@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -32,7 +33,20 @@ _LOCAL_PREFIX = Path(__file__).parent / ".openclaw_node"
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
     pkg = f"{_OPENCLAW_PKG}@{version}" if version else f"{_OPENCLAW_PKG}@latest"
-    subprocess.run([npm_bin, "install", "-g", pkg], check=True)
+    for attempt in range(1, 4):
+        try:
+            subprocess.run([npm_bin, "install", "-g", pkg], check=True)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 3:
+                raise
+            LOG.warning("npm install %s failed (attempt %d/3), retrying", pkg, attempt)
+            time.sleep(2 * attempt)
+
+
+def _npm_global_bin(npm_bin: str) -> str | None:
+    prefix = subprocess.run([npm_bin, "prefix", "-g"], capture_output=True, text=True).stdout.strip()
+    return str(Path(prefix) / "bin") if prefix else None
 
 
 def _install_node_locally() -> Path:
@@ -83,11 +97,7 @@ def ensure_openclaw(version: str | None = None) -> None:
 
     # npm install -g may put the binary in a prefix not yet on PATH
     if not shutil.which("openclaw"):
-        npm_bin_dir = subprocess.run(
-            [shutil.which("npm") or "npm", "bin", "-g"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        npm_bin_dir = _npm_global_bin(shutil.which("npm") or "npm")
         if npm_bin_dir and Path(npm_bin_dir).is_dir():
             os.environ["PATH"] = npm_bin_dir + os.pathsep + os.environ.get("PATH", "")
 

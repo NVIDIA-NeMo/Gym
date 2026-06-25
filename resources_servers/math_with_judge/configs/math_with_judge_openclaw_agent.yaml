@@ -22,6 +22,7 @@ math_with_judge_openclaw_agent:
       concurrency: 8
       command: openclaw
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      openclaw_version: 2026.6.10
       thinking: "off"
       timeout: 600
       system_prompt: |

@@ -294,7 +294,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         return root
 
     def _env(self, home: Path) -> dict[str, str]:
-        env = {**os.environ, "HOME": str(home)}
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "OPENCLAW_TELEMETRY": "0",
+            "CLAWHUB_DISABLE_TELEMETRY": "1",
+        }
         if self.config.node_bin_dir:
             env["PATH"] = f"{self.config.node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env.update({k: v for k, v in self.config.env.items() if v})
