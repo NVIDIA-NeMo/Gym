@@ -7,5 +7,6 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: false
       uses_reasoning_parser: true
+      uses_interleaved_reasoning: true  # ported from gym-gitlab b66e37c6 (in-struct so _copy override works)
       chat_template_kwargs: null
       extra_body: null
