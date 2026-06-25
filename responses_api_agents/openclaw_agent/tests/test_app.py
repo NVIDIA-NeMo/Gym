@@ -23,6 +23,7 @@ import yaml
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -236,6 +237,19 @@ class TestBuildOpenclawConfig:
         cfg = agent._build_openclaw_config({})
         assert "message" in cfg["tools"]["deny"]
         assert "custom" in cfg["tools"]["deny"]
+
+    def test_timeout_pads_empty_output(self) -> None:
+        agent = _make_agent()
+
+        async def _boom(*args, **kwargs):
+            raise TimeoutError("openclaw timed out")
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve it")
+        with patch.object(agent, "_run_openclaw", _boom):
+            resp = asyncio.run(agent.responses(MagicMock(), body))
+        assert len(resp.output) == 1
+        assert resp.output[0].content[0].text == ""
+        assert resp.usage.total_tokens == 0
 
     def test_env_passthrough(self) -> None:
         agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})

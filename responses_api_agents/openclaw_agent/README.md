@@ -12,10 +12,10 @@ OpenClaw must be installed (or it is auto-installed on first start).
 Make sure `env.yaml` is also set.
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_openclaw_agent.yaml]"
+ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_openclaw_agent.yaml]"
 
-ng_collect_rollouts +agent_name=reasoning_gym_openclaw_agent \
-  +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
+ng_collect_rollouts +agent_name=math_with_judge_openclaw_agent \
+  +input_jsonl_fpath=resources_servers/math_with_judge/data/example.jsonl \
   +output_jsonl_fpath=openclaw_rollout.jsonl +limit=3
 ```
 

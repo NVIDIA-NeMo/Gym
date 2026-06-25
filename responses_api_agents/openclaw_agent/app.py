@@ -402,7 +402,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
+        try:
+            output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
+        except TimeoutError:
+            LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
+            output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
 
         if not output_items:
             LOG.warning("OpenClaw produced no assistant message. Padding empty output")

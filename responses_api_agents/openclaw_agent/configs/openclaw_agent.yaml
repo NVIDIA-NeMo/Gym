@@ -22,7 +22,7 @@ openclaw_agent:
             nvinf:
               api: openai-completions
               baseUrl: https://integrate.api.nvidia.com/v1
-              apiKey: ${nvidia_api_key}
+              apiKey: ${policy_api_key}
               models:
               - id: nvidia/meta/llama-3.3-70b-instruct
                 name: nvidia/meta/llama-3.3-70b-instruct
