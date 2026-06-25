@@ -14,15 +14,9 @@
 # limitations under the License.
 from pathlib import Path
 
-from pytest import raises
-
 from nemo_gym.agent_registry import (
     AgentEntry,
-    AgentNotComposableError,
-    AgentNotFoundError,
-    AgentVariantError,
     discover_agents,
-    resolve_agent_config_path,
 )
 
 
@@ -124,92 +118,6 @@ class TestDiscoverAgents:
 
     def test_missing_directory_yields_no_agents(self, tmp_path: Path) -> None:
         assert discover_agents(tmp_path / "nope") == {}
-
-
-class TestResolveAgentConfigPath:
-    def test_single_config_resolves(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "simple_agent", configs={"simple_agent": _pattern_a()})
-
-        path = resolve_agent_config_path("simple_agent", agents_dir=tmp_path)
-        assert path.endswith("simple_agent/configs/simple_agent.yaml")
-
-    def test_explicit_variant_resolves(self, tmp_path: Path) -> None:
-        _make_agent(
-            tmp_path,
-            "langgraph_agent",
-            configs={
-                "orchestrator_agent": _pattern_a("langgraph_agent"),
-                "rewoo_agent": _pattern_a("langgraph_agent"),
-            },
-        )
-
-        path = resolve_agent_config_path("langgraph_agent", variant="rewoo_agent", agents_dir=tmp_path)
-        assert path.endswith("rewoo_agent.yaml")
-
-    def test_variant_matching_name_is_default_when_several(self, tmp_path: Path) -> None:
-        _make_agent(
-            tmp_path,
-            "harbor_agent",
-            configs={"harbor_agent": _pattern_a("harbor_agent"), "harbor_daytona": _pattern_a("harbor_agent")},
-        )
-
-        assert resolve_agent_config_path("harbor_agent", agents_dir=tmp_path).endswith("harbor_agent.yaml")
-
-    def test_ambiguous_variant_raises(self, tmp_path: Path) -> None:
-        _make_agent(
-            tmp_path,
-            "langgraph_agent",
-            configs={
-                "orchestrator_agent": _pattern_a("langgraph_agent"),
-                "rewoo_agent": _pattern_a("langgraph_agent"),
-            },
-        )
-
-        with raises(AgentVariantError, match="multiple config variants"):
-            resolve_agent_config_path("langgraph_agent", agents_dir=tmp_path)
-
-    def test_unknown_variant_raises_with_suggestion(self, tmp_path: Path) -> None:
-        _make_agent(
-            tmp_path,
-            "langgraph_agent",
-            configs={
-                "orchestrator_agent": _pattern_a("langgraph_agent"),
-                "rewoo_agent": _pattern_a("langgraph_agent"),
-            },
-        )
-
-        with raises(AgentVariantError, match="Did you mean"):
-            resolve_agent_config_path("langgraph_agent", variant="rewoo", agents_dir=tmp_path)
-
-    def test_zero_config_agent_raises(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "aviary_agent", configs=None)
-
-        with raises(AgentVariantError, match="no standalone config"):
-            resolve_agent_config_path("aviary_agent", agents_dir=tmp_path)
-
-    def test_unknown_agent_raises_with_suggestion(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "simple_agent", configs={"simple_agent": _pattern_a()})
-
-        with raises(AgentNotFoundError, match="Did you mean"):
-            resolve_agent_config_path("simple_agnt", agents_dir=tmp_path)
-
-    def test_unknown_agent_without_close_match_lists_available(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "simple_agent", configs={"simple_agent": _pattern_a()})
-
-        with raises(AgentNotFoundError, match="Available agents"):
-            resolve_agent_config_path("zzzzz", agents_dir=tmp_path)
-
-    def test_require_composable_rejects_pattern_b(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "swe_agents", configs={"swebench": _pattern_b()})
-
-        with raises(AgentNotComposableError, match="self-contained"):
-            resolve_agent_config_path("swe_agents", agents_dir=tmp_path, require_composable=True)
-
-    def test_require_composable_allows_pattern_a(self, tmp_path: Path) -> None:
-        _make_agent(tmp_path, "simple_agent", configs={"simple_agent": _pattern_a()})
-
-        path = resolve_agent_config_path("simple_agent", agents_dir=tmp_path, require_composable=True)
-        assert path.endswith("simple_agent.yaml")
 
 
 class TestRealAgents:

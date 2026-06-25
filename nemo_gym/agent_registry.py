@@ -16,9 +16,11 @@
 
 An agent harness is one *component* of an environment (an environment = dataset + agent harness +
 resources server [verifier and state] + model). This module maps an agent's short ``<name>`` (the
-directory name) to its config variant(s) so it can be referenced by name — the foundation for
-``gym run --agent <name>`` (run-by-name) — and records whether the harness bundles its own
-environment or references a separate resources server.
+directory name) to its config variant(s) so it can be enumerated by name (``gym list agents``) and
+classified by how it composes. Resolving an agent name to a config for *running* belongs to the
+config composer (via the CLI's generic asset selectors), so this module is intentionally
+discovery-only; it records whether the harness bundles its own environment or references a separate
+resources server.
 
 - **References a separate resources server (Pattern A):** the config sets
   ``responses_api_agents.<type>.resources_server``, so the harness is reusable and must be wired to a
@@ -35,9 +37,8 @@ starts servers, so it is safe to call when secrets/API keys referenced by a conf
 """
 
 from dataclasses import dataclass
-from difflib import get_close_matches
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from omegaconf import OmegaConf
 
@@ -46,18 +47,6 @@ from nemo_gym import PARENT_DIR
 
 AGENTS_DIR = PARENT_DIR / "responses_api_agents"
 AGENT_CONFIGS_SUBDIR = "configs"
-
-
-class AgentNotFoundError(ValueError):
-    """An agent was referenced by a name that is not registered under ``responses_api_agents/``."""
-
-
-class AgentVariantError(ValueError):
-    """An agent has no standalone config, or has several and no variant was given to disambiguate."""
-
-
-class AgentNotComposableError(ValueError):
-    """A self-contained (Pattern B) agent was requested for wiring into a separate environment."""
 
 
 @dataclass(frozen=True)
@@ -168,60 +157,3 @@ def discover_agents(agents_dir: Path = AGENTS_DIR) -> Dict[str, AgentEntry]:
         )
 
     return agents
-
-
-def _did_you_mean(name: str, available: List[str], noun: str) -> str:
-    suggestions = get_close_matches(name, available, n=3, cutoff=0.6)
-    if suggestions:
-        return "Did you mean: " + ", ".join(repr(s) for s in suggestions) + "?"
-    return f"Available {noun}: " + (", ".join(repr(n) for n in available) or "(none)")
-
-
-def resolve_agent_config_path(
-    name: str,
-    variant: Optional[str] = None,
-    agents_dir: Path = AGENTS_DIR,
-    require_composable: bool = False,
-) -> str:
-    """Return the config path to load to run agent ``name`` — the run-by-name primitive.
-
-    Selection: an explicit ``variant`` wins; otherwise a single config is used directly, and a
-    variant whose name equals ``name`` is the default when several exist. Raises
-    :class:`AgentNotFoundError` (with a "did you mean?" hint) for an unknown agent,
-    :class:`AgentVariantError` for a zero-config or ambiguous-variant agent, and — when
-    ``require_composable`` is set — :class:`AgentNotComposableError` for a Pattern B agent.
-    """
-    agents = discover_agents(agents_dir)
-    entry = agents.get(name)
-    if entry is None:
-        raise AgentNotFoundError(
-            f"No agent named '{name}' under {agents_dir}.\n{_did_you_mean(name, sorted(agents), 'agents')}"
-        )
-
-    if require_composable and entry.self_contained:
-        raise AgentNotComposableError(
-            f"Agent '{name}' is self-contained (it bundles its own environment/framework) and cannot "
-            "be wired into a separate environment; run it with its own config instead."
-        )
-
-    variants = entry.variants
-    if not variants:
-        raise AgentVariantError(
-            f"Agent '{name}' ships no standalone config; it is composed via its paired "
-            "benchmark/resources-server config."
-        )
-
-    if variant is not None:
-        if variant not in variants:
-            raise AgentVariantError(
-                f"Agent '{name}' has no variant '{variant}'.\n{_did_you_mean(variant, sorted(variants), 'variants')}"
-            )
-        return str(variants[variant])
-
-    if len(variants) == 1:
-        return str(next(iter(variants.values())))
-    if name in variants:
-        return str(variants[name])
-    raise AgentVariantError(
-        f"Agent '{name}' has multiple config variants: {sorted(variants)}; pass a variant to select one."
-    )
