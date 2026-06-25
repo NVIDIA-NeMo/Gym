@@ -51,7 +51,7 @@ uv sync
 
 ### Start ARC-AGI environment (we can reuse the same one for ARC-AGI-1 and 2):
 ```bash
-ng_run "+config_paths=[environments/arc_agi/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start --environment arc_agi --model-type vllm_model
 ```
 
 
@@ -59,12 +59,12 @@ ng_run "+config_paths=[environments/arc_agi/config.yaml,responses_api_models/vll
 
 ARC-AGI-1 example rollouts:
 ```bash
-ng_collect_rollouts +agent_name=arc_agi_simple_agent +input_jsonl_fpath=environments/arc_agi/data/example_1.jsonl +output_jsonl_fpath=environments/arc_agi/data/example_1_rollouts.jsonl
+gym eval run --no-serve --agent arc_agi_simple_agent --input environments/arc_agi/data/example_1.jsonl --output environments/arc_agi/data/example_1_rollouts.jsonl
 ```
 
 ARC-AGI-2 example rollouts:
 ```bash
-ng_collect_rollouts +agent_name=arc_agi_simple_agent +input_jsonl_fpath=environments/arc_agi/data/example_2.jsonl +output_jsonl_fpath=environments/arc_agi/data/example_2_rollouts.jsonl
+gym eval run --no-serve --agent arc_agi_simple_agent --input environments/arc_agi/data/example_2.jsonl --output environments/arc_agi/data/example_2_rollouts.jsonl
 ```
 
 For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html).
