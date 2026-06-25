@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import re
-import string
 from typing import Any, Dict, List, Literal
 
 from fastapi import FastAPI
@@ -48,25 +46,30 @@ class InstructionFollowingVerifyRequest(InstructionFollowingRunRequest, BaseVeri
 
 
 def _get_loose_perturbations(text: str) -> list:
-    """Return the 8 IFEval loose-mode perturbations of a response string."""
-    stripped = text.strip()
-    sentences = re.split(r'(?<=[.?!])\s+', stripped)
-    first_sentence = sentences[0] if sentences else stripped
-    paragraphs = re.split(r'\n\s*\n', stripped)
-    first_paragraph = paragraphs[0] if paragraphs else stripped
-    no_punct = stripped.translate(str.maketrans('', '', string.punctuation)).strip()
-    star_match = re.search(r'\*(.*?)\*', text, re.DOTALL)
-    between_stars = star_match.group(1) if star_match else text
-    return [
+    """Return IFEval loose-mode perturbations following the NeMo Skills convention.
+
+    Produces 4 line-removal variants of the text (original, without first line,
+    without last line, without first and last line), each duplicated with asterisks
+    removed. Empty variants are excluded.
+    """
+    def remove_stars(s: str) -> str:
+        return s.replace("*", "")
+
+    def without_first_line(s: str) -> str:
+        idx = s.find("\n")
+        return s[idx + 1 :] if idx >= 0 else ""
+
+    def without_last_line(s: str) -> str:
+        idx = s.rfind("\n")
+        return s[:idx] if idx >= 0 else ""
+
+    base = [
         text,
-        stripped,
-        text.lower(),
-        first_sentence,
-        first_paragraph,
-        stripped.lower(),
-        no_punct,
-        between_stars,
+        without_first_line(text),
+        without_last_line(text),
+        without_last_line(without_first_line(text)),
     ]
+    return [v for s in base for v in (s, remove_stars(s)) if v.strip()]
 
 
 def _check_following_loose(instruction, text: str) -> bool:
