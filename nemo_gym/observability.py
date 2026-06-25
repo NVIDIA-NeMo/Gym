@@ -14,9 +14,10 @@
 # limitations under the License.
 """Per-rollout trajectory capture for model servers.
 
-Opt-in FastAPI middleware (off by default) that records every /v1/responses,
+Opt-in, off by default. A pure-ASGI middleware records every /v1/responses,
 /v1/chat/completions, and /v1/messages exchange -- including failed calls -- into a
-per-rollout CaptureStore. Best-effort; never alters the response. Correlation is
+per-rollout CaptureStore, forwarding bytes downstream unchanged so it composes with
+streaming (SSE) responses. Best-effort; never alters the response. Correlation is
 OpenAI-compatible: callers set the x-nemo-gym-rollout-id header or use a
 /ng-rollout/<rollout_id>/v1/... base_url prefix, which is stripped before routing.
 """
@@ -32,8 +33,6 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
-
-from fastapi.responses import Response
 
 from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX
 from nemo_gym.trajectory_capture import CaptureStore
@@ -52,12 +51,28 @@ _OBSERVED_PATHS = {
 }
 
 
-def _header_int(request: Any, name: str) -> Optional[int]:
-    value = request.headers.get(name)
+def _scope_header(scope: dict[str, Any], name: str) -> Optional[str]:
+    """Read a request header (case-insensitive) from a raw ASGI scope."""
+    target = name.lower().encode("latin-1")
+    for key, value in scope.get("headers") or []:
+        if key.lower() == target:
+            return value.decode("latin-1")
+    return None
+
+
+def _scope_header_int(scope: dict[str, Any], name: str) -> Optional[int]:
+    value = _scope_header(scope, name)
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _headers_content_type(headers: list) -> bytes:
+    for key, value in headers:
+        if key.lower() == b"content-type":
+            return value
+    return b""
 
 
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
@@ -195,7 +210,7 @@ def _classify_exception(exc: BaseException) -> str:
 
 def _record(
     store: CaptureStore,
-    request: Any,
+    scope: dict[str, Any],
     dialect: str,
     config: Any,
     request_bytes: bytes,
@@ -213,8 +228,8 @@ def _record(
             {
                 "dialect": dialect,
                 "model_server": getattr(config, "name", None),
-                "trial_index": _header_int(request, TRIAL_HEADER),
-                "turn_index": _header_int(request, TURN_HEADER),
+                "trial_index": _scope_header_int(scope, TRIAL_HEADER),
+                "turn_index": _scope_header_int(scope, TURN_HEADER),
                 "latency_ms": round(latency_ms, 2),
                 "status_code": status_code,
                 "error_category": error_category,
@@ -226,52 +241,66 @@ def _record(
         logger.warning("Trajectory capture failed for one %s call.", dialect, exc_info=True)
 
 
-def install_trajectory_capture(app: Any, config: Any) -> None:
-    """Install the per-rollout exchange-capture middleware (no-op when capture is disabled).
+class _CaptureMiddleware:
+    """Pure-ASGI per-rollout capture.
 
-    Records each observed call's request + response into a rollout-keyed CaptureStore.
-    Signature-agnostic; never alters the response. Buffers and replays the request body.
+    Buffers the request body and a copy of the response while forwarding both downstream
+    unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
+    the stream. An optional ``/ng-rollout/<id>`` path prefix is stripped before routing and used
+    as the capture key (an explicit header wins). Streaming responses are forwarded but their
+    body is not buffered.
     """
-    store = make_capture_store(config)
-    if store is None:
-        return
 
-    @app.middleware("http")
-    async def _capture(request: Any, call_next: Any) -> Response:
-        # Per-rollout URL prefix: strip it so /v1/... routes unchanged; use its id (header wins).
-        path = request.url.path
+    def __init__(self, app: Any, *, store: CaptureStore, config: Any) -> None:
+        self._app = app
+        self._store = store
+        self._config = config
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
             rollout_from_path = prefix_match.group("rollout_id")
             path = prefix_match.group("rest")
-            request.scope["path"] = path
-            request.scope["raw_path"] = path.encode("utf-8")
+            scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
         dialect = _OBSERVED_PATHS.get(path)
         if dialect is None:
-            return await call_next(request)  # not observed (or a stripped non-/v1 path)
+            await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
+            return
 
-        rollout_id = request.headers.get(ROLLOUT_HEADER) or rollout_from_path or "rollout"
-        request_bytes = await request.body()
+        rollout_id = _scope_header(scope, ROLLOUT_HEADER) or rollout_from_path or "rollout"
+        request_body = bytearray()
 
-        # Replay the buffered body so the route handler can still read it.
         async def _receive() -> dict[str, Any]:
-            return {"type": "http.request", "body": request_bytes, "more_body": False}
+            message = await receive()
+            if message.get("type") == "http.request":
+                request_body.extend(message.get("body", b"") or b"")
+            return message
 
-        request._receive = _receive
-
+        state: dict[str, Any] = {"status": None, "streaming": False, "body": bytearray()}
         start = time.perf_counter()
+
+        async def _send(message: dict[str, Any]) -> None:
+            message_type = message.get("type")
+            if message_type == "http.response.start":
+                state["status"] = message.get("status")
+                content_type = _headers_content_type(message.get("headers") or [])
+                state["streaming"] = content_type.startswith(b"text/event-stream")
+            elif message_type == "http.response.body" and not state["streaming"]:
+                state["body"].extend(message.get("body", b"") or b"")
+            await send(message)  # forward unchanged -> streaming is preserved
+
         try:
-            response = await call_next(request)
+            await self._app(scope, _receive, _send)
         except Exception as exc:
-            # Capture the failed call, then propagate.
             _record(
-                store,
-                request,
-                dialect,
-                config,
-                request_bytes,
+                self._store, scope, dialect, self._config, bytes(request_body),
                 rollout_id=rollout_id,
                 response_body=None,
                 status_code=None,
@@ -280,32 +309,32 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
             )
             raise
 
-        response_bytes = b"".join([chunk async for chunk in response.body_iterator])
         latency_ms = (time.perf_counter() - start) * 1000.0
         response_body = None
-        if response_bytes:
+        if not state["streaming"] and state["body"]:
             try:
-                response_body = json.loads(response_bytes)
+                response_body = json.loads(bytes(state["body"]))
             except Exception:
                 response_body = None
+        status = state["status"]
         _record(
-            store,
-            request,
-            dialect,
-            config,
-            request_bytes,
+            self._store, scope, dialect, self._config, bytes(request_body),
             rollout_id=rollout_id,
             response_body=response_body,
-            status_code=response.status_code,
-            error_category=_classify_status(response.status_code),
+            status_code=status,
+            error_category=_classify_status(status) if status is not None else None,
             latency_ms=latency_ms,
         )
 
-        headers = dict(response.headers)
-        headers.pop("content-length", None)  # Response() recomputes it from the buffered body
-        return Response(
-            content=response_bytes,
-            status_code=response.status_code,
-            headers=headers,
-            media_type=response.media_type,
-        )
+
+def install_trajectory_capture(app: Any, config: Any) -> None:
+    """Install the per-rollout exchange-capture middleware (no-op when capture is disabled).
+
+    A pure-ASGI middleware that records each observed call's request + response into a
+    rollout-keyed CaptureStore while forwarding bytes downstream unchanged, so it composes with
+    streaming responses. Streaming (SSE) responses are forwarded but their body is not buffered.
+    """
+    store = make_capture_store(config)
+    if store is None:
+        return
+    app.add_middleware(_CaptureMiddleware, store=store, config=config)
