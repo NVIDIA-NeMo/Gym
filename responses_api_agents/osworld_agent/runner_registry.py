@@ -15,7 +15,7 @@ from importlib import import_module
 from typing import Any, Dict, Literal, Optional
 
 
-RunnerKind = Literal["gym_policy", "prompt_agent"]
+RunnerKind = Literal["gym_policy", "prompt_agent", "pointer_agent"]
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 
 
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
+_POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 
 
 RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
@@ -105,6 +106,18 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         action_space="pyautogui",
         observation_type="som",
         agent_class_path=_PROMPT_AGENT,
+    ),
+    # OSWorld-Verified leaderboard's "Pointer Agent w/ Opus 4.7" path. This
+    # keeps Pointer's own planner/executor/verifier loop intact and only wraps
+    # it in Gym's rollout/evaluation envelope.
+    "pointer_agent": RunnerSpec(
+        name="pointer_agent",
+        kind="pointer_agent",
+        env_class_path="desktop_env.desktop_env_pointer.DesktopEnv",
+        action_space="pyautogui",
+        observation_type="screenshot",
+        agent_class_path=_POINTER_AGENT,
+        agent_kwargs={"provider_name": "anthropic"},
     ),
 }
 

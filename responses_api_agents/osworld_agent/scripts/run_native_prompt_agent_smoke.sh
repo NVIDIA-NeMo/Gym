@@ -44,6 +44,7 @@ EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
+POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 
 mkdir -p "$(dirname "${OUTPUT_JSONL}")"
 
@@ -53,6 +54,9 @@ echo "runner: ${RUNNER_NAME}"
 echo "input: ${INPUT_JSONL}"
 echo "output: ${OUTPUT_JSONL}"
 echo "limit: ${LIMIT}"
+if [[ -n "${POLICY_MODEL_NAME}" ]]; then
+    echo "policy model override: ${POLICY_MODEL_NAME}"
+fi
 echo "ng_run bin: ${NG_RUN_BIN}"
 echo "ng_collect bin: ${NG_COLLECT_BIN}"
 echo "ng_status bin: ${NG_STATUS_BIN}"
@@ -63,6 +67,10 @@ ng_run_cmd=(
     "+config_paths=[${CONFIG_PATHS}]"
     "++osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
 )
+
+if [[ -n "${POLICY_MODEL_NAME}" ]]; then
+    ng_run_cmd+=("++policy_model_name=${POLICY_MODEL_NAME}")
+fi
 
 collect_cmd=(
     "${NG_COLLECT_BIN}"

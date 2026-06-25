@@ -40,6 +40,17 @@ def test_prompt_agent_default_matches_upstream_osworld_defaults() -> None:
     assert spec.observation_type == "screenshot_a11y_tree"
 
 
+def test_pointer_agent_runner_uses_upstream_pointer_agent() -> None:
+    spec = resolve_runner_spec("pointer_agent")
+
+    assert spec.kind == "pointer_agent"
+    assert spec.env_class_path == "desktop_env.desktop_env_pointer.DesktopEnv"
+    assert spec.agent_class_path == "mm_agents.pointer.PointerAgent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs == {"provider_name": "anthropic"}
+
+
 @pytest.mark.parametrize(
     ("runner_name", "action_space", "observation_type"),
     [

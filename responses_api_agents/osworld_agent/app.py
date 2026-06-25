@@ -249,6 +249,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     from responses_api_agents.osworld_agent.client import run_osworld_task  # noqa: PLC0415
 
     base_url = runner_kwargs.pop("base_url")
+    policy_base_url = runner_kwargs.pop("policy_base_url", "")
     model_name = runner_kwargs.pop("model_name")
     api_key = runner_kwargs.pop("api_key")
     max_tokens = runner_kwargs.pop("max_tokens")
@@ -271,6 +272,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         task_config,
         model_fn=model_fn,
         messages_model_fn=messages_model_fn,
+        policy_base_url=policy_base_url,
+        policy_api_key=api_key,
         policy_model_name=model_name,
         policy_max_tokens=max_tokens,
         policy_temperature=temperature,
@@ -325,6 +328,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             model_server_config = get_first_server_config_dict(global_config_dict, model_server_name)
             policy_model_name = global_config_dict.get("policy_model_name", "")
             policy_api_key = global_config_dict.get("policy_api_key", "")
+            policy_base_url = global_config_dict.get("policy_base_url", "")
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
 
             temperature = body.responses_create_params.temperature or self.config.temperature
@@ -345,6 +349,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "step_timeout": self.config.step_timeout,
                 "task_timeout": self.config.task_timeout,
                 "base_url": base_url,
+                "policy_base_url": policy_base_url,
                 "model_name": policy_model_name,
                 "api_key": policy_api_key,
                 "max_tokens": self.config.max_tokens,
