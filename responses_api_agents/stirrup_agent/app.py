@@ -315,6 +315,7 @@ async def _run_stirrup_agent(
     exec_provider_class: Optional[str] = None,
     exec_provider_kwargs: Optional[Dict[str, Any]] = None,
     persist_deliverables_dir: Optional[str] = None,
+    ref_files_dir: Optional[str] = None,
     task_id: Optional[str] = None,
     rollout_index: Optional[int] = None,
     is_gdpval: bool = False,
@@ -442,11 +443,13 @@ async def _run_stirrup_agent(
     # operators whose worker /tmp is tight.
     input_files_dir: Optional[str] = None
     if is_gdpval and reference_files and reference_file_urls:
-        import os as _os_ref
-
         from responses_api_agents.stirrup_agent.tasks.gdpval import _download_reference_files
 
-        ref_root = _os_ref.environ.get("GDPVAL_REF_FILES_DIR")
+        # ref_files_dir is resolved on the server and passed in via params (not read
+        # from the worker's os.environ): a runtime_env Ray worker on a non-Ray model
+        # deployment (e.g. sglang) does not reliably inherit GDPVAL_REF_FILES_DIR, so
+        # the env-only read fell back to node-local /tmp and broke cross-node upload.
+        ref_root = ref_files_dir or os.environ.get("GDPVAL_REF_FILES_DIR")
         if ref_root:
             Path(ref_root).mkdir(parents=True, exist_ok=True)
         input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_", dir=ref_root)
@@ -928,6 +931,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "exec_provider_class": exec_provider_class,
             "exec_provider_kwargs": exec_provider_kwargs,
             "persist_deliverables_dir": self.config.persist_deliverables_dir,
+            "ref_files_dir": os.environ.get("GDPVAL_REF_FILES_DIR"),
             "task_id": task_info.get("task_id"),
             "rollout_index": (body.metadata or {}).get("_ng_rollout_index"),
             "is_gdpval": self.config.task == "gdpval",
