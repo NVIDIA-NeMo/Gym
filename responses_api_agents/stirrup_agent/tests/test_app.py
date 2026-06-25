@@ -139,11 +139,13 @@ class TestJudgeOnlyMode:
         request.cookies = {}
 
         responses_mock = AsyncMock()
-        with patch.object(StirrupAgentWrapper, "responses", responses_mock), patch(
-            "responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()
-        ), patch(
-            "responses_api_agents.stirrup_agent.app.get_response_json",
-            AsyncMock(return_value={"reward": 0.9, "judge_response": "ok"}),
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.9, "judge_response": "ok"}),
+            ),
         ):
             result = await wrapper.run(request, body)
 
@@ -174,8 +176,9 @@ class TestJudgeOnlyMode:
         request.cookies = {}
 
         responses_mock = AsyncMock()
-        with patch.object(StirrupAgentWrapper, "responses", responses_mock), patch(
-            "responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
         ):
             result = await wrapper.run(request, body)
 
