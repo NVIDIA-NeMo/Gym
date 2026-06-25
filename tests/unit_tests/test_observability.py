@@ -622,3 +622,103 @@ def test_capture_streams_sse_and_records_metadata(tmp_path):
     assert records[0]["dialect"] == "messages" and records[0]["status_code"] == 200
     assert records[0]["request"] == {"stream": True}
     assert records[0]["response"] is None  # streamed SSE body intentionally not buffered
+
+
+def test_rollout_id_from_run_body_attempt_suffix():
+    from nemo_gym.server_utils import rollout_id_from_run_body
+
+    base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
+    assert rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
+    assert rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # attempt 0 -> bare (back-compat)
+    assert rollout_id_from_run_body({**base, "_ng_attempt_index": 1}) == "3-2-a1"
+    assert rollout_id_from_run_body({**base, "_ng_attempt_index": "2"}) == "3-2-a2"  # coerced
+    assert rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
+
+
+def test_capture_dirs_from_config_resolves_env_and_config(tmp_path):
+    from nemo_gym.observability import capture_dirs_from_config
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    config = {
+        "policy_model": {
+            "responses_api_models": {
+                "openai_model": {
+                    "observability_enabled": True,
+                    "trajectory_capture_dir": str(server_dir),
+                    "name": "srv",
+                }
+            }
+        }
+    }
+    dirs = capture_dirs_from_config(config, env={"NEMO_GYM_TRAJECTORY_DIR": str(shared)})
+    assert shared in dirs and server_dir in dirs
+    # capture-off servers contribute nothing; non-existent dirs are dropped
+    off = {"a": {"b": {"observability_enabled": False, "trajectory_capture_dir": str(tmp_path / "nope")}}}
+    assert capture_dirs_from_config(off, env={}) == []
+
+
+def _capture_exchange(dialect, model_server, usage, response):
+    return {
+        "dialect": dialect,
+        "model_server": model_server,
+        "trial_index": 0,
+        "turn_index": 0,
+        "latency_ms": 1.0,
+        "status_code": 200,
+        "error_category": None,
+        "request": {"input": "hi"},
+        "response": {"model": "m", "usage": usage, **response},
+    }
+
+
+def test_merge_capture_uniform_shape_across_agents(tmp_path):
+    from nemo_gym.observability import merge_capture_into_record
+    from nemo_gym.trajectory_capture import CaptureStore
+
+    store = CaptureStore(tmp_path)
+    # Two different harnesses/dialects -> the attached trajectory must have the identical shape.
+    store.record(
+        "0-0",
+        _capture_exchange(
+            "responses",
+            "A",
+            {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+            {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]},
+        ),
+    )
+    store.record(
+        "1-0",
+        _capture_exchange(
+            "messages",
+            "B",
+            {"input_tokens": 4, "output_tokens": 1},
+            {"content": [{"type": "text", "text": "ok"}]},
+        ),
+    )
+
+    rec_a = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
+    rec_b = {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {"harness": "B"}}
+    merge_capture_into_record(rec_a, [tmp_path])
+    merge_capture_into_record(rec_b, [tmp_path])
+
+    cap_a, cap_b = rec_a["ng_trajectory_capture"], rec_b["ng_trajectory_capture"]
+    assert set(cap_a) == set(cap_b) == {"rollout_id", "metrics", "steps"}  # identical top-level
+    assert set(cap_a["metrics"]) == set(cap_b["metrics"])  # identical metrics shape
+    assert set(cap_a["steps"][0]) == set(cap_b["steps"][0])  # identical per-step shape
+    assert "request" not in cap_a["steps"][0] and "response" not in cap_a["steps"][0]  # payloads stay in the store
+    # harness output + reward are untouched; capture carries the wire-level token stats
+    assert rec_a["response"] == {"harness": "A"} and rec_a["reward"] == 1.0
+    assert cap_a["rollout_id"] == "0-0" and cap_a["steps"][0]["tokens_in"] == 3
+
+
+def test_merge_capture_noop_without_capture(tmp_path):
+    from nemo_gym.observability import merge_capture_into_record
+
+    rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
+    merge_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
+    assert "ng_trajectory_capture" not in rec
+    merge_capture_into_record(rec, [])  # no dirs
+    assert "ng_trajectory_capture" not in rec
