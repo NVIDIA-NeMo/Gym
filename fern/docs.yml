@@ -53,7 +53,7 @@ redirects:
     destination: "/nemo/gym/main"
   # Legacy Sphinx page paths → current Fern slugs
   - source: "/nemo/gym/about/concepts/configuration-system.html"
-    destination: "/nemo/gym/about/concepts/configuration"
+    destination: "/nemo/gym/main/reference/configuration"
   - source: "/nemo/gym/about/concepts/core-abstractions.html"
     destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/get-started/setup-installation.html"
