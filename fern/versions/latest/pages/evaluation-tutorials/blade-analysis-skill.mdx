@@ -4,11 +4,13 @@ description: "Build and validate a BLADE-style benchmark analysis package from N
 position: 3
 ---
 
-The BLADE analysis skill turns NeMo Gym rollout artifacts into evidence-backed benchmark reports, model comparisons, and benchmark-improvement recommendations. Use it after rollout collection when you need to explain why a score changed, which tasks failed, and what intervention should come next.
+BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is NeMo Gym's built-in benchmark analysis skill. It turns raw rollout artifacts into evidence-backed benchmark reports and answers the question: **why did the score change?**
+
+Given two or more scored runs, BLADE identifies which tasks failed and what the dominant failure modes are. It also maps the most likely intervention — harness work, training, verifier repair, prompt change — to close the gap. It works with any benchmark that produces NeMo Gym rollout JSONL.
 
 <Info>
 
-BLADE analysis is a post-run workflow. It does not run the benchmark or replace the verifier. It reads rollout artifacts, aggregate metrics, reward profiles, configs, and report files.
+BLADE is a post-run analysis workflow. It does not run the benchmark or replace the verifier. It reads rollout artifacts, aggregate metrics, reward profiles, configs, and report files produced by `gym eval run`.
 
 </Info>
 
@@ -205,8 +207,8 @@ Before marking the benchmark BLADE-ready:
 
 <Cards>
 
-<Card title="Skills" href="/evaluation/skills">
-Review how skills fit into the evaluation workflow.
+<Card title="Benchmark Analysis" href="/evaluation/skills">
+Review how benchmark analysis skills fit into the evaluation workflow.
 </Card>
 
 <Card title="Evaluate EvalPlus" href="/evaluation-tutorials/evalplus">
