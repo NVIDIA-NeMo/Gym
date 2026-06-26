@@ -220,11 +220,11 @@ redirects:
     destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
   - source: "/nemo/gym/main/resources-server/example-resources-servers"
     destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
-  # Benchmark Analysis page renamed to Analyze Results (skills → analyze-results)
+  # Benchmark Analysis page renamed to Diagnose Results (skills → diagnose-results)
   - source: "/nemo/gym/evaluation/skills"
-    destination: "/nemo/gym/main/evaluation/analyze-results"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
   - source: "/nemo/gym/main/evaluation/skills"
-    destination: "/nemo/gym/main/evaluation/analyze-results"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"
