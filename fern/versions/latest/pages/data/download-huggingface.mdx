@@ -229,14 +229,15 @@ gym dataset download \
 
 <Accordion title="Automatic Downloads During Data Preparation">
 
-NeMo Gym can automatically download missing datasets during data preparation. Configure `huggingface_identifier` in your resources server config:
+NeMo Gym can automatically download missing datasets during data preparation. Declare a `source:` block (`type: huggingface`) in your resources server config:
 
 ```yaml
 datasets:
   - name: train
     type: train
     jsonl_fpath: resources_servers/code_gen/data/train.jsonl
-    huggingface_identifier:
+    source:
+      type: huggingface
       repo_id: nvidia/nemotron-RL-coding-competitive_coding
       artifact_fpath: opencodereasoning_filtered_25k_train.jsonl
     license: Apache 2.0
@@ -253,7 +254,7 @@ gym dataset collate \
     +data_source=huggingface
 ```
 
-If `jsonl_fpath` doesn't exist locally, NeMo Gym downloads from `huggingface_identifier` before processing.
+If `jsonl_fpath` doesn't exist locally, NeMo Gym downloads from the dataset's `source:` (here, the HuggingFace `repo_id`) before processing. The legacy `huggingface_identifier:` block still works but is deprecated in favor of `source:`.
 </Accordion>
 
 <Accordion title="Caching Behavior">

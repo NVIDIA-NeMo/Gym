@@ -101,9 +101,11 @@ datasets:
   - name: train
     type: train
     jsonl_fpath: resources_servers/workplace_assistant/data/train.jsonl
-    huggingface_identifier:
+    # Unified dataset source. `type` selects the backend; the other fields are backend-specific.
+    source:
+      type: huggingface
       repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
-      artifact_fpath: train.jsonl
+      artifact_fpath: train.jsonl   # optional for huggingface sources
     license: Apache 2.0
 ```
 
@@ -113,8 +115,31 @@ datasets:
 | `type` | Yes | `example`, `train`, or `validation` |
 | `jsonl_fpath` | Yes | Path to data file |
 | `license` | Train/validation | See valid values below |
-| `huggingface_identifier` | No | Remote download location |
+| `source` | No | Where to fetch the data from when it's missing locally (see below) |
 | `num_repeats` | No | Repeat count (default: `1`) |
+
+### Dataset `source`
+
+`source` is the unified way to declare where a dataset is fetched from. `type` selects the backend; the remaining fields are backend-specific:
+
+```yaml
+# Hugging Face Hub
+source:
+  type: huggingface
+  repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
+  artifact_fpath: train.jsonl   # optional; omit to load the split named by the dataset `type`
+
+# NVIDIA GitLab dataset registry
+source:
+  type: gitlab
+  dataset_name: example_multi_step
+  version: 0.0.1
+  artifact_fpath: train.jsonl
+```
+
+<Note>
+The legacy `huggingface_identifier:` / `gitlab_identifier:` blocks still work (a deprecation warning is emitted), so existing configs keep running — but new configs should use `source:`. Migrate existing configs with `python -m nemo_gym.dataset_source_migration <config.yaml>`.
+</Note>
 
 ### Valid Licenses
 

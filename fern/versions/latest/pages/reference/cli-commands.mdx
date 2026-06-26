@@ -19,9 +19,11 @@ gym --help                   # list all command groups
 gym --version [--json]        # print version and system info
 ng ...                        # 'ng' is an alias for 'gym'
 
-# Discover benchmarks
-gym list benchmarks [--json]  # list available benchmarks
-gym search <query> [--json]   # filter the benchmark list by name
+# Discover
+gym list benchmarks [--json]    # list available benchmarks
+gym list environments [--json]  # list available environments by name
+gym list agents [--json]        # list agent harnesses and how each composes
+gym search <query> [--json]     # filter the benchmark list by name
 
 # Datasets
 gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
@@ -34,6 +36,7 @@ gym dataset collate           # validate and collate a dataset
 # Environments
 gym env init                  # scaffold a new resources server
 gym env resolve               # resolve and print the final merged config
+gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # test resources server(s); all of them if none is given
 gym env start                   # start the servers
@@ -141,6 +144,32 @@ gym list benchmarks
 
 # Machine-readable output for scripting
 gym list benchmarks --json | jq '.[].name'
+```
+
+### `gym list environments`
+
+List the environments available under `environments/`, by short name (with their domain and description). The names map to `environments/<name>/config.yaml` and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output the environment list as JSON. |
+
+```bash
+gym list environments
+gym list environments --json | jq '.[].name'
+```
+
+### `gym list agents`
+
+List the agent harnesses under `responses_api_agents/`, with each one's composition pattern — **composable** (Pattern A: references a separate resources server, so it can be wired into a matching environment) vs **self-contained** (Pattern B: ships its own framework/environment) — plus its config variants.
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output the agent list as JSON (includes the `self_contained` flag). |
+
+```bash
+gym list agents
+gym list agents --json | jq '.[] | {name, self_contained}'
 ```
 
 ### `gym search`
@@ -321,6 +350,23 @@ gym env resolve \
     --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     ++responses_create_params.temperature=0.6
+```
+
+### `gym env validate`
+
+Validate a config without starting Ray or any server subprocess — a fast pre-flight check that catches config mistakes (missing/malformed `config_paths`, unknown server cross-references, unset mandatory `???` values, schema errors) in well under a second instead of after a Ray bootstrap. Exits `0` when valid, or `1` with a clean message (no traceback) when not. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
+
+```bash
+gym env validate --environment workplace_assistant
+gym env validate --benchmark gsm8k
+
+# or explicit config path(s)
+gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 ```
 
 ### `gym env packages`

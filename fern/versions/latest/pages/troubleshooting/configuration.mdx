@@ -48,7 +48,7 @@ gym env start \
 
 ```
 nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
-Did you mean: 'weather'?
+Available resources_servers: 'weather'
 ```
 
 **When**: A server config references another server that doesn't exist or isn't loaded. The error
@@ -69,6 +69,55 @@ gym env start \
     --config resource.yaml \
     --config agent.yaml
 ```
+
+### Config Path Not Found
+
+```
+nemo_gym.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
+  - /path/to/cwd/resources_servers/weather/config.yaml
+  - /path/to/gym/resources_servers/weather/config.yaml
+Check the path is spelled correctly and is relative to your working directory or the Gym install root.
+```
+
+**When**: A `config_paths` entry (in a config file or a `--config` flag) points at a file that doesn't
+exist under any search root. The error lists every location that was searched.
+
+**Fix**: Correct the path, or run from the repository root so relative `config_paths` resolve.
+
+### Malformed `config_paths`
+
+```
+nemo_gym.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
+Pass each config with --config (it builds the list for you), e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml
+```
+
+**When**: `config_paths` is set to a scalar or mapping instead of a list of path strings.
+
+**Fix**: Make it a YAML list, or pass each config with `--config`:
+
+```yaml
+config_paths:
+  - resources_servers/weather/config.yaml
+```
+
+### No Server Instances Configured
+
+```
+nemo_gym.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml
+```
+
+**When**: The merged config defines no server instances — usually a wrong/empty `--config` or a
+`config_paths` list that resolved to nothing.
+
+**Fix**: Pass the configs that define your servers, or check the `config_paths` entries actually load.
+
+<Tip>
+Catch all of the above before launch with [`gym env validate`](/reference/cli-commands#gym-env-validate) — it
+merges and validates the same config `gym env start` uses, then exits with a clean message (no traceback)
+and a non-zero status on failure, so it fits in CI pre-flight checks.
+</Tip>
 
 ---
 
