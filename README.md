@@ -100,10 +100,9 @@ Run your agent on a set of tasks and score the results. This example uses a simp
 NeMo Gym uses local servers to coordinate your model, agent, and task verification. Start them first:
 
 ```bash
-environment_config="resources_servers/mcqa/configs/mcqa.yaml"
-model_config="responses_api_models/openai_model/configs/openai_model.yaml"
-
-ng_run "+config_paths=[${environment_config},${model_config}]"
+gym env start \
+    --resources-server mcqa \
+    --model-type openai_model
 ```
 
 You should see three server instances starting:
@@ -121,12 +120,12 @@ In a new terminal, run your agent on a single task to verify everything works:
 ```bash
 source .venv/bin/activate
 
-ng_collect_rollouts \
-    +agent_name=mcqa_simple_agent \
-    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
-    +output_jsonl_fpath=results/mcqa_rollouts.jsonl \
-    +limit=5 \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl \
+    --limit 5 \
+    --num-repeats 1
 ```
 
 You should see a progress bar followed by aggregate metrics:
@@ -146,11 +145,11 @@ Rollouts: results/mcqa_rollouts.jsonl
 Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 ```
 
-For per-task pass rates, see the [`ng_reward_profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
+For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
 
 ### Next Steps
 
-- **[Browse Environments](https://docs.nvidia.com/nemo/gym/main/environments)** — Browse available environments for evaluation and training, or run `ng_list_envs` from the terminal.
+- **[Browse Environments](https://docs.nvidia.com/nemo/gym/main/environments)** — Browse available environments for evaluation and training, or run `gym list environments` from the terminal.
 - **[Agents](https://docs.nvidia.com/nemo/gym/main/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
 - **[Training](https://docs.nvidia.com/nemo/gym/main/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
 - **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** — Create your own evaluation or training environments.
@@ -176,7 +175,7 @@ NeMo Gym includes environments across math, coding, agent, knowledge, safety, an
 Or from the terminal:
 
 ```bash
-ng_list_envs
+gym list environments
 ```
 
 
