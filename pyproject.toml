@@ -114,7 +114,9 @@ dependencies = [
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
-    "fastapi",
+    # fastapi>=0.137 breaks prometheus-fastapi-instrumentator via _IncludedRouter.path;
+    # cap until instrumentator handles it: github.com/trallnag/prometheus-fastapi-instrumentator/issues/370
+    "fastapi<0.137",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
     # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
