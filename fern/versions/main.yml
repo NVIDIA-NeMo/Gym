@@ -22,7 +22,7 @@ navigation:
         title: "Configure Agents"
         title-source: frontmatter
       - folder: ./latest/pages/model-server
-        title: "Configure Model"
+        title: "Configure Models"
         title-source: frontmatter
       - folder: ./latest/pages/resources-server
         title: "Resources Server"
