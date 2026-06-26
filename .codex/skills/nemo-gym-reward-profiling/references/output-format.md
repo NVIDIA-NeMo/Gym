@@ -6,7 +6,7 @@ Reward profiling is built around joining materialized inputs with rollout result
 
 - `*_materialized_inputs.jsonl`: expanded inputs after repeat expansion. Each row should have `_ng_task_index` and `_ng_rollout_index`.
 - `rollouts.jsonl`: completed rollout results. Each row should have matching `_ng_task_index` and `_ng_rollout_index`.
-- `*_reward_profiling.jsonl`: task-level summaries produced by `ng_reward_profile`.
+- `*_reward_profiling.jsonl`: task-level summaries produced by `gym eval profile`.
 - `*_agent_metrics.json`: agent/global aggregate metrics.
 
 ## Task Profile Rows
@@ -36,7 +36,7 @@ Full model responses stay in `rollouts.jsonl`. Join back to full rows with `(_ng
 
 ## Partial Profiles
 
-Strict profiling is the default. If materialized inputs and rollout results do not have the same rollout keys, `ng_reward_profile` fails and suggests:
+Strict profiling is the default. If materialized inputs and rollout results do not have the same rollout keys, `gym eval profile` fails and suggests:
 
 ```bash
 ++allow_partial_rollouts=True

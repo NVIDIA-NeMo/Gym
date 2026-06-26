@@ -30,6 +30,12 @@ navigation:
       - folder: ./latest/pages/environment-tutorials
         title: "Environment Tutorials"
         title-source: frontmatter
+      - folder: ./latest/pages/evaluation
+        title: "Evaluation"
+        title-source: frontmatter
+      - folder: ./latest/pages/evaluation-tutorials
+        title: "Evaluation Tutorials"
+        title-source: frontmatter
       - folder: ./latest/pages/training-tutorials
         title: "Training Tutorials"
         title-source: frontmatter
