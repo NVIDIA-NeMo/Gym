@@ -88,13 +88,15 @@ class VolumeMount:
     host_path: str = ""
     container_path: str = ""
     readonly: bool = False
+    efs: bool = False
     efs_filesystem_id: str | None = None
     efs_root_directory: str | None = None
     efs_access_point_id: str | None = None
 
     @property
     def is_efs(self) -> bool:
-        return self.efs_filesystem_id is not None
+        # Either names its own filesystem, or opts into the provider-level EFS default via `efs: true`.
+        return self.efs or self.efs_filesystem_id is not None
 
 
 @dataclass
@@ -476,6 +478,9 @@ def _retry_with_backoff(
 
 
 def _free_port() -> int:
+    # TOCTOU: the port is free when probed but the socket is closed before ssh binds it, so a racing
+    # process can claim it under high concurrency. SshTunnel.open() retries on port-not-open, which
+    # mitigates this in practice; holding the socket and handing the fd to ssh would remove it.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -533,6 +538,21 @@ def _delete_s3_object(cfg: EcsFargateConfig, key: str) -> None:
         boto3.client("s3", region_name=cfg.region).delete_object(Bucket=cfg.s3_bucket, Key=key)
     except Exception:
         logger.debug("Failed to delete S3 object s3://%s/%s", cfg.s3_bucket, key, exc_info=True)
+
+
+# Registry/repo/tag/digest characters only — used to gate dataset-controlled image refs before they
+# are interpolated into shell `docker pull/tag` commands + the buildspec of a privileged CodeBuild job.
+_IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
+
+
+def _validate_image_ref(ref: str) -> None:
+    """Reject an image reference containing characters outside the safe registry/repo/tag/digest set.
+
+    ``src_image`` comes from the dataset/benchmark and is interpolated into shell commands inside a
+    privileged build, so anything outside the safe set is a code-injection risk and is refused.
+    """
+    if not ref or not _IMAGE_REF_RE.match(ref):
+        raise ValueError(f"Unsafe image reference {ref!r}: only [A-Za-z0-9._:/@-] characters are allowed")
 
 
 def download_secret_to_file(secret_arn: str, region: str | None = None) -> str:
@@ -1070,8 +1090,13 @@ class ImageBuilder:
             return True
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
-            if code in ("ImageNotFoundException", "RepositoryNotFoundException"):
+            if code == "ImageNotFoundException":
                 return False
+            if code == "RepositoryNotFoundException":
+                raise RuntimeError(
+                    f"ECR repository {ecr_repository!r} does not exist; create it (e.g. via Terraform) "
+                    f"before building or mirroring images"
+                ) from exc
             raise
 
     @staticmethod
@@ -1225,6 +1250,7 @@ class ImageBuilder:
         ecr_repo = cfg.ecr_repository
         if not ecr_repo:
             raise ValueError("ecr_repository is required to mirror images")
+        _validate_image_ref(src_image)
         tag = _sanitize_id(src_image)
         image_url = f"{ecr_repo}:{tag}"
 
@@ -1296,13 +1322,16 @@ class ImageBuilder:
         return s3_key
 
     @staticmethod
-    def _resolve_codebuild_project(cfg: EcsFargateConfig, cb: Any, nonce: str) -> str:
+    def _resolve_codebuild_project(cfg: EcsFargateConfig, cb: Any) -> str:
         _, _, ClientError = _require_aws_sdks()
         if cfg.codebuild_project:
             return cfg.codebuild_project
         if not cfg.codebuild_service_role:
             raise RuntimeError("codebuild_project or codebuild_service_role is required")
-        project_name = f"ecs-sandbox-build-{nonce}"
+        # Reuse a single shared project (created once, idempotently) instead of one per build, so
+        # per-build CodeBuild projects don't accumulate. Source + buildspec are overridden per
+        # start_build, so one generic NO_SOURCE project serves every build.
+        project_name = "ecs-sandbox-build"
         try:
             _retry_with_backoff(
                 lambda: cb.create_project(
@@ -1390,7 +1419,7 @@ class ImageBuilder:
         s3_key = cls._upload_build_context(cfg, environment_name, nonce)
         try:
             cb = boto3.client("codebuild", region_name=cfg.region)
-            project_name = cls._resolve_codebuild_project(cfg, cb, nonce)
+            project_name = cls._resolve_codebuild_project(cfg, cb)
             buildspec = cls._generate_buildspec(cfg, repo_name, tag, image_url)
             resp = _retry_with_backoff(
                 lambda: cb.start_build(
@@ -1431,9 +1460,8 @@ class ImageBuilder:
         internally).
         """
         boto3, *_ = _require_aws_sdks()
-        nonce = uuid.uuid4().hex[:8]
         cb = boto3.client("codebuild", region_name=cfg.region)
-        project_name = cls._resolve_codebuild_project(cfg, cb, nonce)
+        project_name = cls._resolve_codebuild_project(cfg, cb)
         timeout = timeout_minutes or cfg.codebuild_build_timeout
 
         logger.info("Starting CodeBuild harness build: %s (timeout=%dm)", job_label, timeout)
@@ -1630,7 +1658,12 @@ class EcsFargateSandbox:
                     sidecar = self._cfg.ssh_sidecar
                     if sidecar and sidecar.exec_server_port is not None:
                         health_url = f"http://127.0.0.1:{self._ssh_tunnel.local_port}/health"  # type: ignore[union-attr]
-                        self._ssh_tunnel.wait_ready(health_url=health_url, timeout=60.0)  # type: ignore[union-attr]
+                        # wait_ready blocks (sleep + urlopen); offload so it can't stall the event loop.
+                        await asyncio.to_thread(
+                            self._ssh_tunnel.wait_ready,  # type: ignore[union-attr]
+                            health_url=health_url,
+                            timeout=60.0,
+                        )
                         old_client = self._exec_client
                         self._exec_client = ExecClient(port=self._ssh_tunnel.local_port)  # type: ignore[union-attr]
                         if old_client is not None:
@@ -2036,20 +2069,32 @@ class EcsFargateSandbox:
         return self._do_register(payload)
 
     def _build_efs_volumes(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Build EFS volume definitions and mount points from spec.volumes."""
+        """Build EFS volume definitions and mount points from spec.volumes.
+
+        A volume may name its own filesystem / access point, or inherit the provider-level
+        ``efs_filesystem_id`` / ``efs_access_point_id`` defaults (populated from YAML/SSM).
+        """
+        cfg = self._cfg
         task_volumes: list[dict[str, Any]] = []
         mount_points: list[dict[str, Any]] = []
         for i, vol in enumerate(self._spec.volumes):
             if not vol.is_efs:
                 continue
+            filesystem_id = vol.efs_filesystem_id or cfg.efs_filesystem_id
+            if not filesystem_id:
+                raise ValueError(
+                    f"EFS volume at {vol.container_path!r} has no filesystem id; set it on the volume "
+                    f"or configure the provider's efs_filesystem_id"
+                )
+            access_point_id = vol.efs_access_point_id or cfg.efs_access_point_id
             vol_name = f"efs-{i}"
             efs_cfg: dict[str, Any] = {
-                "fileSystemId": vol.efs_filesystem_id,
+                "fileSystemId": filesystem_id,
                 "transitEncryption": "ENABLED",
             }
-            if vol.efs_access_point_id:
+            if access_point_id:
                 efs_cfg["authorizationConfig"] = {
-                    "accessPointId": vol.efs_access_point_id,
+                    "accessPointId": access_point_id,
                     "iam": "ENABLED",
                 }
             elif vol.efs_root_directory:

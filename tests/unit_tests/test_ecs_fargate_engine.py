@@ -1034,12 +1034,21 @@ def test_image_exists_in_ecr_true():
     ecr.describe_images.assert_called_once_with(repositoryName="sandbox", imageIds=[{"imageTag": "tag1"}])
 
 
-@pytest.mark.parametrize("code", ["ImageNotFoundException", "RepositoryNotFoundException"])
-def test_image_exists_in_ecr_false_on_missing(code):
+def test_image_exists_in_ecr_false_on_image_not_found():
     ecr = MagicMock()
-    ecr.describe_images.side_effect = _client_error(code, "DescribeImages")
+    ecr.describe_images.side_effect = _client_error("ImageNotFoundException", "DescribeImages")
     with _patch_aws(ecr=ecr):
         assert engine.ImageBuilder.image_exists_in_ecr(_ecr_repo(), "tag1") is False
+
+
+def test_image_exists_in_ecr_fails_fast_on_missing_repo():
+    # A missing repository fails fast with a clear error rather than reporting "image absent" and
+    # then building/pushing into a non-existent repo (which would only fail later at the push).
+    ecr = MagicMock()
+    ecr.describe_images.side_effect = _client_error("RepositoryNotFoundException", "DescribeImages")
+    with _patch_aws(ecr=ecr):
+        with pytest.raises(RuntimeError, match="does not exist"):
+            engine.ImageBuilder.image_exists_in_ecr(_ecr_repo(), "tag1")
 
 
 def test_image_exists_in_ecr_reraises_other():
@@ -1325,22 +1334,22 @@ def test_resolve_codebuild_project_uses_explicit():
     cfg = _build_cfg(codebuild_project="my-project")
     with _patch_aws():
         # No client calls expected when project is explicit.
-        assert engine.ImageBuilder._resolve_codebuild_project(cfg, MagicMock(), "nonce") == "my-project"
+        assert engine.ImageBuilder._resolve_codebuild_project(cfg, MagicMock()) == "my-project"
 
 
 def test_resolve_codebuild_project_requires_role():
     cfg = _build_cfg(codebuild_service_role=None, codebuild_project=None)
     with _patch_aws():
         with pytest.raises(RuntimeError, match="codebuild_project or codebuild_service_role"):
-            engine.ImageBuilder._resolve_codebuild_project(cfg, MagicMock(), "nonce")
+            engine.ImageBuilder._resolve_codebuild_project(cfg, MagicMock())
 
 
 def test_resolve_codebuild_project_creates_project():
     cfg = _build_cfg()
     cb = MagicMock()
     with _patch_aws():
-        name = engine.ImageBuilder._resolve_codebuild_project(cfg, cb, "abc123")
-    assert name == "ecs-sandbox-build-abc123"
+        name = engine.ImageBuilder._resolve_codebuild_project(cfg, cb)
+    assert name == "ecs-sandbox-build"
     cb.create_project.assert_called_once()
     assert cb.create_project.call_args.kwargs["serviceRole"] == "arn:aws:iam::123:role/cb"
 
@@ -1352,8 +1361,8 @@ def test_resolve_codebuild_project_tolerates_already_exists():
         "ResourceAlreadyExistsException", "CreateProject", msg="already exists"
     )
     with _patch_aws():
-        name = engine.ImageBuilder._resolve_codebuild_project(cfg, cb, "abc123")
-    assert name == "ecs-sandbox-build-abc123"
+        name = engine.ImageBuilder._resolve_codebuild_project(cfg, cb)
+    assert name == "ecs-sandbox-build"
 
 
 def test_resolve_codebuild_project_reraises_other_error():
@@ -1362,7 +1371,7 @@ def test_resolve_codebuild_project_reraises_other_error():
     cb.create_project.side_effect = _client_error("AccessDenied", "CreateProject", msg="forbidden")
     with _patch_aws():
         with pytest.raises(ClientError):
-            engine.ImageBuilder._resolve_codebuild_project(cfg, cb, "abc123")
+            engine.ImageBuilder._resolve_codebuild_project(cfg, cb)
 
 
 def test_poll_codebuild_success():
