@@ -28,7 +28,7 @@ navigation:
         title: "Data"
         title-source: frontmatter
       - folder: ./latest/pages/environment-tutorials
-        title: "Environment Tutorials"
+        title: "Build Environments"
         title-source: frontmatter
       - folder: ./latest/pages/evaluation
         title: "Evaluation"
