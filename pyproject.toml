@@ -266,6 +266,13 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
+# FastAPI >=0.137 wraps include_router routes in an internal _IncludedRouter that has
+# no `.path`; prometheus_fastapi_instrumentator <8.0.2 reads route.path unconditionally
+# and raises AttributeError on every request through vLLM's /metrics middleware (the
+# judge servers 500 and appear to hang at startup). 8.0.2 adds a hasattr guard.
+constraint-dependencies = [
+    "prometheus-fastapi-instrumentator>=8.0.2",
+]
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",

@@ -27,6 +27,15 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["local_vllm_model"]
 
+[tool.uv]
+# vLLM's /metrics middleware (prometheus_fastapi_instrumentator) reads route.path on
+# every request; FastAPI >=0.137's _IncludedRouter has no .path, so <8.0.2 raises
+# AttributeError and 500s all requests (the judge server appears to hang at startup).
+# 8.0.2 adds a hasattr guard.
+constraint-dependencies = [
+    "prometheus-fastapi-instrumentator>=8.0.2",
+]
+
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
 
