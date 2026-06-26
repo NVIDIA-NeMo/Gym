@@ -305,7 +305,9 @@ class _CaptureMiddleware:
         try:
             await self._app(scope, _receive, _send)
         except Exception as exc:
-            _record(
+            # Offload the blocking write+fsync so it never stalls the event loop.
+            await asyncio.to_thread(
+                _record,
                 self._store,
                 scope,
                 dialect,
@@ -327,7 +329,9 @@ class _CaptureMiddleware:
             except Exception:
                 response_body = None
         status = state["status"]
-        _record(
+        # Offload the blocking write+fsync so it never stalls the event loop.
+        await asyncio.to_thread(
+            _record,
             self._store,
             scope,
             dialect,
