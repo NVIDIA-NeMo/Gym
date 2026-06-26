@@ -449,7 +449,11 @@ def test_get_task_public_ip_waits_for_public_ip_when_enabled():
     sandbox._ecs = MagicMock()
     sandbox._ecs.describe_tasks.return_value = {
         "tasks": [
-            {"attachments": [{"type": "ElasticNetworkInterface", "details": [{"name": "networkInterfaceId", "value": "eni-1"}]}]}
+            {
+                "attachments": [
+                    {"type": "ElasticNetworkInterface", "details": [{"name": "networkInterfaceId", "value": "eni-1"}]}
+                ]
+            }
         ]
     }
     sandbox._ec2 = MagicMock()
