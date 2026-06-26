@@ -52,7 +52,7 @@ Available resources_servers: 'weather'
 ```
 
 **When**: A server config references another server that doesn't exist or isn't loaded. The error
-names the referencing instance/field and, when a similarly named server exists, suggests it.
+names the referencing instance/field and lists the available servers of that type.
 
 **Common causes**:
 - Typo in the server name
@@ -117,6 +117,7 @@ nemo_gym.config_types.NoServerInstancesError: No server instances are configured
 Catch all of the above before launch with [`gym env validate`](/reference/cli-commands#gym-env-validate) — it
 merges and validates the same config `gym env start` uses, then exits with a clean message (no traceback)
 and a non-zero status on failure, so it fits in CI pre-flight checks.
+
 </Tip>
 
 ---

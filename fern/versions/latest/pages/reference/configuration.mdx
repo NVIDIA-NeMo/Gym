@@ -100,6 +100,7 @@ datasets:
 | `type` | Yes | `example`, `train`, or `validation` |
 | `jsonl_fpath` | Yes | Path to data file |
 | `license` | For train/validation | License identifier (see values below) |
+| `source` | No | Where to fetch the data from when it's missing locally. A `source:` block with `type: gitlab` (`dataset_name`, `version`, `artifact_fpath`) or `type: huggingface` (`repo_id`, optional `artifact_fpath`). Replaces the deprecated `gitlab_identifier:` / `huggingface_identifier:` blocks. |
 | `num_repeats` | No | Repeat dataset n times (default: `1`) |
 
 **Dataset types:**

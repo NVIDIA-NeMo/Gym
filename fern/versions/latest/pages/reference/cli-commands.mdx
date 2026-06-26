@@ -360,6 +360,9 @@ Validate a config without starting Ray or any server subprocess — a fast pre-f
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
+| `--resources-server NAME` | Validate a named resources server config. |
+| `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
 gym env validate --environment workplace_assistant

@@ -204,13 +204,11 @@ A dataset object consists of:
 - name: train
   type: train
   jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
-  gitlab_identifier:
+  source:
+    type: gitlab
     dataset_name: example_multi_step
     version: 0.0.1
-    artifact_fpath: example_multi_step/validation.jsonl
-  huggingface_identifier:
-    repo_id: nvidia/example_multi_step
-    artifact_fpath: example_validation.jsonl
+    artifact_fpath: example_multi_step/train.jsonl
   license: Apache 2.0
 ```
 
