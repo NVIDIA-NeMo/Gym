@@ -3,9 +3,10 @@ name: review-pr-team
 description: >
   Agent-team-based parallel code review for NVIDIA-NeMo/Gym pull requests.
   Spawns specialized agents (core-library expert, component experts for
-  resources servers / agents / models, bug finder, test agent, devil's
-  advocate, comment reviewer, validation runner) that coordinate via the
-  shared Task list and direct messaging. The leader orchestrates, collates
+  resources servers / agents / models, bug finder, test agent, AI-research /
+  benchmark-methodology reviewer, devil's advocate, comment reviewer,
+  validation runner) that coordinate via the shared Task list and direct
+  messaging. The leader summarizes what the PR is about, orchestrates, collates
   ALL findings, and presents to the user for approval before posting.
   Triggered by: "team review PR", "review PR with agents", "parallel PR review".
 argument-hint: "<pr-number>"
@@ -141,6 +142,22 @@ gh issue view <ISSUE_NUM> --repo NVIDIA-NeMo/Gym --json title,body,comments,labe
 The PR description + linked issues + diff together form the full context. Pass this
 context to every agent so they understand *why* the change is being made.
 
+**Summarize what the PR is about (share with the user, then carry it through).** Before
+spawning agents, post a short plain-language summary to the user so they know what's
+being reviewed without reading the diff themselves. Cover: (1) **what the PR does** in
+1-3 sentences (the feature/fix and its motivation), (2) the **components touched** and
+rough size (files / +/− lines), (3) any **upfront flags** worth surfacing immediately
+(merge conflict, no tests added, dependency on unmerged/external work, `verified: true`
+without evidence). Keep this summary on hand — restate the "what this PR does" line at
+the top of the Phase 4 preview so the findings are read in context. Every agent prompt
+already receives this context via the common preamble; the summary is the user-facing
+version of it.
+
+Pair this plain-language summary with the **end-to-end system context and diagram** from
+§1.3a (where the PR sits in the architecture, the data-flow path, and the touched
+modules) — share both together so the user (and every agent) understands not just *what*
+the PR does but *where in the system* it lives.
+
 ### 1.2a Reward-profiling / baselining evidence check
 
 NeMo Gym benchmarks are baselined before they're trusted. New `verified: true` configs
@@ -189,10 +206,68 @@ its area is touched):
 | `responses_api_models/` | `model-server-expert` |
 | `tests/`, any `*/tests/` | `test-agent` (always spawn) |
 | `fern/` | fold into `gym-core-expert` (docs review) |
+| `benchmarks/`, `resources_servers/` (verifier/reward), datasets, training configs | `research-reviewer` (AI-research lens) |
 
 `bug-finder`, `test-agent`, and `comment-reviewer` are always spawned. If only one
 component area is touched, still spawn `gym-core-expert` as the generalist owner of the
 cross-cutting guidelines.
+
+**Spawn `research-reviewer` (the AI-research / benchmark-methodology lens) whenever the
+PR affects what is measured or how well** — i.e. it adds/changes a benchmark, dataset,
+verifier/reward logic, scoring, evaluation config, or reports baseline numbers. The other
+agents cover engineering *correctness*; `research-reviewer` covers *research validity*
+(does the change faithfully and rigorously measure what it claims?), which engineering
+review alone misses. Skip it only for purely infra/plumbing PRs with no measurement
+impact (e.g. CI, logging, refactors with no reward/dataset effect).
+
+### 1.3a Situate the PR in the system (end-to-end context + diagram) — ALWAYS
+
+ALWAYS produce a short "where does this PR sit in the big picture" briefing **and a
+diagram**, and share both with the user alongside the Phase 1.2 summary. A reviewer
+(human or agent) judges a change far better when they can see which part of the system it
+touches and how data flows through the modules it changes — a diff in isolation hides
+that. This is not optional and not conditional on PR size.
+
+NeMo Gym decomposes into the four components in `CLAUDE.md` — **Dataset** (JSONL) →
+**Agent Harness** (`responses_api_agents/`) ↔ **Model Server** (`responses_api_models/`),
+scored by a **Resources Server** (`resources_servers/`), all wired by the **core library**
+(`nemo_gym/`: BaseServer/SimpleServer, `server_utils`, `responses_converter`, Hydra
+config). For deeper architecture read `fern/versions/latest/pages/about/`.
+
+Build the briefing from the ACTUAL repo, not from memory:
+1. **Component map**: for each touched top-level path (from 1.3), name its component and
+   its one-line role in the system.
+2. **Data-flow path**: trace the path the change participates in — what *produces* the
+   data, what *transforms* it, what *consumes* it — citing `file:line`. Name external
+   producers/consumers when the flow crosses the repo boundary (e.g. an inference
+   provider upstream, a training framework like Nemo-RL downstream).
+3. **Position / blast radius**: note whether the change sits on a hot path, a startup
+   path, a serialization boundary, a shared schema/contract, etc. — i.e. what a mistake
+   here would ripple into.
+
+**Render a diagram** (Mermaid `flowchart` preferred; ASCII fallback if Mermaid is
+unsuitable) showing the relevant components and the data flow, with the PR's touched
+modules **highlighted**. Show only the slice the PR lives in plus one hop of context on
+each side — do NOT redraw the whole system. Skeleton to adapt:
+
+````
+```mermaid
+flowchart LR
+    Model[Model Server<br/>responses_api_models/] -->|chat/responses| Agent[Agent Harness<br/>responses_api_agents/]
+    Agent -->|trajectory| Conv[Converter<br/>nemo_gym/responses_converter.py]
+    Conv -->|training output| RL[(Nemo-RL<br/>external consumer)]
+    classDef touched fill:#ffe08a,stroke:#d48806;
+    class Model,Conv touched
+```
+````
+
+Keep this briefing on hand:
+- Pass it to EVERY agent (it is folded into the common preamble as `SYSTEM CONTEXT`) so
+  reviewers anchor findings to the right component and understand cross-module impact.
+- Restate the diagram + the "what this PR does" line at the top of the Phase 4 preview so
+  findings are read in context.
+
+Record `$SYSTEM_CONTEXT` (the briefing text + diagram) for reuse.
 
 ### 1.4 Read root context (load coding guidelines)
 
@@ -240,6 +315,7 @@ status with `TaskUpdate` as waves complete.
 | `review-existing-comments` | `comment-reviewer` | Review all PR comment threads; identify responses needed. |
 | `review-and-suggest-tests` | `test-agent` | Review tests; suggest+verify new tests; run locally where possible. |
 | `scan-for-bugs` | `bug-finder` | Independently scan the diff for bugs; write tests when uncertain. |
+| `analyze-research-methodology` | `research-reviewer` | (conditional — measurement-affecting PRs) Reward/scoring fidelity, evaluation semantics, statistical rigor, baselining sufficiency. Report ALL findings. |
 
 **Wave 2 (blocked by ALL Wave 1 tasks):**
 
@@ -289,9 +365,15 @@ $PR_BODY
 Related Issues:
 $RELATED_ISSUES (title, body, key comments for each linked issue)
 
+System Context (where this PR sits in NeMo Gym — components touched, data-flow path,
+producers/consumers, and a diagram):
+$SYSTEM_CONTEXT
+
 Instructions:
-- Read and understand the PR description and related issues FIRST — they explain the
-  author's intent, motivation, and test plan. Review the code in that context.
+- Read and understand the PR description, related issues, AND the System Context FIRST —
+  they explain the author's intent, motivation, test plan, and where the change lives in
+  the system. Review the code in that context, and anchor each finding to the affected
+  component / data-flow stage.
 - Claim your task with TaskUpdate(status="in_progress") and mark it completed when done.
 - Use Read, Glob, Grep for local lookups (faster than gh CLI). The PR is checked out
   on branch pr-$PRNUM-team-review.
@@ -491,6 +573,48 @@ Tasks:
 4. Delegate domain questions to expert agents via SendMessage.
 ```
 
+### `research-reviewer` (conditional — measurement-affecting PRs)
+
+```
+You are the AI-research / benchmark-methodology reviewer. Engineering correctness is
+covered by other agents — YOUR lens is RESEARCH VALIDITY: does this change faithfully and
+rigorously measure what it claims to measure? Evaluate the science, not the plumbing.
+
+FIRST: Glob `.claude/skills/*/SKILL.md` and read the measurement-relevant ones (e.g.
+`add-benchmark`, `nemo-gym-reward-profiling`, `nemo-gym-blade-analysis`,
+`nemo-gym-pivot-datasets`). These define how NeMo Gym expects benchmarks to be baselined
+and what counts as a faithful, trustworthy reward.
+
+Evaluate (whichever apply to the diff):
+1. REWARD / SCORING FIDELITY: Does the verifier/reward reproduce the canonical benchmark's
+   reward? If the PR reports a standalone-vs-Gym comparison, scrutinize per-cell gaps —
+   are outliers within run-to-run noise or evidence of a systematic integration
+   discrepancy (tool execution, user-simulator drift, prompt/message reconstruction)?
+   Trace where reward is computed vs surfaced verbatim from upstream.
+2. EVALUATION SEMANTICS: Does the integration silently change WHAT is scored — dropping or
+   adding reward components, changing evaluation_type, filtering trajectories, altering the
+   metric? Any divergence from the published/canonical definition must be intentional and
+   documented, not incidental. Flag silent reward-definition changes.
+3. STATISTICAL RIGOR: Is num_repeats / sample size adequate for the reward regime? Are
+   reported deltas within noise? Are N (tasks per cell), confidence intervals, and the
+   sampling/seed/determinism protocol (temperature, greedy vs sampled) stated? Flag
+   over-interpreted small deltas and missing variance reporting.
+4. METHODOLOGY / COVERAGE: If the benchmark has an independent variable (retrieval mode,
+   difficulty tier, tool set), does the PR baseline a representative slice or risk
+   cherry-picking? Is the choice of what to ship first justified?
+5. BASELINING SUFFICIENCY: Per the reward-profiling / add-benchmark skills, are the
+   artifacts behind any reported numbers durable and in-repo (aggregate_metrics.json,
+   per-task reward distributions, sample rollouts) — or do they live only in the PR
+   description and vanish on merge? Is there a machine-readable trust marker (`verified`)?
+
+For EACH finding give a concrete, constructive, community-friendly ASK for the author
+(frame as a question, not an accusation) and distinguish "blocking for a trustworthy
+benchmark" vs "good-to-report". Anchor to file:line + permalink where code-relevant; for
+claims about pre-existing code NOT in the diff, cite the permalink and let the leader
+place it in the review body. Categories: [REWARD-FIDELITY], [EVAL-SEMANTICS], [STATS],
+[METHODOLOGY], [BASELINE]. Ask component/test agents for domain facts via SendMessage.
+```
+
 ### `devil-advocate`
 
 ```
@@ -563,7 +687,8 @@ contributors:
 After all Wave 2 agents complete:
 
 1. Gather ALL findings. Categories: `[BUG]`, `[ASYNC]`, `[TEST]`, `[GUIDELINE]`,
-   `[CONFIG]`, `[DOC]`, `[DOCSTRING]`, `[BASELINE]`.
+   `[CONFIG]`, `[DOC]`, `[DOCSTRING]`, `[BASELINE]`, and the research-reviewer's
+   `[REWARD-FIDELITY]`, `[EVAL-SEMANTICS]`, `[STATS]`, `[METHODOLOGY]`.
 2. Apply devil-advocate verdicts: remove DISPUTED, adjust DOWNGRADED.
 3. Deduplicate: same file + same line range + same core issue = one finding.
 4. Confidence threshold: discard anything scoring below 80.
@@ -583,6 +708,11 @@ Display ALL findings using the card layout, grouped by severity:
 ```markdown
 ## Review: PR #$PRNUM — $TITLE
 by @$AUTHOR | <count> files changed | <count> agents
+
+**What this PR does:** <restate the 1-line summary from §1.2>
+
+**Where it sits:** <restate the §1.3a system-context one-liner + the diagram, so findings
+are read against the architecture they touch>
 
 ### Critical (<count>)
 
@@ -679,16 +809,31 @@ UI — submit via API (below).
 
 ### Step 1: Create PENDING review with body + inline comments
 
-Omit `event` to create a PENDING review. Add `_Generated by Claude Code_` at the end of
-the body.
+Omit `event` to create a PENDING review.
+
+**Do NOT reference the agent team, the review tooling, or AI generation in any posted
+content** (review body, inline comments, or thread replies). No "reviewed by a team of
+agents", no agent/attribution names, no "Generated by Claude Code" footer. Posted text
+should read as a single reviewer's voice. (Agent attributions belong only in the Phase 4
+preview shown to the user, never on the PR.)
 
 **All actionable findings MUST be inline comments**, not body text. The body is for
-general context (PR summary, merge-conflict note, agent count, non-actionable
-observations). Tie "general" findings to the most relevant diff line:
+general context (PR summary, merge-conflict note, non-actionable observations). Tie
+"general" findings to the most relevant diff line:
 - Bug in a file not in the diff → comment on the diff line that introduces the
   requirement; reference the external file in the body.
 - Missing test coverage → comment on the most relevant test file in the diff, listing
   untested functions with permalinks.
+
+**ALWAYS lead the review body with the end-to-end system context from §1.3a** — a 1-2
+sentence "where this PR sits" framing followed by the **diagram** (Mermaid fenced block;
+GitHub renders Mermaid in review/comment markdown). This gives every reader the
+big-picture map of which components and data-flow stages the PR touches before they read
+the inline findings. Keep it to the PR's slice (the same focused diagram from §1.3a), and
+keep the single-reviewer voice — no agent-team / AI-generation references. The system
+context is non-actionable framing, so the body is its home; do not duplicate it as an
+inline comment. (Because a UI submit can wipe the body — see the limitation note above —
+submit via the API in Step 2 so the context survives.)
 
 Use Python `json.dump` to build the review JSON (avoids shell-escaping issues with
 backticks/markdown):
@@ -697,7 +842,7 @@ backticks/markdown):
 cat <<'REVIEW_JSON' > "$TMPDIR/review.json"
 {
   "commit_id": "$HEAD_SHA",
-  "body": "<brief summary — merge conflict note, agent count, etc.>\n\n_Generated by Claude Code_",
+  "body": "<system context FIRST: 'where this PR sits' framing + the §1.3a Mermaid diagram (```mermaid ... ``` fenced) — then a brief summary of what the PR does, merge-conflict note, and any non-actionable observations. No agent-team / AI-generation references.>",
   "comments": [
     {"path": "<file>", "line": <line>, "side": "RIGHT", "body": "[`<file>:<line>`](<permalink>)\n\n<comment with evidence permalinks>"}
   ]
