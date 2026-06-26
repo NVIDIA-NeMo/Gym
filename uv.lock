@@ -13,10 +13,7 @@ resolution-markers = [
 ]
 
 [manifest]
-constraints = [
-    { name = "grpcio", specifier = ">=1.81.0rc1" },
-    { name = "prometheus-fastapi-instrumentator", specifier = ">=8.0.2" },
-]
+constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
 excludes = [
     "alembic",
     "blinker",

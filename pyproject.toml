@@ -297,8 +297,6 @@ required-version = ">=0.9.30"
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
-    # <8.0.2 crashes on FastAPI>=0.137 pathless routes in vLLM /metrics. See vllm-project/vllm#45629
-    "prometheus-fastapi-instrumentator>=8.0.2",
 ]
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
