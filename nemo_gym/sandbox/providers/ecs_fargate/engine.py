@@ -481,6 +481,22 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _ephemeral_storage_block(requested: Any) -> dict[str, int] | None:
+    """Task-def ``ephemeralStorage`` block for an explicit request, or ``None`` to take Fargate's
+    implicit 20 GiB default.
+
+    Fargate accepts only 21-200 GiB; an explicit ``20`` is rejected by RegisterTaskDefinition (20 is
+    valid only as the omitted default), so we omit the field unless a larger size is requested and
+    validate the range.
+    """
+    if not requested:
+        return None
+    size = int(requested)
+    if not 21 <= size <= 200:
+        raise ValueError(f"ephemeral storage must be between 21 and 200 GiB (got {size})")
+    return {"sizeInGiB": size}
+
+
 def download_secret_to_file(secret_arn: str, region: str | None = None) -> str:
     """Fetch a Secrets Manager secret → temp file (mode 0600)."""
     key_material = download_secret_to_string(secret_arn, region=region)
@@ -1084,6 +1100,53 @@ class ImageBuilder:
         return ecr_url
 
     @classmethod
+    def _run_deduped_build(
+        cls, *, cfg: EcsFargateConfig, tag: str, image_url: str, force: bool, build: Callable[[], None]
+    ) -> str:
+        """Run ``build`` for ``tag`` at most once across threads, returning the ECR ``image_url``.
+
+        Concurrent callers for the same tag block on a shared in-flight event **outside**
+        ``cls._lock`` (so one waiter can't stall every other tag's build) and then confirm the
+        result via ECR rather than the event -- a failed build sets the event too, so a waiter must
+        not return a URL for an image that was never pushed.
+        """
+        ecr_repo = cfg.ecr_repository
+        if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
+            logger.info("ECR cache hit — skipping build: %s", image_url)
+            return image_url
+
+        with cls._lock:
+            event = cls._inflight_builds.get(tag)
+            is_builder = event is None
+            if is_builder:
+                event = threading.Event()
+                cls._inflight_builds[tag] = event
+            if cls._build_semaphore is None or cls._build_semaphore_size != cfg.build_parallelism:
+                cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
+                cls._build_semaphore_size = cfg.build_parallelism
+            semaphore = cls._build_semaphore
+
+        if not is_builder:
+            event.wait()  # wait outside the lock so one waiter can't block other tags' builds
+            if cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
+                return image_url
+            raise RuntimeError(f"Concurrent build for {image_url} failed; image is not in ECR")
+
+        try:
+            semaphore.acquire()
+            try:
+                if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
+                    return image_url
+                build()
+                return image_url
+            finally:
+                semaphore.release()
+        finally:
+            with cls._lock:
+                cls._inflight_builds.pop(tag, None)
+            event.set()
+
+    @classmethod
     def ensure_image_built(cls, *, cfg: EcsFargateConfig, environment_name: str, force_build: bool = False) -> str:
         ecr_repo = cfg.ecr_repository
         env_dir = cfg.environment_dir
@@ -1091,41 +1154,15 @@ class ImageBuilder:
             raise ValueError("ecr_repository and environment_dir are required for image building")
         tag = cls.get_ecr_image_tag(env_dir, environment_name)
         image_url = f"{ecr_repo}:{tag}"
-
-        # Dedup: check if another thread is already building this tag
-        with cls._lock:
-            if tag in cls._inflight_builds:
-                event = cls._inflight_builds[tag]
-                event.wait()
-                return image_url
-        if not force_build and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
-            logger.info("ECR cache hit — skipping build: %s", image_url)
-            return image_url
-
-        # Register as builder
-        event = threading.Event()
-        with cls._lock:
-            if tag in cls._inflight_builds:
-                cls._inflight_builds[tag].wait()
-                return image_url
-            cls._inflight_builds[tag] = event
-        with cls._lock:
-            if cls._build_semaphore is None or cls._build_semaphore_size != cfg.build_parallelism:
-                cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
-                cls._build_semaphore_size = cfg.build_parallelism
-        try:
-            cls._build_semaphore.acquire()  # type: ignore[union-attr]
-            try:
-                if not force_build and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
-                    return image_url
-                cls._build_and_push(cfg=cfg, environment_name=environment_name, tag=tag, image_url=image_url)
-            finally:
-                cls._build_semaphore.release()  # type: ignore[union-attr]
-        finally:
-            event.set()
-            with cls._lock:
-                cls._inflight_builds.pop(tag, None)
-        return image_url
+        return cls._run_deduped_build(
+            cfg=cfg,
+            tag=tag,
+            image_url=image_url,
+            force=force_build,
+            build=lambda: cls._build_and_push(
+                cfg=cfg, environment_name=environment_name, tag=tag, image_url=image_url
+            ),
+        )
 
     @classmethod
     def ensure_mirrored(cls, *, cfg: EcsFargateConfig, src_image: str, force: bool = False) -> str:
@@ -1145,45 +1182,18 @@ class ImageBuilder:
         tag = _sanitize_id(src_image)
         image_url = f"{ecr_repo}:{tag}"
 
-        with cls._lock:
-            if tag in cls._inflight_builds:
-                cls._inflight_builds[tag].wait()
-                return image_url
-        if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
-            logger.info("ECR mirror hit — skipping pull: %s", image_url)
-            return image_url
+        def _mirror() -> None:
+            logger.info("Mirroring %s -> %s via CodeBuild ...", src_image, image_url)
+            buildspec = cls._generate_mirror_buildspec(cfg, src_image, image_url)
+            cls.run_buildspec_via_codebuild(
+                cfg=cfg,
+                buildspec=buildspec,
+                job_label=f"mirror::{tag}",
+                timeout_minutes=cfg.codebuild_build_timeout,
+            )
+            logger.info("Mirrored OK: %s -> %s", src_image, image_url)
 
-        event = threading.Event()
-        with cls._lock:
-            if tag in cls._inflight_builds:
-                cls._inflight_builds[tag].wait()
-                return image_url
-            cls._inflight_builds[tag] = event
-        with cls._lock:
-            if cls._build_semaphore is None or cls._build_semaphore_size != cfg.build_parallelism:
-                cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
-                cls._build_semaphore_size = cfg.build_parallelism
-        try:
-            cls._build_semaphore.acquire()  # type: ignore[union-attr]
-            try:
-                if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
-                    return image_url
-                logger.info("Mirroring %s -> %s via CodeBuild ...", src_image, image_url)
-                buildspec = cls._generate_mirror_buildspec(cfg, src_image, image_url)
-                cls.run_buildspec_via_codebuild(
-                    cfg=cfg,
-                    buildspec=buildspec,
-                    job_label=f"mirror::{tag}",
-                    timeout_minutes=cfg.codebuild_build_timeout,
-                )
-                logger.info("Mirrored OK: %s -> %s", src_image, image_url)
-            finally:
-                cls._build_semaphore.release()  # type: ignore[union-attr]
-        finally:
-            event.set()
-            with cls._lock:
-                cls._inflight_builds.pop(tag, None)
-        return image_url
+        return cls._run_deduped_build(cfg=cfg, tag=tag, image_url=image_url, force=force, build=_mirror)
 
     @staticmethod
     def _generate_mirror_buildspec(cfg: EcsFargateConfig, src_image: str, ecr_url: str) -> str:
@@ -1550,10 +1560,10 @@ class EcsFargateSandbox:
         self._require_exec_client()
         shell_cmd = command
         if env:
-            exports = " ".join(f"{k}={v}" for k, v in env.items())
+            exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
             shell_cmd = f"export {exports} && {shell_cmd}"
         if cwd:
-            shell_cmd = f"cd {cwd} && {shell_cmd}"
+            shell_cmd = f"cd {shlex.quote(cwd)} && {shell_cmd}"
         if user is not None:
             if isinstance(user, int):
                 shell_cmd = f'su -s /bin/bash "$(getent passwd {user} | cut -d: -f1)" -c {shlex.quote(shell_cmd)}'
@@ -1809,6 +1819,14 @@ class EcsFargateSandbox:
             value = value.replace("{ssh_tunnel_port}", str(self._ssh_tunnel_port))
         if self._task_ip:
             value = value.replace("{task_ip}", self._task_ip)
+        elif "{task_ip}" in value:
+            # _task_ip is only assigned after the task is RUNNING (_get_task_public_ip), which is
+            # after container env is baked into the task-def / RunTask overrides. Fail loudly rather
+            # than baking a literal "{task_ip}" that later breaks model egress with a confusing error.
+            raise ValueError(
+                "{task_ip} is not available in container env: the task IP is only known after the "
+                "sandbox starts. Resolve the container's own address at runtime instead."
+            )
         value = value.replace("{image}", self._spec.image or "")
         return value
 
@@ -1900,12 +1918,12 @@ class EcsFargateSandbox:
             "cpu": str(max(int(base.get("cpu") or "256"), int(cfg.cpu))),
             "memory": str(max(int(base.get("memory") or "512"), int(cfg.memory))),
             "containerDefinitions": containers,
-            "ephemeralStorage": {
-                "sizeInGiB": max(
-                    (base.get("ephemeralStorage") or {}).get("sizeInGiB", 20), cfg.ephemeral_storage_gib or 20
-                )
-            },
         }
+        ephemeral = _ephemeral_storage_block(
+            (base.get("ephemeralStorage") or {}).get("sizeInGiB") or cfg.ephemeral_storage_gib
+        )
+        if ephemeral is not None:
+            payload["ephemeralStorage"] = ephemeral
         for k in ("taskRoleArn", "executionRoleArn", "runtimePlatform", "volumes"):
             if base.get(k) is not None:
                 payload[k] = base[k]
@@ -1957,8 +1975,9 @@ class EcsFargateSandbox:
             payload["volumes"] = task_volumes
         if cfg.task_role_arn:
             payload["taskRoleArn"] = cfg.task_role_arn
-        if cfg.ephemeral_storage_gib:
-            payload["ephemeralStorage"] = {"sizeInGiB": cfg.ephemeral_storage_gib}
+        ephemeral = _ephemeral_storage_block(cfg.ephemeral_storage_gib)
+        if ephemeral is not None:
+            payload["ephemeralStorage"] = ephemeral
         return self._do_register(payload)
 
     def _build_efs_volumes(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

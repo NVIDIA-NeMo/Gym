@@ -1183,42 +1183,46 @@ def test_ensure_image_built_force_skips_cache_check():
 
 
 def test_ensure_image_built_dedupes_on_inflight():
+    # A peer build for this tag is in flight; once it finishes the image is in ECR, so the waiter
+    # returns the URL without building. The waiter verifies via ECR (not the event) on wake.
     cfg = _build_cfg()
     tag = "env__abcd1234"
     done = threading.Event()
     done.set()
     engine.ImageBuilder._inflight_builds[tag] = done
-    with (
-        patch.object(engine.ImageBuilder, "get_ecr_image_tag", return_value=tag),
-        patch.object(engine.ImageBuilder, "image_exists_in_ecr") as exists,
-        patch.object(engine.ImageBuilder, "_build_and_push") as build,
-    ):
-        url = engine.ImageBuilder.ensure_image_built(cfg=cfg, environment_name="env")
-    assert url == f"{cfg.ecr_repository}:{tag}"
-    exists.assert_not_called()
-    build.assert_not_called()
+    try:
+        with (
+            patch.object(engine.ImageBuilder, "get_ecr_image_tag", return_value=tag),
+            patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=True),
+            patch.object(engine.ImageBuilder, "_build_and_push") as build,
+        ):
+            url = engine.ImageBuilder.ensure_image_built(cfg=cfg, environment_name="env")
+        assert url == f"{cfg.ecr_repository}:{tag}"
+        build.assert_not_called()
+    finally:
+        engine.ImageBuilder._inflight_builds.pop(tag, None)
 
 
-def test_ensure_image_built_dedupes_on_second_check():
-    # A concurrent builder registers the tag between the first cache check and
-    # the second in-flight check; we must wait on it rather than rebuild.
+def test_ensure_image_built_waiter_raises_when_peer_build_failed():
+    # A peer build for this tag is in flight but fails (image never lands in ECR). The waiter must
+    # raise rather than return a URL for an image that was never pushed (it would fail later at the
+    # ECS image pull). It verifies via ECR on wake instead of trusting the in-flight event.
     cfg = _build_cfg()
     tag = "env__deadbeef"
-
-    def _register_inflight(*_a, **_k):
-        ev = threading.Event()
-        ev.set()
-        engine.ImageBuilder._inflight_builds[tag] = ev
-        return False
-
-    with (
-        patch.object(engine.ImageBuilder, "get_ecr_image_tag", return_value=tag),
-        patch.object(engine.ImageBuilder, "image_exists_in_ecr", side_effect=_register_inflight),
-        patch.object(engine.ImageBuilder, "_build_and_push") as build,
-    ):
-        url = engine.ImageBuilder.ensure_image_built(cfg=cfg, environment_name="env")
-    assert url == f"{cfg.ecr_repository}:{tag}"
-    build.assert_not_called()
+    done = threading.Event()
+    done.set()
+    engine.ImageBuilder._inflight_builds[tag] = done
+    try:
+        with (
+            patch.object(engine.ImageBuilder, "get_ecr_image_tag", return_value=tag),
+            patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=False),
+            patch.object(engine.ImageBuilder, "_build_and_push") as build,
+            pytest.raises(RuntimeError, match="not in ECR"),
+        ):
+            engine.ImageBuilder.ensure_image_built(cfg=cfg, environment_name="env")
+        build.assert_not_called()
+    finally:
+        engine.ImageBuilder._inflight_builds.pop(tag, None)
 
 
 def test_ensure_image_built_cache_filled_after_semaphore():
@@ -1241,38 +1245,42 @@ def test_ensure_mirrored_requires_repo():
 
 
 def test_ensure_mirrored_dedupes_on_inflight():
+    # Peer mirror in flight + image now in ECR -> waiter returns the URL without re-mirroring.
     cfg = _build_cfg()
     tag = engine._sanitize_id("ubuntu:24.04")
     done = threading.Event()
     done.set()
     engine.ImageBuilder._inflight_builds[tag] = done
-    with (
-        patch.object(engine.ImageBuilder, "image_exists_in_ecr") as exists,
-        patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
-    ):
-        url = engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
-    assert url.endswith(tag)
-    exists.assert_not_called()
-    cb.assert_not_called()
+    try:
+        with (
+            patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=True),
+            patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
+        ):
+            url = engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
+        assert url.endswith(tag)
+        cb.assert_not_called()
+    finally:
+        engine.ImageBuilder._inflight_builds.pop(tag, None)
 
 
-def test_ensure_mirrored_dedupes_on_second_check():
+def test_ensure_mirrored_waiter_raises_when_peer_build_failed():
+    # Peer mirror in flight but failed (image absent from ECR) -> waiter raises instead of returning
+    # a URL for an image that was never pushed.
     cfg = _build_cfg()
     tag = engine._sanitize_id("ubuntu:24.04")
-
-    def _register_inflight(*_a, **_k):
-        ev = threading.Event()
-        ev.set()
-        engine.ImageBuilder._inflight_builds[tag] = ev
-        return False
-
-    with (
-        patch.object(engine.ImageBuilder, "image_exists_in_ecr", side_effect=_register_inflight),
-        patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
-    ):
-        url = engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
-    assert url.endswith(tag)
-    cb.assert_not_called()
+    done = threading.Event()
+    done.set()
+    engine.ImageBuilder._inflight_builds[tag] = done
+    try:
+        with (
+            patch.object(engine.ImageBuilder, "image_exists_in_ecr", return_value=False),
+            patch.object(engine.ImageBuilder, "run_buildspec_via_codebuild") as cb,
+            pytest.raises(RuntimeError, match="not in ECR"),
+        ):
+            engine.ImageBuilder.ensure_mirrored(cfg=cfg, src_image="ubuntu:24.04")
+        cb.assert_not_called()
+    finally:
+        engine.ImageBuilder._inflight_builds.pop(tag, None)
 
 
 def test_ensure_mirrored_cache_filled_after_semaphore():
