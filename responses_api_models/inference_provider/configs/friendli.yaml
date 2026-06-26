@@ -2,6 +2,6 @@ policy_model:
   responses_api_models:
     inference_provider:
       entrypoint: app.py
-      base_url: https://inference.friendli.ai/v1
+      base_url: https://api.friendli.ai/serverless/v1
       api_key: ${policy_api_key}
       model: ${policy_model_name}

@@ -157,7 +157,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             model=body.model,
             object="response",
             output=response_output_dicts,
-            tool_choice=body.tool_choice if "tool_choice" in body else "auto",
+            tool_choice=body.tool_choice if body.tool_choice is not None else "auto",
             parallel_tool_calls=body.parallel_tool_calls,
             tools=body.tools,
             temperature=body.temperature,

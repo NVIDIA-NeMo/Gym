@@ -289,6 +289,44 @@ class TestResponses:
         assert data["output"][0]["type"] == "message"
         assert data["output"][0]["content"][0]["text"] == "Hello from the model!"
 
+    async def test_responses_defaults_tool_choice_to_auto(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+
+        async def mock_create_chat(**kwargs):
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+        assert response.status_code == 200
+        assert response.json()["tool_choice"] == "auto"
+
+    async def test_responses_preserves_explicit_tool_choice(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+
+        async def mock_create_chat(**kwargs):
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post("/v1/responses", json={"input": "hello", "tool_choice": "required"})
+        assert response.status_code == 200
+        assert response.json()["tool_choice"] == "required"
+
     async def test_responses_with_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
