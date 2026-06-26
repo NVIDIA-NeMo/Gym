@@ -75,6 +75,10 @@ class TestAnthropicRequestToResponses:
         )
         assert params.instructions is None
 
+    def test_request_without_max_tokens_leaves_max_output_tokens_unset(self) -> None:
+        params = _converter().anthropic_request_to_responses({"messages": [{"role": "user", "content": "hi"}]})
+        assert params.max_output_tokens is None
+
     def test_system_list_without_text_leaves_instructions_unset(self) -> None:
         # A system list that contributes no usable text (empty-text blocks) yields no instructions.
         params = _converter().anthropic_request_to_responses(

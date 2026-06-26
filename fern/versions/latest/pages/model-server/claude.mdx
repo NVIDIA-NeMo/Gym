@@ -1,12 +1,17 @@
 ---
 title: "Claude"
 description: "Use Anthropic Claude models through NeMo Gym's Responses API"
-position: 2
+position: 4
 ---
 
-The `anthropic_model` server connects NeMo Gym to [Anthropic Claude](https://docs.anthropic.com/en/docs/about-claude/models/overview). It accepts NeMo Gym's native [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) on `/v1/responses`, translates requests to Anthropic's [Messages API](https://docs.anthropic.com/en/api/messages), and maps responses back to Responses objects.
+NeMo Gym offers two complementary ways to work with Claude, aimed at different audiences:
 
-Conversion logic lives in `nemo_gym.anthropic_converter` and is shared with the default `/v1/messages` route on other Gym model servers (see [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) for harness workflows that call Messages directly).
+- **Egress (`anthropic_model` — this page):** Your harness speaks NeMo Gym's native [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) on `/v1/responses` and the backend is Anthropic Claude. Use this when you already run Gym agents or harnesses in Responses format and want Claude as the policy model.
+- **Ingress (built into every model server):** Your harness speaks Anthropic's [Messages API](https://docs.anthropic.com/en/api/messages) on `/v1/messages` and the backend is any Gym model server (vLLM, OpenAI, an inference provider, etc.). Every Gym model server exposes `/v1/messages` by default, mapping Messages ↔ Responses around its own `responses()` implementation. Blackbox agents that already talk Anthropic Messages — notably the [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) — can target any Gym backend without rewriting to Responses.
+
+The `anthropic_model` server is the egress path: it accepts Responses API requests, translates them to Anthropic `/v1/messages`, and maps Anthropic responses back to Responses objects.
+
+Conversion logic lives in `nemo_gym.anthropic_converter` and is shared with the ingress `/v1/messages` route on other Gym model servers.
 
 <Info>
 For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Anthropic's hosted API does not expose the token-level information needed for RL training.
@@ -20,6 +25,8 @@ This server exposes one endpoint and converts to Anthropic Messages under the ho
 - **OpenAI Responses** — `/v1/responses`
 
 Chat Completions (`/v1/chat/completions`) is not supported on this server.
+
+If your agent speaks Anthropic Messages instead of Responses, you do not need `anthropic_model`. Point the agent at any Gym model server's `/v1/messages` endpoint (see ingress above).
 
 ## Set Your Credentials
 
@@ -40,7 +47,7 @@ policy_model_name: claude-sonnet-4-6
 | `anthropic_base_url` | `str` | `https://api.anthropic.com/v1` | Base URL for the Anthropic API. |
 | `anthropic_api_key` | `str` | — | **Required.** Anthropic API key (`x-api-key` header). |
 | `anthropic_model` | `str` | — | **Required.** Model identifier (for example, `claude-sonnet-4-6`). |
-| `max_tokens` | `int` | — | **Required.** Maximum tokens to generate per request. |
+| `max_tokens` | `int` | `32768` | Maximum tokens to generate per request when `max_output_tokens` is not set on the Responses request. |
 | `anthropic_version` | `str` | `2023-06-01` | Value for the `anthropic-version` header. |
 | `thinking` | `dict` | `null` | Typed thinking config for modern Claude models (for example, `{type: adaptive}`). |
 | `thinking_budget_tokens` | `int` | `null` | Budget for older models that use `thinking: {type: enabled, budget_tokens: ...}`. |
@@ -114,6 +121,6 @@ curl -s <POLICY_MODEL_URL>/v1/responses \
 ```
 
 <Note>
-This example uses the simple agent harness because it exercises `anthropic_model` as the policy model server through NeMo Gym's `/v1/responses` interface. [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) is a separate harness that invokes Claude Code directly; it is useful for Claude Code workflows but does not validate this model server.
+This example uses the simple agent harness because it exercises `anthropic_model` as the policy model server through NeMo Gym's `/v1/responses` interface. For Claude Code workflows that speak Anthropic Messages, use the ingress path: set the agent's `model_server` ref so the CLI targets `/v1/messages` on any Gym model server (see [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent)).
 
 </Note>

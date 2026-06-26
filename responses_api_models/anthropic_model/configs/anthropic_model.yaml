@@ -5,7 +5,7 @@ policy_model:
       anthropic_base_url: ${policy_base_url}
       anthropic_api_key: ${policy_api_key}
       anthropic_model: ${policy_model_name}
-      max_tokens: 4096
+      max_tokens: 32768
       anthropic_version: "2023-06-01"
       thinking: null
       thinking_budget_tokens: null

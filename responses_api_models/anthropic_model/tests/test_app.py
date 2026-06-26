@@ -381,6 +381,86 @@ class TestAnthropicConverter:
                 extra_body={"top_k": 5},
             )
 
+    def test_responses_to_anthropic_merges_consecutive_function_calls(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"type": "function_call", "call_id": "toolu_1", "name": "a", "arguments": "{}"},
+                {"type": "function_call", "call_id": "toolu_2", "name": "b", "arguments": '{"x": 1}'},
+            ]
+        )
+        actual = converter.responses_to_anthropic(
+            body=body,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            thinking=None,
+            thinking_budget_tokens=None,
+            extra_body={},
+        )
+        assert actual["messages"] == [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "a", "input": {}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "b", "input": {"x": 1}},
+                ],
+            }
+        ]
+
+    def test_anthropic_to_responses_maps_multiple_tool_use_blocks(self) -> None:
+        converter = AnthropicConverter()
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
+        response = converter.anthropic_to_responses(
+            anthropic_response={
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "SF"}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "get_time", "input": {"tz": "PST"}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            request_body=request_body,
+            model="claude-sonnet-4-20250514",
+        )
+        assert [item.type for item in response.output] == ["function_call", "function_call"]
+        assert response.output[0].call_id == "toolu_1"
+        assert json.loads(response.output[1].arguments) == {"tz": "PST"}
+
+    def test_anthropic_to_responses_preserves_text_tool_text_ordering(self) -> None:
+        converter = AnthropicConverter()
+        request_body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
+        response = converter.anthropic_to_responses(
+            anthropic_response={
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {}},
+                    {"type": "text", "text": "second"},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            request_body=request_body,
+            model="claude-sonnet-4-20250514",
+        )
+        assert [item.type for item in response.output] == ["message", "function_call", "message"]
+        assert response.output[2].content[0].text == "second"
+
+    def test_responses_to_anthropic_reasoning_without_signature_omits_signature(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "thinking"}]}]
+        )
+        actual = converter.responses_to_anthropic(
+            body=body,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            thinking=None,
+            thinking_budget_tokens=None,
+            extra_body={},
+        )
+        assert actual["messages"][0]["content"][0] == {"type": "thinking", "thinking": "thinking"}
+        assert "signature" not in actual["messages"][0]["content"][0]
+
 
 class TestAnthropicModel:
     def _setup_server(
@@ -470,6 +550,19 @@ class TestAnthropicModel:
         ]
         assert called_body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
         assert response.json()["output"][0]["content"][0]["text"] == "Hello from Claude."
+
+    def test_responses_endpoint_propagates_upstream_error(self) -> None:
+        server = self._setup_server()
+        app = server.setup_webserver()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        async def boom(body, cookies):
+            raise RuntimeError("upstream 529 overloaded")
+
+        server._messages_create = boom
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+        assert response.status_code == 500
 
     def test_responses_endpoint_sends_curl_shaped_anthropic_request_fields(self) -> None:
         server = self._setup_server(
