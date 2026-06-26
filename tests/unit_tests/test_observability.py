@@ -744,3 +744,55 @@ def test_aggregate_step_records_sums_and_counts():
         "num_turns": None,
         "num_steps": 0,
     }
+
+
+# --- P0 review regressions: prefix routing + capture-dir resolution ---
+def test_rollout_prefix_stripped_when_capture_disabled():
+    # The /ng-rollout/<id> prefix must be stripped + routed even when capture is OFF (the default),
+    # otherwise a default `gym eval` 404s on every prefixed model call.
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_trajectory_capture(app, SimpleNamespace(observability_enabled=False))
+    client = TestClient(app)
+    assert client.post("/v1/chat/completions", json={}).status_code == 200
+    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+
+
+def test_capture_dirs_resolves_default_by_config_key(tmp_path, monkeypatch):
+    # Bare opt-in (no trajectory_capture_dir / NEMO_GYM_TRAJECTORY_DIR): the consumer must resolve the
+    # same default dir the producer used, which is keyed off the asset config key (== config.name),
+    # not the "model_server" fallback.
+    import nemo_gym.observability as obs
+
+    monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
+    monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))
+    producer_dir = tmp_path / "nemo_gym_trajectories" / "openai_model"
+    producer_dir.mkdir(parents=True)
+    # Inner server node has no "name"; instance key (policy_model) differs from the asset key.
+    gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
+    dirs = obs.capture_dirs_from_config(gc, env={})
+    assert producer_dir in dirs
+    assert (tmp_path / "nemo_gym_trajectories" / "model_server") not in dirs
+
+
+def test_capture_dirs_warns_once_when_unresolved(tmp_path, monkeypatch, caplog):
+    import logging
+
+    import nemo_gym.observability as obs
+
+    monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
+    monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))  # nothing created -> unresolved
+    obs._capture_dirs_warned = False
+    gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
+    try:
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.observability"):
+            assert obs.capture_dirs_from_config(gc, env={}) == []
+            assert obs.capture_dirs_from_config(gc, env={}) == []  # second call: no new warning
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "capture directory" in r.message]
+        assert len(warns) == 1
+    finally:
+        obs._capture_dirs_warned = False
