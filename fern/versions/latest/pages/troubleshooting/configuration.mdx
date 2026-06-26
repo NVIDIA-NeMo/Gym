@@ -48,11 +48,13 @@ gym env start \
 
 ```
 nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
-Available resources_servers: 'weather'
+Did you mean: 'weather'?
 ```
 
 **When**: A server config references another server that doesn't exist or isn't loaded. The error
-names the referencing instance/field and lists the available servers of that type.
+names the referencing instance/field and then either suggests a similarly named server
+(`Did you mean: …`) or, when nothing is close, lists the available servers of that type
+(`Available resources_servers: …`).
 
 **Common causes**:
 - Typo in the server name
