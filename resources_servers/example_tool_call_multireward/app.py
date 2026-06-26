@@ -13,9 +13,10 @@
 # limitations under the License.
 """Single-tool-call environment scored on three decoupled reward components.
 
-This is a multi-reward environment intended for GDPO
-(https://arxiv.org/abs/2601.05242). A single expected tool call is graded on three
-independent {0, 1} components:
+This environment returns multiple reward components instead of a single scalar,
+useful both for evaluation (profile each objective independently) and for
+multi-objective RL such as GDPO (https://arxiv.org/abs/2601.05242). A single expected
+tool call is graded on three independent {0, 1} components:
 
 - ``correctness``  : a predicted call matches the expected name + expected arguments.
 - ``schema_valid`` : the call's arguments parse as a JSON object containing every
@@ -23,13 +24,15 @@ independent {0, 1} components:
 - ``format``       : exactly one tool call was emitted and no extra assistant text.
 
 These decouple: a response can be well-formed but wrong, correct but malformed, etc.
-GDPO normalizes each component independently, so two responses with the same total
-reward but different composition receive different advantages (whereas GRPO, which
-normalizes the summed reward, collapses them).
+For evaluation, each component is surfaced as a top-level field so the aggregate
+metrics endpoint reports a per-objective pass rate. For multi-objective RL, an
+algorithm like GDPO normalizes each component independently, so two responses with the
+same total reward but different composition receive different advantages (whereas
+GRPO, which normalizes the summed reward, collapses them).
 
-The components are returned in ``reward_components``; NeMo-RL exposes them as reward1,
-reward2, ... ordered by component name (correctness, format, schema_valid). ``reward``
-is set to the sum so a single-reward (GRPO) baseline reads the same aggregate.
+The components are returned in ``reward_components`` and ``reward`` is set to their sum
+so a single-reward (GRPO) baseline reads the same aggregate. How ``reward_components``
+reaches a trainer depends on the training framework's NeMo Gym integration.
 """
 
 import json
@@ -58,10 +61,9 @@ class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
 class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
     # Per-component scores are also surfaced as top-level fields so the aggregate
     # metrics endpoint profiles each one in addition to the combined reward.
-    # Decoupled per-component rewards (name -> score) for GDPO. NeMo-RL's NeMo Gym
-    # bridge reads this from the verify result and exposes the components as reward1,
-    # reward2, ... ordered by name. Defined here (not on BaseVerifyResponse) so other
-    # environments' verify responses are unchanged.
+    # Decoupled per-component rewards (name -> score). How these reach a trainer
+    # depends on the training framework's NeMo Gym integration. Defined here (not on
+    # BaseVerifyResponse) so other environments' verify responses are unchanged.
     reward_components: Dict[str, float] | None = None
     correctness: float = 0.0
     schema_valid: float = 0.0

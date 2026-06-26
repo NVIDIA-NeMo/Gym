@@ -1,0 +1,184 @@
+---
+title: "Multi-Reward Verification"
+description: "Score a rollout on multiple reward components for richer evaluation and multi-objective RL"
+position: 2
+---
+
+<Info>
+
+**Goal**: Learn how to design a verifier to return multiple reward components for a single rollout, useful for both evaluation and multi-objective RL.
+
+This page assumes you know how a resources server's `verify()` method receives a rollout and returns a reward. For background, see [Environment Components](/about/architecture) for how the resources server fits alongside the agent and model servers, and the [Single-Step Environment](/environment-tutorials/single-step-environment) tutorial for a basic `verify()` walkthrough.
+
+</Info>
+
+---
+
+## When to Use Multiple Rewards
+
+Use multiple reward components when:
+
+- **You care about several independent objectives at once** — e.g. *did the agent pick the right action*, *were its arguments well-formed*, *did it follow the output format* — and collapsing them into one number would hide which objective failed.
+- You want to diagnose **how an agent fails during evaluation**, not just whether it passed.
+- You plan to train with a **multi-objective algorithm** such as GDPO, which normalizes each objective separately.
+
+If a single pass/fail signal captures everything you care about, a scalar `reward` is simpler — don't add components you won't use.
+
+---
+
+## The Verifier Contract
+
+A multi-reward verifier is a normal resources server with one change to what `verify()` returns. The recipe is four steps:
+
+### 1. Scaffold a resources server
+
+Skip if you already have one. Otherwise generate the app, config, and test layout:
+
+```bash
+ng_init_resources_server +entrypoint=resources_servers/my_server
+```
+
+### 2. Subclass `BaseVerifyResponse` to add `reward_components`
+
+This is the multi-reward contract: a `{objective_name: score}` dict. Defining it on a subclass (rather than on `BaseVerifyResponse`) keeps every other environment's verify response unchanged.
+
+```python
+class MultiRewardResponse(BaseVerifyResponse):
+    reward_components: Dict[str, float] | None = None
+```
+
+### 3. Set the scalar `reward`
+
+Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. Summing the components is a common convention.
+
+### 4. Expose each reward component as a top-level field
+
+Aggregate metrics computes a stat for every **top-level numeric field**, but does not descend into nested dicts — so a key inside `reward_components` won't appear in your metrics on its own. To get a per-objective pass rate during evaluation, surface each component as its own field too.
+
+---
+
+## Try It
+
+We'll make the contract concrete with the [`example_tool_call_multireward`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_tool_call_multireward) server, which asks the agent to call `get_weather` for a city and scores the rollout on three independent `{0, 1}` components: did the agent call the right tool, were its arguments well-formed, and did it emit exactly one call with no extra text. Here each rollout is a single tool call, but the pattern applies to multi-step trajectories too.
+
+### 1. Carry the ground truth into `verify()`
+
+The example data carries an `expected_call` describing the tool call the agent should make:
+
+```json
+{"responses_create_params": {"input": [{"role": "developer", "content": "Respond with exactly one get_weather tool call and no other text."}, {"role": "user", "content": "what's the weather in San Francisco?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get the current weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}, "expected_call": {"name": "get_weather", "arguments": {"city": "San Francisco"}}}
+```
+
+Subclass `BaseVerifyRequest` to declare any extra per-task fields your scoring needs:
+
+```python
+class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
+    expected_call: Dict[str, Any] = Field(default_factory=dict)
+```
+
+The subclass is required for `expected_call` to survive Pydantic parsing: parsing into `BaseVerifyRequest` directly would silently drop any field not defined on the base class.
+
+### 2. Score each objective independently
+
+Compute one score per objective. Keeping them independent is what lets evaluation and GDPO treat them separately. The example uses three `{0, 1}` checks:
+
+| Component | Measures |
+|---|---|
+| `correctness` | A predicted call matches the expected tool name and arguments. |
+| `schema_valid` | The call's arguments parse as a JSON object containing every required parameter. |
+| `format` | Exactly one tool call was emitted, with no extra assistant text. |
+
+```python
+async def verify(self, body: ToolCallMultiRewardVerifyRequest) -> ToolCallMultiRewardVerifyResponse:
+    predicted_calls = self._extract_function_calls(body)
+
+    # format: exactly one tool call and no extra assistant prose.
+    format_score = 1.0 if len(predicted_calls) == 1 and not self._has_assistant_text(body) else 0.0
+
+    # schema_valid: the first call's arguments are a valid object with all required params.
+    schema_score = 0.0
+    if predicted_calls:
+        first = predicted_calls[0]
+        parsed, is_valid = self._parse_arguments(first["arguments"])
+        required = self._required_params(body, first["name"])
+        schema_score = 1.0 if is_valid and all(k in parsed for k in required) else 0.0
+
+    # correctness: some predicted call matches the expected name + arguments.
+    correctness_score = 1.0 if any(self._call_matches(c, body.expected_call) for c in predicted_calls) else 0.0
+
+    # ... continues in "Return all three forms" below
+```
+
+The `self._…` helpers (extracting calls, parsing arguments, checking required params, matching the expected call) are defined on the server — see `app.py`. What matters for the pattern is that each objective produces its own score.
+
+### 3. Return all three forms
+
+The example's response class adds the `reward_components` dict and the three top-level component fields. The scalar `reward` is already declared on `BaseVerifyResponse`, so it isn't redeclared here — `verify()` computes its value (the sum) in the return below.
+
+```python
+class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
+    reward_components: Dict[str, float] | None = None
+    correctness: float = 0.0
+    schema_valid: float = 0.0
+    format: float = 0.0
+```
+
+Continuing the same `verify()` method body from step 2, assemble the three forms and return them:
+
+```python
+    # ... continued from "Score each objective" (same verify() method body)
+    reward_components = {
+        "correctness": correctness_score,
+        "schema_valid": schema_score,
+        "format": format_score,
+    }
+
+    return ToolCallMultiRewardVerifyResponse(
+        **body.model_dump(),
+        reward=sum(reward_components.values()),   # scalar for single-reward consumers
+        reward_components=reward_components,      # dict for all reward components
+        correctness=correctness_score,            # top-level fields for aggregate metrics
+        schema_valid=schema_score,
+        format=format_score,
+    )
+```
+
+See [`resources_servers/example_tool_call_multireward/app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_tool_call_multireward/app.py) for the full implementation, including the argument-parsing and call-matching helpers.
+
+---
+
+## Use Multi-Reward Verification for Evaluation
+
+Collect rollouts as with any other environment:
+
+```bash
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
+resources_servers/example_tool_call_multireward/configs/example_tool_call_multireward.yaml"
+ng_run "+config_paths=[$config_paths]"
+
+ng_collect_rollouts +agent_name=example_tool_call_multireward_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_tool_call_multireward/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/example_tool_call_multireward/data/example_rollouts.jsonl \
+    +limit=null +num_repeats=null +num_samples_in_parallel=null
+```
+
+Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
+
+```json
+{
+  "reward":       {"mean": 2.6, "min": 1.0, "max": 3.0},
+  "correctness":  {"mean": 0.8, "min": 0.0, "max": 1.0},
+  "schema_valid": {"mean": 1.0, "min": 1.0, "max": 1.0},
+  "format":       {"mean": 0.8, "min": 0.0, "max": 1.0}
+}
+```
+
+That breakdown tells you *where* the agent struggles. Above, the model always emits schema-valid calls (`schema_valid` = 1.0) and usually picks the right city (`correctness` = 0.8), but sometimes wraps the call in extra prose (`format` = 0.8) — detail a single conflated score would hide.
+
+---
+
+## Use Multi-Reward Verification for Multi-Objective RL (E.g. GDPO)
+
+The same verifier feeds multi-objective training: a GDPO-style algorithm reads the per-objective scores from `reward_components` and normalizes each component independently, rather than collapsing them into one number. A GRPO baseline instead reads the summed `reward` and therefore cannot distinguish two rollouts with the same total but different composition (e.g. correct-but-malformed vs. wrong-but-clean) — the advantage collapse that GDPO is designed to fix.
+
+How `reward_components` reaches the trainer depends on the training framework's NeMo Gym integration; see [Integrate RL Frameworks](/contribute/rl-framework-integration) for current support.
