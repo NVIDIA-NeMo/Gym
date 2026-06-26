@@ -49,7 +49,7 @@ class MultiRewardResponse(BaseVerifyResponse):
 
 ### 3. Set the scalar `reward`
 
-Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. The sum of your components is the usual default.
+Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. Summing the components is a common convention.
 
 ### 4. Expose each reward component as a top-level field
 
@@ -105,6 +105,8 @@ async def verify(self, body: ToolCallMultiRewardVerifyRequest) -> ToolCallMultiR
 
     # correctness: some predicted call matches the expected name + arguments.
     correctness_score = 1.0 if any(self._call_matches(c, body.expected_call) for c in predicted_calls) else 0.0
+
+    # ... continues in "Return all three forms" below
 ```
 
 The `self._…` helpers (extracting calls, parsing arguments, checking required params, matching the expected call) are defined on the server — see `app.py`. What matters for the pattern is that each objective produces its own score.
@@ -119,12 +121,12 @@ class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
     correctness: float = 0.0
     schema_valid: float = 0.0
     format: float = 0.0
-    predicted_calls: List[Dict[str, Any]] = Field(default_factory=list)
 ```
 
-`verify()` then populates all three forms:
+Continuing the same `verify()` method body from step 2, assemble the three forms and return them:
 
 ```python
+    # ... continued from "Score each objective" (same verify() method body)
     reward_components = {
         "correctness": correctness_score,
         "schema_valid": schema_score,
