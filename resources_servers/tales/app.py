@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import importlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -28,7 +29,7 @@ from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 class TALESResourcesServerConfig(BaseResourcesServerConfig):
     expose_admissible_commands: bool = False
-    framework: str = "alfworld"
+    framework: str = "textworld"
     task_no: int = 0
     seed: int = 0
     split: str = "train"
@@ -87,7 +88,7 @@ class TALESResourcesServer(GymnasiumServer):
             make_kwargs["split"] = split
         try:
             env = gym.make(id=f"tales/{env_key}", **make_kwargs)
-            obs, info = env.reset(seed=seed)
+            obs, info = await asyncio.to_thread(env.reset, seed=seed)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Could not launch TALES env 'tales/{env_key}': {e!r}")
 
@@ -110,7 +111,7 @@ class TALESResourcesServer(GymnasiumServer):
             return state.observation, 0.0, True, False, dict(state.last_info)
 
         command = extract_text(action).strip()
-        obs, score, done, info = state.env.step(command)
+        obs, score, done, info = await asyncio.to_thread(state.env.step, command)
 
         if state.framework == "textworld":
             reward = float(score - state.last_score)
@@ -141,6 +142,10 @@ class TALESResourcesServer(GymnasiumServer):
         if not self.config.expose_admissible_commands:
             info.pop("admissible_commands", None)
         return info
+
+    async def close_session(self, session_id: Optional[str]) -> None:
+        self._close_env(session_id)
+        await super().close_session(session_id)
 
     def _close_env(self, session_id: str) -> None:
         state = self.session_id_to_state.pop(session_id, None)

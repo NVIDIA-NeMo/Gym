@@ -71,6 +71,7 @@ class FakeEnv:
         self._steps = list(steps or [("obs1", 1.0, False, {}), ("obs2", 2.0, True, {})])
         self._reset_info = reset_info or {}
         self._i = 0
+        self.closed = False
 
     def reset(self, seed=None):  # noqa: ARG002
         return "initial observation", dict(self._reset_info)
@@ -81,7 +82,7 @@ class FakeEnv:
         return result
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def _fake_framework_module(n_train=3, n_test=1):
@@ -182,6 +183,27 @@ class TestApp:
         client = TestClient(server.setup_webserver())
         r = client.post("/step", json=_step_payload("look"))
         assert r.status_code == 400
+
+    def test_terminated_episode_closes_env_and_clears_session(self) -> None:
+        server = _make_server()
+        fake = FakeEnv(steps=[("you win", 1.0, True, {})])
+        with _patch_env(fake):
+            client = TestClient(server.setup_webserver())
+            cookies = client.post("/reset", json=_reset_payload(framework="alfworld")).cookies
+            client.post("/step", json=_step_payload("take apple"), cookies=cookies)
+        assert fake.closed is True
+        assert len(server.session_id_to_state) == 0
+
+    def test_truncated_episode_closes_env_and_clears_session(self) -> None:
+        server = _make_server(max_episode_steps=1)
+        fake = FakeEnv(steps=[("o", 0.0, False, {})])
+        with _patch_env(fake):
+            client = TestClient(server.setup_webserver())
+            cookies = client.post("/reset", json=_reset_payload(framework="jericho")).cookies
+            s = client.post("/step", json=_step_payload("wait"), cookies=cookies).json()
+        assert s["truncated"] is True
+        assert fake.closed is True
+        assert len(server.session_id_to_state) == 0
 
     def test_concurrent_sessions_keep_independent_state(self) -> None:
         server = _make_server()
