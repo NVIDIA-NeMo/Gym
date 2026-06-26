@@ -116,9 +116,7 @@ async def _abandon_finish_executor(params: AbandonFinishParams) -> ToolResult[To
 # Second finish tool (GDPval-AA v2 early-exit). Stirrup >= 0.1.9 accepts a list
 # of finish tools (PR #49); the agent may call this instead of ``finish`` when
 # it genuinely cannot complete the task, submitting no files.
-ABANDON_FINISH_TOOL: Tool[AbandonFinishParams, ToolUseCountMetadata] = Tool[
-    AbandonFinishParams, ToolUseCountMetadata
-](
+ABANDON_FINISH_TOOL: Tool[AbandonFinishParams, ToolUseCountMetadata] = Tool[AbandonFinishParams, ToolUseCountMetadata](
     name=ABANDON_FINISH_TOOL_NAME,
     description=(
         "Signal that you do not believe the task can be completed, with a "
