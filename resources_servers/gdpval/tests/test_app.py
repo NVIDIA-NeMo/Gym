@@ -595,6 +595,74 @@ class TestMultiReference:
         assert resp.total_losses == 2
         assert resp.judge_response["reference_count"] == 2
 
+    @pytest.mark.asyncio
+    async def test_reference_ids_filter_judges_subset(self, tmp_path) -> None:
+        """``reference_ids`` on the verify request restricts judging to the named
+        references; unknown ids are ignored."""
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        ref_roots = {}
+        for ref_id in ("kimi", "gpt5"):
+            root = tmp_path / ref_id
+            td = root / "task_task-1"
+            td.mkdir(parents=True)
+            (td / "finish_params.json").write_text("{}")
+            ref_roots[ref_id] = root
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "kimi": {"deliverables_dir": str(ref_roots["kimi"]), "elo": 1290.0},
+                "gpt5": {"deliverables_dir": str(ref_roots["gpt5"]), "elo": 1320.0},
+            },
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+        )
+
+        def fake_run_trials(**_kwargs):
+            return {"winner": "[[B]]", "win_count_a": 1, "win_count_b": 3, "tie_count": 0, "task_count": 4}
+
+        # Only judge against gpt5 (and an unknown id, which is ignored).
+        body = _verify_request(deliverables_dir=str(eval_dir), reference_ids=["gpt5", "nonexistent"])
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        assert set(resp.per_reference) == {"gpt5"}
+        assert resp.total_wins == 3
+        assert resp.total_losses == 1
+        assert resp.judge_response["reference_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_reference_ids_empty_yields_no_references(self, tmp_path) -> None:
+        """An empty ``reference_ids`` list judges against nothing → reference_missing."""
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+        root = tmp_path / "kimi"
+        (root / "task_task-1").mkdir(parents=True)
+        (root / "task_task-1" / "finish_params.json").write_text("{}")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"kimi": {"deliverables_dir": str(root), "elo": 1290.0}},
+            preconvert_office_to_pdf=False,
+        )
+        body = _verify_request(deliverables_dir=str(eval_dir), reference_ids=[])
+
+        with patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"):
+            resp = await server.verify(body)
+
+        assert resp.reward == 0.0
+        assert resp.judge_response == {"error": "reference_missing"}
+
     @staticmethod
     def _two_ref_server_and_body(tmp_path):
         eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"

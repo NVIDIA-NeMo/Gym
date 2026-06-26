@@ -184,6 +184,12 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     rubric_pretty: Optional[str] = None
     reference_file_urls: Optional[List[str]] = None
     deliverables_dir: Optional[str] = None
+    # Optional per-request filter (comparison mode): judge the eval deliverable
+    # only against this subset of the configured ``reference_models``. Unknown
+    # ids are ignored; ``None`` (default) judges against every configured
+    # reference. Used by the multi-stage ELO driver to select a different set of
+    # reference models per judgementstage without reconfiguring the server.
+    reference_ids: Optional[List[str]] = None
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
@@ -369,11 +375,18 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
+        # Optional per-request reference subset (multi-stage ELO). When set, only
+        # the named references are judged this call; unknown ids are ignored.
+        active_references = self._references
+        if body.reference_ids is not None:
+            requested = set(body.reference_ids)
+            active_references = {rid: cfg for rid, cfg in self._references.items() if rid in requested}
+
         # Resolve, per reference model, the available (attempted) repeat dirs
         # for this task. A reference that has no deliverable for this task is
         # simply skipped — the eval model just isn't judged against it here.
         ref_dirs_by_id: Dict[str, List[Path]] = {}
-        for ref_id, ref_cfg in self._references.items():
+        for ref_id, ref_cfg in active_references.items():
             ref_task_root = Path(ref_cfg.deliverables_dir) / f"task_{body.task_id}"
             dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
             if dirs:
