@@ -2,7 +2,7 @@
 
 Integrates [TALES](https://github.com/microsoft/tale-suite)
 
-Specifically, this uses the `tt_split` branch, which provides both a set of tasks for
+Specifically, this uses the `train_test_splits` branch, which provides both a set of tasks for
 training and evaluation across five text-adventure frameworks: `textworld`,
 `textworld_express`, `alfworld`, `scienceworld`, and `jericho`.
 
