@@ -14,14 +14,10 @@
 
 """ECS Fargate sandbox provider.
 
-Adapts the lifted :mod:`engine` (one stateful ``EcsFargateSandbox`` per
-sandbox) to Gym's stateless ``SandboxProvider`` contract: per-sandbox engine
-state lives in ``SandboxHandle.raw``; the provider methods delegate to it.
-
-The model endpoint is assumed reachable from inside the sandbox directly, or
-routed via the SSH reverse tunnel when ``outside_endpoints`` are supplied
-through ``spec.provider_options``. See the package README for the planned
-Teleport follow-up.
+Adapts :mod:`engine` (one stateful ``EcsFargateSandbox`` per sandbox) to Gym's ``SandboxProvider``
+contract: per-sandbox engine state lives in ``SandboxHandle.raw`` and the provider methods delegate
+to it. The model endpoint is reached directly from the sandbox, or via the SSH reverse tunnel when
+``outside_endpoints`` are supplied through ``spec.provider_options``.
 """
 
 from __future__ import annotations
@@ -171,9 +167,8 @@ class EcsFargateProvider:
 def engine_config_from_mapping(config: dict[str, Any]) -> engine.EcsFargateConfig:
     """Build an ``EcsFargateConfig`` from provider kwargs.
 
-    When ``region`` is given but ``cluster`` is omitted, infrastructure is
-    auto-discovered from SSM (written by the reference Terraform); explicit
-    kwargs always win over SSM. Mirrors NEL's orchestrator resolution.
+    When ``region`` is given but ``cluster`` is omitted, infrastructure is auto-discovered from SSM;
+    explicit kwargs always win over SSM.
     """
     config = dict(config)
     region = config.get("region")

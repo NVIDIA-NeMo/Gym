@@ -10,9 +10,8 @@ mini_swe_agent_2:
         name: policy_model
       concurrency: 8
       env: sandbox
-      # Region-only config: the provider auto-discovers cluster/subnets/SGs/roles
-      # and the SSH-sidecar key ARNs from SSM (/<ssm_project>/ecs-sandbox/config,
-      # ssm_project defaults to "harbor"), exactly like NEL.
+      # Region-only config: the provider auto-discovers cluster/subnets/SGs/roles and the
+      # SSH-sidecar key ARNs from SSM (/<ssm_project>/ecs-sandbox/config, ssm_project="harbor").
       sandbox_provider:
         ecs_fargate:
           region: ${oc.env:AWS_REGION}
