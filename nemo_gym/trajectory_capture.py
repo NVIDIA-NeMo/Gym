@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import threading
@@ -61,14 +62,24 @@ class CaptureStore:
         return self._root / f"{_sanitize(rollout_id)}.capture.jsonl"
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
-        """Append one exchange and fsync (durable across a killed box)."""
+        """Append one exchange and fsync (durable across a killed box).
+
+        ``flock`` serializes appends across worker processes (a model server may run with
+        ``num_workers > 1``, where the in-process lock can't coordinate); the in-process lock
+        serializes threads. This does blocking file IO + fsync, so callers run it off the event
+        loop (the capture middleware offloads it via ``asyncio.to_thread``).
+        """
         line = json.dumps(exchange, default=str, ensure_ascii=False)
         path = self.path_for(rollout_id)
         with self._lock:
             with path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    handle.write(line + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
         path = self.path_for(rollout_id)
@@ -250,15 +261,33 @@ def assemble_rollout(store: CaptureStore, rollout_id: str) -> list[Any]:
 
 # --- #1483 step contract: typed StepRecord + builders ---
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
-    """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage."""
+    """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
+
+    For native Anthropic ``/v1/messages`` with prompt caching, ``input_tokens`` is only the uncached
+    remainder, so cache-read + cache-creation tokens are folded into ``tokens_in`` to reflect the true
+    prompt size (and cache-creation is surfaced separately as ``cache_creation_tokens``). OpenAI /
+    Responses usage already includes cached tokens in ``input_tokens`` / ``prompt_tokens`` (where
+    ``cached_tokens`` is a subset), so it is left untouched -- no double counting.
+    """
     if not usage:
-        return {"tokens_in": None, "tokens_out": None, "tokens_reasoning": None, "tokens_total": None}
+        return {
+            "tokens_in": None,
+            "tokens_out": None,
+            "tokens_reasoning": None,
+            "tokens_total": None,
+            "cache_creation_tokens": None,
+        }
     tokens_in = usage.get("input_tokens")
     if tokens_in is None:
         tokens_in = usage.get("prompt_tokens")
     tokens_out = usage.get("output_tokens")
     if tokens_out is None:
         tokens_out = usage.get("completion_tokens")
+    # Anthropic-native shape: top-level cache_* keys mean input_tokens excludes cached tokens.
+    cache_read = usage.get("cache_read_input_tokens")
+    cache_creation = usage.get("cache_creation_input_tokens")
+    if tokens_in is not None and (cache_read is not None or cache_creation is not None):
+        tokens_in = tokens_in + (cache_read or 0) + (cache_creation or 0)
     tokens_total = usage.get("total_tokens")
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -268,6 +297,7 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
         "tokens_out": tokens_out,
         "tokens_reasoning": details.get("reasoning_tokens"),
         "tokens_total": tokens_total,
+        "cache_creation_tokens": cache_creation,
     }
 
 
@@ -351,8 +381,10 @@ class StepRecord(BaseModel):
     """Per-step model-call record (#1483 contract); field names align with OpenAI shapes."""
 
     run_id: Optional[str] = None
-    # trial/turn come from request headers (set by Gym-orchestrated callers); they are None for
-    # base_url-only clients (e.g. AIAgent) that correlate via the URL prefix. step_index is derived.
+    # step_index is always server-derived and authoritative. trial_index is set from a run's rollout
+    # index (header, for Gym-orchestrated callers); turn_index is reserved for a future agent-loop
+    # boundary and is currently always None. Both are None for base_url-only clients that correlate
+    # via the URL prefix.
     trial_index: Optional[int] = None
     turn_index: Optional[int] = None
     step_index: int
@@ -374,9 +406,11 @@ class StepRecord(BaseModel):
     # Structured reasoning (not flattened into the response text).
     reasoning_content: Optional[str] = None
 
-    # Cache visibility.
+    # Cache visibility. cached_tokens is the cache-read count; cache_creation_tokens is the
+    # Anthropic cache-write count (also folded into tokens_in for the true prompt size).
     cache_hit: Optional[bool] = None
     cached_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
 
     # Retry / error classification.
     error_category: Optional[str] = None
