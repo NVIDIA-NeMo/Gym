@@ -202,6 +202,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
 
+    # GRPO related fields
+    mask_sample: bool = False
+
     @property
     def instance_id(self) -> str:
         return self.problem_info["instance_id"]
@@ -211,6 +214,13 @@ class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
     model_patch: Optional[str] = None
+
+    # Failure-mode signals used to decide mask_sample downstream.
+    # agent_error_kind is one of: "max_iteration", "context_window",
+    # "stuck_in_loop", "other", or None if the agent finished cleanly.
+    agent_error_kind: Optional[str] = None
+    agent_timed_out: Optional[bool] = None
+    eval_timed_out: Optional[bool] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -1080,6 +1090,19 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 ########################################
 
 
+def _classify_agent_error(err: Optional[str]) -> Optional[str]:
+    if not err:
+        return None
+    s = str(err)
+    if "maximum iteration" in s:
+        return "max_iteration"
+    if "ContextWindow" in s or "context window" in s.lower():
+        return "context_window"
+    if "stuck in a loop" in s.lower():
+        return "stuck_in_loop"
+    return "other"
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -1257,6 +1280,10 @@ class RunOpenHandsAgent(BaseModel):
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
+            metrics.agent_timed_out = (
+                metrics.openhands_run_time is not None
+                and metrics.openhands_run_time >= self.config.swebench_agent_timeout
+            )
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
@@ -1270,6 +1297,8 @@ class RunOpenHandsAgent(BaseModel):
 
         with open(out_file, "r") as f:
             out_dict = json.loads(f.read().strip())
+
+        metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
 
         patch = out_dict["test_result"]["git_patch"] or None
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
@@ -1325,6 +1354,10 @@ class RunOpenHandsAgent(BaseModel):
             print(f"Eval command failed for {instance_id}: {e}", flush=True)
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
+            metrics.eval_timed_out = (
+                metrics.final_eval_time is not None
+                and metrics.final_eval_time >= self.config.swebench_tests_timeout
+            )
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
@@ -1829,6 +1862,23 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metrics_to_update["resolved"] = resolved
         else:
             metrics_to_update["resolved"] = False
+
+        # Decide whether to mask this sample from the GRPO gradient.
+        # 1) Patch passed eval but agent did not actually submit (hit max-turns
+        #    or blew the context window) - the reward is accidental.
+        # 2) Final eval step timed out - reward is unreliable.
+        # 3) Agent itself timed out (wall-clock) - mask regardless of resolved.
+        persisted_metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        resolved_now = metrics_to_update.get("resolved", False)
+        agent_error_kind = persisted_metrics.agent_error_kind
+        eval_timed_out = bool(persisted_metrics.eval_timed_out)
+        agent_timed_out = bool(persisted_metrics.agent_timed_out)
+        if (
+            (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
+            or eval_timed_out
+            or agent_timed_out
+        ):
+            params.mask_sample = True
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
