@@ -79,7 +79,7 @@ class TALESResourcesServer(GymnasiumServer):
                 f"Choose 0..{len(envs) - 1}.",
             )
 
-        self._close_env(session_id)
+        await self._close_env(session_id)
 
         task = envs[task_no]
         env_key = f"{task[0]}-{task[1]}"
@@ -144,15 +144,15 @@ class TALESResourcesServer(GymnasiumServer):
         return info
 
     async def close_session(self, session_id: Optional[str]) -> None:
-        self._close_env(session_id)
+        await self._close_env(session_id)
         await super().close_session(session_id)
 
-    def _close_env(self, session_id: str) -> None:
+    async def _close_env(self, session_id: str) -> None:
         state = self.session_id_to_state.pop(session_id, None)
         if state is None:
             return
         try:
-            state.env.close()
+            await asyncio.to_thread(state.env.close)
         except Exception:
             pass
 
