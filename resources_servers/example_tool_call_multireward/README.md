@@ -33,7 +33,7 @@ regenerated with `python resources_servers/example_tool_call_multireward/create_
 ## Tutorial
 
 For a walkthrough of the multi-reward pattern — including how the components are surfaced
-for both evaluation and multi-objective RL — see the [Multi-Reward Verification](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-reward-environment) docs.
+for both evaluation and multi-objective RL — see the [Multi-Reward Verification](https://docs.nvidia.com/nemo/gym/main/build-verifiers/multi-reward-verification) docs.
 
 # Licensing information
 Code: Apache 2.0

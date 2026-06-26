@@ -1,7 +1,7 @@
 ---
 title: "Multi-Reward Verification"
 description: "Score a rollout on multiple reward components for richer evaluation and multi-objective RL"
-position: 11
+position: 2
 ---
 
 <Info>
@@ -160,7 +160,7 @@ ng_collect_rollouts +agent_name=example_tool_call_multireward_simple_agent \
     +limit=null +num_repeats=null +num_samples_in_parallel=null
 ```
 
-Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/environment-tutorials/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
+Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
 
 ```json
 {
