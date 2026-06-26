@@ -471,3 +471,38 @@ def test_delete_s3_object_best_effort():
     fake_s3.delete_object.assert_called_once_with(Bucket="bucket", Key="some/key.zip")
     # no bucket configured -> no-op (no client built)
     engine._delete_s3_object(engine.EcsFargateConfig(region="us-east-1"), "k")
+
+
+# ── Phase C review fixes ──────────────────────────────────────────────
+
+
+def test_validate_image_ref_blocks_injection():
+    # Legit references pass (registry/repo/tag and digests).
+    engine._validate_image_ref("docker.io/swebench/sweb.eval.x86_64.astropy_1776-12907:latest")
+    engine._validate_image_ref("123.dkr.ecr.us-east-1.amazonaws.com/mirror:tag@sha256:abc123")
+    engine._validate_image_ref("ubuntu:24.04")
+    # Anything with shell metacharacters (the privileged-build injection surface) is refused.
+    for bad in ["ubuntu:24.04; rm -rf /", "img$(whoami)", "img`id`", "a && curl evil", "x\nFROM y", ""]:
+        with pytest.raises(ValueError, match="Unsafe image reference"):
+            engine._validate_image_ref(bad)
+
+
+def test_build_efs_volumes_inherits_provider_defaults():
+    # A volume opts into EFS (efs=True) without naming a filesystem; it inherits the provider-level
+    # efs_filesystem_id / efs_access_point_id (from YAML/SSM).
+    cfg = engine.EcsFargateConfig(region="us-east-1", efs_filesystem_id="fs-123", efs_access_point_id="fsap-9")
+    spec = engine.SandboxSpec(image="img", volumes=[engine.VolumeMount(container_path="/data", efs=True)])
+    sandbox = engine.EcsFargateSandbox(spec, ecs_config=cfg)
+    task_volumes, mount_points = sandbox._build_efs_volumes()
+    efs = task_volumes[0]["efsVolumeConfiguration"]
+    assert efs["fileSystemId"] == "fs-123"
+    assert efs["authorizationConfig"]["accessPointId"] == "fsap-9"
+    assert mount_points[0]["containerPath"] == "/data"
+
+
+def test_build_efs_volumes_requires_a_filesystem_id():
+    cfg = engine.EcsFargateConfig(region="us-east-1")  # no provider-level EFS default
+    spec = engine.SandboxSpec(image="img", volumes=[engine.VolumeMount(container_path="/data", efs=True)])
+    sandbox = engine.EcsFargateSandbox(spec, ecs_config=cfg)
+    with pytest.raises(ValueError, match="no filesystem id"):
+        sandbox._build_efs_volumes()
