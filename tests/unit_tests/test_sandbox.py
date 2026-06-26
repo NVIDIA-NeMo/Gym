@@ -333,6 +333,17 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
+    asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
+
+
+async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
+    sandbox = AsyncSandbox(FakeSandboxProvider())
+    assert await sandbox.status() == SandboxStatus.UNKNOWN
+    with pytest.raises(ValueError, match="requires a SandboxSpec"):
+        await sandbox.start()
+
+
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
     assert rewrite_image("image:tag", [{"from": "other/", "to": "mirror/"}]) == "image:tag"
@@ -350,6 +361,7 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
 
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
     assert get_provider_class(provider_name) is FakeSandboxProvider
     assert "opensandbox" in list_providers()
     assert provider_name in list_providers()
@@ -495,6 +507,24 @@ def test_sync_loop_runner_times_out_waits_and_skips_running_loop_close() -> None
         runner._thread.join(timeout=1)
         if not runner._loop.is_closed():
             runner._loop.close()
+
+
+def test_sync_loop_runner_times_out_async_operations() -> None:
+    runner = _AsyncLoopRunner(wait_timeout_s=0.01)
+    cancelled = threading.Event()
+
+    async def never_finishes() -> None:
+        try:
+            await asyncio.get_running_loop().create_future()
+        finally:
+            cancelled.set()
+
+    try:
+        with pytest.raises(TimeoutError, match="timed out waiting for the sync loop"):
+            runner.run("blocked", never_finishes)
+        assert cancelled.wait(timeout=1)
+    finally:
+        runner.close()
 
 
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:

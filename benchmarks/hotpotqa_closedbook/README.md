@@ -19,24 +19,25 @@ validation split — the exact same source used by Skills'
 (`question`, `expected_answer`, `id`, `type`, `level`).
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/hotpotqa_closedbook/config.yaml]"
+gym eval prepare --benchmark hotpotqa_closedbook
 ```
 
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/hotpotqa_closedbook/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark hotpotqa_closedbook
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=hotpotqa_closedbook_simple_agent \
-    +input_jsonl_fpath=benchmarks/hotpotqa_closedbook/data/hotpotqa_closedbook_benchmark.jsonl \
-    +output_jsonl_fpath=results/hotpotqa_closedbook_rollouts.jsonl \
-    +num_repeats=4 \
+gym eval run --no-serve \
+    --agent hotpotqa_closedbook_simple_agent \
+    --input benchmarks/hotpotqa_closedbook/data/hotpotqa_closedbook_benchmark.jsonl \
+    --output results/hotpotqa_closedbook_rollouts.jsonl \
+    --num-repeats 4 \
     +num_repeats_add_seed=true
 ```
 

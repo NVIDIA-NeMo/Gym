@@ -8,23 +8,23 @@ It integrates with the NeMo Skills ToolManager to dynamically load and execute t
 ## Running servers
 The following are example commands for running this resources server with the simple agent and a vLLM model:
 ```bash
-config_paths="resources_servers/ns_tools/configs/ns_tools.yaml, \
-resources_servers/math_with_judge/configs/math_with_judge.yaml, \
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    +policy_base_url="http://localhost:8000/v1" \
-    +policy_model_name="Qwen/Qwen3-8B" \
+gym env start \
+    --resources-server ns_tools \
+    --resources-server math_with_judge \
+    --model-type vllm_model \
+    --model-url http://localhost:8000/v1 \
+    --model Qwen/Qwen3-8B \
     ++math_with_judge.resources_servers.math_with_judge.should_use_judge=false \
     ++math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
 ```
 
 Then, rollouts can be collected using a command such as the following:
 ```bash
-ng_collect_rollouts \
-    +agent_name=ns_tools_simple_agent \
-    +input_jsonl_fpath=resources_servers/ns_tools/data/example.jsonl \
-    +output_jsonl_fpath=data/ns_tools_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent ns_tools_simple_agent \
+    --input resources_servers/ns_tools/data/example.jsonl \
+    --output data/ns_tools_rollouts.jsonl \
+    --limit 5
 ```
 
 ## Sample data format
@@ -78,9 +78,11 @@ python prepare_dataset.py \
 
 To validate the example data and regenerate metrics:
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/ns_tools/configs/ns_tools.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-    +output_dirpath=data/ns_tools \
-    +mode=example_validation
+gym dataset collate \
+    --resources-server ns_tools \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --output-dir data/ns_tools \
+    --mode example_validation
 ```
 
 # Licensing information

@@ -22,17 +22,18 @@ This resources server adapts [Aviary environments](https://github.com/Future-Hou
 Run the GSM8K Aviary resources server together with a model config:
 
 ```bash
-config_paths="resources_servers/aviary/configs/gsm8k_aviary.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --resources-server aviary/gsm8k_aviary \
+    --model-type vllm_model
 ```
 
 Then collect rollouts:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=gsm8k_aviary_agent +input_jsonl_fpath=resources_servers/aviary/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/aviary/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent gsm8k_aviary_agent \
+    --input resources_servers/aviary/data/example.jsonl \
+    --output resources_servers/aviary/data/example_rollouts.jsonl
 ```
 
 # BixBench-Hypothesis (BBH)
@@ -48,17 +49,18 @@ Then, prepare your Gym data with the task_idx values of the problems you would l
 Once the dataset server is running and is accessible at a specific URL, update your config based on [configs/bbh_remote.yaml](configs/bbh_remote.yaml) with the server URL and api key, and launch NeMo-Gym as follows:
 
 ```bash
-config_paths="resources_servers/aviary/configs/bbh_remote.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --resources-server aviary/bbh_remote \
+    --model-type vllm_model
 ```
 
-Then collect rollouts on your data as follows (updating the input_jsonl_fpath to your Gym data if needed):
+Then collect rollouts on your data as follows (updating the input file to your Gym data if needed):
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=bbh_aviary_agent +input_jsonl_fpath=resources_servers/aviary/data/bbh_train_example.jsonl \
-    +output_jsonl_fpath=resources_servers/aviary/data/example_bbh_rollouts.jsonl
+gym eval run --no-serve \
+    --agent bbh_aviary_agent \
+    --input resources_servers/aviary/data/bbh_train_example.jsonl \
+    --output resources_servers/aviary/data/example_bbh_rollouts.jsonl
 ```
 
 To run training with NeMo-RL, set the following fields in your NeMo-RL container (where train_data.jsonl and validation_data.jsonl are set to your train/val Gym data respectively, and bbh_remote.yaml is updated with your dataset server URL/api-key):
@@ -98,14 +100,15 @@ cd /path/to/gym/directory
 ```
 And then bring up NeMo-Gym:
 ```bash
-config_paths="resources_servers/aviary/configs/bbh_bundled.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --resources-server aviary/bbh_bundled \
+    --model-type vllm_model
 ```
 ```bash
-ng_collect_rollouts \
-    +agent_name=bbh_aviary_agent +input_jsonl_fpath=resources_servers/aviary/data/bbh_train_example.jsonl \
-    +output_jsonl_fpath=resources_servers/aviary/data/example_bbh_rollouts.jsonl
+gym eval run --no-serve \
+    --agent bbh_aviary_agent \
+    --input resources_servers/aviary/data/bbh_train_example.jsonl \
+    --output resources_servers/aviary/data/example_bbh_rollouts.jsonl
 ```
 
 If you are running training with NeMo-RL and NeMo-Gym, add the following modification to your `ray.sub` file in NeMo-RL to support adding a setup command:

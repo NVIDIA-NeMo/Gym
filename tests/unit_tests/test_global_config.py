@@ -18,12 +18,18 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from omegaconf import OmegaConf
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
-from nemo_gym.config_types import ServerRefNotFoundError
+from nemo_gym.config_types import (
+    ConfigMissingValuesError,
+    ConfigPathNotFoundError,
+    MalformedConfigPathsError,
+    NoServerInstancesError,
+    ServerRefNotFoundError,
+)
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -482,6 +488,268 @@ class TestGlobalConfig:
         # Fuzzy match should suggest the correctly-spelled resources server, scoped to the same type.
         assert "Did you mean" in message
         assert "'resources'" in message
+
+    def test_collect_missing_value_paths(self) -> None:
+        config = DictConfig(
+            {
+                "a": "???",
+                "b": {"c": "value", "d": "???"},
+                "e": ["ok", "???"],
+            }
+        )
+        missing = GlobalConfigDictParser().collect_missing_value_paths(config)
+        assert missing == ["a", "b.d", "e[1]"]
+
+    def test_missing_value_check_ignores_deleted_branch(self) -> None:
+        # A '???' inside a branch removed by _delete_key must not be reported as missing (the swap
+        # runs first and deletes it), while a genuinely-unset '???' elsewhere still is. Also exercises
+        # that _recursively_swap_keys no longer crashes when a live '???' is present.
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "policy_model": {
+                    "responses_api_models": {
+                        "_delete_key": "old_model",
+                        "old_model": {"entrypoint": "app.py", "model": "???"},
+                        "new_model": {"entrypoint": "app.py", "model": "actual-model"},
+                    }
+                },
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {"entrypoint": "app.py", "container_formatter": "???"},
+                    }
+                },
+            }
+        )
+        parser._recursively_swap_keys(config)
+
+        assert "old_model" not in config.policy_model.responses_api_models
+        missing = parser.collect_missing_value_paths(config)
+        assert missing == ["agent.responses_api_agents.simple_agent.container_formatter"]
+
+    def test_missing_value_check_handles_copy_and_inherit(self) -> None:
+        # A '???' that flows through _copy / _inherit_from into a target is still reported (the swap
+        # propagates it), so missing values in copied/inherited branches are not silently lost.
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "base": {"a": "set", "b": "???"},
+                "viacopy": "${copy:base}",  # copies base, including b='???'
+                "viainherit": {"_inherit_from": "base"},  # inherits base (moves it), including b='???'
+            }
+        )
+        parser._recursively_swap_keys(config)
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "viacopy.b" in missing
+        assert "viainherit.b" in missing
+
+    def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
+        # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
+        # exist" error; the copy propagates MISSING so both the target and source are reported.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": "${copy:source.model}", "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "target" in missing
+        assert "source.model" in missing
+
+    @mark.parametrize(
+        "target_value",
+        [
+            "${inherit_from:source.model}",  # string inherit, missing leaf
+            "${inherit_from:source.model.name}",  # string inherit, missing parent
+            "${copy:source.model.name}",  # string copy, missing parent
+            {"_copy": "source.model"},  # property copy, missing leaf
+            {"_copy": "source.model.name"},  # property copy, missing parent
+            {"_inherit_from": "source.model"},  # property inherit, missing leaf
+            {"_inherit_from": "source.model.name"},  # property inherit, missing parent
+        ],
+    )
+    def test_swap_copy_inherit_of_missing_value_does_not_crash(self, target_value) -> None:
+        # All four quadrants {string, property} x {missing leaf, missing parent}, for both copy and
+        # inherit_from: swapping a '???' source must not raise an opaque error (AttributeError from
+        # .pop() on a bare string, or OmegaConf.merge ValueError). The target inherits MISSING and is
+        # reported by the aggregated scan instead.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": target_value, "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        assert "target" in parser.collect_missing_value_paths(config)
+
+    def test_inherit_of_missing_surfaces_aggregated_error_not_opaque(self) -> None:
+        # End-to-end (swap -> raise_on_missing_values, the core of parse()): a property inherit of an
+        # unset value yields the friendly ConfigMissingValuesError, not an AttributeError/ValueError.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"target": {"_inherit_from": "source.model"}, "source": {"model": "???"}})
+
+        parser._recursively_swap_keys(config)
+        with raises(ConfigMissingValuesError):
+            parser.raise_on_missing_values(config)
+
+    def test_missing_value_in_list_is_reported_not_crash(self) -> None:
+        # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
+        # reported by collect_missing_value_paths with its indexed path.
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"server": {"items": ["a", "???"], "nested": [{"k": "???"}]}})
+
+        parser._recursively_swap_keys(config)  # must not raise
+
+        missing = parser.collect_missing_value_paths(config)
+        assert "server.items[1]" in missing
+        assert "server.nested[0].k" in missing
+
+    def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        # A model server that leaves a required value unset ('???') — as base configs do.
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "openai_model": {
+                                "entrypoint": "app.py",
+                                "openai_api_key": "???",
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            get_global_config_dict()
+
+        message = str(exc_info.value)
+        # Names the full dotted path and shows how to override it.
+        assert "policy_model.responses_api_models.openai_model.openai_api_key" in message
+        assert "++policy_model.responses_api_models.openai_model.openai_api_key=<value>" in message
+
+    def test_get_global_config_dict_ignores_missing_in_deleted_branch(self, monkeypatch: MonkeyPatch) -> None:
+        # Regression: a '???' inside a branch removed by _delete_key must NOT raise
+        # ConfigMissingValuesError. The missing-value scan runs after _recursively_swap_keys, which
+        # deletes the branch first, so the only surviving config has no unset values. End-to-end
+        # guard through the full get_global_config_dict() parse path.
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "_delete_key": "old_model",
+                            # old_model carries the only '???' and is removed before the scan.
+                            "old_model": {"entrypoint": "app.py", "openai_api_key": "???"},
+                            "new_model": {"entrypoint": "app.py"},
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Must not raise — the only '???' lived in the deleted branch.
+        config = get_global_config_dict()
+        models = config["policy_model"]["responses_api_models"]
+        assert "old_model" not in models
+        assert "new_model" in models
+
+    def test_get_global_config_dict_aggregates_multiple_missing(self, monkeypatch: MonkeyPatch) -> None:
+        # End-to-end through get_global_config_dict() -> parse(): more than one unset '???' is
+        # collected into a single ConfigMissingValuesError listing every missing path.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "openai_model": {
+                                "entrypoint": "app.py",
+                                "openai_api_key": "???",
+                                "openai_model": "???",
+                            }
+                        }
+                    },
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            get_global_config_dict()
+
+        message = str(exc_info.value)
+        assert "2 required" in message
+        assert "policy_model.responses_api_models.openai_model.openai_api_key" in message
+        assert "policy_model.responses_api_models.openai_model.openai_model" in message
+
+    def test_plain_interpolation_resolves_through_parse(self, monkeypatch: MonkeyPatch) -> None:
+        # Regression: a plain OmegaConf interpolation `${a.b.c}` (not a swap directive) must still
+        # resolve through the full parse after _recursively_swap_keys was made missing-tolerant.
+        self._mock_versions_for_testing(monkeypatch)
+
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"a": {"b": {"c": 3}}, "x": "${a.b.c}"})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        config = get_global_config_dict()
+        assert config["x"] == 3
 
     def test_get_first_server_config_dict(self) -> None:
         global_config_dict = DictConfig(
@@ -1037,3 +1305,74 @@ class TestGlobalConfig:
 
         # Without the help override, this will SystemExit.
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
+
+
+class TestConfigLoadErrors:
+    """Actionable, fail-fast errors for bad/malformed/empty config_paths (no raw traceback)."""
+
+    def test_load_extra_config_paths_missing_relative_lists_both_locations(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cwd, parent = tmp_path / "cwd", tmp_path / "parent"
+        cwd.mkdir()
+        parent.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent)
+
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths(["missing/nope.yaml"])
+
+        message = str(exc_info.value)
+        assert "missing/nope.yaml" in message
+        assert str(cwd / "missing/nope.yaml") in message
+        assert str(parent / "missing/nope.yaml") in message
+        assert "spelled correctly" in message
+
+    def test_load_extra_config_paths_missing_dedups_when_cwd_is_install_root(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths(["missing/nope.yaml"])
+
+        assert str(exc_info.value).count("  - ") == 1
+
+    def test_load_extra_config_paths_missing_absolute_path(self, tmp_path: Path) -> None:
+        missing = tmp_path / "absent.yaml"
+        parser = GlobalConfigDictParser()
+        with raises(ConfigPathNotFoundError) as exc_info:
+            parser.load_extra_config_paths([str(missing)])
+
+        message = str(exc_info.value)
+        assert str(missing) in message
+        assert message.count("  - ") == 1
+
+    def test_parse_malformed_config_paths_raises_actionable_error(self) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"config_paths": "not_a_list.yaml"}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(MalformedConfigPathsError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "config_paths" in message
+        assert "list" in message
+
+    def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
+        with raises(NoServerInstancesError) as exc_info:
+            parser.raise_on_no_server_instances(config)
+        assert "gym env start" in str(exc_info.value)
+
+    def test_raise_on_no_server_instances_passes_with_a_server(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
+        parser.raise_on_no_server_instances(config)
