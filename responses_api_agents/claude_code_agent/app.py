@@ -86,6 +86,7 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     buffered_think: str | None = None
     total_input = 0
     total_output = 0
+    num_turns: Optional[int] = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -94,6 +95,9 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             usage = event.get("usage") or {}
             total_input += int(usage.get("input_tokens") or 0)
             total_output += int(usage.get("output_tokens") or 0)
+            # Claude Code's authoritative turn counter (what --max-turns bounds).
+            if event.get("num_turns") is not None:
+                num_turns = int(event["num_turns"])
 
         elif etype == "assistant":
             message = event.get("message", {})
@@ -168,7 +172,10 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
-    return output_items, {"input_tokens": total_input, "output_tokens": total_output}
+    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+    if num_turns is not None:
+        metadata["num_turns"] = num_turns
+    return output_items, metadata
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:

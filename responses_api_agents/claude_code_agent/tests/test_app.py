@@ -345,6 +345,16 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
 
+    def test_result_event_exposes_num_turns(self) -> None:
+        result = _event("result", num_turns=9, usage={"input_tokens": 1, "output_tokens": 1})
+        _, usage = parse_stream_json(result)
+        assert usage["num_turns"] == 9
+
+    def test_num_turns_absent_when_no_result_event(self) -> None:
+        assistant = self._assistant([{"type": "text", "text": "hi"}])
+        _, usage = parse_stream_json(assistant)
+        assert "num_turns" not in usage
+
 
 class TestConfigYaml:
     def test_module_parses(self) -> None:
