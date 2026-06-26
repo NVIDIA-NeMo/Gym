@@ -1,0 +1,38 @@
+---
+title: "Sandbox API"
+description: "Provider-neutral isolated execution for NeMo Gym agents and environments."
+position: 3
+---
+
+The `nemo_gym.sandbox` module is the provider-neutral interface for creating isolated execution environments, running commands, and moving files in and out of them. Agents and resources servers use one caller-facing API (`AsyncSandbox` / `Sandbox` with a `SandboxSpec`), while each provider page documents backend-specific setup, configuration, and isolation properties.
+
+```python
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+```
+
+Select a provider with a single-key provider config and describe the sandbox with a `SandboxSpec`:
+
+```python
+provider_config = {"ecs_fargate": {"region": "us-east-1"}}
+spec = SandboxSpec(image="python:3.12-slim", resources=SandboxResources(cpu=2, memory_mib=8192))
+
+async with AsyncSandbox(provider_config, spec) as sandbox:
+    await sandbox.start()
+    result = await sandbox.exec("python3 --version", timeout_s=60)
+```
+
+<Note>
+Treat `nemo_gym.sandbox` as the stable caller-facing API. Modules under `nemo_gym.sandbox.providers` are implementation details unless you are adding or configuring a provider.
+</Note>
+
+## Providers
+
+<Cards>
+
+<Card title="ECS Fargate" href="/infrastructure/sandbox/ecs-fargate">
+Run sandboxes as AWS ECS Fargate tasks behind an SSH sidecar.
+
+<Badge minimal outlined>aws</Badge> <Badge minimal outlined>fargate</Badge> <Badge minimal outlined>ssh-sidecar</Badge>
+</Card>
+
+</Cards>
