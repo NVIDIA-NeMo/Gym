@@ -34,6 +34,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
@@ -77,6 +78,31 @@ def _engine_spec(spec: SandboxSpec) -> engine.SandboxSpec:
     )
 
 
+def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> engine.EcsFargateConfig:
+    """Apply per-sandbox ``SandboxSpec`` requests (readiness/TTL/resources) onto the provider config.
+
+    ``SandboxResources.cpu`` is in vCPUs; Fargate task CPU is in 1024-unit increments. GPU is not
+    supported on Fargate.
+    """
+    overrides: dict[str, Any] = {}
+    if spec.ready_timeout_s is not None:
+        overrides["startup_timeout_sec"] = float(spec.ready_timeout_s)
+    if spec.ttl_s is not None:
+        overrides["max_task_lifetime_sec"] = int(spec.ttl_s)
+    resources = spec.resources
+    if not isinstance(resources, SandboxResources):
+        resources = SandboxResources.from_mapping(resources)
+    if resources.gpu:
+        raise SandboxCreateError("ECS Fargate does not support GPU sandboxes (spec.resources.gpu)")
+    if resources.cpu is not None:
+        overrides["cpu"] = str(int(resources.cpu * 1024))
+    if resources.memory_mib is not None:
+        overrides["memory"] = str(int(resources.memory_mib))
+    if resources.disk_gib is not None:
+        overrides["ephemeral_storage_gib"] = int(resources.disk_gib)
+    return replace(cfg, **overrides) if overrides else cfg
+
+
 class EcsFargateProvider:
     """Run sandboxes as AWS ECS Fargate tasks behind an SSH sidecar."""
 
@@ -86,9 +112,7 @@ class EcsFargateProvider:
         self._cfg = engine_config_from_mapping(config)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        cfg = self._cfg
-        if spec.ready_timeout_s is not None:
-            cfg = replace(cfg, startup_timeout_sec=float(spec.ready_timeout_s))
+        cfg = _apply_spec_overrides(self._cfg, spec)
         sandbox = engine.EcsFargateSandbox(_engine_spec(spec), ecs_config=cfg)
         try:
             await sandbox.start(outside_endpoints=_outside_endpoints(spec))
@@ -136,7 +160,7 @@ class EcsFargateProvider:
         sandbox: engine.EcsFargateSandbox = handle.raw
         return SandboxStatus.RUNNING if sandbox.is_running else SandboxStatus.STOPPED
 
-    async def close(self, handle: SandboxHandle, *, delete: bool = False) -> None:
+    async def close(self, handle: SandboxHandle) -> None:
         sandbox: engine.EcsFargateSandbox = handle.raw
         await sandbox.stop()
 

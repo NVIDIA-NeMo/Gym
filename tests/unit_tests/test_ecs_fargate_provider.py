@@ -30,7 +30,7 @@ from nemo_gym.sandbox.providers import (
     list_providers,
 )
 from nemo_gym.sandbox.providers.ecs_fargate import EcsFargateProvider, engine
-from nemo_gym.sandbox.providers.ecs_fargate.provider import engine_config_from_mapping
+from nemo_gym.sandbox.providers.ecs_fargate.provider import _apply_spec_overrides, engine_config_from_mapping
 
 
 _ENG = "nemo_gym.sandbox.providers.ecs_fargate.engine"
@@ -373,3 +373,55 @@ def test_get_ecr_image_tag_is_content_addressed(tmp_path):
     assert tag1 == tag2 and tag1.startswith("env__")
     (tmp_path / "Dockerfile").write_text("FROM alpine")
     assert engine.ImageBuilder.get_ecr_image_tag(tmp_path, "env") != tag1
+
+
+# ── Phase A review fixes ──────────────────────────────────────────────
+
+
+def test_ephemeral_storage_block_validates_fargate_range():
+    # Omit the field (take Fargate's implicit 20 GiB) unless a larger size is requested; an explicit
+    # 20 -- or anything outside 21-200 -- is rejected by RegisterTaskDefinition.
+    assert engine._ephemeral_storage_block(None) is None
+    assert engine._ephemeral_storage_block(0) is None
+    assert engine._ephemeral_storage_block(50) == {"sizeInGiB": 50}
+    for bad in (20, 201):
+        with pytest.raises(ValueError, match="21 and 200"):
+            engine._ephemeral_storage_block(bad)
+
+
+def test_render_env_value_rejects_unresolved_task_ip():
+    cfg = engine.EcsFargateConfig(region="us-east-1")
+    sandbox = engine.EcsFargateSandbox(engine.SandboxSpec(image="img"), ecs_config=cfg)
+    # _task_ip is unknown until the task is running, so it cannot be baked into container env.
+    with pytest.raises(ValueError, match="task_ip"):
+        sandbox._render_env_value("BASE=http://{task_ip}:8000")
+    # once known it resolves; unrelated values pass through untouched.
+    sandbox._task_ip = "10.0.0.5"
+    assert sandbox._render_env_value("BASE=http://{task_ip}:8000") == "BASE=http://10.0.0.5:8000"
+    assert sandbox._render_env_value("PLAIN=1") == "PLAIN=1"
+
+
+def test_apply_spec_overrides_maps_resources_and_ttl():
+    cfg = engine.EcsFargateConfig(region="us-east-1", cpu="256", memory="512")
+    spec = SandboxSpec(
+        image="img",
+        ttl_s=3600,
+        ready_timeout_s=120,
+        resources={"cpu": 2, "memory_mib": 4096, "disk_gib": 50},
+    )
+    out = _apply_spec_overrides(cfg, spec)
+    assert out.max_task_lifetime_sec == 3600
+    assert out.startup_timeout_sec == 120.0
+    assert out.cpu == "2048"  # vCPUs -> Fargate CPU units
+    assert out.memory == "4096"
+    assert out.ephemeral_storage_gib == 50
+    # no per-sandbox requests -> config returned unchanged (same object)
+    assert _apply_spec_overrides(cfg, SandboxSpec(image="img")) is cfg
+
+
+def test_apply_spec_overrides_rejects_gpu():
+    from nemo_gym.sandbox.providers import SandboxCreateError
+
+    cfg = engine.EcsFargateConfig(region="us-east-1")
+    with pytest.raises(SandboxCreateError, match="GPU"):
+        _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"gpu": 1}))
