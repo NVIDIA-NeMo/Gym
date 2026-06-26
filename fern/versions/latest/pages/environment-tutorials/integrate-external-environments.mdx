@@ -1,7 +1,7 @@
 ---
 title: "Integrate external libraries"
 description: ""
-position: 6
+position: 7
 ---
 Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
 
@@ -12,7 +12,7 @@ Integrating external training environments, benchmarks, or agents into a NeMo Gy
 1. Because external training environments, benchmarks, or agents include their own rollout orchestration logic (that is, coordinating model and tool calls) and may sometimes return their own reward, NeMo Gym agent servers are the appropriate level to integrate at.  
 2. You can add a dependency from your NeMo Gym agent server to the third-party library by adding it to the requirements.txt. If your dependency needs are more complicated beyond installing pip packages or GitHub repositories, consider using setup.py and pyproject.toml.  
 3. After you add a dependency, you can import it in app.py like a normal Python script.  
-4. You can run the `ng_test` command to run tests on your agent server. Refer to the [ng_test CLI reference](/reference/cli-commands#ng-test-nemo-gym-test) for details.   
+4. You can run the `gym env test` command to run tests on your agent server. Refer to the [gym env test CLI reference](/reference/cli-commands#gym-env-test) for details.   
 5. Typically you can just wrap the external library in the `/run` function and omit the `/responses` function.  
 6. In the `/run` function before calling into the third-party library, you will need to preprocess from NeMo Gym schema into a config for the external library.  
 7. In the `/run` function after calling into the third-party library, you will need to postprocess from the external library result into a NeMo Gym response.

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from unittest.mock import MagicMock
 
 from nemo_gym.openai_utils import (
@@ -50,6 +51,86 @@ class TestSanity:
     def test_concurrency_semaphore_initialized(self) -> None:
         agent = HermesAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
         assert agent.sem._value == 4
+
+
+class _FakeAgent:
+    """Stand-in for AIAgent — only needs .interrupt() for the SIGTERM dispatch path."""
+
+    def __init__(self) -> None:
+        self.interrupt_reason = None
+
+    def interrupt(self, reason: str) -> None:
+        self.interrupt_reason = reason
+
+
+class TestSigtermHandler:
+    """Regression tests for the concurrency-safe SIGTERM dispatcher.
+
+    The old per-call add_signal_handler/remove_signal_handler approach raced: concurrent responses()
+    calls clobbered each other's handler and the first to finish removed the only one left, so a
+    later SIGTERM interrupted nobody. The fix registers a single dispatcher over a shared set of
+    in-flight agents.
+    """
+
+    def test_active_agents_initialized_empty(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        assert agent.active_agents == set()
+        assert agent.sigterm_installed is False
+
+    def test_handler_installed_once_and_interrupts_all_in_flight(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+
+        registered: list = []
+        loop = asyncio.new_event_loop()
+        loop.add_signal_handler = lambda sig, cb, *a: registered.append(cb)  # type: ignore[method-assign]
+        asyncio.set_event_loop(loop)
+        try:
+            agent._ensure_sigterm_handler()
+            assert agent.sigterm_installed is True
+            assert len(registered) == 1  # exactly one dispatcher registered
+
+            # Idempotent: a second concurrent call must NOT register another handler.
+            agent._ensure_sigterm_handler()
+            assert len(registered) == 1
+
+            dispatch = registered[0]
+
+            # Two concurrent in-flight agents: SIGTERM must interrupt BOTH (the old code lost one).
+            a, b = _FakeAgent(), _FakeAgent()
+            agent.active_agents.update({a, b})
+            dispatch()
+            assert a.interrupt_reason == "timeout"
+            assert b.interrupt_reason == "timeout"
+
+            # Once an agent finishes (discarded), a later SIGTERM no longer touches it.
+            a.interrupt_reason = None
+            b.interrupt_reason = None
+            agent.active_agents.discard(a)
+            dispatch()
+            assert a.interrupt_reason is None
+            assert b.interrupt_reason == "timeout"
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_handler_install_survives_unsupported_platform(self) -> None:
+        # On platforms where add_signal_handler raises (e.g. non-main thread), install is a no-op
+        # rather than an error, and the agent stays usable.
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+
+        loop = asyncio.new_event_loop()
+
+        def _raise(*_a, **_k):
+            raise NotImplementedError
+
+        loop.add_signal_handler = _raise  # type: ignore[method-assign]
+        asyncio.set_event_loop(loop)
+        try:
+            agent._ensure_sigterm_handler()
+            assert agent.sigterm_installed is False
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 class TestSplitInputToUserAndHistory:
