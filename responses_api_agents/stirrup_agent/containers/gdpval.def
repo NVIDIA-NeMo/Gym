@@ -29,6 +29,11 @@ From: python:3.13-bookworm
     # ``set -ex`` aborts on the first failure, and the ``command -v`` checks
     # below fail loud if any binary we expect didn't actually install.
     export DEBIAN_FRONTEND=noninteractive
+    # Under apptainer's unprivileged (fakeroot) build, apt cannot drop to its
+    # _apt sandbox user ("Could not switch group"; the http method dies with
+    # error 112). Disable the sandbox so apt runs as root. Harmless for a
+    # privileged/root build too.
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-disable-sandbox
     apt-get update
     apt-get install -y --no-install-recommends \
         git \
@@ -36,6 +41,7 @@ From: python:3.13-bookworm
         gcc \
         g++ \
         cmake \
+        swig \
         pkg-config \
         make \
         coreutils \
@@ -47,6 +53,7 @@ From: python:3.13-bookworm
         libreoffice-calc \
         libreoffice-impress \
         fonts-dejavu-core \
+        fonts-liberation \
         tesseract-ocr \
         pandoc \
         poppler-utils \
@@ -54,6 +61,8 @@ From: python:3.13-bookworm
         ffmpeg \
         graphviz \
         imagemagick \
+        chromium \
+        jq \
         texlive-latex-base \
         texlive-latex-recommended \
         texlive-latex-extra \
@@ -61,19 +70,26 @@ From: python:3.13-bookworm
         texlive-fonts-extra \
         texlive-xetex \
         texlive-luatex \
-        texlive-lang-european \
+        texlive-pictures \
+        texlive-science \
+        texlive-plain-generic \
+        texlive-pstricks \
+        texlive-lang-greek \
         latexmk \
+        biber \
         default-jre-headless \
         gdal-bin \
+        libgdal-dev \
         proj-bin \
+        libproj-dev \
+        libgeos-dev \
         libgl1 \
         libglib2.0-0 \
         libsndfile1 \
         espeak-ng \
         libzbar0 \
-        wkhtmltopdf \
+        unzip \
         unar \
-        libgraphviz-dev \
         curl \
         wget
     rm -rf /var/lib/apt/lists/*
@@ -88,48 +104,81 @@ From: python:3.13-bookworm
     command -v convert
     command -v pdflatex
     command -v xelatex
+    command -v lualatex
     command -v latexmk
+    command -v biber
     command -v java
     command -v gdalinfo
+    command -v jq
+    command -v unzip
+    command -v chromium || command -v chromium-browser
+    # Style files from the curated TeX Live set (texlive-pictures / -science /
+    # -pstricks) must resolve, else figure/equation-heavy docs fail at runtime.
+    kpsewhich tikz.sty
+    kpsewhich siunitx.sty
+    kpsewhich pst-plot.sty
 
     python -m pip install --no-cache-dir --upgrade pip
 
-    # CPU-only PyTorch stack (avoids pulling multi-GB CUDA wheels).
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        torch torchvision torchaudio
+    # NOTE: deliberately NO PyTorch. Neither the AA prompt nor the apt/python
+    # reference snapshots include torch/torchvision/torchaudio; the reference ML
+    # stack is scikit-learn/xgboost/catboost/lightgbm + onnxruntime. Installing
+    # torch would bloat the sif by multiple GB for nothing.
 
-    # Everything advertised to the agent in prompts/gdpval_user_prompt.txt.
-    # Versions left unpinned so the resolver picks Python 3.13-compatible
-    # wheels; the prompt's version numbers are illustrative of the v1 snapshot.
+    # Python stack aligned to the GDPval AA sandbox reference (the agent's
+    # advertised runtime).  Versions left unpinned so the resolver picks
+    # Python 3.13-compatible wheels.  This block MUST fully succeed: a missing
+    # wheel aborts the build rather than silently shipping a degraded sif.
     pip install --no-cache-dir \
-        jupyterlab notebook nbclassic jupyter-server \
+        jupyterlab notebook jupyter-server \
         aiohttp hypercorn fastapi websockets pydantic gradio \
-        numpy numpy-financial scipy pandas matplotlib matplotlib-venn seaborn plotly plotnine bokeh \
+        numpy numpy-financial scipy pandas polars duckdb pyarrow xarray \
+        matplotlib matplotlib-venn seaborn plotly plotnine bokeh \
         statsmodels scikit-learn scikit-image xgboost catboost lightgbm imbalanced-learn shap \
-        nltk gensim spacy textblob \
-        keras jax \
-        opencv-python Pillow pytesseract qrcode pyzbar imgkit \
-        ffmpeg-python pydub moviepy av soundfile librosa mutagen gtts pyttsx3 pedalboard pyloudnorm mne \
-        python-docx python-pptx openpyxl xlrd pymupdf pdf2image pdfplumber pdfkit pypandoc docx2txt odfpy pyxlsb tabula-py camelot-py \
-        fpdf2 reportlab weasyprint pdfrw PyPDF2 pdfminer.six \
-        graphviz pydot networkx svgwrite trimesh wordcloud folium \
-        shapely fiona geopandas geopy rasterio \
-        sympy pymc h5py tables \
-        rdkit biopython \
-        xml-python markdownify anytree rarfile chardet srt \
-        tqdm tabulate faker loguru fuzzywuzzy rapidfuzz einops pycountry countryinfo pronouncing exchange-calendars \
-        pyprover nashpy rdflib \
+        nltk gensim spacy textblob onnxruntime \
+        opencv-python Pillow pytesseract qrcode pyzbar playwright \
+        ffmpeg-python pydub moviepy av soundfile librosa mutagen gtts pyttsx3 pedalboard pyloudnorm mne SpeechRecognition \
+        python-docx python-pptx openpyxl xlrd xlsxwriter pymupdf pdf2image pdfplumber pypandoc docx2txt odfpy pyxlsb tabula-py camelot-py \
+        mammoth markitdown magika \
+        fpdf2 reportlab weasyprint pdfrw pypdf pypdfium2 pdfminer.six scour \
+        graphviz pydot networkx svgwrite svglib cairosvg trimesh wordcloud \
+        shapely fiona geopandas geopy rasterio contextily folium \
+        sympy pymc casadi h5py tables \
+        rdkit biopython ezdxf \
+        markdownify anytree rarfile chardet srt youtube-transcript-api \
+        tqdm tabulate faker loguru rapidfuzz einops pycountry countryinfo pronouncing exchange-calendars \
+        nashpy rdflib \
         cryptography pyopenssl requests httpx \
+        boto3 azure-ai-documentintelligence azure-identity \
         snowflake-connector-python databricks-sql-connector \
         pytest pytest-cov pytest-json-report coverage pytest-asyncio ddtrace datadog \
-        markdown2 beautifulsoup4 lxml typing-extensions
+        beautifulsoup4 lxml typing-extensions
 
-    # Architecture-specific / fragile extras the prompt marks "not available on
-    # aarch64" or that need heavy native builds. Best-effort: never fail the
+    # Architecture-specific / fragile extras that need heavy native builds or
+    # whose wheels are not on every target platform. Best-effort: never fail the
     # build if a target-platform wheel is missing.
     pip install --no-cache-dir \
-        pygraphviz svglib cairosvg cadquery cadquery-ocp aspose-words dlib mtcnn kerykeion pylog pyth3 \
+        cadquery cadquery-ocp aspose-words kerykeion nlopt \
         || echo "[gdpval.def] some architecture-specific extras were skipped"
+
+    # Fail loud if the AA-advertised Python stack didn't actually install.
+    python - <<'PYCHECK'
+import importlib
+mods = [
+    "numpy", "pandas", "polars", "scipy", "matplotlib", "plotly", "sklearn",
+    "docx", "pptx", "openpyxl", "fitz", "pdfplumber", "reportlab", "weasyprint",
+    "PIL", "cv2", "playwright",
+]
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception as exc:  # noqa: BLE001
+        missing.append(f"{m}: {exc}")
+if missing:
+    raise SystemExit("[gdpval.def] missing/broken AA python deps:\n  " + "\n  ".join(missing))
+print("[gdpval.def] AA python import smoke check OK")
+PYCHECK
 
     mkdir -p /workspace
 
@@ -137,7 +186,6 @@ From: python:3.13-bookworm
     export HOME=/root
     export PATH=/usr/local/bin:$PATH
     export DEBIAN_FRONTEND=noninteractive
-    export KERAS_BACKEND=torch
 
 %runscript
     exec /bin/bash "$@"
