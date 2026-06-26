@@ -264,6 +264,28 @@ class TestApp:
         config = create_test_config(model_name="")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    def test_committed_smoke_data_has_one_valid_row(self) -> None:
+        data_path = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        rows = data_path.read_text(encoding="utf-8").splitlines()
+
+        assert len(rows) == 1
+        row = json.loads(rows[0])
+        required_fields = {
+            "instance_id",
+            "repo",
+            "base_commit",
+            "problem_statement",
+            "patch",
+            "test_patch",
+            "FAIL_TO_PASS",
+            "PASS_TO_PASS",
+            "responses_create_params",
+            "subset",
+            "split",
+        }
+        assert required_fields <= row.keys()
+        assert row["responses_create_params"]["input"] == []
+
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
         assert _json_dict_from_metadata({"top_k": 20}, field_name="extra_body") == {"top_k": 20}
