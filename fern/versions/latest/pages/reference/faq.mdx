@@ -194,7 +194,7 @@ A dataset object consists of:
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
 - Source: the unified `source:` block declaring where the dataset is fetched from when it's missing locally. `type` selects the backend:
-  - `gitlab` — the NVIDIA GitLab dataset registry: `dataset_name`, `version`, `artifact_fpath`.
+  - `gitlab` — the GitLab dataset registry: `dataset_name`, `version`, `artifact_fpath`.
   - `huggingface` — the Hugging Face Hub: `repo_id` (required) and optionally `artifact_fpath` for raw-file repos (if omitted, the split is inferred from the dataset `type`).
 
   Required for train and validation datasets; not for example datasets (those are committed to Git). The legacy `gitlab_identifier:` / `huggingface_identifier:` fields still work (with a deprecation warning) and may be set together as a gitlab-primary / huggingface-fallback pair, but `source:` is preferred for new configs.
