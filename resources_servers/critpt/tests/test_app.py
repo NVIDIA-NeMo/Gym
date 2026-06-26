@@ -26,6 +26,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.critpt.app import (
+    CritPtRateLimitExceeded,
     CritPtResourcesServer,
     CritPtResourcesServerConfig,
     CritPtVerifyRequest,
@@ -34,12 +35,12 @@ from resources_servers.critpt.app import (
 
 
 def _make_config(batch_size: int = 70, **kwargs) -> CritPtResourcesServerConfig:
+    kwargs.setdefault("api_key", "test-key")  # pragma: allowlist secret
     return CritPtResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
-        api_key="test-key",  # pragma: allowlist secret
         batch_size=batch_size,
         **kwargs,
     )
@@ -87,6 +88,38 @@ def _mock_api(api_result: dict):
     mock_response.status = 200
     mock_response.json = AsyncMock(return_value=api_result)
     mock_request.return_value = mock_response
+    return mock_request, [request_patch]
+
+
+def _build_mock_response(spec: dict) -> AsyncMock:
+    """Build a single mock aiohttp-like response from a compact spec.
+
+    spec keys:
+        status:  int HTTP status (default 200)
+        json:    dict body returned by .json() (for 2xx)
+        body:    str body returned by .text() (for non-2xx)
+        headers: dict (used for 429 Retry-After / X-Ratelimit-Reset)
+    """
+    status = spec.get("status", 200)
+    m = AsyncMock()
+    m.status = status
+    m.ok = status < 400
+    m.headers = spec.get("headers", {})
+    if m.ok:
+        m.json = AsyncMock(return_value=spec.get("json", {}))
+    m.text = AsyncMock(return_value=spec.get("body", ""))
+    return m
+
+
+def _mock_api_sequence(response_specs: list):
+    """Patch module-level request() to return a sequence of responses.
+
+    Each `await request(...)` consumes the next spec. Tests use this to drive
+    rotation: e.g. `[{status: 429, ...}, {status: 200, json: {...}}]`.
+    """
+    request_patch = patch("resources_servers.critpt.app.request")
+    mock_request = request_patch.start()
+    mock_request.side_effect = [_build_mock_response(s) for s in response_specs]
     return mock_request, [request_patch]
 
 
@@ -317,3 +350,138 @@ class TestApp:
                 assert r.reward == 0.0
         finally:
             _stop_patches(patches)
+
+
+class TestKeyRotation:
+    """Live-run AA-key rotation on HTTP 429.
+
+    Mirrors the cli replay tool but tested through the server's verify() path:
+    a config with multiple keys must transparently rotate on 429, surface only
+    the final CritPtRateLimitExceeded once every key has 429'd in one batch,
+    and round-robin past the successful key on the next batch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_single_key_normalized_to_list(self):
+        """Pydantic config accepts a bare string and the server stores [key]."""
+        server = _make_server(_make_config(batch_size=2, api_key="solo-key"))  # pragma: allowlist secret
+        assert server._api_keys == ["solo-key"]
+        assert server._key_index == 0
+
+    @pytest.mark.asyncio
+    async def test_list_of_keys_preserved_in_order(self):
+        """Pydantic config accepts a list and order/identity is preserved."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1", "k2"]))
+        assert server._api_keys == ["k0", "k1", "k2"]
+        assert server._key_index == 0
+
+    def test_empty_key_list_rejected(self):
+        """An empty list must fail config-construction time, not at first 429."""
+        with pytest.raises(ValueError):
+            _make_config(batch_size=2, api_key=[])
+
+    def test_empty_string_key_rejected(self):
+        """A blank single key must fail config-construction time."""
+        with pytest.raises(ValueError):
+            _make_config(batch_size=2, api_key="")
+
+    @pytest.mark.asyncio
+    async def test_rotates_to_next_key_on_429(self):
+        """Two keys, first 429s, server retries with key #2 and succeeds.
+
+        Cursor sticks to the key that worked (k1), so the next batch starts
+        on k1 directly — k0 is presumed still rate-limited.
+        """
+        server = _make_server(_make_config(batch_size=3, api_key=["k0", "k1"]))
+
+        mock_request, patches = _mock_api_sequence(
+            [
+                {"status": 429, "headers": {"Retry-After": "60", "X-Ratelimit-Reset": "111"}, "body": "rl"},
+                {"status": 200, "json": {"accuracy": 0.5, "timeout_rate": 0.0}},
+            ]
+        )
+        try:
+            results = await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                server.verify(_make_verify_request("```python\nc=3\n```", problem_id="p3")),
+            )
+            assert mock_request.call_count == 2
+            sent_keys = [call.kwargs["headers"]["x-api-key"] for call in mock_request.call_args_list]
+            assert sent_keys == ["k0", "k1"]
+            for r in results:
+                assert r.reward == 0.5
+            assert server._key_index == 1
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_all_keys_429_raises_rate_limited(self):
+        """Three keys all 429: server raises CritPtRateLimitExceeded once, no extra attempts."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1", "k2"]))
+
+        mock_request, patches = _mock_api_sequence(
+            [
+                {"status": 429, "headers": {"Retry-After": "10"}, "body": "rl"},
+                {"status": 429, "headers": {"Retry-After": "20"}, "body": "rl"},
+                {"status": 429, "headers": {"Retry-After": "30", "X-Ratelimit-Reset": "999"}, "body": "rl"},
+            ]
+        )
+        try:
+            with pytest.raises(CritPtRateLimitExceeded) as exc_info:
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            # The surfaced exception carries the last attempt's signals.
+            assert exc_info.value.retry_after_seconds == 30
+            assert exc_info.value.reset_unix == 999
+            assert mock_request.call_count == 3
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_single_key_429_no_retry(self):
+        """One configured key, 429: raises immediately (one attempt, no rotation)."""
+        server = _make_server(_make_config(batch_size=2, api_key=["solo-key"]))  # pragma: allowlist secret
+
+        mock_request, patches = _mock_api_sequence(
+            [{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}]
+        )
+        try:
+            with pytest.raises(CritPtRateLimitExceeded):
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_cursor_sticks_to_working_key(self):
+        """Two successful batches in a row both use k0; the cursor never
+        moves off a working key absent a 429."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1"]))
+
+        mock_request, patches = _mock_api_sequence(
+            [
+                {"status": 200, "json": {"accuracy": 0.1, "timeout_rate": 0.0}},
+                {"status": 200, "json": {"accuracy": 0.2, "timeout_rate": 0.0}},
+            ]
+        )
+        try:
+            await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+            )
+            await asyncio.gather(
+                server.verify(_make_verify_request("```python\na2=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb2=2\n```", problem_id="p2")),
+            )
+            sent_keys = [call.kwargs["headers"]["x-api-key"] for call in mock_request.call_args_list]
+            assert sent_keys == ["k0", "k0"]
+            assert server._key_index == 0
+        finally:
+            _stop_patches(patches)
+

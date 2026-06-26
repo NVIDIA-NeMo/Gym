@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -69,7 +69,8 @@ class CritPtRateLimitExceeded(RuntimeError):
 
 class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_url: str = "https://artificialanalysis.ai/api/v2/critpt/evaluate"
-    api_key: str
+    # One AA key, or a list of keys for in-process rotation on HTTP 429.
+    api_key: Union[str, List[str]]
     # AA PUBLIC mode requires all 70 problems in one call; verify() buffers until full.
     batch_size: int = 70
     # Per-batch AA API call timeout. AA can take ~minutes to evaluate 70 submissions server-side.
@@ -91,6 +92,30 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     #   partial_metrics.json aggregate accuracy over scored submissions
     # Leaving this None (or unset) preserves the prior behavior (no on-disk state).
     cache_dir: Optional[Path] = Field(default_factory=_cache_dir_from_env)
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, v):
+        """Fail fast on empty key configs.
+
+        We accept `str | List[str]` for ergonomic env passthrough, but a bare
+        empty string or an empty/all-blank list almost always means a missing
+        export — surface that at construction time rather than at the first
+        429 (where a confused stack trace would suggest a quota bug instead).
+        """
+        if isinstance(v, str):
+            if not v.strip():
+                raise ValueError("CritPt api_key must be a non-empty string")
+            return v
+        items = list(v)
+        if any(not isinstance(k, str) for k in items):
+            raise ValueError("CritPt api_key list must contain only strings")
+        keys = [k for k in items if k.strip()]
+        if not keys:
+            raise ValueError(
+                "CritPt api_key list must contain at least one non-empty key"
+            )
+        return keys
 
 
 class CritPtRunRequest(BaseRunRequest):
@@ -124,6 +149,14 @@ class CritPtResourcesServer(SimpleResourcesServer):
         # have an AA score and skip re-shipping them.
         self._submission_counter: int = 0
         self._batch_counter: int = 0
+        # Normalize api_key into a non-empty list of keys; the field validator
+        # has already enforced non-emptiness. The rotation cursor is advanced
+        # after each successful batch so successive batches round-robin across
+        # keys, and bumped on 429 so the next batch starts past the
+        # rate-limited key. All cursor mutations happen under `_api_lock`.
+        raw = self.config.api_key
+        self._api_keys: List[str] = [raw] if isinstance(raw, str) else list(raw)
+        self._key_index: int = 0
         if self.config.cache_dir is not None:
             self.config.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -206,18 +239,19 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 submission_ids_snapshot = None
 
         if ready_to_fire:
-            LOG.warning("CritPt batch full (%d submissions); firing AA API.", len(submissions_snapshot))
+            LOG.warning(
+                "CritPt batch full (%d submissions); firing AA API (key idx=%d/%d).",
+                len(submissions_snapshot),
+                self._key_index,
+                len(self._api_keys),
+            )
             try:
                 # Serialize: only one AA submission in flight at a time (concurrent ones 500).
+                # Rotation cursor (`self._key_index`) is mutated only under this
+                # lock, so successive batches cleanly round-robin across keys.
                 async with self._api_lock:
                     result = await asyncio.wait_for(
-                        _call_api(
-                            self.config.api_url,
-                            self.config.api_key,
-                            submissions_snapshot,
-                            max_retries=self.config.api_max_retries,
-                            backoff_seconds=self.config.api_retry_backoff_seconds,
-                        ),
+                        self._call_aa_with_rotation(submissions_snapshot),
                         timeout=self.config.api_timeout_seconds,
                     )
                 self._record_aa_response(submission_ids_snapshot, result)
@@ -225,10 +259,13 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 future.set_result(result)
             except CritPtRateLimitExceeded as e:
                 LOG.error(
-                    "CritPt AA quota exhausted (retry_after=%ds, reset_unix=%d); "
-                    "failing %d waiters in this batch. Submissions cached at %s; "
-                    "run `python -m resources_servers.critpt.replay --cache-dir <that_path>` "
-                    "after the quota resets to score the remaining batches without rerunning inference.",
+                    "CritPt AA quota exhausted on all %d configured key(s) "
+                    "(last retry_after=%ds, reset_unix=%d); failing %d waiters in "
+                    "this batch. Submissions cached at %s; run "
+                    "`python -m resources_servers.critpt.replay --cache-dir <that_path>` "
+                    "after the quota resets to score the remaining batches without "
+                    "rerunning inference.",
+                    len(self._api_keys),
                     e.retry_after_seconds,
                     e.reset_unix,
                     len(submissions_snapshot),
@@ -259,6 +296,63 @@ class CritPtResourcesServer(SimpleResourcesServer):
             accuracy=accuracy,
             timeout_rate=timeout_rate,
         )
+
+    # ──────────────────────────────────────────────────────────
+    # AA key rotation
+    # ──────────────────────────────────────────────────────────
+
+    async def _call_aa_with_rotation(self, submissions: List[Dict]) -> Dict:
+        """Ship a batch to AA, rotating across configured keys on HTTP 429.
+
+        Sticky behaviour: every batch starts on `self._key_index` and the
+        cursor only advances when a key 429s. On success the cursor stays
+        on the key that worked, so subsequent batches keep hitting it
+        until AA rate-limits it. On a 429 the cursor moves to the next key
+        and retries the same submissions immediately; once every key has
+        429'd in a single batch (one full cycle), the last
+        `CritPtRateLimitExceeded` is re-raised so the surrounding verify()
+        block can fail the cohort with a clean signal.
+
+        With a single configured key this degenerates to a thin wrapper
+        around `_call_api` (one attempt, no rotation).
+
+        Callers must hold `self._api_lock` — both because AA itself 500s on
+        concurrent full-batch submissions, and because this function mutates
+        `self._key_index`.
+        """
+        n = len(self._api_keys)
+        last_exc: Optional[CritPtRateLimitExceeded] = None
+        for attempt in range(n):
+            current = (self._key_index + attempt) % n
+            try:
+                result = await _call_api(
+                    self.config.api_url,
+                    self._api_keys[current],
+                    submissions,
+                    max_retries=self.config.api_max_retries,
+                    backoff_seconds=self.config.api_retry_backoff_seconds,
+                )
+                self._key_index = current
+                return result
+            except CritPtRateLimitExceeded as exc:
+                last_exc = exc
+                remaining = n - (attempt + 1)
+                if remaining > 0:
+                    next_idx = (current + 1) % n
+                    LOG.warning(
+                        "CritPt AA rate-limited on key idx=%d/%d "
+                        "(retry_after=%ds, reset_unix=%d); rotating to key idx=%d.",
+                        current,
+                        n,
+                        exc.retry_after_seconds,
+                        exc.reset_unix,
+                        next_idx,
+                    )
+        if last_exc is None:
+            raise RuntimeError(
+                "_call_aa_with_rotation invoked with no api_keys configured"
+            )
+        raise last_exc
 
     # ──────────────────────────────────────────────────────────
     # Aggregate metrics overrides

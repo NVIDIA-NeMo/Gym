@@ -19,21 +19,23 @@ rerunning model inference.
 Batches that the live run already scored successfully are skipped, so partial
 quota is never wasted re-scoring submissions that already have a verdict.
 
-By default the tool authenticates with a single key from
-$ARTIFICIAL_ANALYSIS_API_KEY. Pass --api-key-file (one key per line) to load
-multiple keys, then combine with --rotate-on-rate-limit to fail over on
-HTTP 429. When every configured key is rate-limited the tool exits cleanly
-with exit code 3; already-scored batches stay in aa_responses.jsonl, so
-simply rerun the tool after the AA daily quota resets.
+API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY. 
 
-Examples:
-    ARTIFICIAL_ANALYSIS_API_KEY=... python -m resources_servers.critpt.replay \\
+    # Single key (free tier, 10 CritPt scorings / 24h):
+    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx"
+
+    # Multiple keys for rotation on HTTP 429 (bracketed list literal,
+    # comma-separated; whitespace ok):
+    ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]"
+
+Rotation is always on when more than one key is configured: every 429
+advances to the next key. When every configured key 429s on the same batch
+(one full cycle), the tool exits with code 3; already-scored batches stay
+in aa_responses.jsonl, so simply rerun after the AA daily quota resets.
+
+Example:
+    ARTIFICIAL_ANALYSIS_API_KEY="[k1,k2,k3]" python -m resources_servers.critpt.replay \\
         --cache-dir /path/to/critpt_cache
-
-    python -m resources_servers.critpt.replay \\
-        --cache-dir /path/to/critpt_cache \\
-        --api-key-file ~/.aa_keys \\
-        --rotate-on-rate-limit
 """
 import argparse
 import asyncio
@@ -53,24 +55,58 @@ from resources_servers.critpt.app import (
 AA_API_KEY_ENV_VAR = "ARTIFICIAL_ANALYSIS_API_KEY"
 
 
-def _load_api_keys(args: argparse.Namespace) -> List[str]:
-    """Resolve AA API keys.
+def _parse_api_keys_env(raw: str) -> List[str]:
+    """Parse $ARTIFICIAL_ANALYSIS_API_KEY into a non-empty ordered list.
 
-    If --api-key-file is given, every non-empty, non-`#`-comment line is taken
-    as one key (preserving order, deduped). Otherwise fall back to a single
-    key read from $ARTIFICIAL_ANALYSIS_API_KEY. Returns [] if neither yields a
-    key; the caller is responsible for surfacing that.
+    Accepts two shapes:
+
+    * Single key:        ``aa-xxx``      → ``["aa-xxx"]``
+    * Bracketed list:    ``[k1,k2,k3]``  → ``["k1", "k2", "k3"]``
+
+    For the list form we tolerate whitespace and surrounding single/double
+    quotes around each item (a common shape after a shell `export` round-trip
+    of a `.env` line with comma-separated quoted strings). Order is preserved
+    and duplicates are dropped while keeping the first occurrence.
+
+    Raises ValueError on an empty value or an empty/all-dup list — callers
+    fail fast rather than try to ship to AA with no key.
     """
-    if args.api_key_file:
-        keys: List[str] = []
-        with args.api_key_file.open("r") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and stripped not in keys:
-                    keys.append(stripped)
-        return keys
+    s = raw.strip()
+    if not s:
+        raise ValueError(
+            f"${AA_API_KEY_ENV_VAR} is set but empty; cannot resolve any AA key."
+        )
+    if not (s.startswith("[") and s.endswith("]")):
+        return [s]
+
+    inner = s[1:-1].strip()
+    if not inner:
+        raise ValueError(
+            f"${AA_API_KEY_ENV_VAR}={raw!r} parsed as an empty list."
+        )
+    keys: List[str] = []
+    for piece in inner.split(","):
+        cleaned = piece.strip().strip('"').strip("'")
+        if cleaned and cleaned not in keys:
+            keys.append(cleaned)
+    if not keys:
+        raise ValueError(
+            f"${AA_API_KEY_ENV_VAR}={raw!r} parsed to zero non-empty keys."
+        )
+    return keys
+
+
+def _load_api_keys() -> List[str]:
+    """Resolve AA API keys from $ARTIFICIAL_ANALYSIS_API_KEY.
+
+    Single-key and bracketed-list shapes are both accepted by
+    `_parse_api_keys_env`. Returns [] when the env var is unset so the
+    caller can surface a uniform "no key resolved" error and exit 2.
+    """
     value = os.environ.get(AA_API_KEY_ENV_VAR)
-    return [value] if value else []
+    if value is None:
+        return []
+    return _parse_api_keys_env(value)
 
 
 async def _call_api_with_rotation(
@@ -79,42 +115,43 @@ async def _call_api_with_rotation(
     submissions: List[Dict],
     max_retries: int,
     backoff_seconds: float,
-    rotate_on_rate_limit: bool,
     key_index_in: int,
 ) -> Tuple[Dict, int]:
     """Call AA with key-rotation on HTTP 429.
 
-    On a 429: if rotation is enabled and >1 keys are configured, advance to
-    the next key and retry immediately. Once all keys have cycled back to the
-    starting index (i.e. every key was rate-limited this round) re-raise so
-    the caller fails fast — AA's daily quota means waiting in-process is not
-    productive, just rerun after the quota resets.
+    Sticky behaviour matching the live server: start on `key_index_in`,
+    advance only on a 429, and re-raise the last `CritPtRateLimitExceeded`
+    once every key has 429'd in one cycle. On success the cursor stays on
+    the key that worked so successive batches keep hitting it until AA
+    rate-limits it.
 
-    Returns (response, new_key_index). The caller threads the returned index
-    back in so successive successful batches round-robin across keys.
+    Returns (response, key_index_used). Callers thread the returned index
+    back in so the next batch resumes on the same (working) key.
     """
-    key_index = key_index_in
-    while True:
-        api_key = api_keys[key_index % len(api_keys)]
+    n = len(api_keys)
+    last_exc = None
+    for attempt in range(n):
+        current = (key_index_in + attempt) % n
         try:
             response = await _call_api(
                 api_url=api_url,
-                api_key=api_key,
+                api_key=api_keys[current],
                 submissions=submissions,
                 max_retries=max_retries,
                 backoff_seconds=backoff_seconds,
             )
-            return response, key_index + 1
-        except CritPtRateLimitExceeded:
-            if not (rotate_on_rate_limit and len(api_keys) > 1):
-                raise
-            key_index += 1
-            if key_index % len(api_keys) == 0:
-                raise
-            print(
-                f"  rate-limited on key idx={(key_index - 1) % len(api_keys)}; "
-                f"rotating to key idx={key_index % len(api_keys)}"
-            )
+            return response, current
+        except CritPtRateLimitExceeded as exc:
+            last_exc = exc
+            remaining = n - (attempt + 1)
+            if remaining > 0:
+                print(
+                    f"  rate-limited on key idx={current}/{n}; "
+                    f"rotating to key idx={(current + 1) % n}"
+                )
+    if last_exc is None:
+        raise RuntimeError("_call_api_with_rotation invoked with no api_keys")
+    raise last_exc
 
 
 def _load_jsonl(path: Path) -> List[Dict]:
@@ -125,9 +162,8 @@ def _load_jsonl(path: Path) -> List[Dict]:
     with path.open("r") as fh:
         for raw in fh:
             line = raw.strip()
-            if not line:
-                continue
-            out.append(json.loads(line))
+            if line:
+                out.append(json.loads(line))
     return out
 
 
@@ -141,14 +177,14 @@ def _pack_into_batches(submissions: List[Dict], batch_size: int) -> List[List[Di
     batches: List[List[Dict]] = []
     for sub in submissions:
         pid = sub["submission"]["problem_id"]
-        placed = False
-        for b in batches:
-            if pid not in {s["submission"]["problem_id"] for s in b}:
-                b.append(sub)
-                placed = True
-                break
-        if not placed:
+        target = next(
+            (b for b in batches if pid not in {s["submission"]["problem_id"] for s in b}),
+            None,
+        )
+        if target is None:
             batches.append([sub])
+        else:
+            target.append(sub)
     return batches
 
 
@@ -203,7 +239,6 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 submissions=sub_payload,
                 max_retries=args.max_retries,
                 backoff_seconds=args.backoff_seconds,
-                rotate_on_rate_limit=args.rotate_on_rate_limit,
                 key_index_in=key_index,
             )
         except CritPtRateLimitExceeded as e:
@@ -248,6 +283,8 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Re-ship unscored CritPt submissions to AA without rerunning inference.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
     p.add_argument(
         "--cache-dir",
@@ -255,20 +292,6 @@ def parse_args(argv=None) -> argparse.Namespace:
         required=True,
         help="Path to the directory holding submissions.jsonl + aa_responses.jsonl, "
         "matching the `cache_dir` set on the resource server config.",
-    )
-    p.add_argument(
-        "--api-key-file",
-        type=Path,
-        default=None,
-        help=f"Optional file with one AA API key per line (blank lines and '#' "
-        f"comments ignored). When omitted, falls back to a single key from "
-        f"${AA_API_KEY_ENV_VAR}.",
-    )
-    p.add_argument(
-        "--rotate-on-rate-limit",
-        action="store_true",
-        help="On HTTP 429, advance to the next configured AA key and retry immediately. "
-        "No-op when only one key is configured.",
     )
     p.add_argument(
         "--api-url",
@@ -283,10 +306,11 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    api_keys = _load_api_keys(args)
+    api_keys = _load_api_keys()
     if not api_keys:
         print(
-            f"No AA API key resolved: set ${AA_API_KEY_ENV_VAR} or pass --api-key-file.",
+            f"No AA API key resolved: set ${AA_API_KEY_ENV_VAR} (single key "
+            f"or a `[k1,k2,k3]` list for rotation).",
             file=sys.stderr,
         )
         return 2
