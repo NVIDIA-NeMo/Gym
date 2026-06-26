@@ -244,14 +244,15 @@ def _record(
 class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
 
-    Buffers the request body and a copy of the response while forwarding both downstream
-    unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
-    the stream. An optional ``/ng-rollout/<id>`` path prefix is stripped before routing and used
-    as the capture key (an explicit header wins). Streaming responses are forwarded but their
-    body is not buffered.
+    Always strips an optional ``/ng-rollout/<id>`` path prefix before routing (used as the capture
+    key; an explicit header wins) so the prefix is a stable routing feature independent of capture.
+    When ``store`` is set it also buffers the request body and a copy of the response while forwarding
+    both downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or
+    rewraps the stream (streamed bodies are forwarded but not buffered). When ``store`` is None
+    (capture disabled) it strips the prefix and forwards only.
     """
 
-    def __init__(self, app: Any, *, store: CaptureStore, config: Any) -> None:
+    def __init__(self, app: Any, *, store: Optional[CaptureStore], config: Any) -> None:
         self._app = app
         self._store = store
         self._config = config
@@ -268,6 +269,11 @@ class _CaptureMiddleware:
             rollout_from_path = prefix_match.group("rollout_id")
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+
+        # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
+        if self._store is None:
+            await self._app(scope, receive, send)
+            return
 
         dialect = _OBSERVED_PATHS.get(path)
         if dialect is None:
@@ -336,19 +342,34 @@ class _CaptureMiddleware:
 
 
 def install_trajectory_capture(app: Any, config: Any) -> None:
-    """Install the per-rollout exchange-capture middleware (no-op when capture is disabled).
+    """Install the per-rollout capture middleware.
 
-    A pure-ASGI middleware that records each observed call's request + response into a
-    rollout-keyed CaptureStore while forwarding bytes downstream unchanged, so it composes with
-    streaming responses. Streaming (SSE) responses are forwarded but their body is not buffered.
+    Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
+    regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
+    prefixed model call). When capture is enabled the middleware additionally records each observed
+    call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
+    unchanged (streaming SSE responses are forwarded but their body is not buffered).
     """
-    store = make_capture_store(config)
-    if store is None:
-        return
-    app.add_middleware(_CaptureMiddleware, store=store, config=config)
+    app.add_middleware(_CaptureMiddleware, store=make_capture_store(config), config=config)
 
 
 # --- Consumer read: fold per-rollout capture into the rollout record (uniform across agents) ---
+_capture_dirs_warned = False
+
+
+def _warn_capture_dirs_unresolved() -> None:
+    """Warn once when capture is enabled but no readable capture dir was resolved (silent no-op guard)."""
+    global _capture_dirs_warned
+    if _capture_dirs_warned:
+        return
+    _capture_dirs_warned = True
+    logger.warning(
+        "Trajectory capture is enabled but no capture directory was resolved to merge from -- "
+        "per-rollout trajectories will not be attached. Set NEMO_GYM_TRAJECTORY_DIR (shared by the "
+        "model server and rollout collection) for a deterministic location."
+    )
+
+
 def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, str]] = None) -> list[Path]:
     """Candidate directories to read per-rollout captures from.
 
@@ -372,20 +393,27 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
     except Exception:
         pass
 
-    def _walk(node: Any) -> None:
+    saw_enabled = False
+
+    def _walk(node: Any, key: Optional[str] = None) -> None:
+        nonlocal saw_enabled
         if isinstance(node, dict):
             if node.get("observability_enabled"):
+                saw_enabled = True
+                # The producer keys its default dir off the server config's ``name``, which equals the
+                # config key the node sits under -- fall back to that key (not "model_server") so the
+                # consumer resolves the same directory the producer wrote to.
                 resolved = (
                     node.get("trajectory_capture_dir")
                     or shared
-                    or _default_capture_dir(node.get("name") or "model_server")
+                    or _default_capture_dir(node.get("name") or key or "model_server")
                 )
                 dirs.append(Path(resolved))
-            for value in node.values():
-                _walk(value)
+            for child_key, value in node.items():
+                _walk(value, child_key)
         elif isinstance(node, (list, tuple)):
             for value in node:
-                _walk(value)
+                _walk(value, key)
 
     try:
         _walk(global_config_dict)
@@ -398,6 +426,8 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
         if directory not in seen and directory.exists():
             seen.add(directory)
             unique.append(directory)
+    if saw_enabled and not unique:
+        _warn_capture_dirs_unresolved()
     return unique
 
 
