@@ -425,3 +425,49 @@ def test_apply_spec_overrides_rejects_gpu():
     cfg = engine.EcsFargateConfig(region="us-east-1")
     with pytest.raises(SandboxCreateError, match="GPU"):
         _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"gpu": 1}))
+
+
+# ── Phase B review fixes ──────────────────────────────────────────────
+
+
+def test_validate_fargate_cpu_memory():
+    engine._validate_fargate_cpu_memory(2048, 8192)  # valid pair
+    engine._validate_fargate_cpu_memory(256, 512)  # valid low edge
+    with pytest.raises(ValueError, match="cpu must be"):
+        engine._validate_fargate_cpu_memory(777, 2048)  # unsupported cpu value
+    with pytest.raises(ValueError, match="memory for cpu"):
+        # the independent-max bug: cpu=256 cannot pair with 8192 MiB
+        engine._validate_fargate_cpu_memory(256, 8192)
+
+
+def test_get_task_public_ip_waits_for_public_ip_when_enabled():
+    # assign_public_ip=ENABLED: must keep retrying for the PublicIp to propagate instead of
+    # returning the (VPC-internal, unreachable) private IP on the first poll.
+    cfg = engine.EcsFargateConfig(region="us-east-1", cluster="c", assign_public_ip=True)
+    sandbox = engine.EcsFargateSandbox(engine.SandboxSpec(image="img"), ecs_config=cfg)
+    sandbox._task_arn = "task-arn"
+    sandbox._ecs = MagicMock()
+    sandbox._ecs.describe_tasks.return_value = {
+        "tasks": [
+            {"attachments": [{"type": "ElasticNetworkInterface", "details": [{"name": "networkInterfaceId", "value": "eni-1"}]}]}
+        ]
+    }
+    sandbox._ec2 = MagicMock()
+    sandbox._ec2.describe_network_interfaces.side_effect = [
+        {"NetworkInterfaces": [{"PrivateIpAddress": "10.0.0.1"}]},  # no PublicIp yet
+        {"NetworkInterfaces": [{"Association": {"PublicIp": "1.2.3.4"}, "PrivateIpAddress": "10.0.0.1"}]},
+    ]
+    with patch(f"{_ENG}.time.sleep"):
+        assert sandbox._get_task_public_ip() == "1.2.3.4"
+
+
+def test_delete_s3_object_best_effort():
+    cfg = engine.EcsFargateConfig(region="us-east-1", s3_bucket="bucket")
+    fake_s3 = MagicMock()
+    fake_boto3 = MagicMock()
+    fake_boto3.client.return_value = fake_s3
+    with patch(f"{_ENG}._require_aws_sdks", return_value=(fake_boto3, MagicMock(), MagicMock())):
+        engine._delete_s3_object(cfg, "some/key.zip")
+    fake_s3.delete_object.assert_called_once_with(Bucket="bucket", Key="some/key.zip")
+    # no bucket configured -> no-op (no client built)
+    engine._delete_s3_object(engine.EcsFargateConfig(region="us-east-1"), "k")
