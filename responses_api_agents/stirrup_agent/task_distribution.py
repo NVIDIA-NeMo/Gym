@@ -33,8 +33,13 @@ distribution can later be reused to *sample* ``task_id``s (see
 
 Usage::
 
-    # --dataset defaults to the prepared GDPVal dataset
-    # (benchmarks/gdpval/data/gdpval_benchmark.jsonl) when omitted.
+    # Full config defaults: the prepared GDPVal dataset
+    # (benchmarks/gdpval/data/gdpval_benchmark.jsonl) grouped by ``occupation``.
+    # Without --output the distribution is printed to stdout.
+    python -m responses_api_agents.stirrup_agent.task_distribution \
+        --output occupation_distribution.json
+
+    # --dataset defaults to the prepared GDPVal dataset when omitted.
     python -m responses_api_agents.stirrup_agent.task_distribution \
         --column sector \
         --output sector_distribution.json
@@ -60,6 +65,9 @@ MISSING_VALUE = "<missing>"
 
 # Separator joining multiple column values into a single composite key.
 DEFAULT_KEY_SEPARATOR = " | "
+
+# Column grouped on when ``--column`` is not specified.
+DEFAULT_COLUMN = "occupation"
 
 # Repo root: this file is responses_api_agents/stirrup_agent/task_distribution.py.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -316,11 +324,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--column",
         dest="columns",
         action="append",
-        required=True,
+        default=None,
         metavar="COLUMN",
         help=(
             "Metadata column to group by. Repeat to group by a composite key "
-            "(e.g. --column sector --column occupation)."
+            "(e.g. --column sector --column occupation). "
+            f"Defaults to {DEFAULT_COLUMN!r} if not specified."
         ),
     )
     parser.add_argument(
@@ -375,12 +384,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         print(f"Using default dataset: {dataset_path}", file=sys.stderr)
 
+    columns = args.columns
+    if not columns:
+        columns = [DEFAULT_COLUMN]
+        print(f"No --column specified; defaulting to {DEFAULT_COLUMN!r}.", file=sys.stderr)
+
     precision = None if args.precision is not None and args.precision < 0 else args.precision
     indent = None if args.indent is not None and args.indent < 0 else args.indent
 
     distribution = build_distribution_from_dataset(
         dataset_path,
-        args.columns,
+        columns,
         task_id_column=args.task_id_column,
         separator=args.separator,
         missing_value=args.missing_value,
@@ -394,7 +408,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out_path.write_text(payload + "\n", encoding="utf-8")
         total_tasks = sum(len(entry["task_ids"]) for entry in distribution.values())
         print(
-            f"Wrote distribution over {args.columns} ({len(distribution)} groups, {total_tasks} tasks) to {out_path}",
+            f"Wrote distribution over {columns} ({len(distribution)} groups, {total_tasks} tasks) to {out_path}",
             file=sys.stderr,
         )
     else:

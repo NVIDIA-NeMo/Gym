@@ -226,6 +226,19 @@ class TestMain:
         assert "gym eval prepare --benchmark gdpval" in err
         assert "--dataset" in err
 
+    def test_defaults_to_occupation_column(self, tmp_path: Path, capsys) -> None:
+        dataset = _write_jsonl(
+            tmp_path / "d.jsonl",
+            [_row("a", occupation="Lawyer"), _row("b", occupation="Lawyer"), _row("c", occupation="Nurse")],
+        )
+        rc = main(["--dataset", str(dataset)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "defaulting to 'occupation'" in captured.err
+        data = json.loads(captured.out)
+        assert data["Lawyer"]["task_ids"] == ["a", "b"]
+        assert data["Nurse"]["percentage"] == pytest.approx(1 / 3)
+
     def test_errors_when_specified_dataset_missing(self, tmp_path: Path, capsys) -> None:
         rc = main(["--dataset", str(tmp_path / "nope.jsonl"), "--column", "sector"])
         assert rc == 2
