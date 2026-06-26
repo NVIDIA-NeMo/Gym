@@ -33,7 +33,7 @@ distribution can later be reused to *sample* ``task_id``s (see
 
 Usage::
 
-    # Full config defaults: the prepared GDPVal dataset
+    # Full defaults: the prepared GDPVal dataset (220 tasks)
     # (benchmarks/gdpval/data/gdpval_benchmark.jsonl) grouped by ``occupation``.
     # Without --output the distribution is printed to stdout.
     python -m responses_api_agents.stirrup_agent.task_distribution \
@@ -109,10 +109,16 @@ def _no_dataset_message() -> str:
         "\nTo fix this, do one of the following:\n"
         "\n  1. Prepare the GDPVal benchmark dataset (recommended). This downloads\n"
         "     the openai/gdpval dataset from HuggingFace and writes\n"
-        "     benchmarks/gdpval/data/gdpval_benchmark.jsonl (220 tasks):\n"
-        "\n         export HF_TOKEN=<your-huggingface-token>\n"
-        "         gym eval prepare --benchmark gdpval\n"
-        "\n     (or run: bash responses_api_agents/stirrup_agent/setup_scripts/gdpval.sh)\n"
+        "     benchmarks/gdpval/data/gdpval_benchmark.jsonl (220 tasks).\n"
+        "\n     First activate the project virtualenv so the Gym CLI is on PATH\n"
+        "     (the `gym`/`ng_*` commands live in .venv, not on your global PATH):\n"
+        "\n         source .venv/bin/activate\n"
+        "         export HF_TOKEN=<your-huggingface-token>\n"
+        "\n     Then run the setup script (works on all installs):\n"
+        "\n         bash responses_api_agents/stirrup_agent/setup_scripts/gdpval.sh\n"
+        "\n     Or call a prepare CLI directly:\n"
+        "\n         gym eval prepare --benchmark gdpval        # newer installs\n"
+        "         ng_prepare_benchmark '+config_paths=[benchmarks/gdpval/config.yaml]'  # any install\n"
         "\n  2. Pass an explicit dataset path with --dataset <path-to.jsonl>.\n"
         "\nNote: the GDPVal dataset is gated on HuggingFace, so HF_TOKEN must be set\n"
         "and your account must have access to https://huggingface.co/datasets/openai/gdpval.\n"
