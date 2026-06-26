@@ -796,3 +796,72 @@ def test_capture_dirs_warns_once_when_unresolved(tmp_path, monkeypatch, caplog):
         assert len(warns) == 1
     finally:
         obs._capture_dirs_warned = False
+
+
+# --- P1 review regressions: Anthropic cache tokens + concurrent-append integrity ---
+def test_extract_token_stats_anthropic_cache_fold():
+    from nemo_gym.trajectory_capture import extract_token_stats
+
+    # Anthropic native: input_tokens is the uncached remainder; cache-read + cache-creation fold in.
+    stats = extract_token_stats(
+        {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 30,
+        }
+    )
+    assert stats["tokens_in"] == 330  # 100 + 200 + 30
+    assert stats["tokens_out"] == 50
+    assert stats["tokens_total"] == 380  # 330 + 50 (Anthropic sends no total_tokens)
+    assert stats["cache_creation_tokens"] == 30
+
+
+def test_extract_token_stats_openai_cached_not_double_counted():
+    from nemo_gym.trajectory_capture import extract_token_stats
+
+    # OpenAI: input_tokens already includes cached tokens (cached_tokens is a subset) -> no fold.
+    stats = extract_token_stats(
+        {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "prompt_tokens_details": {"cached_tokens": 4}}
+    )
+    assert stats["tokens_in"] == 10
+    assert stats["tokens_total"] == 15
+    assert stats["cache_creation_tokens"] is None
+
+
+def test_build_step_record_surfaces_anthropic_cache_creation():
+    rec = build_step_record(
+        {
+            "dialect": "messages",
+            "response": {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 7,
+                    "cache_creation_input_tokens": 3,
+                }
+            },
+        },
+        step_index=0,
+    )
+    assert rec.tokens_in == 20  # 10 + 7 + 3
+    assert rec.cached_tokens == 7  # cache-read
+    assert rec.cache_creation_tokens == 3
+
+
+def test_capture_store_concurrent_append_no_loss(tmp_path):
+    import threading
+
+    store = CaptureStore(tmp_path)
+
+    def _write(i: int) -> None:
+        store.record("0-0", {"dialect": "chat", "request": {"i": i}, "response": {}})
+
+    threads = [threading.Thread(target=_write, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    rows = store.read("0-0")
+    assert len(rows) == 20  # flock + in-process lock: no lost or corrupted appends
+    assert sorted(r["request"]["i"] for r in rows) == list(range(20))
