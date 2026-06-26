@@ -1,6 +1,6 @@
 ---
 title: "Diagnose Results"
-description: "Use BLADE and other analysis skills to diagnose evaluation results — why scores changed, which tasks failed, and what to fix next."
+description: "Use BLADE and other analysis skills to diagnose evaluation results — why scores changed, which tasks failed, and what intervention to prioritize."
 position: 5
 ---
 
@@ -10,10 +10,10 @@ NeMo Gym equips agents to diagnose evaluation results: an agent reads the raw ar
 
 BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is one of NeMo Gym's built-in analysis skills. It answers the questions a headline score can't: **which tasks failed, why, and what to fix.** Given a run's artifacts, it identifies which tasks failed, the dominant failure modes, and the intervention most likely to close the gap — harness work, training, verifier repair, or prompt change.
 
-To diagnose a run, ask a skill-capable coding agent (such as Claude Code or Codex CLI) to analyze your run's artifacts. It works for any evaluation, whether you ran a built-in benchmark or your own custom tasks.
+To diagnose a run, ask a skill-capable coding agent (such as Claude Code or Codex CLI) to analyze your run's artifacts. It works with any evaluation that produces standard Gym artifacts (rollout JSONL, aggregate metrics, configs), whether from a built-in benchmark or your own custom tasks.
 
 <Note>
-BLADE ships as an Agent Skill inside the NeMo Gym repo (`.claude/skills/`, `.codex/skills/`), so your agent discovers it when you work inside a clone of the repo. Installing skills directly from the PyPI package is planned soon.
+BLADE ships as an Agent Skill inside the NeMo Gym repo (`.claude/skills/`, `.codex/skills/`), so your agent discovers it when you work inside a clone of the repo.
 </Note>
 
 ## Outputs
