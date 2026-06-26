@@ -199,6 +199,12 @@ class TestTrajectoryToOutputItems:
         assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
 
     def test_assistant_with_tokens(self) -> None:
+        routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+            [[4, 5]],
+            [[6, 7]],
+        ]
         msgs = [
             {
                 "role": "assistant",
@@ -206,6 +212,7 @@ class TestTrajectoryToOutputItems:
                 "prompt_token_ids": [1, 2],
                 "generation_token_ids": [3, 4],
                 "generation_log_probs": [0.0, -0.1],
+                "routed_experts": routed_experts,
             }
         ]
         out = _trajectory_to_output_items(msgs, 0)
@@ -213,6 +220,7 @@ class TestTrajectoryToOutputItems:
         assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
         assert out[0].generation_token_ids == [3, 4]
         assert out[0].prompt_token_ids == [1, 2]
+        assert out[0].routed_experts == routed_experts
 
     def test_assistant_with_tool_call_and_tool_result(self) -> None:
         msgs = [

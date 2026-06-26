@@ -1684,7 +1684,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         provider_specific_fields = data.get("provider_specific_fields", {})
         final_assistant_message = data["response"]["choices"][0]["message"]
 
-        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+        for key in [
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ]:
             if key in provider_specific_fields:
                 final_assistant_message[key] = provider_specific_fields[key]
 
