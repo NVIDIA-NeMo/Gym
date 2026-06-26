@@ -113,7 +113,7 @@ redirects:
   - source: "/nemo/gym/latest/about/concepts/architecture"
     destination: "/nemo/gym/main/infrastructure/engineering-notes/system-design"
   - source: "/nemo/gym/latest/about/concepts/task-verification"
-    destination: "/nemo/gym/main/resources-server"
+    destination: "/nemo/gym/main/build-verifiers/resources-server"
   - source: "/nemo/gym/latest/about/concepts/configuration"
     destination: "/nemo/gym/main/reference/configuration"
   - source: "/nemo/gym/latest/about/concepts/training-approaches"
@@ -206,6 +206,11 @@ redirects:
     destination: "/nemo/gym/main/build-verifiers/verification-patterns"
   - source: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
     destination: "/nemo/gym/main/build-verifiers/verification-patterns/llm-as-judge"
+  # Resources Server moved from top-level into Build Verifiers
+  - source: "/nemo/gym/main/resources-server"
+    destination: "/nemo/gym/main/build-verifiers/resources-server"
+  - source: "/nemo/gym/main/resources-server/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"
