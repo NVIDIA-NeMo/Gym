@@ -53,7 +53,7 @@ redirects:
     destination: "/nemo/gym/main"
   # Legacy Sphinx page paths → current Fern slugs
   - source: "/nemo/gym/about/concepts/configuration-system.html"
-    destination: "/nemo/gym/about/concepts/configuration"
+    destination: "/nemo/gym/main/reference/configuration"
   - source: "/nemo/gym/about/concepts/core-abstractions.html"
     destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/get-started/setup-installation.html"
@@ -135,11 +135,11 @@ redirects:
   - source: "/nemo/gym/latest/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
   # Pages that only existed under v0.2.1's structure (no /main/ equivalent at the same path)
-  # - `benchmarks/` was folded into `environment-tutorials/` on main
+  # - `benchmarks/` was folded into `evaluation/` on main
   # - `documentation/home` no longer exists; send to the main root
   # - `pypi-install` was consolidated into `installation` on main
   - source: "/nemo/gym/latest/benchmarks/adding-a-benchmark"
-    destination: "/nemo/gym/main/environment-tutorials/adding-a-benchmark"
+    destination: "/nemo/gym/main/evaluation/adding-a-benchmark"
   - source: "/nemo/gym/latest/benchmarks/designing-customer-evaluation"
     destination: "/nemo/gym/main/environment-tutorials"
   - source: "/nemo/gym/latest/benchmarks/run-benchmark-suite"
