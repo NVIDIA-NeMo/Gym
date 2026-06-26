@@ -1,19 +1,22 @@
 ---
-title: "Skills"
-description: "Use analysis skills to interpret evaluation artifacts and diagnose benchmark changes."
+title: "Benchmark Analysis"
+description: "Use BLADE and other analysis skills to interpret evaluation artifacts, diagnose benchmark changes, and understand why scores change."
 position: 5
 ---
 
-Skills are reusable analysis instructions that help agents interpret evaluation artifacts consistently. 
-They are used to enhance an agent's capability with a pre-defined, explainable structure.
+Benchmark analysis skills are reusable instructions that help agents interpret evaluation artifacts consistently. After collecting rollouts, an analysis skill turns raw artifacts into structured reports — explaining what changed, which tasks failed, and what intervention is most likely to improve the next run.
 
-NeMo Gym supports skills in two different ways: 
-- Skills evaluation: comparison of an agent's performance with multiple different skills set up.
-- Using skills in model evaluation: the [skills](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) folder in Gym contains the skills that can be added to Gym runs.
+NeMo Gym supports skills in two ways:
+- **Skills evaluation**: Compare agent performance across different skill sets by varying `skills.path` between runs.
+- **Using skills in model evaluation**: The [skills](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) folder in Gym contains built-in skills that can be added to any Gym run.
 
-## Skill Example: BLADE Analysis
+## BLADE Analysis
 
-The [BLADE analysis](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills/nemo-gym-blade-analysis) skill is designed to turn NeMo Gym rollout artifacts into BLADE-style benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It then computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
+BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is NeMo Gym's built-in benchmark analysis skill. It is a post-run workflow — it does not run the benchmark or replace the verifier. Instead, it reads rollout artifacts produced by `gym eval run` and answers the question: **why did the score change?**
+
+Use BLADE when you need to go beyond a headline score. It shows which tasks failed, what the dominant failure modes are, and the intervention most likely to close the gap — harness work, training, verifier repair, or prompt change.
+
+The [BLADE analysis](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills/nemo-gym-blade-analysis) skill turns NeMo Gym rollout artifacts into evidence-backed benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
 
 BLADE-ready benchmark packages use three deliverables:
 

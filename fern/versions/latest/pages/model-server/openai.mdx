@@ -1,0 +1,72 @@
+---
+title: "OpenAI"
+description: "Use OpenAI (or any endpoint that natively serves the Responses API) with no conversion"
+position: 2
+---
+
+The `openai_model` server connects NeMo Gym to OpenAI. It forwards requests straight through with no conversion in either direction: a Responses request goes to OpenAI's [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and returns a Responses object, and a Chat Completions request goes to OpenAI's Chat Completions and returns a chat completion — OpenAI serves both natively.
+
+Because it is a pass-through, the Responses endpoint also works with any other backend that implements the Responses API natively — point `openai_base_url` at it. In practice that is rare: most hosted backends only expose Chat Completions and instead go through [Inference Providers](/model-server/inference-providers), which translates between the two formats.
+
+<Info>
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted endpoints do not expose the token-level information needed for RL training.
+
+</Info>
+
+## Supported APIs
+
+This server exposes both endpoints and forwards each directly to the upstream endpoint:
+
+- **OpenAI Responses** — `/v1/responses`
+- **OpenAI Chat Completions** — `/v1/chat/completions`
+
+## Set Your Credentials
+
+Store your values in `env.yaml` in the project root (gitignored):
+
+```yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: your-api-key
+policy_model_name: gpt-4o-mini
+```
+
+Point `policy_base_url` at any OpenAI-compatible Responses endpoint to reuse this server with a different host.
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `openai_base_url` | `str` | — | **Required.** Base URL of an endpoint that serves the Responses API. |
+| `openai_api_key` | `str` | — | **Required.** API key for the endpoint. |
+| `openai_model` | `str` | — | **Required.** Model identifier (for example, `gpt-4o-mini`). |
+| `openai_default_headers` | `dict` | `{}` | Extra headers sent on every request. |
+| `extra_body` | `dict` | `{}` | Default parameters merged into every request body. Values set on the incoming request take precedence. |
+| `max_concurrent_requests` | `int` | `null` | Cap on in-flight upstream requests (per-process). `null` = unlimited; set it on rate-limited endpoints. |
+
+<Note>
+**The model is fixed by configuration.** This server always sends the configured `openai_model` (from `policy_model_name`) to the upstream endpoint. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.
+
+</Note>
+
+## Usage Example
+
+### 1. Set model and environment config
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/openai_model/configs/openai_model.yaml"
+```
+
+### 2. Start servers
+
+```bash
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+### 3. Evaluate your agent
+
+```bash
+ng_collect_rollouts +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+```
