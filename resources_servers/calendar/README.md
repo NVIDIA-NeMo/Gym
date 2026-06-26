@@ -16,9 +16,9 @@ The conversations in the dataset are generated using personas from the [nvidia/N
 The following is an example command for running this resources server along with an OpenAI model:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-resources_servers/calendar/configs/calendar.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server calendar
 ```
 
 ## Collecting rollouts
@@ -26,11 +26,11 @@ ng_run "+config_paths=[$config_paths]"
 Rollouts can be collected using the example dataset as follows:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=calendar_agent \
-    +input_jsonl_fpath=data/example.jsonl \
-    +output_jsonl_fpath=results/example_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent calendar_agent \
+    --input data/example.jsonl \
+    --output results/example_rollouts.jsonl \
+    --limit 5
 ```
 
 The input JSONL file should contain entries with:

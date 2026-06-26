@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[project]
+name = "code-fim"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-gym[dev]",
+    "human-eval-infilling",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["code_fim"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+human-eval-infilling = { git = "https://github.com/wasiahmad/human-eval-infilling.git" }
+
+# The upstream human-eval-infilling setup.py imports `pkg_resources` (no
+# pyproject.toml, no PEP 518 build deps declared). On modern setuptools
+# `pkg_resources` is split out and not a build-time dependency by default,
+# so the build env needs an older setuptools.
+[tool.uv.extra-build-dependencies]
+human-eval-infilling = ["setuptools<81"]

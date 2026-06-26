@@ -3,7 +3,10 @@ swe_agents:
   responses_api_agents:
     swe_agents:
       entrypoint: app.py
-      
+      domain: coding
+      description: Software engineering tasks with OpenHands agent harness.
+      value: Improve agentic software engineering capabilities.
+
       # Agent framework configuration
       agent_framework: swe_agent
       agent_config: configs/swe_agent_config.yaml

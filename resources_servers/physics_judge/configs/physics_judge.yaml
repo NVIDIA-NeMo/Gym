@@ -1,0 +1,34 @@
+physics_judge:
+  resources_servers:
+    physics_judge:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Physics QA verified by NeMo Skills' physics judge LLM with math-verify symbolic fallback
+      value: Score open-ended physics benchmarks (e.g. PHYSICS) where the judge emits [Correct] / [Incorrect] verdicts
+      should_use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+        temperature: 0.0
+        top_p: 1.0
+      use_chat_completions_for_judge: true
+
+physics_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: physics_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/physics_judge/data/example.jsonl
+          license: Apache 2.0

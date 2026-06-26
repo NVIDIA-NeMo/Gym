@@ -1,0 +1,220 @@
+---
+title: "BLADE Analysis Skill"
+description: "Build and validate a BLADE-style benchmark analysis package from NeMo Gym rollout artifacts."
+position: 3
+---
+
+The BLADE analysis skill turns NeMo Gym rollout artifacts into evidence-backed benchmark reports, model comparisons, and benchmark-improvement recommendations. Use it after rollout collection when you need to explain why a score changed, which tasks failed, and what intervention should come next.
+
+<Info>
+
+BLADE analysis is a post-run workflow. It does not run the benchmark or replace the verifier. It reads rollout artifacts, aggregate metrics, reward profiles, configs, and report files.
+
+</Info>
+
+## What This Tutorial Builds
+
+This tutorial builds a BLADE-ready package for one benchmark:
+
+| ID | Deliverable | Purpose | Typical path |
+|---|---|---|---|
+| D1 | Analysis skill | Teaches an agent how to analyze this benchmark's rollout data. | `benchmarks/<benchmark_name>/skill/SKILL.md` |
+| D2 | Rollout data | Provides comparable model or agent runs for analysis and calibration. | `benchmarks/<benchmark_name>/rollouts/*.jsonl` |
+| D3 | Golden report package | Provides curated reports, metric sidecars, shallow baselines, and anchor facts. | `benchmarks/<benchmark_name>/golden_reports/` |
+
+The bundled helper script validates this package shape and provides public fallback utilities when external BLADE infrastructure is unavailable.
+
+The main helper commands are `blade_toolkit.py validate`, `blade_toolkit.py extract-anchor-facts`, `blade_toolkit.py make-shallow`, and `blade_toolkit.py calibrate`.
+
+## Prerequisites
+
+Collect rollout artifacts for the benchmark you want to analyze. For a quick source of rollout data, first complete [Evaluate EvalPlus](/evaluation-tutorials/evalplus), then repeat the run with a second model or harness.
+
+A complete BLADE-ready package should include at least two scored rollout files with comparable task sets. One rollout file is enough to draft the skill and report, but full validation will fail the rollout-data check until there are two scored runs.
+
+## Create The Package Directory
+
+Run from the repository root:
+
+```bash
+benchmark_name=evalplus
+benchmark_dir="benchmarks/${benchmark_name}"
+
+mkdir -p "${benchmark_dir}/skill"
+mkdir -p "${benchmark_dir}/rollouts"
+mkdir -p "${benchmark_dir}/golden_reports"
+```
+
+Use the real benchmark name for `benchmark_name`. The directory can point at an existing benchmark directory or a new package directory created for BLADE review.
+
+## Add Rollout Data
+
+Copy comparable rollout files into `rollouts/`:
+
+```bash
+cp results/evalplus_model_a_rollouts.jsonl \
+  "${benchmark_dir}/rollouts/model_a_rollouts.jsonl"
+
+cp results/evalplus_model_b_rollouts.jsonl \
+  "${benchmark_dir}/rollouts/model_b_rollouts.jsonl"
+```
+
+Each rollout row should include a task identifier, a rollout or repeat identifier when repeats exist, a `reward` or `score` field, the model or agent output, verifier output, and useful task metadata.
+
+Keep the sidecar artifacts with the run notes even if they are not copied into `rollouts/`:
+
+- `_aggregate_metrics.json`
+- materialized inputs JSONL
+- reward profile JSONL
+- config files
+- model names or checkpoint references
+- sampling settings and repeat counts
+
+## Write The Analysis Skill
+
+Create `benchmarks/<benchmark_name>/skill/SKILL.md`. This is a benchmark-specific skill, not a generic BLADE overview. It should explain what this benchmark measures and how to read its rollout data.
+
+Include these sections:
+
+- Overview: task shape, target capability, reward computation, and verifier behavior.
+- Input schema: task id, rollout id, reward field, output fields, verifier fields, and useful slicing metadata.
+- Workflow funnel: ordered stages such as started, attempted the core action, reached verifier, received feedback, and passed.
+- Failure taxonomy: benchmark-specific labels and detection rules.
+- Analysis workflow: deterministic metrics first, qualitative trajectory reading second, causal synthesis third.
+- Report template: the markdown sections expected in a BLADE report.
+
+The package validator checks for a real `SKILL.md` with YAML frontmatter and substantive content. Do not leave this file as a short placeholder.
+
+## Create A Golden Report
+
+Write a curated report for one model:
+
+```bash
+golden_report="${benchmark_dir}/golden_reports/model_a_golden_report.md"
+```
+
+A good golden report is not just metric tables. It should include:
+
+- executive summary
+- artifact inventory
+- aggregate results
+- workflow funnel
+- task outcome buckets
+- dominant failure modes
+- sometimes-pass deep dives when repeats exist
+- never-pass deep dives
+- cross-model comparison when available
+- recommendations
+- reproducibility notes
+
+Tie claims to task ids, rollout ids, verifier messages, logs, tool calls, or generated outputs. Mark missing rows, timeouts, malformed outputs, and redacted evidence explicitly.
+
+## Add Metrics Sidecar
+
+Create a metrics sidecar next to the report:
+
+```bash
+cat > "${benchmark_dir}/golden_reports/model_a_golden_report_metrics.json" <<'JSON'
+{
+  "model_name": "model_a",
+  "benchmark": "evalplus",
+  "pass_at_1": 0.42,
+  "pass_at_k": 0.58,
+  "total_tasks": 164,
+  "total_rollouts": 656
+}
+JSON
+```
+
+Use the real metric values from the rollout and aggregate metrics artifacts. Add benchmark-specific fields such as consistency, coverage, pipeline counts, per-category breakdowns, or token statistics when they matter to the analysis.
+
+## Extract Anchor Facts
+
+Anchor facts are concrete, non-guessable findings that the BLADE judge can use to check whether a candidate report found the same evidence-backed patterns as the golden report.
+
+Use the local helper to draft them:
+
+```bash
+tool=".codex/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
+
+uv run python "${tool}" extract-anchor-facts \
+  --golden "${benchmark_dir}/golden_reports/model_a_golden_report.md" \
+  --benchmark "${benchmark_name}" \
+  --model-name model_a \
+  --output "${benchmark_dir}/golden_reports/model_a_anchor_facts.json"
+```
+
+Review the generated anchor facts before using them. Remove weak facts, aggregate-only facts, or facts that do not require reading benchmark evidence.
+
+## Create A Shallow Baseline
+
+A shallow baseline is a negative control. It looks like a report, but it should lack the causal diagnosis, examples, and recommendations that make the golden report useful.
+
+```bash
+uv run python "${tool}" make-shallow \
+  --input "${benchmark_dir}/golden_reports/model_a_golden_report.md" \
+  --output "${benchmark_dir}/golden_reports/model_a_shallow.md"
+```
+
+Use this to check that calibration can distinguish a real diagnostic report from a script-style metric dump.
+
+## Validate The Package
+
+Run validation across D1, D2, and D3:
+
+```bash
+uv run python "${tool}" validate \
+  --benchmark-dir "${benchmark_dir}" \
+  --phase all
+```
+
+Common validation failures are useful action items:
+
+| Failure | Meaning | Fix |
+|---|---|---|
+| D1 skill missing | No benchmark-specific analysis skill was found. | Add `skill/SKILL.md` or `SKILL.md`. |
+| At least two scored rollout files | Only one rollout file has `reward` or `score`. | Add another comparable model or agent run. |
+| task id field present | Rows do not expose a stable task identifier. | Preserve `_ng_task_index`, `task_id`, or an equivalent field. |
+| missing metrics sidecar | Golden report has no structured metric JSON. | Add `<model>_golden_report_metrics.json`. |
+| missing anchor facts | Golden report has no judge anchor facts. | Generate and review `<model>_anchor_facts.json`. |
+
+## Calibrate Locally
+
+After validation passes, run local proxy calibration:
+
+```bash
+uv run python "${tool}" calibrate \
+  --golden-report "${benchmark_dir}/golden_reports/model_a_golden_report.md" \
+  --anchor-facts "${benchmark_dir}/golden_reports/model_a_anchor_facts.json" \
+  --shallow-report "${benchmark_dir}/golden_reports/model_a_shallow.md"
+```
+
+The local proxy is a public fallback, not a replacement for official BLADE scoring when that infrastructure is available. Treat failures as review signals: weak anchor facts, shallow report too close to golden, missing evidence, or report sections that need more diagnostic detail.
+
+## Readiness Checklist
+
+Before marking the benchmark BLADE-ready:
+
+- D1 skill has overview, schema, taxonomy, workflow, and report template.
+- D2 rollouts include at least two scored, comparable runs.
+- D3 golden reports cite task-level evidence, not only aggregate tables.
+- Metrics sidecars parse and match the report.
+- Anchor facts exist for each golden report and are concrete.
+- Shallow baselines exist for calibration.
+- Sanitization removes private source, endpoints, credentials, user names, unreleased benchmark names, and raw data that is not cleared for sharing.
+
+<Cards>
+
+<Card title="Skills" href="/evaluation/skills">
+Review how skills fit into the evaluation workflow.
+</Card>
+
+<Card title="Evaluate EvalPlus" href="/evaluation-tutorials/evalplus">
+Collect a small rollout artifact set to use as tutorial input.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the scorecard used by BLADE reports.
+</Card>
+
+</Cards>

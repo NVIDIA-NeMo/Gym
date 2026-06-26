@@ -1,0 +1,23 @@
+imo_gradingbench:
+  resources_servers:
+    imo_gradingbench:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: "Four-class grading of math proofs — the policy model reads a problem plus a candidate proof and emits one of correct / almost / partial / incorrect as the last word."
+      value: "Improve the IMO-GradingBench benchmark and proof-grading skill."
+
+imo_gradingbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: imo_gradingbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/imo_gradingbench/data/example.jsonl

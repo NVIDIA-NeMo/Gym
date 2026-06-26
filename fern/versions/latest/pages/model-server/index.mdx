@@ -1,0 +1,53 @@
+---
+title: "Configure Model"
+description: ""
+position: 1
+---
+
+Configure your model with the inference backend of your choice.
+
+NeMo Gym uses the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) as its native schema because it natively represents tool calls, multi-turn conversations, and structured outputs. NeMo Gym provides middleware to automatically convert other protocols, for example, Chat Completions, into Responses format.
+
+For training, use a backend that returns token IDs and log probabilities (marked with <Badge minimal outlined>training</Badge> below).
+
+## Available Backends
+
+<Cards>
+
+<Card title="OpenAI" href="/model-server/openai">
+Use OpenAI models.
+
+<Badge minimal outlined>cloud</Badge>
+</Card>
+
+<Card title="Azure OpenAI" href="/model-server/azure-openai">
+Use models hosted on Azure OpenAI deployments.
+
+<Badge minimal outlined>cloud</Badge>
+</Card>
+
+<Card title="Inference Providers" href="/model-server/inference-providers">
+Use hosted providers like Fireworks, Together.ai, OpenRouter, and more.
+
+<Badge minimal outlined>cloud</Badge>
+</Card>
+
+<Card title="vLLM" href="/model-server/vllm">
+Connect to a vLLM server you start and manage yourself.
+
+<Badge minimal outlined>self-hosted</Badge> <Badge minimal outlined>training</Badge>
+</Card>
+
+<Card title="Local vLLM" href="/model-server/local-vllm">
+Let NeMo Gym launch and manage the vLLM server for you.
+
+<Badge minimal outlined>self-hosted</Badge> <Badge minimal outlined>gym-managed</Badge> <Badge minimal outlined>training</Badge>
+</Card>
+
+<Card title="Local vLLM Proxy" href="/model-server/local-vllm-proxy">
+Serve multiple request-time configs (e.g. reasoning on/off) from one Local vLLM deployment.
+
+<Badge minimal outlined>self-hosted</Badge> <Badge minimal outlined>gym-managed</Badge> <Badge minimal outlined>training</Badge>
+</Card>
+
+</Cards>

@@ -1,0 +1,65 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/structeval/data/example.jsonl",
+    "num_repeats": 1,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 382.4,
+        "Min": 349.0,
+        "Max": 415.0,
+        "Standard deviation": 26.6
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "task_name": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "input_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "output_type": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "raw_output_metric": {
+        "unique_count": 81,
+        "total_count": 81
+    },
+    "rendering": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}

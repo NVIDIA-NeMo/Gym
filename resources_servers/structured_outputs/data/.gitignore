@@ -1,5 +1,14 @@
-*train.jsonl
-*val.jsonl
-*train_prepare.jsonl
-*val_prepare.jsonl
-*example_prepare.jsonl
+# Data artifacts in this folder are usually generated or downloaded from a
+# dataset registry. Keep only explicit small examples and checked-in legacy
+# metrics in Git.
+*.jsonl
+*.json
+
+!example.jsonl
+!example_metrics.json
+!example_rollouts.jsonl
+!structured_outputs_251027_nano_v3_sdg_json_train_metrics.json
+!structured_outputs_251027_nano_v3_sdg_json_val_metrics.json
+!structured_outputs_v3_example.jsonl
+!structured_outputs_v3_example_metrics.json
+!structured_outputs_v4_example.jsonl

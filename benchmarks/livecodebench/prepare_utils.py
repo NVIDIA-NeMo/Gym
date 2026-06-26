@@ -33,6 +33,8 @@ import zlib
 from pathlib import Path
 from typing import Callable, Optional
 
+import orjson
+
 
 # From LiveCodeBench lcb_runner/prompts/code_generation.py — tells the model which code style to use
 _FORMATTING_WITH_STARTER_CODE = (
@@ -139,8 +141,8 @@ def prepare_from_hf_raw(
 
 def _write_rows(rows: list, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "wb") as f:
         for row in rows:
-            f.write(json.dumps(row) + "\n")
+            f.write(orjson.dumps(row) + b"\n")
     print(f"Wrote {len(rows)} problems to {output_path}")
     return output_path

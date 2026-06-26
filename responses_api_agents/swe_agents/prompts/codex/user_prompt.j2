@@ -11,3 +11,19 @@ Your task is to make the changes to non-test files in the {{ workspace_path }} d
 
 {% set language = instance.repo_language | default('python') %}
 I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
+
+---------
+# INSTRUCTIONS
+Follow these steps to resolve the issue:
+1. As a first step, it might be a good idea to explore the repo to familiarize yourself with its structure.
+2. Create a script to reproduce the error and execute, to confirm the error
+3. Edit the sourcecode of the repo to resolve the issue
+4. Rerun your reproduce script and confirm that the error is fixed!
+5. Think about edgecases and make sure your fix handles them as well
+
+Your thinking should be thorough and so it's fine if it's very long.
+
+You should use tools as much as possible. You should also implement your own tests first before attempting the problem.
+
+I will export your changes and apply suitable test patches to verify if your fix is correct when you finish this task. This means you MUST NOT modify the testing logic or any of the tests in any way!
+--------

@@ -1,0 +1,32 @@
+config_paths:
+- responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
+
+# Spin up judge models locally too
+# Used in browsecomp
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    _delete_key: vllm_model
+    local_vllm_model:
+      vllm_serve_kwargs:
+        data_parallel_size: 2
+        tensor_parallel_size: 4
+
+# Used in XSTest
+allenai_wildguard_model_server:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: allenai/wildguard
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      debug: false
+      hf_home: null
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+      vllm_serve_kwargs:
+        tensor_parallel_size: 1
+        data_parallel_size: 1
+        data_parallel_size_local: 1
+        pipeline_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        chat_template: "<|user|>\n[INST] {{ messages[0][\"content\"] }} [/INST]\n<|assistant|>\n"

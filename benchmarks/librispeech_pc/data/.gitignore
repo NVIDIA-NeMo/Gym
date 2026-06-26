@@ -1,0 +1,4 @@
+librispeech_pc_*.jsonl
+LibriSpeech/
+*.tar.gz
+*.json

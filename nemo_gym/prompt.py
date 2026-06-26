@@ -29,7 +29,6 @@ from pydantic import BaseModel, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 
 
 class PromptConfig(BaseModel):
@@ -152,7 +151,7 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_materialize_prompts \\
+    gym dataset render \\
         +input_jsonl_fpath=data/my_dataset.jsonl \\
         +prompt_config=/path/to/my_prompt.yaml \\
         +output_jsonl_fpath=my_dataset_materialized.jsonl
@@ -164,12 +163,14 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with populated prompts.")
 
 
-def materialize_prompts_cli() -> None:  # pragma: no cover
-    """CLI entry point for ng_materialize_prompts."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    config = MaterializePromptsConfig.model_validate(global_config_dict)
-    materialize_prompts(config.input_jsonl_fpath, config.prompt_config, config.output_jsonl_fpath)
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "materialize_prompts_cli": "nemo_gym.cli.dataset",
+    },
+)

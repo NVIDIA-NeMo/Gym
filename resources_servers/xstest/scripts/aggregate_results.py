@@ -60,7 +60,7 @@ def aggregate(entries: list[dict]) -> None:
         for judge_eval in e.get("judge_evaluations") or []:
             judge_total += 1
             vl = judge_eval.get("verdict_label")
-            if vl == "judge_error":
+            if vl in ("judge_error", "judge_parsing_error"):
                 judge_errors += 1
             elif vl is None:
                 judge_empty += 1
@@ -68,7 +68,7 @@ def aggregate(entries: list[dict]) -> None:
                 verdict_counts[vl] += 1
 
     # Detect judge type from verdict labels
-    judge_type = "string-match"
+    judge_type = "unknown"
     if verdict_counts:
         labels = set(verdict_counts.keys())
         if labels & {"refusal", "compliance"}:
@@ -92,8 +92,16 @@ def aggregate(entries: list[dict]) -> None:
     if safe:
         print(f"{'Over-refusal rate':<35s} {safe_refusals}/{len(safe)} ({safe_refusals / len(safe):.1%})")
     if judge_total > 0:
-        print(f"{'Judge error rate':<35s} {judge_errors}/{judge_total} ({judge_errors / judge_total:.1%})")
+        judge_error_rate = judge_errors / judge_total
+        print(f"{'Judge error rate':<35s} {judge_errors}/{judge_total} ({judge_error_rate:.1%})")
         print(f"{'Judge empty rate':<35s} {judge_empty}/{judge_total} ({judge_empty / judge_total:.1%})")
+        if judge_errors > 0:
+            print()
+            print(
+                f"WARNING: {judge_errors}/{judge_total} ({judge_error_rate:.1%}) judge calls failed. "
+                "Results are unreliable. Check that the WildGuard judge model server "
+                "is running and reachable."
+            )
 
     # Verdict distribution (if judge was used)
     if verdict_counts:
