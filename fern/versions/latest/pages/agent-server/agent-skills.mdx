@@ -12,14 +12,14 @@ NeMo Gym treats skills as an **environment-level variable you can sweep**, the s
 
 ## Skills are a run-level knob, not a dataset field
 
-Skills are specified on `ng_collect_rollouts` and applied to a **fixed, skill-agnostic dataset** at rollout time. The dataset stays a description of tasks, so the same dataset is reusable across skill variants and across agents.
+Skills are specified on `gym eval run` and applied to a **fixed, skill-agnostic dataset** at rollout time. The dataset stays a description of tasks, so the same dataset is reusable across skill variants and across agents.
 
 ## Usage
 
-A single `skills.path` field points at a directory of skill directories:
+A single `skills.path` field points at a directory of skill directories (here `--no-serve` collects against servers already started with `gym env start`):
 
 ```bash
-ng_collect_rollouts +agent_name=my_agent \
+gym eval run --no-serve +agent_name=my_agent \
   +input_jsonl_fpath=data/tasks.jsonl \
   +output_jsonl_fpath=results/rollouts_variant_a.jsonl \
   +skills.path=skills/variant_a/
