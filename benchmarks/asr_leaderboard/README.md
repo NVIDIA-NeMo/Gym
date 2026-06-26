@@ -23,7 +23,7 @@ System + user templates live in [`prompts/default.yaml`](prompts/default.yaml).
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/asr_leaderboard/config.yaml]"
+gym eval prepare --benchmark asr_leaderboard
 ```
 
 Downloads the 8 ESB subsets (~tens of GB of FLAC) and writes
@@ -32,18 +32,18 @@ Downloads the 8 ESB subsets (~tens of GB of FLAC) and writes
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/asr_leaderboard/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark asr_leaderboard
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=asr_leaderboard_asr_with_pc_simple_agent \
-    +output_jsonl_fpath=results/asr_leaderboard_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent asr_leaderboard_asr_with_pc_simple_agent \
+    --output results/asr_leaderboard_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Verification

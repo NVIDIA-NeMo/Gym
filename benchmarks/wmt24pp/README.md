@@ -14,7 +14,7 @@ details and the Ray GPU-scheduled COMET path.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"
+gym eval prepare --benchmark wmt24pp
 ```
 
 In addition to writing `data/wmt24pp_benchmark.jsonl`, the prepare step
@@ -32,21 +32,21 @@ runs disable COMET via Hydra override and rely on corpus-BLEU only;
 xCOMET scoring still works end-to-end on the cluster path:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/wmt24pp/config.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --benchmark wmt24pp \
     "++wmt24pp_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=wmt24pp_wmt_translation_simple_agent \
-    +prompt_config=benchmarks/wmt24pp/prompts/default.yaml \
-    +input_jsonl_fpath=benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
-    +output_jsonl_fpath=results/wmt24pp_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent wmt24pp_wmt_translation_simple_agent \
+    --input benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
+    --output results/wmt24pp_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/wmt24pp/prompts/default.yaml
 ```
 
 ## End-to-end reproduction on a SLURM cluster (via NeMo-Skills)
@@ -98,7 +98,7 @@ The two container fields that aren't trivial:
 
 #### Prepare benchmark data on the cluster
 
-The local `ng_prepare_benchmark` from [above](#prepare-benchmark-data)
+The local `gym eval prepare` from [above](#prepare-benchmark-data)
 writes the JSONL to your dev workstation. For a SLURM run, the JSONL
 plus the `Unbabel/XCOMET-XXL` cache need to live on the cluster's
 filesystem. Dispatch the prepare via `ns run_cmd` with the `nemo-gym`
@@ -110,7 +110,7 @@ ns run_cmd \
     --cluster <your-cluster> \
     --container nemo-gym \
     --expname wmt24pp_prepare \
-    --command 'ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"'
+    --command 'gym eval prepare --benchmark wmt24pp'
 ```
 
 This populates `benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl` and

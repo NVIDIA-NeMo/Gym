@@ -14,17 +14,17 @@ server.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/supergpqa/config.yaml]"
+gym eval prepare --benchmark supergpqa
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/supergpqa/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark supergpqa
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=supergpqa_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/supergpqa/data/supergpqa_benchmark.jsonl \
-    +output_jsonl_fpath=results/supergpqa/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/eval/aai/mcq-10choices.yaml
+gym eval run --no-serve \
+    --agent supergpqa_mcqa_simple_agent \
+    --input benchmarks/supergpqa/data/supergpqa_benchmark.jsonl \
+    --output results/supergpqa/rollouts.jsonl \
+    --prompt-config benchmarks/prompts/eval/aai/mcq-10choices.yaml
 ```
