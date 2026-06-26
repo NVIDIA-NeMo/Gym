@@ -7,14 +7,14 @@ position: 5
 Benchmark analysis skills are reusable instructions that help agents interpret evaluation artifacts consistently. After collecting rollouts, an analysis skill turns raw artifacts into structured reports — explaining what changed, which tasks failed, and what intervention is most likely to improve the next run.
 
 NeMo Gym supports skills in two ways:
-- **Skills evaluation**: compare agent performance across different skill sets by varying `skills.path` between runs.
-- **Using skills in model evaluation**: the [skills](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) folder in Gym contains built-in skills that can be added to any Gym run.
+- **Skills evaluation**: Compare agent performance across different skill sets by varying `skills.path` between runs.
+- **Using skills in model evaluation**: The [skills](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) folder in Gym contains built-in skills that can be added to any Gym run.
 
 ## BLADE Analysis
 
 BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is NeMo Gym's built-in benchmark analysis skill. It is a post-run workflow — it does not run the benchmark or replace the verifier. Instead, it reads rollout artifacts produced by `gym eval run` and answers the question: **why did the score change?**
 
-Use BLADE when you need to go beyond a headline score — to understand which tasks failed, what the dominant failure modes are, and what action (harness work, training, verifier repair, prompt change) is most likely to close the gap.
+Use BLADE when you need to go beyond a headline score. It shows which tasks failed, what the dominant failure modes are, and the intervention most likely to close the gap — harness work, training, verifier repair, or prompt change.
 
 The [BLADE analysis](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills/nemo-gym-blade-analysis) skill turns NeMo Gym rollout artifacts into evidence-backed benchmark reports, model comparisons, and benchmark-improvement recommendations. Its workflow starts from rollout JSONL, aggregate metrics, reward profiles, configs, model names, repeat counts, and sampling settings. It computes pass@1/pass@k, separates always-pass, sometimes-pass, never-pass, and missing rows, reads trajectories in order, assigns root-cause labels, and maps findings to concrete interventions.
 
