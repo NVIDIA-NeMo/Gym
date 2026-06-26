@@ -137,10 +137,6 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
-class ServerRefNotFoundError(ValueError):
-    """A server cross-reference points to an instance that is not defined in the merged config."""
-
-
 class ConfigError(Exception):
     """Base for user-facing configuration errors.
 
@@ -165,6 +161,10 @@ class NoServerInstancesError(ConfigError, ValueError):
 
 class ConfigMissingValuesError(ConfigError, ValueError):
     """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
+class ServerRefNotFoundError(ConfigError, ValueError):
+    """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
 ########################################

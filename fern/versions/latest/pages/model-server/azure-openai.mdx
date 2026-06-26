@@ -1,0 +1,72 @@
+---
+title: "Azure OpenAI"
+description: "Use models hosted on Azure OpenAI deployments"
+position: 3
+---
+
+The `azure_openai_model` server connects NeMo Gym to models hosted on [Azure OpenAI](https://learn.microsoft.com/azure/ai-services/openai/). It calls Azure's Chat Completions endpoint and converts to and from NeMo Gym's native [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) — so, like [Inference Providers](/model-server/inference-providers), it translates between the two formats (unlike [OpenAI](/model-server/openai), which forwards Responses requests natively). Azure also requires an explicit `api-version`.
+
+<Info>
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted endpoints do not expose the token-level information needed for RL training.
+
+</Info>
+
+## Supported APIs
+
+This server exposes both endpoints, calling Azure's Chat Completions under the hood:
+
+- **OpenAI Responses** — `/v1/responses`
+- **OpenAI Chat Completions** — `/v1/chat/completions`
+
+## Set Your Credentials
+
+Store your values in `env.yaml` in the project root (gitignored). For Azure, `policy_model_name` is your **deployment name** and `policy_base_url` is your Azure endpoint:
+
+```yaml
+policy_base_url: https://your-resource.openai.azure.com
+policy_api_key: your-api-key
+policy_model_name: your-deployment-name
+```
+
+Azure requires an API version (for example `2024-10-21`). Set it on the `default_query.api-version` config field — see the usage example below.
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `openai_base_url` | `str` | — | **Required.** Azure OpenAI endpoint. |
+| `openai_api_key` | `str` | — | **Required.** Azure API key. |
+| `openai_model` | `str` | — | **Required.** Azure deployment name. |
+| `default_query` | `dict` | — | **Required.** Must include `api-version` (for example, `2024-10-21`). |
+| `num_concurrent_requests` | `int` | — | **Required.** Maximum concurrent requests to Azure. |
+
+<Note>
+**The model is fixed by configuration.** This server always sends the configured `openai_model` (from `policy_model_name`) to Azure. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.
+
+</Note>
+
+## Usage Example
+
+### 1. Set model and environment config
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/azure_openai_model/configs/azure_openai_model.yaml"
+```
+
+### 2. Start servers
+
+Pass your Azure API version on the command line:
+
+```bash
+ng_run "+config_paths=[${environment_config},${model_config}]" \
+    +policy_model.responses_api_models.azure_openai_model.default_query.api-version=2024-10-21
+```
+
+### 3. Evaluate your agent
+
+```bash
+ng_collect_rollouts +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+```

@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from asyncio import Future
+from collections import Counter
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -312,6 +313,108 @@ class TestRolloutCollection:
             NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
+
+    def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
+        """Dict-form num_repeats applies the per-agent value to each row."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "beta": 4},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 2, "beta": 4})
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "alpha"] == [0, 1]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "beta"] == [0, 1, 2, 3]
+
+    def test_preprocess_rows_num_repeats_dict_with_default(self, tmp_path: Path) -> None:
+        """`_default` key acts as the fallback for agents not explicitly listed."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 3, "_default": 1},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 3, "beta": 1})
+
+    def test_preprocess_rows_num_repeats_dict_raises_on_missing_agent_no_default(self, tmp_path: Path) -> None:
+        """Dict form without `_default` raises if a row's agent is unlisted, and reports ALL
+        missing agents in one error so the user can fix them in one pass."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "gamma"}, "x": 2}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 3}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2},
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        msg = str(exc_info.value)
+        # All missing agents reported in one shot, deduped:
+        assert "'beta'" in msg
+        assert "'gamma'" in msg
+
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_preprocess_rows_num_repeats_rejects_zero_or_negative(self, tmp_path: Path, bad_value: int) -> None:
+        # int form
+        with pytest.raises(ValueError, match="num_repeats"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats=bad_value,
+            )
+        # dict form
+        with pytest.raises(ValueError, match="num_repeats dict"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats={"alpha": bad_value},
+            )
+
+    def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
+        """An agent listed in the dict that never appears in input rows warns (likely typo)."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0})]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "alpah_typo": 3},
+        )
+
+        with pytest.warns(UserWarning, match="alpah_typo"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
 
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

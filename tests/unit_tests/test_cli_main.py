@@ -54,6 +54,7 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
 CONFIG_COMMANDS = [
     (["env", "start"], "nemo_gym.cli.env:run"),
     (["env", "resolve"], "nemo_gym.cli.env:dump_config"),
+    (["env", "validate"], "nemo_gym.cli.env:validate"),
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
     (["eval", "aggregate"], "nemo_gym.cli.eval:aggregate_rollouts"),
     (["eval", "run"], "nemo_gym.cli.eval:e2e_rollout_collection"),
@@ -571,6 +572,7 @@ class TestJsonFlag:
         "argv, expected_target",
         [
             (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
+            (["list", "agents", "--json"], "nemo_gym.cli.agents:list_agents"),
             (["env", "status", "--json"], "nemo_gym.cli.env:status"),
         ],
     )
@@ -933,3 +935,15 @@ class TestSearchDir:
         with pytest.raises(SystemExit):
             main()
         assert "Did you mean `mybench`?" in capsys.readouterr().err
+
+
+class TestListEnvironmentsRouting:
+    def test_list_environments_dispatches(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == []
+
+    def test_list_environments_json_dispatches(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--json"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == ["+json=true"]

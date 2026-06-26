@@ -51,6 +51,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.registry import discover_environments
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -861,6 +862,83 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+
+@exit_cleanly_on_config_error
+def validate():
+    """Validate a config without starting Ray or any server subprocess.
+
+    Runs the full config parse — config_paths resolution (missing/malformed), server cross-reference
+    validation, mandatory `???` values, and schema — then exits 0 (valid) or, via
+    `exit_cleanly_on_config_error`, 1 with a clean traceback-free message. No Ray, no servers, so it
+    returns in well under a second instead of after Ray bootstrap.
+
+    No model config is required: a dummy `policy_model` is injected (the `NO_MODEL` parser config, as
+    in `gym list` / `env compose`) so model interpolations (e.g. `${policy_base_url}`) resolve —
+    validation is about config well-formedness, not the model. Pass a model config / `--model-type`
+    as well if you want it validated too.
+
+    Examples:
+
+    ```bash
+    gym env validate --environment <env>
+    gym env validate --benchmark <benchmark>
+    # or by explicit config path(s):
+    gym env validate --config resources_servers/<env>/configs/<env>.yaml
+    ```
+    """
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        ),
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    rich.print("[green]✓[/green] Config is valid.")
+
+
+def list_environments() -> None:
+    """List the environments available under environments/, by short name.
+
+    Examples:
+
+    ```bash
+    gym list environments
+    gym list environments --json
+    ```
+    """
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    environments = discover_environments()
+
+    if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(
+            json.dumps(
+                [
+                    {"name": name, "domain": env.domain, "description": env.description}
+                    for name, env in environments.items()
+                ]
+            )
+        )
+        return
+
+    if not environments:
+        rich.print("[yellow]No environments found.[/yellow]")
+        return
+
+    table = Table(title=f"Available environments in NeMo Gym ({len(environments)})")
+    table.add_column("Environment")
+    table.add_column("Domain")
+    table.add_column("Description")
+    for name, environment in environments.items():
+        table.add_row(name, environment.domain or "", environment.description or "")
+
+    rich.print(table)
 
 
 def status():  # pragma: no cover

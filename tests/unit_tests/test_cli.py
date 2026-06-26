@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import shutil
+import sys
 import tomllib
 from importlib import import_module
 from pathlib import Path
@@ -22,6 +24,7 @@ from unittest.mock import MagicMock, patch
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli.env
 import nemo_gym.global_config
 from nemo_gym import PARENT_DIR
 from nemo_gym.cli.env import (
@@ -32,8 +35,11 @@ from nemo_gym.cli.env import (
     _select_shard,
     exit_cleanly_on_config_error,
     init_resources_server,
+    list_environments,
+    validate,
 )
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.registry import EnvironmentEntry
 
 
 class TestSelectShard:
@@ -284,3 +290,88 @@ class TestExitCleanlyOnConfigError:
 
     def test_config_error_base_catches_subclasses(self) -> None:
         assert issubclass(NoServerInstancesError, ConfigError)
+
+
+class TestValidate:
+    def _validate_config(self, monkeypatch: MonkeyPatch, tmp_path: Path, config_yaml: str) -> None:
+        """Run the real `validate()` against a config file (no mocking of the parse path)."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_yaml)
+        # chdir to a clean dir so a repo-local env.yaml isn't picked up; clear the parse cache.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]"])
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        validate()
+
+    def test_valid_config_passes(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        # A well-formed config (real parse, real checks) -> "valid".
+        self._validate_config(
+            monkeypatch,
+            tmp_path,
+            "my_server:\n  resources_servers:\n    my_server:\n      entrypoint: app.py\n      domain: other\n",
+        )
+        assert "valid" in capsys.readouterr().out.lower()
+
+    def test_unknown_cross_reference_exits_nonzero(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # An agent referencing a resources server that isn't defined -> ServerRefNotFoundError ->
+        # clean exit(1) (real cross-reference validation, not a mock).
+        bad = (
+            "my_agent:\n"
+            "  responses_api_agents:\n"
+            "    a:\n"
+            "      entrypoint: app.py\n"
+            "      resources_server:\n        type: resources_servers\n        name: does_not_exist\n"
+            "      model_server:\n        type: responses_api_models\n        name: policy_model\n"
+        )
+        with raises(SystemExit) as exc_info:
+            self._validate_config(monkeypatch, tmp_path, bad)
+        assert exc_info.value.code == 1
+
+    def test_config_error_becomes_clean_exit(self, monkeypatch: MonkeyPatch) -> None:
+        # Fast unit check of the decorator path: any ConfigError -> exit(1), no traceback.
+        def _raise(**kwargs):
+            raise NoServerInstancesError("nothing configured to run")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            validate()
+        assert exc_info.value.code == 1
+
+
+class TestListEnvironments:
+    _ALPHA = EnvironmentEntry(
+        name="alpha",
+        config_path=Path("environments/alpha/config.yaml"),
+        path=Path("environments/alpha"),
+        description="Alpha env",
+        domain="agent",
+    )
+
+    def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "alpha" in out
+        assert "agent" in out
+
+    def test_no_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {})
+
+        list_environments()
+
+        assert "No environments found" in capsys.readouterr().out
+
+    def test_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"json": True}))
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out) == [
+            {"name": "alpha", "domain": "agent", "description": "Alpha env"}
+        ]

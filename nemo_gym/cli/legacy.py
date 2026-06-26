@@ -48,6 +48,7 @@ LEGACY = {
     "gitlab_to_hf_dataset": ["dataset", "migrate"],
     "delete_dataset_from_gitlab": ["dataset", "rm"],
     "dump_config": ["env", "resolve"],
+    "validate": ["env", "validate"],
     "help": ["--help"],
     "status": ["env", "status"],
     "pip_list": ["env", "packages"],
