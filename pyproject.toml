@@ -88,6 +88,15 @@ dependencies = [
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
     "openai<=2.7.2",
 
+    # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
+    # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never
+    # use the anthropic client (it uses httpx, whose O(n^2) connection pooling hangs at high
+    # concurrency); all transport stays on aiohttp. Upper-bounded since the version bumps frequently,
+    # mirroring how we pin openai.
+    # Updated Tue Jun 16, 2026 with anthropic<=0.109.2
+    # License: MIT https://github.com/anthropics/anthropic-sdk-python/blob/v0.109.2/LICENSE
+    "anthropic<=0.109.2",
+
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
@@ -106,6 +115,11 @@ dependencies = [
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
     "fastapi",
+
+    # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
+    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
+    # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
+    "mcp>=1.27,<2",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
@@ -136,10 +150,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Mon May 19, 2026 with mlflow>=3.12.0 (CVE remediation)
+    # Updated Sun Jun 22, 2026 with mlflow>=3.14.0 (CVE remediation)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.12.0",
-    "mlflow>=3.12.0",
+    "mlflow-skinny>=3.14.0",
+    "mlflow>=3.14.0",
 
     # aiohttp: async http backend
     # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
@@ -220,6 +234,18 @@ docs = [
 ]
 
 [project.optional-dependencies]
+sandbox = [
+    # Tenacity: Retry helpers used by sandbox providers.
+    # Updated: Sat May 09, 2026 with tenacity==9.1.4
+    # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
+    "tenacity>=9.1.4",
+
+    # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
+    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # License: Apache 2.0
+    "opensandbox>=0.1.9",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # Pre-commit: Used for pre-commit hooks.
@@ -266,6 +292,12 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
+# grpcio is a transitive dependency of ray. Pin the lower bound here to
+# ensure uv selects a CVE-safe version across all resolver paths.
+# Updated Sun Jun 22, 2026 (CVE remediation)
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+]
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
@@ -311,91 +343,111 @@ Download = "https://github.com/NVIDIA-NeMo/Gym/releases"
 Homepage = "https://github.com/NVIDIA-NeMo/Gym"
 
 [project.scripts]
+
+gym = "nemo_gym.cli.main:main"
+ng = "nemo_gym.cli.main:main"
+
+########################## DEPRECATED COMMANDS ##########################
+
 # Run/test scripts for servers.
-nemo_gym_run = "nemo_gym.cli:run"
-ng_run = "nemo_gym.cli:run"
-nemo_gym_test = "nemo_gym.cli:test"
-ng_test = "nemo_gym.cli:test"
-nemo_gym_test_all = "nemo_gym.cli:test_all"
-ng_test_all = "nemo_gym.cli:test_all"
+nemo_gym_run = "nemo_gym.cli.legacy:main"
+ng_run = "nemo_gym.cli.legacy:main"
+nemo_gym_test = "nemo_gym.cli.legacy:main"
+ng_test = "nemo_gym.cli.legacy:main"
+nemo_gym_test_all = "nemo_gym.cli.legacy:main"
+ng_test_all = "nemo_gym.cli.legacy:main"
 
 # Development convenience aliases.
-nemo_gym_dev_test = "nemo_gym.cli:dev_test"
-ng_dev_test = "nemo_gym.cli:dev_test"
-nemo_gym_init_resources_server = "nemo_gym.cli:init_resources_server"
-ng_init_resources_server = "nemo_gym.cli:init_resources_server"
+nemo_gym_dev_test = "nemo_gym.cli.legacy:main"
+ng_dev_test = "nemo_gym.cli.legacy:main"
+nemo_gym_init_resources_server = "nemo_gym.cli.legacy:main"
+ng_init_resources_server = "nemo_gym.cli.legacy:main"
 
 # Benchmarks
-nemo_gym_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-ng_list_benchmarks = "nemo_gym.benchmarks:list_benchmarks"
-nemo_gym_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
-ng_prepare_benchmark = "nemo_gym.benchmarks:prepare_benchmark"
+nemo_gym_list_benchmarks = "nemo_gym.cli.legacy:main"
+ng_list_benchmarks = "nemo_gym.cli.legacy:main"
+nemo_gym_prepare_benchmark = "nemo_gym.cli.legacy:main"
+ng_prepare_benchmark = "nemo_gym.cli.legacy:main"
 
 # Rollout collection
-nemo_gym_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
-ng_collect_rollouts = "nemo_gym.rollout_collection:collect_rollouts"
-nemo_gym_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
-ng_e2e_collect_rollouts = "nemo_gym.cli:e2e_rollout_collection"
-nemo_gym_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
-ng_aggregate_rollouts = "nemo_gym.rollout_collection:aggregate_rollouts"
+nemo_gym_collect_rollouts = "nemo_gym.cli.legacy:main"
+ng_collect_rollouts = "nemo_gym.cli.legacy:main"
+nemo_gym_e2e_collect_rollouts = "nemo_gym.cli.legacy:main"
+ng_e2e_collect_rollouts = "nemo_gym.cli.legacy:main"
+nemo_gym_aggregate_rollouts = "nemo_gym.cli.legacy:main"
+ng_aggregate_rollouts = "nemo_gym.cli.legacy:main"
 
 # Prompt materialization
-nemo_gym_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
-ng_materialize_prompts = "nemo_gym.prompt:materialize_prompts_cli"
+nemo_gym_materialize_prompts = "nemo_gym.cli.legacy:main"
+ng_materialize_prompts = "nemo_gym.cli.legacy:main"
 
 # Reward profiling
-nemo_gym_reward_profile = "nemo_gym.reward_profile:reward_profile"
-ng_reward_profile = "nemo_gym.reward_profile:reward_profile"
+nemo_gym_reward_profile = "nemo_gym.cli.legacy:main"
+ng_reward_profile = "nemo_gym.cli.legacy:main"
 
 # Dataset management
-nemo_gym_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
-ng_upload_dataset_to_gitlab = "nemo_gym.gitlab_utils:upload_jsonl_dataset_cli"
-nemo_gym_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
-ng_download_dataset_from_gitlab = "nemo_gym.gitlab_utils:download_jsonl_dataset_cli"
-nemo_gym_prepare_data = "nemo_gym.train_data_utils:prepare_data"
-ng_prepare_data = "nemo_gym.train_data_utils:prepare_data"
+nemo_gym_upload_dataset_to_gitlab = "nemo_gym.cli.legacy:main"
+ng_upload_dataset_to_gitlab = "nemo_gym.cli.legacy:main"
+nemo_gym_download_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+ng_download_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+nemo_gym_prepare_data = "nemo_gym.cli.legacy:main"
+ng_prepare_data = "nemo_gym.cli.legacy:main"
 
 # HF dataset upload and download
-nemo_gym_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
-ng_upload_dataset_to_hf = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_cli"
-nemo_gym_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
-ng_download_dataset_from_hf = "nemo_gym.dataset_orchestrator:download_jsonl_dataset_from_hf_cli"
+nemo_gym_upload_dataset_to_hf = "nemo_gym.cli.legacy:main"
+ng_upload_dataset_to_hf = "nemo_gym.cli.legacy:main"
+nemo_gym_download_dataset_from_hf = "nemo_gym.cli.legacy:main"
+ng_download_dataset_from_hf = "nemo_gym.cli.legacy:main"
 
 # Gitlab -> HF (upload then delete)
-nemo_gym_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
-ng_gitlab_to_hf_dataset = "nemo_gym.dataset_orchestrator:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli"
+nemo_gym_gitlab_to_hf_dataset = "nemo_gym.cli.legacy:main"
+ng_gitlab_to_hf_dataset = "nemo_gym.cli.legacy:main"
 
 # Manually delete from Gitlab
-nemo_gym_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
-ng_delete_dataset_from_gitlab = "nemo_gym.dataset_orchestrator:delete_jsonl_dataset_from_gitlab_cli"
+nemo_gym_delete_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
+ng_delete_dataset_from_gitlab = "nemo_gym.cli.legacy:main"
 
 # Configuration utils
-nemo_gym_dump_config = "nemo_gym.cli:dump_config"
-ng_dump_config = "nemo_gym.cli:dump_config"
+nemo_gym_dump_config = "nemo_gym.cli.legacy:main"
+ng_dump_config = "nemo_gym.cli.legacy:main"
+
+nemo_gym_validate = "nemo_gym.cli.legacy:main"
+ng_validate = "nemo_gym.cli.legacy:main"
 
 # Display help
-nemo_gym_help = "nemo_gym.cli:display_help"
-ng_help = "nemo_gym.cli:display_help"
+nemo_gym_help = "nemo_gym.cli.legacy:main"
+ng_help = "nemo_gym.cli.legacy:main"
 
 # Server status
-nemo_gym_status = "nemo_gym.cli:status"
-ng_status = "nemo_gym.cli:status"
+nemo_gym_status = "nemo_gym.cli.legacy:main"
+ng_status = "nemo_gym.cli.legacy:main"
 
 # Environment-specific uv pip list
-nemo_gym_pip_list = "nemo_gym.cli:pip_list"
-ng_pip_list = "nemo_gym.cli:pip_list"
+nemo_gym_pip_list = "nemo_gym.cli.legacy:main"
+ng_pip_list = "nemo_gym.cli.legacy:main"
 
 # Display version
-nemo_gym_version = "nemo_gym.cli:version"
-ng_version = "nemo_gym.cli:version"
+nemo_gym_version = "nemo_gym.cli.legacy:main"
+ng_version = "nemo_gym.cli.legacy:main"
 
 # Re-install Gym and dependencies
-nemo_gym_reinstall = "nemo_gym.cli:reinstall"
-ng_reinstall = "nemo_gym.cli:reinstall"
+nemo_gym_reinstall = "nemo_gym.cli.legacy:main"
+ng_reinstall = "nemo_gym.cli.legacy:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["benchmarks", "resources_servers", "responses_api_agents", "responses_api_models", "nemo_gym"]
+include = [
+    "benchmarks",
+    "benchmarks.*",
+    "resources_servers",
+    "resources_servers.*",
+    "responses_api_agents",
+    "responses_api_agents.*",
+    "responses_api_models",
+    "responses_api_models.*",
+    "nemo_gym",
+    "nemo_gym.*",
+]
 
 ################################################
 # Testing
@@ -415,6 +467,8 @@ norecursedirs = [
     "scripts",
     "tools",
     "tutorials",
+    "deps",
+    "results",
     "*.egg",
     ".*",
     "_darcs",

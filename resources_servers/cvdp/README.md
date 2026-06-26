@@ -123,7 +123,9 @@ apt install -y ./apptainer_1.3.1_amd64.deb
 ### Step 1 — Start servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server cvdp \
+    --model-type vllm_model
 ```
 
 ### Step 2 — Run rollout collection
@@ -131,15 +133,18 @@ ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_mo
 `num_repeats` controls how many times each problem is run (for pass@k metrics):
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=cvdp_agent \
-    +input_jsonl_fpath=resources_servers/cvdp/data/<dataset>.jsonl \
-    +output_jsonl_fpath=results/rollouts.jsonl \
-    +num_repeats=5 \
-    +num_samples_in_parallel=4 \
-    "+responses_create_params={max_output_tokens: 4096, temperature: 0.2, top_p: 0.7}" \
-    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
-    "+resume_from_cache=True"
+gym eval run --no-serve \
+    --agent cvdp_agent \
+    --input resources_servers/cvdp/data/<dataset>.jsonl \
+    --output results/rollouts.jsonl \
+    --num-repeats 5 \
+    --concurrency 4 \
+    --max-output-tokens 4096 \
+    --temperature 0.2 \
+    --top-p 0.7 \
+    --resources-server cvdp \
+    --model-type vllm_model \
+    --resume
 ```
 
 At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.json, rollouts_materialized_inputs.jsonl, rollouts_reward_profiling.jsonl.
@@ -158,7 +163,7 @@ python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \
 
 | Arg          | Required | Default    | Description                                               |
 | ------------ | -------- | ---------- | --------------------------------------------------------- |
-| `--rollouts` | Yes      | —          | Rollout JSONL from `ng_collect_rollouts`                  |
+| `--rollouts` | Yes      | —          | Rollout JSONL from `gym eval run --no-serve`              |
 | `--output`   | Yes      | —          | Output directory for reports                              |
 | `--model`    | No       | `nemo-gym` | Model name shown in report metadata                       |
 | `--dataset`  | No       | —          | Path to original CVDP dataset JSONL (for report metadata) |

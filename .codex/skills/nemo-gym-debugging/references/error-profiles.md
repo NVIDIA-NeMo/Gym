@@ -113,7 +113,7 @@ Next actions:
 
 Symptoms:
 
-- `ng_run` or `ng_collect_rollouts` fails before launching servers
+- `gym env start` or `gym eval run --no-serve` fails before launching servers
 - errors mention missing config keys, unknown overrides, or interpolation failures
 - wrong agent/resource server starts despite expected data
 
@@ -134,7 +134,7 @@ Evidence to collect:
 
 Next actions:
 
-- reduce to a minimal `ng_run "+config_paths=[...]"` command
+- reduce to a minimal `gym env start --config ...` command
 - add overrides back one at a time
 - trust target checkout code over copied command templates
 

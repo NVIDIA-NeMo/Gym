@@ -66,14 +66,14 @@ parser name that matches your model's reasoning tokens (see `vllm serve
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/math_proof_judgement/configs/math_proof_judgement.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server math_proof_judgement
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=math_proof_judgement_simple_agent \
-    +input_jsonl_fpath=resources_servers/math_proof_judgement/data/example.jsonl \
-    +output_jsonl_fpath=results/math_proof_judgement_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent math_proof_judgement_simple_agent \
+    --input resources_servers/math_proof_judgement/data/example.jsonl \
+    --output results/math_proof_judgement_rollouts.jsonl \
+    --num-repeats 1
 ```

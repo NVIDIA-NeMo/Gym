@@ -47,7 +47,7 @@ def split_by_rollout(rollouts_path: str) -> dict[int, list[dict]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate CVDP pass@k report from NeMo-Gym rollouts")
-    parser.add_argument("--rollouts", required=True, help="pass@k rollout JSONL from ng_collect_rollouts")
+    parser.add_argument("--rollouts", required=True, help="pass@k rollout JSONL from gym eval run")
     parser.add_argument("--output", required=True, help="Output directory")
     parser.add_argument("--model", default="nemo-gym", help="Model name for report metadata")
     parser.add_argument("--dataset", help="Path to original CVDP dataset JSONL (for report metadata)")

@@ -1,0 +1,174 @@
+---
+title: "Evaluate EvalPlus"
+description: "Run the EvalPlus coding benchmark and inspect rollout and aggregate metric outputs."
+position: 2
+---
+
+EvalPlus evaluates Python function-completion ability. NeMo Gym's `evalplus` resources server sends HumanEval+ or MBPP+ prompts to an agent, extracts the model's Python code, runs EvalPlus base and plus tests, and returns a pass/fail score and verdict fields for each task.
+
+Use this tutorial for a small, reproducible coding evaluation before scaling to a larger benchmark run.
+
+## What This Tutorial Runs
+
+This walkthrough uses:
+
+| Component | Value |
+|---|---|
+| Benchmark resources server | `resources_servers/evalplus` |
+| Config | `resources_servers/evalplus/configs/evalplus.yaml` |
+| Agent | `evalplus_simple_agent` |
+| Dataset | `resources_servers/evalplus/data/example.jsonl` |
+| Tasks | 5 HumanEval examples |
+| Pass score (`reward` field) | `1.0` when the generated code passes EvalPlus plus tests |
+
+The config currently selects `dataset: humaneval`. The same resources server also supports MBPP+ through the `dataset` field.
+
+## Prerequisites
+
+Complete [Installation](/get-started/installation) and configure a model endpoint as shown in [Quickstart](/get-started/quickstart).
+
+EvalPlus executes generated Python code in the verifier. Run this tutorial in an environment where code execution is expected and isolated per the team's policy.
+
+<Note>
+
+When using a thinking model with vLLM, start vLLM with the appropriate reasoning parser so `<think>...</think>` text is stripped before EvalPlus extracts code.
+
+</Note>
+
+## Start Servers
+
+Run from the repository root:
+
+The values below are examples. Choose the `--model-url`, `--model-type`, and `--model` that match the endpoint and model you want to evaluate.
+
+```bash
+: "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY before running this tutorial.}"
+
+gym env start \
+    --resources-server evalplus \
+    --model-type vllm_model \
+    --model-url "https://integrate.api.nvidia.com/v1" \
+    --model-api-key "${NVIDIA_API_KEY}" \
+    --model "nvidia/nemotron-3-ultra-550b-a55b" \
+```
+
+This starts:
+
+- `evalplus`, the resources server
+- `evalplus_simple_agent`, the agent server
+- `policy_model`, the model server
+
+This example uses `vllm_model` as a Responses API to Chat Completions bridge against NVIDIA's OpenAI-compatible endpoint. To use an external vLLM server instead, point the same model wrapper at your vLLM endpoint and choose the model name served by that endpoint:
+
+```bash
+gym env start \
+    --resources-server evalplus \
+    --model-type vllm_model \
+    --model-url "http://0.0.0.0:10240/v1" \
+    --model-api-key "dummy_key" \
+    --model "<served-model-name>"
+```
+
+## How Evaluation Works
+
+The `evalplus` resources server contains the evaluation logic. During rollout collection, the server's `verify()` method ([resources_servers/evalplus/app.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/evalplus/app.py)) runs three steps for each agent response:
+
+1. Extracts the Python code block from the model output
+2. Runs it against EvalPlus base and plus tests via `check_correctness_remote`
+3. Returns `is_correct` (base tests), `is_correct_plus` (plus tests), and `reward=1.0` if plus tests pass
+
+`gym eval run --no-serve` then aggregates these per-task results into `pass@k` and `majority@k` metrics in `_aggregate_metrics.json`.
+
+Evaluation is not a separate step; it happens inside the resources server during rollout collection.
+
+## Collect Rollouts
+
+In a second terminal, activate the NeMo Gym environment and collect a five-task smoke test:
+
+```bash
+source .venv/bin/activate
+mkdir -p results
+
+gym eval run --no-serve \
+    --agent evalplus_simple_agent \
+    --input resources_servers/evalplus/data/example.jsonl \
+    --output results/evalplus_rollouts.jsonl \
+    --limit 5 \
+    --num-repeats 1
+```
+
+This writes the rollout file and sidecar artifacts under `results/`, including:
+
+- `results/evalplus_rollouts.jsonl`
+- `results/evalplus_rollouts_materialized_inputs.jsonl`
+- `results/evalplus_rollouts_aggregate_metrics.json`
+
+## Inspect Rollouts
+
+Each rollout row contains the model response, extracted code, verifier verdicts, and a pass/fail score. The most useful fields are:
+
+| Field | Meaning |
+|---|---|
+| `extracted_model_code` | Python code EvalPlus extracted from the model response. |
+| `base_status` | Whether the code passed the base HumanEval or MBPP tests. |
+| `plus_status` | Whether the code passed EvalPlus extra tests. |
+| `is_correct` | Boolean base-test verdict. |
+| `is_correct_plus` | Boolean plus-test verdict. |
+| `reward` | `1.0` when plus tests pass, otherwise `0.0`. |
+
+Use the rollout JSONL to debug individual failures. For example, compare `extracted_model_code` with the prompt in `responses_create_params.input` and the verifier verdicts.
+
+## Read Aggregate Metrics
+
+Use the aggregate metrics file for the top-level scorecard:
+
+```bash
+cat results/evalplus_rollouts_aggregate_metrics.json
+```
+
+For EvalPlus, compare base-test and plus-test metrics. A model can pass the base tests while failing the stricter plus tests, so treat plus-test performance as the stricter headline metric.
+
+## What You Can Evaluate
+
+This tutorial uses `evalplus_simple_agent`, a thin passthrough that sends the prompt directly to the model and returns its output, so scores measure the model's coding ability in isolation.
+
+The same setup works for evaluating an agent harness. Swap `evalplus_simple_agent` for any other agent config (e.g. a reflection agent or a code-execution agent) and set its `resources_server.name` to `evalplus`. The resources server and verifier are unchanged, so scores are directly comparable across agents and models.
+
+| What you're measuring | Agent config |
+|---|---|
+| Model coding ability | `evalplus_simple_agent` (passthrough) |
+| Agent harness quality | Any agent wired to the `evalplus` resources server |
+
+The same `gym eval run --no-serve` command works in both cases; what changes is what the score reflects.
+
+## Scale the Run
+
+After the smoke test succeeds:
+
+1. Remove `--limit 5` to run the configured dataset.
+2. Increase `--num-repeats` to get statistically meaningful scores (see below).
+3. Keep the model, agent, dataset, sampling settings, and EvalPlus config fixed when comparing models.
+4. Save rollout JSONL, aggregate metrics, model ID, config files, and git SHA with the run notes.
+
+### Choosing `--num-repeats`
+
+All models are stochastic at temperature > 0, so a single attempt per task is a point estimate with no measure of stability. `--num-repeats` controls how many independent attempts are collected per task, and it unlocks a richer set of aggregate metrics:
+
+| `--num-repeats` | Metrics available |
+|---|---|
+| 1 | `pass@1` only |
+| >= 2 | `pass@k`, `majority@k`, `pass@1` standard error and standard deviation across runs, within-task variance |
+
+Even `--num-repeats 4` is enough to surface `std_err_across_runs` and `pass@4`, which tells you whether a score difference between two models is real or noise. Use `--num-repeats 1` for smoke tests; use `--num-repeats 4` or higher when reporting results.
+
+<Cards>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the `_aggregate_metrics.json` format.
+</Card>
+
+<Card title="Environment List" href="/evaluation/environment-list">
+Find other Eval benchmarks.
+</Card>
+
+</Cards>

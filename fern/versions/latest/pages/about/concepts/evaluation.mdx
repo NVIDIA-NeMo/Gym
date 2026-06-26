@@ -6,26 +6,38 @@ position: 1.6
 
 <Info>
 
-**Goal**: Understand what evaluation is, how to evaluate agents and models, and what makes a good eval.
+**Goal**: Understand what evaluation is, how to evaluate agents and models, and what makes a good evaluation.
 
 **Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
+
+For the end-to-end workflow, see [Evaluation](/evaluation).
 
 </Info>
 
 ## What is Evaluation?
 
-Run an agent on tasks, score the results, measure performance. Evaluation exists to guide improvement — scores tell you what's working, what's not, and where to focus next.
+Evaluation is the entire process of running an agent on tasks, scoring the results and measuring performance. It exists to guide improvements to the AI pipeline — evaluation scores give information on what's working, what's not, and where to focus next.
 
-Accuracy is the most common metric, but it's not the only one that matters. Token usage, latency, and number of tool calls are often just as important — two agents might solve the same tasks but one uses 3x fewer tokens or completes in half the time. A good eval captures the dimensions most important for your use case.
+Model performance has many different dimensions, and evaluation can be used to measure them: from the model's accuracy, or any other similar definition of intelligence, to the quality of its tool calling, the confidence in operating in a specific environment, and even latency or token usage.
 
-For example: you want to know how accurate your coding agent is at fixing bugs. You need:
-- A set of real bugs to test against (**dataset**)
-- A sandbox with the code repository for the agent to work in (**state**)
-- A test suite to check if the fix actually works (**verifier**)
+The process of evaluating entails different components. For example: to evaluate how accurate a coding agent is at fixing bugs, the following are needed:
+- The model (in Gym, accessed by deploying the **model server**)
+- The agent harness, which determines the tools it can access (**agent server**)
+- A set of real bugs to test against (the dataset, integrated into the **environment** in the **resources server**)
+- A sandbox with the code repository for the agent to work in (**state**, that exists in an **environment** in the **resources server**)
+- A test suite to check if the fix actually works (**verifier**, contained in the **environment**)
+
+## Environments vs Benchmarks
+
+An **environment** is the executable task setup: dataset, resources server, verifier, state, tools, and the agent interaction pattern. It defines what the agent can do and how each attempt is scored.
+
+A **benchmark** is a repeatable evaluation built on top of an environment. It fixes the dataset, the metrics being tracked and the comparison protocol, so different models or harnesses can be compared fairly.
+
+Not every environment is a benchmark. Some environments are used mainly for training data or harness development. Conversely, a benchmark may use one environment with a fixed split, or a curated subset of an environment selected for a specific capability.
 
 ## How to Evaluate Agents and Models
 
-You can evaluate the model, the agent harness, or both together depending on what you're trying to improve.
+The model, the agent harness, or both can be evaluated together depending on what is being improved.
 
 ![Model vs Agent Evaluation](/assets/images/model-vs-agent-eval.png)
 
@@ -41,21 +53,21 @@ The agent harness (e.g. OpenHands) is held constant so the scores reflect model 
 
 Swap the agent harness, keep everything else the same.
 
-> E.g. you added a new tool, rewrote the system prompt, or changed the retry logic — run the same tasks with the same model to see if your agent improved.
+> E.g. a new tool was added, the system prompt was rewritten, or the retry logic was changed — running the same tasks with the same model shows whether the agent improved.
 
 The model is held constant so the scores reflect harness quality. A new tool might improve accuracy while tripling token usage; the eval should capture both. The environment and model are the same — only the harness changes.
 
 ## Evaluation Data
 
-The most important property of evaluation data is that it represents your actual use case. High scores on a public benchmark don't guarantee performance on your tasks if the distribution is different. When possible, combine public benchmarks with custom data drawn from your domain. Tasks can come from multiple sources:
+The most important property of evaluation data is that it represents the actual use case. High scores on a public benchmark don't guarantee performance on specific tasks if the distribution is different. When possible, combine public benchmarks with custom data drawn from the target domain. Tasks can come from multiple sources:
 
 - **Public benchmarks** — standardized task sets for community comparison (e.g. SWE-Bench, AIME, HLE, Tau2).
-- **Custom datasets** — tasks specific to your use case, domain, or deployment.
+- **Custom datasets** — tasks specific to the target use case, domain, or deployment.
 - **Production traces** — real agent interactions captured from deployed systems.
 
 How much data you need depends on what you're measuring. A few hundred tasks can surface major capability gaps. Distinguishing small improvements (e.g. 2-3% accuracy gains) requires larger datasets and multiple repeats per task to separate signal from noise.
 
-## What Makes a Good Eval
+## Characteristics of Good Evaluation
 
 ### Coverage
 
@@ -63,7 +75,7 @@ Tasks should be diverse and representative of real usage. A narrow eval suite gi
 
 ### Verifier Design
 
-The verifier defines what "good" means — not just correctness, but potentially efficiency, format adherence, or safety. A noisy or biased verifier gives misleading scores — you'll optimize for the wrong thing. Programmatic checks (exact match, test suites, code execution) are more consistent than LLM-as-Judge; use them when possible.
+The verifier defines what "good" means — not just correctness, but potentially efficiency, format adherence, or safety. A noisy or biased verifier gives misleading scores — the result is optimization for the wrong thing. Programmatic checks (exact match, test suites, code execution) are more consistent than LLM-as-Judge; use them when possible.
 
 ### Realistic Interaction
 
@@ -89,6 +101,10 @@ Post-training techniques and how environments are used for training.
 
 <Card title="Data" href="/data">
 Prepare datasets for environments.
+</Card>
+
+<Card title="Evaluation Workflow" href="/evaluation">
+Run repeatable model and agent evaluations with NeMo Gym environments.
 </Card>
 
 </Cards>
