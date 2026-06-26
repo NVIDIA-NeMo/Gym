@@ -45,9 +45,9 @@ from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerSandboxProvider
-from resources_servers.swe_env.verify_task import verify_task
 from responses_api_agents.swe_env.harness import SweTask
 from responses_api_agents.swe_env.self_drive import provision_and_collect
+from responses_api_agents.swe_env.verify_task import verify_task
 
 
 class SWEBenchMetrics(BaseModel):

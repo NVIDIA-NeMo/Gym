@@ -34,9 +34,9 @@ import urllib.request
 
 import pytest
 
-from resources_servers.swe_env.verify_task import verify_task
 from responses_api_agents.swe_env.grading import reward_from_report
 from responses_api_agents.swe_env.harness import SweTask
+from responses_api_agents.swe_env.verify_task import verify_task
 
 
 _RUN = os.environ.get("SWE_ENV_REAL_SWEBENCH") == "1" and shutil.which("docker") is not None

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pure grading helpers shared by harnesses + the verifier server.
+"""Pure grading helpers shared by the harnesses and the ``verify_task`` grader.
 
 These functions never touch a sandbox; they decide ``resolved`` from parsed
 test status and map a report to a (non-nullable) reward.

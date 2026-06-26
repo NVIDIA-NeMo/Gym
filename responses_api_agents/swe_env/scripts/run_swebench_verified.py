@@ -25,14 +25,14 @@ This is a driver/operational script (not a unit test). Requires extra deps:
 
 Examples:
     # smoke (5 instances), docker provider, prune images to bound disk
-    python resources_servers/swe_env/scripts/run_swebench_verified.py --limit 5
+    python responses_api_agents/swe_env/scripts/run_swebench_verified.py --limit 5
 
     # full 500, 4 in parallel, keep an incremental results file
-    python resources_servers/swe_env/scripts/run_swebench_verified.py \\
+    python responses_api_agents/swe_env/scripts/run_swebench_verified.py \\
         --concurrency 4 --output /tmp/swebench_gold_results.jsonl
 
     # apptainer provider (converts each image to .sif on the fly, then removes it)
-    python resources_servers/swe_env/scripts/run_swebench_verified.py --provider apptainer --limit 5
+    python responses_api_agents/swe_env/scripts/run_swebench_verified.py --provider apptainer --limit 5
 """
 
 from __future__ import annotations

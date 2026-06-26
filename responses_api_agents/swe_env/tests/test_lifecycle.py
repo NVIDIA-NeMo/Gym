@@ -26,10 +26,10 @@ import pytest
 
 import responses_api_agents.swe_env.harnesses  # noqa: F401  (register harnesses)
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxStatus
-from resources_servers.swe_env.verify_task import verify_task
 from responses_api_agents.swe_env.harness import SweTask
 from responses_api_agents.swe_env.harnesses.swe_bench_ext import SweBenchExtHarness
 from responses_api_agents.swe_env.lifecycle import acquire_sandbox
+from responses_api_agents.swe_env.verify_task import verify_task
 
 
 class _CountingProvider:

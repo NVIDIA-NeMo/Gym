@@ -18,9 +18,9 @@ Any agent that runs to completion inside a sandbox (editing the repo at the task
 working directory) can reuse these helpers: provision a working sandbox via a
 ``SandboxProvider``, inject a sandbox-reachable model endpoint and/or extra
 environment for egress, run an opaque agent launch command, and extract the
-resulting unified-diff patch. Grading is decoupled — callers either POST the patch
-to the verifier over HTTP, or call :func:`run_self_driving` to grade in-process in a
-fresh sandbox. The agent launch command, staged files, and patch-output location are
+resulting unified-diff patch. Grading is decoupled — callers grade the patch
+in-process via :func:`run_self_driving` (or ``verify_task`` directly) in a fresh
+sandbox. The agent launch command, staged files, and patch-output location are
 caller-supplied, so nothing here is specific to any one agent harness.
 """
 
@@ -282,7 +282,7 @@ async def run_self_driving(
         A dict with the instance id, model patch, resolution status, reward, whether a patch
         exists, whether the sample is masked, and the verifier's error kind.
     """
-    from resources_servers.swe_env.verify_task import verify_task
+    from responses_api_agents.swe_env.verify_task import verify_task
 
     patch = await provision_and_extract_patch(
         task,

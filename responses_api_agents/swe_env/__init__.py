@@ -17,8 +17,9 @@
 Decouples SWE environment infrastructure (sandbox provisioning, exec, and
 verification recipes) from agent harnesses. Built entirely on
 ``nemo_gym.sandbox``. Any agent imports this to provision and drive its own
-working container; the separate ``resources_servers/swe_env`` verifier imports
-the harness recipes and grading to score a patch in a fresh sandbox.
+working container and to grade a patch inline via ``verify_task`` (the harness
+recipes plus grading score the patch in a fresh sandbox) — no separate verifier
+server is required.
 """
 
 from responses_api_agents.swe_env.environment import AsyncSweEnvironment

@@ -26,7 +26,6 @@ from nemo_gym.sandbox import (
     SandboxStatus,
     register_provider,
 )
-from resources_servers.swe_env.verify_task import ProviderCapabilityError, verify_task
 from responses_api_agents.swe_env import (
     compute_resolved,
     get_harness,
@@ -35,6 +34,7 @@ from responses_api_agents.swe_env import (
 )
 from responses_api_agents.swe_env.harness import EvalArtifacts, SweEvalReport, SweTask
 from responses_api_agents.swe_env.harnesses.swe_bench_ext import SweBenchExtHarness
+from responses_api_agents.swe_env.verify_task import ProviderCapabilityError, verify_task
 
 
 # Trailing-status pytest text (``<node_id> PASSED``) is the format the test

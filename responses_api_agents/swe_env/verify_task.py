@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Verification orchestrator for the SWE environment verifier.
+"""Verification orchestrator for the SWE environment.
 
-Imported by the verifier resources server; agents POST a patch to ``/verify``.
-Runs a fresh-only sequence via ``acquire_sandbox`` (always-teardown), bounded by
-a per-call eval timeout. Infra failures are masked as a typed ``error_kind``
-(reward 0.0) rather than crashing the server.
+Grades an agent's patch inline as a library call (used by anyswe and the
+``swe_env`` self-driving harness) — there is no separate verifier server. Runs a
+fresh-only sequence via ``acquire_sandbox`` (always-teardown), bounded by a
+per-call eval timeout. Infra failures are masked as a typed ``error_kind``
+(reward 0.0) rather than raising.
 
 Every eval spec is stamped with a ``ttl_s`` so TTL-honoring backends (such as
-opensandbox) self-expire orphaned sandboxes, and callers bound their ``/verify``
-POST with a client-side timeout so a retried or hung verify cannot pin a rollout
-slot.
+opensandbox) self-expire orphaned sandboxes.
 """
 
 from __future__ import annotations

@@ -18,9 +18,9 @@ The harness contract is intentionally split across a trust boundary:
 
 * ``build_spec`` / ``supports_provider`` / ``materialize`` are **provisioning**
   methods imported and called by *agents* (and the verifier).
-* ``reset_repo`` / ``run_eval`` / ``grade`` are **server-private grading**
-  methods used **only** by the verifier server. A test asserts agent adapters
-  never reference them.
+* ``reset_repo`` / ``run_eval`` / ``grade`` are **grading** methods used
+  **only** by the grader (``verify_task``). A test asserts agent adapters never
+  reference them.
 """
 
 from __future__ import annotations
