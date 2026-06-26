@@ -216,10 +216,15 @@ redirects:
     destination: "/nemo/gym/main/build-verifiers"
   - source: "/nemo/gym/main/build-verifiers/resources-server"
     destination: "/nemo/gym/main/build-verifiers"
+  # Example Resources Servers page was removed; fold into the Build Verifiers index
+  - source: "/nemo/gym/build-verifiers/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers"
+  - source: "/nemo/gym/main/build-verifiers/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers"
   - source: "/nemo/gym/resources-server/example-resources-servers"
-    destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers"
   - source: "/nemo/gym/main/resources-server/example-resources-servers"
-    destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"
