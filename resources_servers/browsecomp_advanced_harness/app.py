@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import re
 from asyncio import sleep
 from collections import defaultdict
@@ -160,6 +161,7 @@ class TavilySearchMetrics(BaseModel):
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
+    reset_count: int = 0
     metrics: TavilySearchMetrics
 
 
@@ -249,11 +251,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
 
+        # Optional Tavily client-source identity header (matches bc_frankie's
+        # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
+        # not hardcoded. Empty/unset => header not sent.
+        client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
         self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
         for async_tavily_client in self._async_tavily_clients:
             async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
                 async_tavily_client._client, self.config.debug
             )
+            if client_source:
+                async_tavily_client._client.headers["x-client-source"] = client_source
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -403,10 +411,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
 
+        # num_tool_calls now comes from the agent loop (counts ALL tool calls,
+        # including those made before context resets). Fall back to the old
+        # final-output count only if the agent didn't surface it.
+        agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
+        if agent_num_tool_calls is None:
+            agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
-            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
+            num_tool_calls=agent_num_tool_calls,
+            reset_count=getattr(body.response, "reset_count", 0) or 0,
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
 
