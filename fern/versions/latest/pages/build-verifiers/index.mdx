@@ -1,0 +1,19 @@
+---
+title: "Build Verifiers"
+description: "Implement the verification logic that evaluates agent behavior and computes reward signals."
+position: 1
+---
+
+A verifier is the `/verify` endpoint in a NeMo Gym resources server. It receives the agent's output at the end of a rollout, evaluates it against the task's ground truth, and returns a numeric reward used for training and evaluation.
+
+<Cards>
+
+<Card title="Verification Patterns" href="/build-verifiers/verification-patterns">
+Choose the right verification approach for your task — equivalence match, execution-based checking, LLM-as-Judge, or reward model.
+</Card>
+
+<Card title="Resources Server" href="/resources-server">
+Understand the full resources server structure that hosts your verifier alongside tools and session state.
+</Card>
+
+</Cards>

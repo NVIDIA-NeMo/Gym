@@ -24,6 +24,9 @@ navigation:
       - folder: ./latest/pages/resources-server
         title: "Resources Server"
         title-source: frontmatter
+      - folder: ./latest/pages/build-verifiers
+        title: "Build Verifiers"
+        title-source: frontmatter
       - folder: ./latest/pages/data
         title: "Data"
         title-source: frontmatter
