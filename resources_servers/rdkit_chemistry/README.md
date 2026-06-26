@@ -65,15 +65,14 @@ takes precedence over `use_box_format`.
 ## Example Usage
 
 ```bash
-config_paths="resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+gym env start \
+    --resources-server rdkit_chemistry \
+    --model-type openai_model
 
-ng_run "+config_paths=[${config_paths}]"
-
-ng_collect_rollouts \
-    +agent_name=rdkit_chemistry_agent \
-    +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent rdkit_chemistry_agent \
+    --input resources_servers/rdkit_chemistry/data/example.jsonl \
+    --output resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
 ```
 
 ## Licensing

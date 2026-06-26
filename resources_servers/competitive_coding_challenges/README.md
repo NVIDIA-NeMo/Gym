@@ -61,15 +61,17 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 
 The following allows users to launch the environment followed by the request for generating and collecting rollouts.
 ```bash
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+  --config "$config_paths" \
   +simple_agent.responses_api_agents.simple_agent.resources_server.name=competitive_coding_challenges_resources_server
 
-ng_collect_rollouts +agent_name=simple_agent \
-  +input_jsonl_fpath=$input_jsonl_fpath \
-  +output_jsonl_fpath=$output_jsonl_fpath \
-  +limit=null \
-  +num_repeats=1 \
-  +num_samples_in_parallel=null
+gym eval run --no-serve \
+  --agent simple_agent \
+  --input $input_jsonl_fpath \
+  --output $output_jsonl_fpath \
+  --limit null \
+  --num-repeats 1 \
+  --concurrency null
 ```
 
 ## Additional Information

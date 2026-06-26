@@ -7,25 +7,25 @@ This benchmark chains to the existing `instruction_following` resources server, 
 ## Prepare data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/ifeval/config.yaml]"
+gym eval prepare --benchmark ifeval
 ```
 
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/ifeval/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark ifeval
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=ifeval_instruction_following_simple_agent \
-    +input_jsonl_fpath=benchmarks/ifeval/data/ifeval_benchmark.jsonl \
-    +output_jsonl_fpath=results/ifeval_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent ifeval_instruction_following_simple_agent \
+    --input benchmarks/ifeval/data/ifeval_benchmark.jsonl \
+    --output results/ifeval_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Scoring notes
