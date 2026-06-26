@@ -57,6 +57,7 @@ from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
+    split_responses_input_output_items,
 )
 
 
@@ -2498,6 +2499,29 @@ class TestApp:
         ]
         actual_messages = mock_method.call_args.kwargs["messages"]
         assert expected_messages == actual_messages
+
+
+def test_split_responses_treats_function_call_as_output() -> None:
+    input_item = NeMoGymEasyInputMessage(
+        role="user",
+        content=[{"type": "input_text", "text": "Fix the bug."}],
+        type="message",
+    )
+    function_call = NeMoGymResponseFunctionToolCall(
+        call_id="call_123",
+        type="function_call",
+        name="execute_bash",
+        arguments='{"cmd": "pytest"}',
+        status="completed",
+        id="call_123",
+    )
+
+    input_items, output_items = split_responses_input_output_items(
+        [input_item, function_call]
+    )
+
+    assert input_items == [input_item]
+    assert output_items == [function_call]
 
 
 class TestVLLMConverter:
