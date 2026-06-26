@@ -15,13 +15,13 @@ New to the concepts? Start with [Environments](/about/concepts/environments) and
 
 You build a resources server by subclassing one of two base classes. At runtime it runs as a web server that the agent drives over HTTP:
 
-- **`SimpleResourcesServer`** — the agent calls `/seed_session` at the start to initialize per-task state (optional) and `/verify` at the end to score the trajectory. Tools are exposed as additional endpoints or over MCP.
+- **`SimpleResourcesServer`** — the agent calls `/seed_session` at the start to initialize per-task state (optional) and `/verify` at the end to score the rollout. Tools are exposed as additional endpoints or over MCP.
 - **`GymnasiumServer`** — scores incrementally via `/step` (with `/reset` at the start) instead of a single `/verify`, for environments that need per-turn observations and rewards.
 
 <Cards>
 
 <Card title="Verification Patterns" href="/build-verifiers/verification-patterns">
-Choose how to compute a score: equivalence match, execution and state match, LLM-as-Judge, or reward models.
+How to score a rollout, from execution and state checks to LLM-as-Judge.
 </Card>
 
 </Cards>
