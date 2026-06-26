@@ -497,6 +497,44 @@ def _ephemeral_storage_block(requested: Any) -> dict[str, int] | None:
     return {"sizeInGiB": size}
 
 
+# Valid Fargate task cpu (units) -> inclusive memory range (MiB). cpu/memory are not independent:
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html
+_FARGATE_MEMORY_RANGE_MIB: dict[int, tuple[int, int]] = {
+    256: (512, 2048),
+    512: (1024, 4096),
+    1024: (2048, 8192),
+    2048: (4096, 16384),
+    4096: (8192, 30720),
+    8192: (16384, 61440),
+    16384: (32768, 122880),
+}
+
+
+def _validate_fargate_cpu_memory(cpu: int, memory: int) -> None:
+    """Validate that a Fargate task cpu (units) + memory (MiB) form a supported combination.
+
+    Fargate rejects independent cpu/memory values (e.g. cpu=4096 with memory=512), so callers that
+    derive the two separately (max-of-base-and-config) must check the pair before RegisterTaskDefinition.
+    """
+    memory_range = _FARGATE_MEMORY_RANGE_MIB.get(cpu)
+    if memory_range is None:
+        raise ValueError(f"Fargate task cpu must be one of {sorted(_FARGATE_MEMORY_RANGE_MIB)} units (got {cpu})")
+    low, high = memory_range
+    if not low <= memory <= high:
+        raise ValueError(f"Fargate memory for cpu={cpu} must be {low}-{high} MiB (got {memory})")
+
+
+def _delete_s3_object(cfg: EcsFargateConfig, key: str) -> None:
+    """Best-effort delete of a transient S3 artifact; never raises."""
+    if not cfg.s3_bucket or not key:
+        return
+    try:
+        boto3, *_ = _require_aws_sdks()
+        boto3.client("s3", region_name=cfg.region).delete_object(Bucket=cfg.s3_bucket, Key=key)
+    except Exception:
+        logger.debug("Failed to delete S3 object s3://%s/%s", cfg.s3_bucket, key, exc_info=True)
+
+
 def download_secret_to_file(secret_arn: str, region: str | None = None) -> str:
     """Fetch a Secrets Manager secret → temp file (mode 0600)."""
     key_material = download_secret_to_string(secret_arn, region=region)
@@ -1121,9 +1159,17 @@ class ImageBuilder:
             if is_builder:
                 event = threading.Event()
                 cls._inflight_builds[tag] = event
-            if cls._build_semaphore is None or cls._build_semaphore_size != cfg.build_parallelism:
+            if cls._build_semaphore is None:
                 cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
                 cls._build_semaphore_size = cfg.build_parallelism
+            elif cls._build_semaphore_size != cfg.build_parallelism:
+                # Init once: never replace a live semaphore (a permit held against the old object
+                # would be released into the new one, drifting the cap). Honor the first caller's size.
+                logger.warning(
+                    "build_parallelism=%d ignored; build semaphore already initialized at %d",
+                    cfg.build_parallelism,
+                    cls._build_semaphore_size,
+                )
             semaphore = cls._build_semaphore
 
         if not is_builder:
@@ -1342,27 +1388,31 @@ class ImageBuilder:
         nonce = uuid.uuid4().hex[:8]
         logger.info("Building image via CodeBuild: %s", image_url)
         s3_key = cls._upload_build_context(cfg, environment_name, nonce)
-        cb = boto3.client("codebuild", region_name=cfg.region)
-        project_name = cls._resolve_codebuild_project(cfg, cb, nonce)
-        buildspec = cls._generate_buildspec(cfg, repo_name, tag, image_url)
-        resp = _retry_with_backoff(
-            lambda: cb.start_build(
-                projectName=project_name,
-                sourceTypeOverride="S3",
-                sourceLocationOverride=f"{cfg.s3_bucket}/{s3_key}",
-                buildspecOverride=buildspec,
-                timeoutInMinutesOverride=cfg.codebuild_build_timeout,
-                privilegedModeOverride=True,
-                environmentTypeOverride="LINUX_CONTAINER",
-                imageOverride="aws/codebuild/amazonlinux-x86_64-standard:5.0",
-                computeTypeOverride=cfg.codebuild_compute_type,
-            ),
-            operation_name="codebuild.start_build",
-            max_retries=5,
-        )
-        build_id = resp["build"]["id"]
-        logger.info("CodeBuild started: %s", build_id)
-        cls._poll_codebuild(cb, build_id, image_url)
+        try:
+            cb = boto3.client("codebuild", region_name=cfg.region)
+            project_name = cls._resolve_codebuild_project(cfg, cb, nonce)
+            buildspec = cls._generate_buildspec(cfg, repo_name, tag, image_url)
+            resp = _retry_with_backoff(
+                lambda: cb.start_build(
+                    projectName=project_name,
+                    sourceTypeOverride="S3",
+                    sourceLocationOverride=f"{cfg.s3_bucket}/{s3_key}",
+                    buildspecOverride=buildspec,
+                    timeoutInMinutesOverride=cfg.codebuild_build_timeout,
+                    privilegedModeOverride=True,
+                    environmentTypeOverride="LINUX_CONTAINER",
+                    imageOverride="aws/codebuild/amazonlinux-x86_64-standard:5.0",
+                    computeTypeOverride=cfg.codebuild_compute_type,
+                ),
+                operation_name="codebuild.start_build",
+                max_retries=5,
+            )
+            build_id = resp["build"]["id"]
+            logger.info("CodeBuild started: %s", build_id)
+            cls._poll_codebuild(cb, build_id, image_url)
+        finally:
+            # The build-context zip is only needed during the CodeBuild job.
+            _delete_s3_object(cfg, s3_key)
 
     @classmethod
     def run_buildspec_via_codebuild(
@@ -1470,6 +1520,7 @@ class EcsFargateSandbox:
         self._ec2: Any = None
         self._ssm: Any = None
         self._runtime_container_env: dict[str, str] = {}
+        self._s3_artifacts: list[str] = []  # transient S3 keys to delete on cleanup
         self._ssh_tunnel_port: int | None = None
         self._agent_forward_port: int | None = None
         self._outside_endpoints: list[OutsideEndpoint] = []
@@ -1911,12 +1962,15 @@ class EcsFargateSandbox:
             target["mountPoints"] = existing_mounts + mount_points
 
         family = self._make_family_name()
+        cpu = max(int(base.get("cpu") or "256"), int(cfg.cpu))
+        memory = max(int(base.get("memory") or "512"), int(cfg.memory))
+        _validate_fargate_cpu_memory(cpu, memory)
         payload: dict[str, Any] = {
             "family": family,
             "networkMode": base.get("networkMode", "awsvpc"),
             "requiresCompatibilities": base.get("requiresCompatibilities", ["FARGATE"]),
-            "cpu": str(max(int(base.get("cpu") or "256"), int(cfg.cpu))),
-            "memory": str(max(int(base.get("memory") or "512"), int(cfg.memory))),
+            "cpu": str(cpu),
+            "memory": str(memory),
             "containerDefinitions": containers,
         }
         ephemeral = _ephemeral_storage_block(
@@ -1962,6 +2016,7 @@ class EcsFargateSandbox:
         if mount_points:
             container_def["mountPoints"] = mount_points
 
+        _validate_fargate_cpu_memory(int(cfg.cpu), int(cfg.memory))
         payload: dict[str, Any] = {
             "family": self._make_family_name(),
             "networkMode": "awsvpc",
@@ -2227,6 +2282,12 @@ class EcsFargateSandbox:
                     logger.info("Container public IP: %s", pub)
                     return pub
                 priv = iface.get("PrivateIpAddress")
+                # When a public IP is expected, keep retrying for it to propagate before falling back
+                # to the private IP on the last attempt — the orchestrator is outside the VPC and
+                # cannot reach the private address, so an early private fallback only yields a
+                # misleading SSH-timeout later.
+                if self._cfg.assign_public_ip and attempt < max_retries:
+                    raise RuntimeError(f"ENI {eni_id} has no public IP yet")
                 if priv:
                     logger.info("Container private IP: %s", priv)
                     return priv
@@ -2316,6 +2377,9 @@ class EcsFargateSandbox:
             except Exception:
                 logger.debug("Failed to remove SSH key file %s", self._ssh_key_file, exc_info=True)
             self._ssh_key_file = None
+        for key in self._s3_artifacts:
+            _delete_s3_object(self._cfg, key)
+        self._s3_artifacts = []
 
     def _sync_stop(self) -> None:
         """Synchronous stop for emergency cleanup (atexit handler)."""
@@ -2361,6 +2425,7 @@ class EcsFargateSandbox:
             operation_name="s3.put_object(upload)",
             max_retries=5,
         )
+        self._s3_artifacts.append(key)  # remove on cleanup (the container downloads it during the run)
         url = await asyncio.to_thread(
             s3.generate_presigned_url,
             "get_object",
