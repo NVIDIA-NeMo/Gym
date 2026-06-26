@@ -1,0 +1,21 @@
+# cvdp agentic, harness-agnostic agent driving hermes_agent inside the sim sandbox
+cvdp_generic_hermes:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: agentic_generic.py
+      resources_server: {type: resources_servers, name: cvdp}
+      model_server: {type: responses_api_models, name: policy_model}
+      concurrency: 4
+      timeout: 900
+
+      # the harness: swap these three and setup_scripts/<key>_deps.sh to change agent
+      agent_server_module: responses_api_agents.hermes_agent.app
+      agent_server_class: HermesAgent
+      agent_config_class: HermesAgentConfig
+      agent_kwargs: {max_turns: 60, terminal_backend: local}
+
+      # sandbox: eda sim image, apptainer backend, deps bind-mounted
+      image: ${cvdp_sim_image}
+      sandbox_provider: {apptainer: {}}
+      container_workdir: /code
+      deps_provision: bind

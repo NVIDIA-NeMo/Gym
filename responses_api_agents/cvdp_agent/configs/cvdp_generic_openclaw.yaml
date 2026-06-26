@@ -1,0 +1,20 @@
+# cvdp agentic, harness-agnostic agent driving openclaw_agent inside the sim sandbox
+cvdp_generic_openclaw:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: agentic_generic.py
+      resources_server: {type: resources_servers, name: cvdp}
+      model_server: {type: responses_api_models, name: policy_model}
+      concurrency: 4
+      timeout: 900
+
+      agent_server_module: responses_api_agents.openclaw_agent.app
+      agent_server_class: OpenClawAgent
+      agent_config_class: OpenClawAgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+
+      image: ${cvdp_sim_image}
+      sandbox_provider: {apptainer: {}}
+      container_workdir: /code
+      deps_provision: bind

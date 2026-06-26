@@ -1,0 +1,24 @@
+# cvdp agentic, harness-agnostic agent driving claude_code_agent inside the sim sandbox
+# claude_code speaks the anthropic api, so its endpoint and key are passed via agent_kwargs
+cvdp_generic_claude:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: agentic_generic.py
+      resources_server: {type: resources_servers, name: cvdp}
+      model_server: {type: responses_api_models, name: policy_model}
+      concurrency: 4
+      timeout: 900
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${anthropic_model_name}
+        anthropic_base_url: ${anthropic_base_url}
+        anthropic_api_key: ${anthropic_api_key}
+        max_turns: 30
+
+      image: ${cvdp_sim_image}
+      sandbox_provider: {apptainer: {}}
+      container_workdir: /code
+      deps_provision: bind
