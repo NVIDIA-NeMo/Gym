@@ -28,6 +28,7 @@ import base64
 import contextlib
 import io
 import json
+import logging
 import threading
 import types
 from pathlib import Path
@@ -2321,11 +2322,45 @@ async def test_upload_via_s3_packs_a_directory(tmp_path):
         assert "sub/f.txt" in tar.getnames()
 
 
+async def test_upload_via_s3_honors_arcname_for_single_file(tmp_path):
+    # A large single file must land under the requested remote name, not the local temp basename.
+    f = tmp_path / "local-temp-xyz.bin"
+    f.write_text("data")
+    sb = _make_sandbox(s3_bucket="bkt")
+    _attach_exec_client(sb, engine.ExecResult("ok\n", "", 0))
+    s3 = MagicMock()
+    s3.generate_presigned_url.return_value = "https://signed/url"
+    import tarfile
+
+    with _patch_aws(s3=s3):
+        await sb._upload_via_s3([f], "/dest", arcnames={f: "final-name.bin"})
+    body = s3.put_object.call_args.kwargs["Body"]
+    with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
+        assert tar.getnames() == ["final-name.bin"]
+
+
 async def test_upload_via_s3_requires_bucket():
     sb = _make_sandbox(s3_bucket=None)
     _attach_exec_client(sb)
     with pytest.raises(ValueError, match="s3_bucket is required"):
         await sb._upload_via_s3([Path("/x")], "/dest")
+
+
+def test_delete_s3_object_warns_once_then_silent(caplog):
+    cfg = _make_sandbox(s3_bucket="bkt")._cfg
+    s3 = MagicMock()
+    s3.delete_object.side_effect = Exception("AccessDenied")
+    engine._s3_delete_warned = False
+    try:
+        with _patch_aws(s3=s3):
+            with caplog.at_level(logging.WARNING, logger="nemo_gym.sandbox.providers.ecs_fargate.engine"):
+                engine._delete_s3_object(cfg, "k1")  # first failure -> one WARNING
+                engine._delete_s3_object(cfg, "k2")  # subsequent failures silenced at WARNING
+    finally:
+        engine._s3_delete_warned = False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "s3:DeleteObject" in r.message]
+    assert len(warnings) == 1
+    assert s3.delete_object.call_count == 2  # still attempted both times, never raised
 
 
 async def test_upload_via_s3_raises_when_extraction_fails(tmp_path):
@@ -2560,14 +2595,17 @@ async def test_upload_directory_recurses(tmp_path):
 
 
 async def test_upload_large_file_uses_s3(tmp_path):
-    f = tmp_path / "big.bin"
+    # Local basename intentionally differs from the requested remote name to catch the case where
+    # the S3 path drops the target filename.
+    f = tmp_path / "local-temp-name.bin"
     f.write_bytes(b"x" * (512 * 1024 + 1))
     sb = _make_sandbox(ssh_sidecar=_exec_sidecar(), s3_bucket="bkt")
     _attach_exec_client(sb)
     with patch.object(engine.EcsFargateSandbox, "_upload_via_s3", AsyncMock()) as via_s3:
-        await sb.upload(f, "/remote/big.bin")
+        await sb.upload(f, "/remote/renamed.bin")
     via_s3.assert_awaited_once()
     assert via_s3.await_args.args[1] == "/remote"
+    assert via_s3.await_args.kwargs["arcnames"] == {f: "renamed.bin"}
 
 
 async def test_download_writes_bytes(tmp_path):

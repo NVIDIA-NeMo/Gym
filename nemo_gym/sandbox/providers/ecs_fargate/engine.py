@@ -14,11 +14,9 @@
 
 """ECS Fargate sandbox engine.
 
-Lifted from nemo-evaluator-next (``nemo_evaluator/sandbox/ecs_fargate.py``).
-The orchestration is unchanged; only the three host-protocol types it relied on
-(``ExecResult``, ``OutsideEndpoint``, ``SandboxSpec``) and the SSM/port
-constants are vendored here so the engine stands alone inside the provider.
-The Gym-facing adapter lives in ``provider.py``.
+Runs each sandbox as an ECS Fargate task behind an SSH sidecar. Defines the host-protocol
+types (``ExecResult``, ``OutsideEndpoint``, ``SandboxSpec``) and the engine; the Gym-facing
+provider adapter lives in ``provider.py``.
 """
 
 from __future__ import annotations
@@ -264,10 +262,7 @@ class EcsFargateConfig:
     codebuild_build_timeout: int = 60
     dockerhub_secret_arn: str | None = None
     build_parallelism: int = 50
-    # When a public/bare image is routed to the ECR mirror and is not yet
-    # present, pull it into ECR on demand (via CodeBuild) during create. The
-    # mirror normally runs ahead of time, but this keeps create self-healing so
-    # callers never have to pre-stage images manually. Set False to require a
+    # Mirror a missing public/bare image into ECR on demand during create. Set False to require a
     # pre-populated mirror and fail fast on a miss.
     auto_mirror: bool = True
     efs_filesystem_id: str | None = None
@@ -478,21 +473,17 @@ def _retry_with_backoff(
 
 
 def _free_port() -> int:
-    # TOCTOU: the port is free when probed but the socket is closed before ssh binds it, so a racing
-    # process can claim it under high concurrency. SshTunnel.open() retries on port-not-open, which
-    # mitigates this in practice; holding the socket and handing the fd to ssh would remove it.
+    # TOCTOU: the probed port can be claimed before ssh binds it; SshTunnel.open() retries on
+    # port-not-open to mitigate this under concurrency.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
 def _ephemeral_storage_block(requested: Any) -> dict[str, int] | None:
-    """Task-def ``ephemeralStorage`` block for an explicit request, or ``None`` to take Fargate's
-    implicit 20 GiB default.
+    """Task-def ``ephemeralStorage`` block, or ``None`` for Fargate's implicit 20 GiB default.
 
-    Fargate accepts only 21-200 GiB; an explicit ``20`` is rejected by RegisterTaskDefinition (20 is
-    valid only as the omitted default), so we omit the field unless a larger size is requested and
-    validate the range.
+    Fargate accepts only 21-200 GiB explicitly (20 is valid only as the omitted default).
     """
     if not requested:
         return None
@@ -516,11 +507,7 @@ _FARGATE_MEMORY_RANGE_MIB: dict[int, tuple[int, int]] = {
 
 
 def _validate_fargate_cpu_memory(cpu: int, memory: int) -> None:
-    """Validate that a Fargate task cpu (units) + memory (MiB) form a supported combination.
-
-    Fargate rejects independent cpu/memory values (e.g. cpu=4096 with memory=512), so callers that
-    derive the two separately (max-of-base-and-config) must check the pair before RegisterTaskDefinition.
-    """
+    """Validate a Fargate cpu (units) + memory (MiB) pair; Fargate rejects unsupported combinations."""
     memory_range = _FARGATE_MEMORY_RANGE_MIB.get(cpu)
     if memory_range is None:
         raise ValueError(f"Fargate task cpu must be one of {sorted(_FARGATE_MEMORY_RANGE_MIB)} units (got {cpu})")
@@ -529,28 +516,41 @@ def _validate_fargate_cpu_memory(cpu: int, memory: int) -> None:
         raise ValueError(f"Fargate memory for cpu={cpu} must be {low}-{high} MiB (got {memory})")
 
 
+_s3_delete_warned = False
+
+
 def _delete_s3_object(cfg: EcsFargateConfig, key: str) -> None:
-    """Best-effort delete of a transient S3 artifact; never raises."""
+    """Best-effort delete of a transient S3 staging artifact; never raises.
+
+    Warns once if the role lacks ``s3:DeleteObject`` (objects then rely on a bucket lifecycle policy).
+    """
+    global _s3_delete_warned
     if not cfg.s3_bucket or not key:
         return
     try:
         boto3, *_ = _require_aws_sdks()
         boto3.client("s3", region_name=cfg.region).delete_object(Bucket=cfg.s3_bucket, Key=key)
     except Exception:
-        logger.debug("Failed to delete S3 object s3://%s/%s", cfg.s3_bucket, key, exc_info=True)
+        if not _s3_delete_warned:
+            _s3_delete_warned = True
+            logger.warning(
+                "Could not delete S3 staging object s3://%s/%s (further failures silenced); grant "
+                "s3:DeleteObject or set a bucket lifecycle policy to avoid leaking staging artifacts",
+                cfg.s3_bucket,
+                key,
+                exc_info=True,
+            )
+        else:
+            logger.debug("Failed to delete S3 object s3://%s/%s", cfg.s3_bucket, key, exc_info=True)
 
 
-# Registry/repo/tag/digest characters only — used to gate dataset-controlled image refs before they
-# are interpolated into shell `docker pull/tag` commands + the buildspec of a privileged CodeBuild job.
+# Safe registry/repo/tag/digest characters. Gates dataset-controlled image refs before they are
+# interpolated into shell commands inside a privileged CodeBuild job (injection guard).
 _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
 
 
 def _validate_image_ref(ref: str) -> None:
-    """Reject an image reference containing characters outside the safe registry/repo/tag/digest set.
-
-    ``src_image`` comes from the dataset/benchmark and is interpolated into shell commands inside a
-    privileged build, so anything outside the safe set is a code-injection risk and is refused.
-    """
+    """Reject an image reference with characters outside the safe set (shell-injection guard)."""
     if not ref or not _IMAGE_REF_RE.match(ref):
         raise ValueError(f"Unsafe image reference {ref!r}: only [A-Za-z0-9._:/@-] characters are allowed")
 
@@ -927,17 +927,15 @@ _TRANSIENT_ERRORS = (
 class ExecClient:
     """Async HTTP client for the exec server (through the SSH tunnel).
 
-    Methods are coroutines so each in-flight request occupies an event-loop
-    slot, not an executor thread — required to scale past asyncio's default
-    thread-pool cap when many long agent commands run concurrently (FEP-886).
+    Methods are coroutines so concurrent requests occupy event-loop slots rather than executor
+    threads, scaling past asyncio's default thread-pool cap.
     """
 
     def __init__(self, *, port: int, connect_timeout: float = 30.0) -> None:
         self._base = f"http://127.0.0.1:{port}"
         self._timeout = connect_timeout
-        # Lazy: aiohttp.ClientSession must be created inside a running event
-        # loop, but ExecClient is constructed from `_do_start` (which runs in
-        # asyncio.to_thread). Defer creation to the first request.
+        # Lazy: aiohttp.ClientSession needs a running loop, but ExecClient is built inside a
+        # to_thread; create it on the first request.
         self._session: aiohttp.ClientSession | None = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -1109,12 +1107,7 @@ class ImageBuilder:
 
     @staticmethod
     def list_ecr_tags(ecr_repository: str, region: str | None = None) -> set[str]:
-        """Return all image tags present in an ECR repository.
-
-        Uses paginated ``list_images`` to fetch every tagged image in
-        a handful of API calls, rather than one ``describe_images``
-        call per tag.
-        """
+        """Return all image tags present in an ECR repository (paginated ``list_images``)."""
         boto3, _, ClientError = _require_aws_sdks()
         ecr_region = ImageBuilder._ecr_region(ecr_repository, fallback=region)
         ecr = boto3.client("ecr", region_name=ecr_region)
@@ -1168,10 +1161,8 @@ class ImageBuilder:
     ) -> str:
         """Run ``build`` for ``tag`` at most once across threads, returning the ECR ``image_url``.
 
-        Concurrent callers for the same tag block on a shared in-flight event **outside**
-        ``cls._lock`` (so one waiter can't stall every other tag's build) and then confirm the
-        result via ECR rather than the event -- a failed build sets the event too, so a waiter must
-        not return a URL for an image that was never pushed.
+        Concurrent callers wait on a shared in-flight event outside ``cls._lock`` (so one waiter
+        can't stall other tags' builds), then confirm via ECR -- a failed build also sets the event.
         """
         ecr_repo = cfg.ecr_repository
         if not force and cls.image_exists_in_ecr(ecr_repo, tag, cfg.region):
@@ -1188,8 +1179,7 @@ class ImageBuilder:
                 cls._build_semaphore = threading.Semaphore(cfg.build_parallelism)
                 cls._build_semaphore_size = cfg.build_parallelism
             elif cls._build_semaphore_size != cfg.build_parallelism:
-                # Init once: never replace a live semaphore (a permit held against the old object
-                # would be released into the new one, drifting the cap). Honor the first caller's size.
+                # Init once: never replace a live semaphore (would drift the permit cap).
                 logger.warning(
                     "build_parallelism=%d ignored; build semaphore already initialized at %d",
                     cfg.build_parallelism,
@@ -1237,15 +1227,10 @@ class ImageBuilder:
 
     @classmethod
     def ensure_mirrored(cls, *, cfg: EcsFargateConfig, src_image: str, force: bool = False) -> str:
-        """Ensure ``src_image`` is present in the ECR mirror, pulling it if not.
+        """Ensure ``src_image`` is present in the ECR mirror tag, mirroring it on demand if not.
 
-        Public/bare image references are served from the ECR mirror tag
-        (``{ecr_repository}:{sanitize(src_image)}``) rather than pulled from
-        their origin registry at task-launch time. This mirrors the image into
-        ECR on demand via a self-contained CodeBuild job (privileged DinD that
-        logs into Docker Hub + ECR, pulls, retags, and pushes), so callers never
-        have to pre-stage images. Concurrent callers for the same tag dedup on a
-        shared in-flight event, exactly like :meth:`ensure_image_built`.
+        Mirrors via a self-contained CodeBuild job (privileged DinD: login, pull, retag, push).
+        Concurrent callers dedup on a shared in-flight event, like :meth:`ensure_image_built`.
         """
         ecr_repo = cfg.ecr_repository
         if not ecr_repo:
@@ -1328,9 +1313,8 @@ class ImageBuilder:
             return cfg.codebuild_project
         if not cfg.codebuild_service_role:
             raise RuntimeError("codebuild_project or codebuild_service_role is required")
-        # Reuse a single shared project (created once, idempotently) instead of one per build, so
-        # per-build CodeBuild projects don't accumulate. Source + buildspec are overridden per
-        # start_build, so one generic NO_SOURCE project serves every build.
+        # One shared project (created idempotently); source + buildspec are overridden per build,
+        # so a generic NO_SOURCE project serves every build instead of accumulating per-build ones.
         project_name = "ecs-sandbox-build"
         try:
             _retry_with_backoff(
@@ -1452,13 +1436,7 @@ class ImageBuilder:
         job_label: str = "harness-build",
         timeout_minutes: int | None = None,
     ) -> None:
-        """Run an arbitrary buildspec via CodeBuild (privileged mode for DinD).
-
-        Unlike :meth:`_build_and_push` which uploads a Dockerfile context to S3,
-        this method uses ``NO_SOURCE`` — the buildspec is fully self-contained
-        (e.g. it installs packages and runs a harness that builds Docker images
-        internally).
-        """
+        """Run a self-contained buildspec via CodeBuild (privileged DinD, ``NO_SOURCE``)."""
         boto3, *_ = _require_aws_sdks()
         cb = boto3.client("codebuild", region_name=cfg.region)
         project_name = cls._resolve_codebuild_project(cfg, cb)
@@ -1496,21 +1474,15 @@ _task_def_cache: dict[str, str] = {}
 _task_def_cache_lock = threading.Lock()
 _task_def_inflight: dict[str, threading.Event] = {}
 
-# Env vars whose values vary per sandbox invocation (workspace session id, etc).
-# Routed via RunTask containerOverrides so the underlying task definition stays
-# content-stable and the FEP-866 hash cache hits across invocations of the same
-# task. Per-invocation env keys discovered dynamically from OutsideEndpoint
-# routing (e.g. MODEL_BASE_URL with session-scoped URLs) are merged in at call
-# time; this set holds the keys that are NOT visible to OutsideEndpoint routing.
+# Env keys whose values vary per invocation. Routed via RunTask containerOverrides (not baked into
+# the task def) so the task-def hash cache stays stable across invocations. OutsideEndpoint routing
+# keys are merged in dynamically at call time; this set holds the rest.
 _PER_INVOCATION_ENV_KEYS: frozenset[str] = frozenset({"_NEL_EFS_SESSION"})
 
 
 def _compute_task_def_hash(payload: dict[str, Any]) -> str:
-    # Strip logConfiguration from every container definition before hashing.
-    # Log config (group, stream-prefix, region) is a visibility annotation — it has
-    # no effect on what the sandbox does. Two task defs that differ only in
-    # log_stream_prefix or log_group are functionally identical and should share
-    # a cache entry so cross-run SSM cache hits work across differently-named runs.
+    # Strip logConfiguration before hashing: it's a visibility annotation with no behavioral
+    # effect, so task defs differing only in log group/prefix should share a cache entry.
     def _strip_log_cfg(containers: list) -> list:
         return [{k: v for k, v in c.items() if k != "logConfiguration"} for c in containers]
 
@@ -1682,7 +1654,13 @@ class EcsFargateSandbox:
                     await self.upload(child, f"{remote_path}/{child.relative_to(local)}")
             return
         if local.stat().st_size > 512 * 1024 and self._cfg.s3_bucket:
-            await self._upload_via_s3([local], os.path.dirname(remote_path) or "/tmp")
+            # Map the local temp name to the requested remote filename: the S3 tar is keyed by
+            # basename and extracted into dest_dir, so otherwise it lands under the local basename.
+            await self._upload_via_s3(
+                [local],
+                os.path.dirname(remote_path) or "/tmp",
+                arcnames={local: os.path.basename(remote_path)},
+            )
         else:
             await self._exec_client.upload(remote_path, local)  # type: ignore[union-attr]
 
@@ -1739,9 +1717,7 @@ class EcsFargateSandbox:
             and not cfg.image_template
             and not _is_ecr_image_ref(self._spec.image)
         ):
-            # The bare/public image is served from the ECR mirror tag; pull it
-            # into ECR on demand so a missing mirror entry self-heals instead of
-            # failing the task's image pull.
+            # Pull the bare/public image into the ECR mirror on demand so a missing entry self-heals.
             ImageBuilder.ensure_mirrored(cfg=cfg, src_image=self._spec.image)
         image = self._resolve_image(built_image)
 
@@ -1815,15 +1791,10 @@ class EcsFargateSandbox:
                     f"placeholders like {{task_id}}."
                 ) from exc
         if self._spec.image:
-            # A reference that already points at an ECR registry (e.g. the
-            # configured mirror) is used verbatim — re-prefixing it under
-            # ecr_repository and re-sanitizing would corrupt the tag and make
-            # an existing image unresolvable.
+            # An existing ECR reference is used verbatim; re-prefixing it would corrupt the tag.
             if _is_ecr_image_ref(self._spec.image):
                 return self._spec.image
-            # Bare / public names are routed to the ECR mirror tag rather than
-            # pulled directly from their origin registry (avoids Docker Hub
-            # rate limits when many tasks start concurrently).
+            # Bare/public names route to the ECR mirror tag (avoids origin-registry rate limits).
             if cfg.ecr_repository:
                 return f"{cfg.ecr_repository}:{_sanitize_id(self._spec.image)}"
             return self._spec.image
@@ -1904,9 +1875,8 @@ class EcsFargateSandbox:
         if self._task_ip:
             value = value.replace("{task_ip}", self._task_ip)
         elif "{task_ip}" in value:
-            # _task_ip is only assigned after the task is RUNNING (_get_task_public_ip), which is
-            # after container env is baked into the task-def / RunTask overrides. Fail loudly rather
-            # than baking a literal "{task_ip}" that later breaks model egress with a confusing error.
+            # _task_ip is only known after the task is RUNNING, i.e. after env is baked into the
+            # task-def; fail loudly rather than baking a literal "{task_ip}".
             raise ValueError(
                 "{task_ip} is not available in container env: the task IP is only known after the "
                 "sandbox starts. Resolve the container's own address at runtime instead."
@@ -2069,10 +2039,10 @@ class EcsFargateSandbox:
         return self._do_register(payload)
 
     def _build_efs_volumes(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Build EFS volume definitions and mount points from spec.volumes.
+        """Build EFS volume defs + mount points from spec.volumes.
 
-        A volume may name its own filesystem / access point, or inherit the provider-level
-        ``efs_filesystem_id`` / ``efs_access_point_id`` defaults (populated from YAML/SSM).
+        A volume may name its own filesystem/access point or inherit the provider-level
+        ``efs_filesystem_id`` / ``efs_access_point_id`` defaults.
         """
         cfg = self._cfg
         task_volumes: list[dict[str, Any]] = []
@@ -2327,10 +2297,8 @@ class EcsFargateSandbox:
                     logger.info("Container public IP: %s", pub)
                     return pub
                 priv = iface.get("PrivateIpAddress")
-                # When a public IP is expected, keep retrying for it to propagate before falling back
-                # to the private IP on the last attempt — the orchestrator is outside the VPC and
-                # cannot reach the private address, so an early private fallback only yields a
-                # misleading SSH-timeout later.
+                # Keep retrying for the public IP to propagate before falling back to the private IP
+                # on the last attempt (the orchestrator is outside the VPC and can't reach private).
                 if self._cfg.assign_public_ip and attempt < max_retries:
                     raise RuntimeError(f"ENI {eni_id} has no public IP yet")
                 if priv:
@@ -2440,17 +2408,21 @@ class EcsFargateSandbox:
                 "(ssh_sidecar.exec_server_port). In agent-server mode use sandbox.ssh_tunnel."
             )
 
-    async def _upload_via_s3(self, paths: list[Path], dest_dir: str) -> None:
+    async def _upload_via_s3(
+        self, paths: list[Path], dest_dir: str, *, arcnames: dict[Path, str] | None = None
+    ) -> None:
         cfg = self._cfg
         if not cfg.s3_bucket:
             raise ValueError("s3_bucket is required for S3 staging")
+
+        names = arcnames or {}
 
         def _pack() -> bytes:
             buf = io.BytesIO()
             with tarfile.open(fileobj=buf, mode="w:gz") as tar:
                 for p in paths:
                     if p.is_file():
-                        tar.add(str(p), arcname=p.name)
+                        tar.add(str(p), arcname=names.get(p, p.name))
                     elif p.is_dir():
                         for child in p.rglob("*"):
                             if child.is_file():
