@@ -15,7 +15,8 @@
 import hashlib
 import json
 import re
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -33,7 +34,9 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -42,6 +45,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_models.vllm_model.app import VLLMConverter
 
 
 def _qid(text: str) -> str:
@@ -59,6 +63,17 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     context_reset_pct: float = 0.3
     context_reset_keep_rounds: int = 3
     max_run_retries: int = 1
+    # Cap on the number of context resets per trajectory (None = unlimited).
+    max_reset_count: Optional[int] = None
+    # When set, save a JSONL snapshot of the full conversation at every context
+    # reset and at the end of the trajectory, under
+    # {snap_dir}/sample_{task_index}/attempt_{attempt}_{reset_<N>|final}.jsonl.
+    # Off when None. (ported from gym-gitlab fe9845ee)
+    snap_dir: Optional[str] = None
+    # Estimate prompt tokens via the vLLM /tokenize endpoint BEFORE the model
+    # call to decide context reset, instead of paying for a full generation and
+    # discarding it. (ported from gym-gitlab b66e37c6)
+    save_model_call_using_vllm_tokenize_endpoint: bool = False
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -75,6 +90,22 @@ class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
     config: BrowsecompAgentConfig
+    _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
+
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        # For the /tokenize-based pre-call token estimation we need a direct
+        # client to the policy model's vLLM /tokenize endpoint. Built only when
+        # the feature is enabled. (ported from gym-gitlab b66e37c6)
+        if self.config.save_model_call_using_vllm_tokenize_endpoint:
+            global_config = get_global_config_dict()
+            policy_model_config_dict = get_first_server_config_dict(global_config, self.config.model_server.name)
+            base_urls = policy_model_config_dict["base_url"]
+            base_url = base_urls if isinstance(base_urls, str) else base_urls[0]
+            self._policy_model_openai_client = NeMoGymAsyncOpenAI(
+                base_url=base_url, api_key=policy_model_config_dict["api_key"]
+            )
+        return app
 
     async def responses(
         self,
@@ -99,6 +130,15 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if self.config.max_context_tokens and self.config.context_reset_pct:
             reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
+        # --- snapshot keys + per-trajectory counters (ported from gym-gitlab fe9845ee) ---
+        task_index, attempt = None, None
+        if self.config.snap_dir and body.metadata:
+            task_index = body.metadata.pop("task_index", None)
+            attempt = body.metadata.pop("attempt", None)
+        reset_count = 0
+        num_tool_calls = 0
+        max_reset_count = self.config.max_reset_count
+
         while True:
             step += 1
 
@@ -106,6 +146,38 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 new_outputs = self._compact_old_tool_messages(new_outputs)
 
             new_body = body.model_copy(update={"input": body.input + new_outputs})
+
+            # --- Pre-call context reset via the vLLM /tokenize endpoint ---
+            # Estimate the prompt token count BEFORE generating; if over the
+            # threshold, reset now and skip the (otherwise wasted) generation.
+            # (ported from gym-gitlab b66e37c6)
+            if self.config.save_model_call_using_vllm_tokenize_endpoint:
+                pre_prompt_tokens = await self._count_prompt_tokens(new_body)
+                if (
+                    reset_threshold
+                    and pre_prompt_tokens > reset_threshold
+                    and (max_reset_count is None or reset_count < max_reset_count)
+                ):
+                    reset_count += 1
+                    if self.config.snap_dir:
+                        self._save_snapshot(
+                            messages=body.input + new_outputs,
+                            task_index=task_index,
+                            attempt=attempt,
+                            reset_count=reset_count,
+                            is_final=False,
+                        )
+                    # Adaptive shrink: keep the largest number of recent rounds
+                    # whose resulting prompt still fits under the threshold.
+                    chosen = None
+                    for n in range(self.config.context_reset_keep_rounds, -1, -1):
+                        cand = self._extract_last_rounds(new_outputs, n=n)
+                        cand_body = body.model_copy(update={"input": body.input + cand})
+                        if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                            chosen = cand
+                            break
+                    new_outputs = chosen if chosen is not None else []
+                    continue
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -124,9 +196,23 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                 ) from e
 
-            # --- Check context reset threshold ---
+            # --- Check context reset threshold (post-call fallback; used when
+            # save_model_call_using_vllm_tokenize_endpoint is off) ---
             prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
-            if reset_threshold and prompt_tokens > reset_threshold:
+            if (
+                reset_threshold
+                and prompt_tokens > reset_threshold
+                and (max_reset_count is None or reset_count < max_reset_count)
+            ):
+                reset_count += 1
+                if self.config.snap_dir:
+                    self._save_snapshot(
+                        messages=body.input + new_outputs,
+                        task_index=task_index,
+                        attempt=attempt,
+                        reset_count=reset_count,
+                        is_final=False,
+                    )
                 if self.config.context_reset_keep_rounds > 0:
                     new_outputs = self._extract_last_rounds(new_outputs)
                 else:
@@ -162,6 +248,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
+                num_tool_calls += 1
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
@@ -231,12 +318,26 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
                 break
 
+        # --- Final trajectory snapshot (ported from gym-gitlab fe9845ee) ---
+        if self.config.snap_dir:
+            self._save_snapshot(
+                messages=body.input + new_outputs,
+                task_index=task_index,
+                attempt=attempt,
+                reset_count=None,
+                is_final=True,
+            )
+
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
         model_response.output = new_outputs
         model_response.usage = usage
+        # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
+        # NeMoGymResponse(Response) has extra="allow", so these round-trip to /verify.
+        model_response.reset_count = reset_count
+        model_response.num_tool_calls = num_tool_calls
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
@@ -263,6 +364,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             last_verify_response = None
             for attempt in range(self.config.max_run_retries):
+                # Seed snapshot keys so responses() can name per-reset/-final files.
+                # (ported from gym-gitlab fe9845ee)
+                if self.config.snap_dir:
+                    body.responses_create_params.metadata = dict(body.responses_create_params.metadata or {})
+                    body.responses_create_params.metadata["task_index"] = str(getattr(body, "_ng_task_index", qid))
+                    body.responses_create_params.metadata["attempt"] = str(attempt)
                 response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path="/v1/responses",
@@ -338,13 +445,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
         return messages
 
-    def _extract_last_rounds(self, new_outputs):
+    def _extract_last_rounds(self, new_outputs, n=None):
         """
         Extract the last n complete tool-call rounds from new_outputs.
         A round = one or more function_call items + their corresponding
         function_call_output items. Returns a flat list preserving order.
+        n defaults to context_reset_keep_rounds; the /tokenize adaptive-shrink
+        path passes smaller n to find a window that fits under the threshold.
         """
-        n = self.config.context_reset_keep_rounds
+        if n is None:
+            n = self.config.context_reset_keep_rounds
         if n <= 0:
             return []
 
@@ -373,6 +483,36 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             result.extend(fn_calls)
             result.extend(tool_outputs)
         return result
+
+    def _save_snapshot(self, messages, task_index, attempt, reset_count, is_final):
+        """Save a JSONL snapshot of the full conversation at a context reset or
+        at trajectory end, keyed by task_index/attempt. Lets us inspect the
+        pre-reset context (otherwise lost when history is trimmed).
+        (ported from gym-gitlab fe9845ee)"""
+        sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        if is_final:
+            sample_path = f"{sample_dir}/attempt_{attempt}_final.jsonl"
+        else:
+            sample_path = f"{sample_dir}/attempt_{attempt}_reset_{reset_count}.jsonl"
+        with open(sample_path, "w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(msg.model_dump_json() + "\n")
+
+    async def _count_prompt_tokens(self, body) -> int:
+        """Hit the policy model's vLLM /tokenize endpoint and return the prompt
+        token count (used to decide context reset without a full generation).
+        (ported from gym-gitlab b66e37c6)"""
+        converter = VLLMConverter(return_token_id_information=False)
+        chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
+        chat_completion_create_params = chat_completion_create_params.model_dump()
+        # Same projection as vllm_model/app.py's tokenize path.
+        tokenize_body_dict = {}
+        for key in ("model", "messages", "tools", "chat_template_kwargs"):
+            if key in chat_completion_create_params:
+                tokenize_body_dict[key] = chat_completion_create_params[key]
+        tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
+        return len(tokenize_response["tokens"])
 
 
 if __name__ == "__main__":
