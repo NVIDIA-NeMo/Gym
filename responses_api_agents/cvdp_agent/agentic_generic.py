@@ -149,11 +149,11 @@ class CvdpGenericAgent(SimpleResponsesAPIAgent):
             image=self.config.image,
             workdir=wd,
             env={
-                "NGTB_MODEL_URL": self._model_url(),
-                "NGTB_MODEL_NAME": body.responses_create_params.model or "model",
-                "NGTB_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
-                "NGTB_SYSTEM_PROMPT": self.config.system_prompt or "",
-                "NGTB_TRAJ_DIR": traj,
+                "NV_MODEL_URL": self._model_url(),
+                "NV_MODEL_NAME": body.responses_create_params.model or "model",
+                "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
+                "NV_SYSTEM_PROMPT": self.config.system_prompt or "",
+                "NV_TRAJ_DIR": traj,
             },
             files={
                 f"{traj}/instruction.txt": instruction,
@@ -168,7 +168,7 @@ class CvdpGenericAgent(SimpleResponsesAPIAgent):
 
     def _traj_dir(self) -> str:
         """runner, instruction, and response location, kept under the workdir mount so spec.files lands."""
-        return f"{self.config.container_workdir.rstrip('/')}/.ngtb"
+        return f"{self.config.container_workdir.rstrip('/')}/.nv"
 
     async def _remote_harvest(self, box: AsyncSandbox, workdir: str, globs: list[str], seeded: Dict[str, str]) -> dict:
         """list and download files matching globs from the sandbox, then filter via harvest()."""

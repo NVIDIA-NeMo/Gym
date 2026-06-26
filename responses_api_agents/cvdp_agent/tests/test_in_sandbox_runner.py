@@ -53,14 +53,14 @@ class TestRenderRunner:
     def test_writes_response_and_calls_responses(self) -> None:
         rendered = self._render()
         assert "agent.responses(request=None, body=body)" in rendered
-        # trajectory dir is configurable (NGTB_TRAJ_DIR) so it works under any sandbox mount
-        assert "NGTB_TRAJ_DIR" in rendered
+        # trajectory dir is configurable (NV_TRAJ_DIR) so it works under any sandbox mount
+        assert "NV_TRAJ_DIR" in rendered
         assert 'Path(TRAJ_DIR, "response.json")' in rendered
 
     def test_forwards_model_egress_and_system_prompt(self) -> None:
         rendered = self._render()
-        assert "NGTB_MODEL_URL" in rendered
-        assert "NGTB_SYSTEM_PROMPT" in rendered
+        assert "NV_MODEL_URL" in rendered
+        assert "NV_SYSTEM_PROMPT" in rendered
         assert "_resolve_model_base_url" in rendered
 
 

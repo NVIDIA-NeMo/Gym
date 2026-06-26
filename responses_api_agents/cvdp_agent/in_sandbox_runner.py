@@ -35,13 +35,13 @@ from pathlib import Path
 sys.path.insert(0, "/nemo_gym_mount")
 os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
 
-MODEL_URL    = os.environ.get("NGTB_MODEL_URL", "")
-MODEL_NAME   = os.environ["NGTB_MODEL_NAME"]
-TRAJ_DIR     = os.environ.get("NGTB_TRAJ_DIR", "/trajectories_mount")
+MODEL_URL    = os.environ.get("NV_MODEL_URL", "")
+MODEL_NAME   = os.environ["NV_MODEL_NAME"]
+TRAJ_DIR     = os.environ.get("NV_TRAJ_DIR", "/trajectories_mount")
 INSTRUCTION  = Path(TRAJ_DIR, "instruction.txt").read_text()
-SYSTEM       = os.environ.get("NGTB_SYSTEM_PROMPT", "") or None
-AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
-SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
+SYSTEM       = os.environ.get("NV_SYSTEM_PROMPT", "") or None
+AGENT_KWARGS = json.loads(os.environ.get("NV_AGENT_KWARGS", "{{}}"))
+SAMPLING     = json.loads(os.environ.get("NV_SAMPLING", "{{}}"))
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef

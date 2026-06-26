@@ -93,12 +93,12 @@ class TestBuildSpec:
 
         assert spec.image == "nvidia/cvdp-sim:v1.0.0"
         assert spec.workdir == "/code"
-        assert spec.env["NGTB_MODEL_URL"] == "http://model:8000"
+        assert spec.env["NV_MODEL_URL"] == "http://model:8000"
         # runner + instruction + seeded context all delivered via provider-neutral spec.files,
         # under the workdir mount (not a separate /trajectories_mount) so upload actually lands.
-        assert "/code/.ngtb/agent_runner.py" in spec.files
-        assert "/code/.ngtb/instruction.txt" in spec.files
-        assert spec.env["NGTB_TRAJ_DIR"] == "/code/.ngtb"
+        assert "/code/.nv/agent_runner.py" in spec.files
+        assert "/code/.nv/instruction.txt" in spec.files
+        assert spec.env["NV_TRAJ_DIR"] == "/code/.nv"
         assert spec.files["/code/docs/spec.md"] == "S"
         # bind provisioning of nemo_gym + deps
         binds = spec.provider_options["binds"]
