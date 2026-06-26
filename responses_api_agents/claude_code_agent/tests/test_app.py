@@ -19,10 +19,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import yaml
+from fastapi import Request
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -30,6 +32,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
+    ClaudeCodeAgentRunRequest,
     ResourcesServerRef,
     _extract_instruction,
     parse_stream_json,
@@ -37,25 +40,36 @@ from responses_api_agents.claude_code_agent.app import (
 
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
+    kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
     return ClaudeCodeAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
-        resources_server=ResourcesServerRef(type="resources_servers", name=""),
         **kwargs,
     )
 
 
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
-    with patch("responses_api_agents.claude_code_agent.app.ClaudeCodeAgent.model_post_init"):
-        agent = ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    # Patch only the external side effect (claude-code install/version check) so the real
+    # model_post_init still runs — it initializes the model's private attrs and the semaphore.
+    with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
+        return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:
     return json.dumps({"type": type_, **kwargs})
+
+
+class FakeAioHTTPResponse:
+    ok = True
+
+    def __init__(self, payload: dict, cookies: dict | None = None):
+        self.payload = payload
+        self.cookies = cookies or {}
+
+    async def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
 
 
 class TestSanity:
@@ -105,6 +119,11 @@ class TestBuildCommand:
         # --mcp-config is explicit, so it coexists with the default --bare
         assert "--bare" in cmd
         assert cmd[cmd.index("--mcp-config") + 1] == "/path/to/mcp.json"
+
+    def test_dynamic_mcp_config_overrides_static_for_command(self) -> None:
+        agent = _make_agent(mcp_config="/path/to/static.json")
+        cmd = agent._build_command("m", "x", mcp_config="/tmp/dynamic.json")
+        assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/dynamic.json"
 
     def test_optional_flags_threaded_through(self) -> None:
         agent = _make_agent(
@@ -233,6 +252,188 @@ class TestRunClaudeCode:
         assert stdout == ""
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
+
+
+class TestRolloutMCPConfig:
+    def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
+        agent = _make_agent(mcp_config="/path/to/static.json")
+        assert agent._write_rollout_mcp_config({}, tmp_path) is None
+
+    def test_writes_rollout_mcp_config_with_session_header(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        config_path = agent._write_rollout_mcp_config(
+            {
+                "mcp": {
+                    "server_name": "example_mcp_weather",
+                    "url_path": "/mcp",
+                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                }
+            },
+            tmp_path,
+        )
+
+        assert config_path is not None
+        config = json.loads(Path(config_path).read_text())
+        server = config["mcpServers"]["example_mcp_weather"]
+        assert server["type"] == "http"
+        assert server["url"] == "http://127.0.0.1:8123/mcp"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "secret-token"
+
+    def test_merges_static_mcp_config_when_metadata_present(self, tmp_path: Path) -> None:
+        static_config = tmp_path / "static_mcp.json"
+        static_config.write_text(json.dumps({"mcpServers": {"static": {"type": "stdio", "command": "server"}}}))
+        agent = _make_agent(
+            mcp_config=str(static_config),
+            resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"),
+        )
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        config_path = agent._write_rollout_mcp_config(
+            {
+                "mcp": {
+                    "server_name": "dynamic",
+                    "url_path": "/mcp",
+                    "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                }
+            },
+            tmp_path / "run",
+        )
+
+        config = json.loads(Path(config_path).read_text())
+        assert "static" in config["mcpServers"]
+        assert config["mcpServers"]["dynamic"]["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+
+    def test_run_passes_generated_mcp_config(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        async def fake_post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                return FakeAioHTTPResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                        }
+                    },
+                    cookies={"session": "abc"},
+                )
+            if url_path == "/verify":
+                return FakeAioHTTPResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        captured: dict = {}
+
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None):
+            captured["instruction"] = instruction
+            captured["mcp_config"] = mcp_config
+            captured["config_exists_during_run"] = Path(mcp_config).is_file()
+            captured["config"] = json.loads(Path(mcp_config).read_text())
+            return _event(
+                "assistant",
+                message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
+            ), "claude-sonnet-4-6"
+
+        agent.server_client.post.side_effect = fake_post
+        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
+            expected_city="Paris",
+        )
+
+        result = asyncio.run(agent.run(request, body))
+
+        assert result.reward == 1.0
+        assert captured["instruction"] == "use the weather tool"
+        assert captured["config_exists_during_run"] is True
+        server = captured["config"]["mcpServers"]["example_mcp_weather"]
+        assert server["url"] == "http://127.0.0.1:8123/mcp"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+        assert not Path(captured["mcp_config"]).exists()
+
+    def test_run_threads_session_cookie_seed_to_verify(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {"resources_servers": {"example_mcp_weather": {"host": "127.0.0.1", "port": 8123}}}
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        captured: dict = {}
+
+        async def fake_post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                # the resources server sets a session cookie on the seed response
+                return FakeAioHTTPResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                        }
+                    },
+                    cookies={"session": "sess-cookie"},
+                )
+            if url_path == "/verify":
+                captured["verify_cookies"] = cookies
+                return FakeAioHTTPResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None):
+            captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
+                "headers"
+            ]["X-NeMo-Gym-Session-Token"]
+            return _event("assistant", message={"content": [{"type": "text", "text": "ok"}]}), "claude-sonnet-4-6"
+
+        agent.server_client.post.side_effect = fake_post
+        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
+            verifier_metadata={"expected_city": "Paris"},
+        )
+
+        asyncio.run(agent.run(request, body))
+
+        # the cookie set on /seed_session is threaded into the /verify call (same rollout session),
+        # and the per-rollout token from seed metadata reaches the generated MCP config.
+        assert captured["verify_cookies"] == {"session": "sess-cookie"}
+        assert captured["config_token"] == "tok"
 
 
 class TestExtractInstruction:

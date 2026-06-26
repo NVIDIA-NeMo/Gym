@@ -116,6 +116,11 @@ dependencies = [
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
     "fastapi",
 
+    # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
+    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
+    # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
+    "mcp>=1.27,<2",
+
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
     # License: BSD 3-Clause https://github.com/pallets/itsdangerous/blob/672971d66a2ef9f85151e53283113f33d642dabd/LICENSE.txt
