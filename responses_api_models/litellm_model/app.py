@@ -30,7 +30,7 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
 
 logger = logging.getLogger(__name__)
 
-_SENSITIVE_HEADER_RE = re.compile(r"('Authorization': ')[^']*(')", re.IGNORECASE)
+_SENSITIVE_HEADER_RE = re.compile(r"('(?:Authorization|x-litellm-key)': ')[^']*(')", re.IGNORECASE)
 _SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
 
 
@@ -161,7 +161,7 @@ class LiteLLMModelServer(SimpleModelServer):
             data = await resp.json(content_type=None)
             version = data.get("litellm_version", "")
         except Exception as e:
-            raise RuntimeError(f"Could not verify LiteLLM proxy version at {health_url}: {e}") from e
+            raise RuntimeError(f"Could not verify LiteLLM proxy version at {health_url}: {_sanitize_error(e)}") from e
 
         if not version:
             raise RuntimeError(
