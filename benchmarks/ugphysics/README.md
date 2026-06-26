@@ -61,19 +61,21 @@ message.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/ugphysics/config.yaml]"
+gym eval prepare --benchmark ugphysics
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/ugphysics/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark ugphysics
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=ugphysics_ugphysics_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/ugphysics/data/ugphysics_benchmark.jsonl \
-    +output_jsonl_fpath=results/ugphysics_rollouts.jsonl \
-    +prompt_config=benchmarks/ugphysics/prompts/default.yaml \
-    +num_repeats=4 \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0, top_p: 0.95}"
+gym eval run --no-serve \
+    --agent ugphysics_ugphysics_judge_simple_agent \
+    --input benchmarks/ugphysics/data/ugphysics_benchmark.jsonl \
+    --output results/ugphysics_rollouts.jsonl \
+    --num-repeats 4 \
+    --max-output-tokens 16384 \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --prompt-config benchmarks/ugphysics/prompts/default.yaml
 ```

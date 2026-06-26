@@ -60,19 +60,18 @@ You need to have singularity installed. Image having singularity:
 `/lustre/fsw/portfolios/llmservice/users/asohrabizade/codegen/sqsh/nvidian+nemo+verl_v2_enroot0.8.5.sqsh`
 
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/swerl_gen/configs/swerl_gen.yaml"
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server swerl_gen
 
-ng_run "+config_paths=[$config_paths]" 
-
-ng_collect_rollouts \
-    +agent_name=swerl_gen_simple_agent \
-    +input_jsonl_fpath=resources_servers/swerl_gen/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/swerl_gen/data/example_rollouts.jsonl \
-    +num_repeats=2 \
-    +num_samples_in_parallel=4 \
-    +responses_create_params.max_output_tokens=4096
+gym eval run --no-serve \
+    --agent swerl_gen_simple_agent \
+    --input resources_servers/swerl_gen/data/example.jsonl \
+    --output resources_servers/swerl_gen/data/example_rollouts.jsonl \
+    --num-repeats 2 \
+    --concurrency 4 \
+    --max-output-tokens 4096
 ```
 
 Rollout example

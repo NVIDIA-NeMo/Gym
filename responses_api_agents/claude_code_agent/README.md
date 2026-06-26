@@ -29,7 +29,7 @@ anthropic_base_url: http://localhost:8000
 For a quick eval against Anthropic's API (or any endpoint set via `anthropic_base_url`), pass the resources server config, which includes the agent server config:
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent.yaml]"
+gym env start --resources-server reasoning_gym/reasoning_gym_claude_code_agent
 ```
 
 #### Against a Gym model server
@@ -49,11 +49,11 @@ Use `vllm_model` for OpenAI-compatible **chat** endpoints (vLLM, NVIDIA build, m
 ### Run the agent
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=reasoning_gym_claude_code_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=claude_code_rollout.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output claude_code_rollout.jsonl \
+    --limit 1
 ```
 
 For the model-server config above, use `+agent_name=reasoning_gym_claude_code_agent_model_server`.

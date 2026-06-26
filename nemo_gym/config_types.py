@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from argparse import ArgumentParser
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -136,12 +137,34 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
-class ServerRefNotFoundError(ValueError):
-    """A server cross-reference points to an instance that is not defined in the merged config."""
+class ConfigError(Exception):
+    """Base for user-facing configuration errors.
+
+    These represent actionable user mistakes (typos, missing files, malformed input) rather than
+    internal bugs. The CLI catches `ConfigError` and prints just the message — no traceback —
+    while still leaving them as ordinary exceptions so callers like `validate` can catch and
+    format them.
+    """
 
 
-class ConfigMissingValuesError(ValueError):
+class ConfigPathNotFoundError(ConfigError, FileNotFoundError):
+    """A `config_paths` entry could not be found in the cwd or the Gym install location."""
+
+
+class MalformedConfigPathsError(ConfigError, ValueError):
+    """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
+
+
+class NoServerInstancesError(ConfigError, ValueError):
+    """A run was requested but the merged config defines no server instances to start."""
+
+
+class ConfigMissingValuesError(ConfigError, ValueError):
     """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
+class ServerRefNotFoundError(ConfigError, ValueError):
+    """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
 ########################################
@@ -156,7 +179,7 @@ class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_upload_dataset_to_gitlab \
+    gym dataset upload --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +input_jsonl_fpath=data/train.jsonl
@@ -181,7 +204,7 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     Examples:
 
     ```bash
-    ng_download_dataset_from_gitlab \
+    gym dataset download --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +artifact_fpath=train.jsonl \
@@ -202,7 +225,7 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+    gym dataset rm +dataset_name=old_dataset
     ```
     """
 
@@ -225,7 +248,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -272,13 +295,13 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
     Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
 
     This command always deletes the dataset from GitLab after uploading to HuggingFace.
-    Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+    Use `gym dataset upload` if you want optional deletion control.
 
     Examples:
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_gitlab_to_hf_dataset \
+    gym dataset migrate \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -304,7 +327,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path} \
@@ -324,7 +347,7 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
     Examples:
 
     ```bash
-    ng_download_dataset_from_hf \
+    gym dataset download \
         +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
         +artifact_fpath=train.jsonl \
         +output_fpath=data/train.jsonl
@@ -366,12 +389,37 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
 
 
+class GitlabDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the GitLab model registry."""
+
+    type: Literal["gitlab"]
+    dataset_name: str
+    version: str
+    artifact_fpath: str
+
+
+class HuggingFaceDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the HuggingFace Hub."""
+
+    type: Literal["huggingface"]
+    repo_id: str
+    artifact_fpath: Optional[str] = None
+
+
+# One discriminated `source:` block replaces the parallel gitlab_identifier / huggingface_identifier
+# fields; `type` selects the backend so it's unambiguous which fields apply.
+DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
 
     num_repeats: int = Field(default=1, ge=1)
+    # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
+    source: Optional[DatasetSource] = None
+    # Deprecated: kept working (and back-filled from/into `source`) for backward compatibility.
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
@@ -391,6 +439,62 @@ class DatasetConfig(BaseModel):
     def check_train_validation_sets(self) -> "DatasetConfig":
         if self.type in ["train", "validation"]:
             assert self.license is not None, f"A license is required for {self.name}"
+
+        return self
+
+    @model_validator(mode="after")
+    def normalize_dataset_source(self) -> "DatasetConfig":
+        """Reconcile the unified `source:` with the legacy `*_identifier` fields.
+
+        The unified `source:` block is mutually exclusive with the legacy identifiers. The two
+        legacy identifiers may still be set together (a gitlab-primary / huggingface-fallback pair
+        selected at download time by `config.data_source`) for backward compatibility. A legacy
+        identifier emits a deprecation warning and, when a single backend is given, is mirrored into
+        `source`; conversely a `source:` is mirrored back into the matching legacy field so existing
+        consumers that read `gitlab_identifier`/`huggingface_identifier` keep working.
+        """
+        legacy_specified = [
+            name
+            for name, value in (
+                ("gitlab_identifier", self.gitlab_identifier),
+                ("huggingface_identifier", self.huggingface_identifier),
+            )
+            if value is not None
+        ]
+        if self.source is not None and legacy_specified:
+            raise ValueError(
+                f"Specify a dataset source once for '{self.name}': set only one of "
+                f"['source', {', '.join(repr(name) for name in legacy_specified)}]. "
+                "Prefer the unified `source:` block."
+            )
+
+        if self.source is not None:
+            # `source:` was used: back-fill the matching legacy field for existing consumers.
+            fields = self.source.model_dump(exclude={"type"})
+            if isinstance(self.source, GitlabDatasetSource):
+                self.gitlab_identifier = JsonlDatasetGitlabIdentifer(**fields)
+            else:
+                self.huggingface_identifier = JsonlDatasetHuggingFaceIdentifer(**fields)
+            return self
+
+        if not legacy_specified:
+            return self
+
+        warnings.warn(
+            f"{' and '.join(f'`{name}`' for name in legacy_specified)} "
+            f"{'is' if len(legacy_specified) == 1 else 'are'} deprecated for dataset "
+            f"'{self.name}'; prefer the unified `source:` block.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Mirror a single legacy identifier into `source`. When both are set (primary + fallback),
+        # the single discriminated `source:` can't represent both, so leave it unset and keep the
+        # legacy fields as the source of truth.
+        if len(legacy_specified) == 1:
+            if self.gitlab_identifier is not None:
+                self.source = GitlabDatasetSource(type="gitlab", **self.gitlab_identifier.model_dump())
+            else:
+                self.source = HuggingFaceDatasetSource(type="huggingface", **self.huggingface_identifier.model_dump())
 
         return self
 

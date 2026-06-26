@@ -1,5 +1,5 @@
 ---
-title: "Overview"
+title: "Build Environments"
 subtitle: "Build your own custom environment"
 description: ""
 position: 1
@@ -10,6 +10,10 @@ Learn how to build custom environments for training or evaluation using NeMo Gym
 Looking to use an existing environment rather than build your own? See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) in the README.
 
 </Tip>
+
+<Note>
+These guides focus on resources server implementation — tools, state management, and verification logic. For verification pattern reference (equivalence match, execution-based checking, LLM-as-Judge, reward models), see [Verification Patterns](/build-verifiers/verification-patterns). For data preparation, see [Prepare Data](/data). For agent harness setup, see [Agent Server](/agent-server). For running and analyzing evaluations, see [Evaluation](/evaluation).
+</Note>
 
 <Accordion title="Key Concepts">
 Before diving in, review these foundational pages:
@@ -49,7 +53,7 @@ Production environment with dynamic routing and state-based verification.
 <Badge intent="success" minimal outlined>advanced</Badge>
 </Card>
 
-<Card title="Verification Patterns" href="/environment-tutorials/verification-patterns">
+<Card title="Build Verifiers" href="/build-verifiers">
 How environments compute rewards — equivalence matching, execution-based checking, LLM-as-Judge, and reward models.
 </Card>
 
@@ -59,14 +63,10 @@ Wrap a third-party benchmark or agent framework as a NeMo Gym agent server.
 <Badge minimal outlined>advanced</Badge>
 </Card>
 
-<Card title="Add a Benchmark" href="/environment-tutorials/adding-a-benchmark">
+<Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
 End-to-end checklist for contributing a new benchmark — data, config, tests, and baselining.
 
 <Badge minimal outlined>contributor</Badge>
-</Card>
-
-<Card title="Aggregate Metrics" href="/environment-tutorials/aggregate-metrics">
-Compute per-task pass rates and roll-up metrics from collected rollouts.
 </Card>
 
 </Cards>

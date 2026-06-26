@@ -27,13 +27,13 @@ Start servers and collect rollouts
 ```bash
 # start vllm and nemo gym servers
 vllm serve futurehouse/ether0 & 
-ng_run "+config_paths=[environments/ether0/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+gym env start --environment ether0 --model-type vllm_model &
 
 # wait for above to be ready
-ng_collect_rollouts \
-    +agent_name=ether0_simple_agent \
-    +input_jsonl_fpath=environments/ether0/data/example.jsonl \
-    +output_jsonl_fpath=environments/ether0/data/ether0_rollouts.jsonl
+gym eval run --no-serve \
+    --agent ether0_simple_agent \
+    --input environments/ether0/data/example.jsonl \
+    --output environments/ether0/data/ether0_rollouts.jsonl
 
 tail -n 1 environments/ether0/data/ether0_rollouts.jsonl | jq | less
 ```

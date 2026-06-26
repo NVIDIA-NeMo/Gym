@@ -11,9 +11,9 @@ VLLMModel provides a Responses API to Chat Completions mapping middleware layer 
 
 **To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --resources-server example_multi_step \
+    --model-type vllm_model
 ```
 
 <Note>
@@ -116,12 +116,12 @@ vllm serve \
 ### Configure NeMo Gym to use the local vLLM server
 In a second terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and start the NeMo Gym servers.
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    ++policy_base_url=http://0.0.0.0:10240/v1 \
-    ++policy_model_name=Qwen/Qwen3-4B-Thinking-2507 \
-    ++policy_api_key=dummy_key
+gym env start \
+    --resources-server example_multi_step \
+    --model-type vllm_model \
+    --model-url http://0.0.0.0:10240/v1 \
+    --model Qwen/Qwen3-4B-Thinking-2507 \
+    --model-api-key dummy_key
 ```
 
 <Tip>
@@ -137,9 +137,10 @@ Then replace the `policy_base_url=http://0.0.0.0:10240/v1` to point to the hostn
 ### Run rollout collection
 In a third terminal on the same GPU node that was used to spin up the vLLM server, enter the NeMo Gym Python environment, and run rollout collection.
 ```bash
-ng_collect_rollouts +agent_name=example_multi_step_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
-    +output_jsonl_fpath=results/example_multi_step_rollouts.jsonl
+gym eval run --no-serve \
+    --agent example_multi_step_simple_agent \
+    --input resources_servers/example_multi_step/data/example.jsonl \
+    --output results/example_multi_step_rollouts.jsonl
 ```
 
 ## VLLMModel configuration reference
