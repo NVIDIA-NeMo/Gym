@@ -530,6 +530,50 @@ class TestNVInternalDatasetProcessor:
             result = processor.get_run_command()
             assert "test_x.py,test_y.py" in result.command
 
+    def test_get_run_command_python_literal_test_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "selected_test_files_to_run": "['test_x.py', 'test_y.py']",
+                },
+            )
+            result = processor.get_run_command()
+            assert "test_x.py,test_y.py" in result.command
+
+    def test_get_run_command_quotes_test_files_arg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "selected_test_files_to_run": ["test_x.py", "test;touch /tmp/pwned"],
+                },
+            )
+            result = processor.get_run_command()
+            assert "bash /root/run_script.sh 'test_x.py,test;touch /tmp/pwned'" in result.command
+
+    def test_get_run_command_rejects_executable_test_files_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "selected_test_files_to_run": '__import__("os").system("touch /tmp/pwned")',
+                },
+            )
+            with pytest.raises(ValueError, match="selected_test_files_to_run"):
+                processor.get_run_command()
+
+    def test_get_run_command_rejects_non_string_test_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "selected_test_files_to_run": '["test_x.py", 1]',
+                },
+            )
+            with pytest.raises(ValueError, match="selected_test_files_to_run"):
+                processor.get_run_command()
+
     def test_get_run_command_no_repo_cmd(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             processor = self._make_processor(

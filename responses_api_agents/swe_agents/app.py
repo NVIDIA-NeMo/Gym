@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import asyncio
 import glob
 import importlib.util
@@ -537,6 +538,28 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
 
 class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
+    @staticmethod
+    def _parse_selected_test_files_to_run(raw_value: Any) -> list[str]:
+        parsed_value = raw_value
+        if isinstance(raw_value, str):
+            try:
+                parsed_value = json.loads(raw_value)
+            except json.JSONDecodeError:
+                try:
+                    parsed_value = ast.literal_eval(raw_value)
+                except (SyntaxError, ValueError) as exc:
+                    raise ValueError(
+                        "selected_test_files_to_run must be a JSON array or Python literal list of strings"
+                    ) from exc
+
+        if isinstance(parsed_value, tuple):
+            parsed_value = list(parsed_value)
+
+        if not isinstance(parsed_value, list) or not all(isinstance(test_file, str) for test_file in parsed_value):
+            raise ValueError("selected_test_files_to_run must decode to a list of strings")
+
+        return parsed_value
+
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         instance_dict = json.loads(self.config.problem_info["instance_dict"])
         base_dockerfile = instance_dict.get("base_dockerfile", "")
@@ -572,11 +595,9 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
             repo_cmd = repo_cmd.split("\n")[-1]
 
         # Get test files
-        test_files_str = instance_dict.get("selected_test_files_to_run", "[]")
-        if isinstance(test_files_str, str):
-            test_files = ",".join(eval(test_files_str))
-        else:
-            test_files = ",".join(test_files_str)
+        test_files = self._parse_selected_test_files_to_run(instance_dict.get("selected_test_files_to_run", "[]"))
+        test_files_arg = ",".join(test_files)
+        test_files_arg = f" {shlex.quote(test_files_arg)}" if test_files_arg else ""
 
         run_script = instance_dict["run_script.sh"]
         parsing_script = instance_dict["parsing_script.py"]
@@ -608,7 +629,7 @@ git apply --ignore-space-change --ignore-whitespace --reject -v /root/patch.diff
 {repo_cmd}
 
 # Run tests
-bash /root/run_script.sh {test_files} > /root/stdout.log 2> /root/stderr.log || true
+bash /root/run_script.sh{test_files_arg} > /root/stdout.log 2> /root/stderr.log || true
 
 # Parse results
 python /root/parsing_script.py /root/stdout.log /root/stderr.log /root/output.json
