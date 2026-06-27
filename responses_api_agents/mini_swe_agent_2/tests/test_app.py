@@ -784,6 +784,12 @@ class TestApp:
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
         config.sandbox_provider = "sandbox"
+        config.sandbox_spec = {
+            "provider_options": {
+                "platform": {"os": "linux", "arch": "arm64"},
+                "extensions": {"trace": "enabled"},
+            }
+        }
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
@@ -792,6 +798,10 @@ class TestApp:
             "policy_model_name": "test_model",
             "sandbox": {
                 "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+                "default_provider_options": {
+                    "platform": {"os": "linux", "arch": "amd64"},
+                    "skip_health_check": True,
+                },
                 "opensandbox": {
                     "connection": {
                         "domain": "sandbox.example",
@@ -817,6 +827,65 @@ class TestApp:
         assert "api_key" not in provider["connection"]
         # Provider default_metadata flows into the sandbox spec metadata.
         assert generated_config["environment"]["spec"]["metadata"]["sandbox-api"] == "opensandbox-sdk"
+        # Provider defaults fill missing values; explicit agent options win on conflict.
+        assert generated_config["environment"]["spec"]["provider_options"] == {
+            "platform": {"os": "linux", "arch": "arm64"},
+            "skip_health_check": True,
+            "extensions": {"trace": "enabled"},
+        }
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_resolves_bundled_apptainer_provider_reference(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.sandbox_provider = "sandbox"
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+
+        provider_config_path = (
+            Path(__file__).parents[3]
+            / "nemo_gym"
+            / "sandbox"
+            / "providers"
+            / "apptainer"
+            / "configs"
+            / "apptainer.yaml"
+        )
+        bundled_provider_config = yaml.safe_load(provider_config_path.read_text())
+        mock_server_client_instance = MagicMock()
+        mock_server_client_instance.global_config_dict = {
+            "policy_model_name": "test_model",
+            **bundled_provider_config,
+        }
+        mock_load_from_global_config.return_value = mock_server_client_instance
+        mock_get_first_server_config_dict.return_value = {"host": "0.0.0.0", "port": 8080}
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
+
+        await server.run(create_run_request())
+
+        mock_runner_ray_remote.options.assert_not_called()
+        call_args = mock_runner_ray_remote.remote.call_args
+        params = call_args.args[1]
+        generated_config = yaml.safe_load(Path(params["config"]).read_text())
+        assert generated_config["environment"]["provider"] == {
+            "apptainer": bundled_provider_config["sandbox"]["apptainer"]
+        }
+        assert generated_config["environment"]["spec"]["metadata"]["sandbox-api"] == "apptainer-cli"
+        assert "provider_options" not in generated_config["environment"]["spec"]
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")

@@ -162,10 +162,6 @@ mini_swe_agent_2:
           cpu: 2
           memory_mib: 8192
           disk_gib: 20
-        provider_options:
-          platform:
-            os: linux
-            arch: amd64
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
@@ -197,6 +193,10 @@ Path - `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`
 sandbox:                      # name referenced by the agent's sandbox_provider
   default_metadata:           # optional: merged into sandbox spec metadata (see below)
     sandbox-api: opensandbox-sdk
+  default_provider_options:   # optional: merged into sandbox provider_options
+    platform:
+      os: linux
+      arch: amd64
   opensandbox:                # provider registry key -> provider class
     connection:
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
@@ -229,11 +229,23 @@ To use a different provider, add a config file under
 `sandbox` block (the name the agent references) with that provider's registry key,
 then point `+config_paths` at it instead — no agent edit required.
 
+Apptainer ships such a config at
+`nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml`. Select it by replacing
+the OpenSandbox provider path in `+config_paths`; the host must have the `apptainer`
+binary installed. See the [Apptainer provider README](../../nemo_gym/sandbox/providers/apptainer/README.md)
+for its runtime requirements and configuration knobs.
+
 An optional `default_metadata` key holds provider-contributed defaults that are
 merged into each sandbox's spec metadata (`SandboxSpec.metadata`); the agent's own
 `sandbox_spec.metadata` overrides them on conflict. This keeps provider-identifying
 tags (e.g. `sandbox-api: opensandbox-sdk`) with the provider rather than in the
 agent config.
+
+Likewise, optional `default_provider_options` are shallow-merged by top-level key into
+`SandboxSpec.provider_options`, with explicit agent options winning. Nested mappings are
+replaced rather than deep-merged. This keeps provider-specific defaults such as
+OpenSandbox's Linux/AMD64 platform in the provider file while the agent config remains
+portable to Apptainer.
 
 To ship a custom provider class from a separate package, register it under the
 `nemo_gym.sandbox_providers` entry point group so it is available on install:
@@ -408,8 +420,10 @@ environment:
       connection: ...
   spec:
     resources: ...
-    provider_options:
-      platform: ...
+    provider_options:          # contributed by the selected OpenSandbox config
+      platform:
+        os: linux
+        arch: amd64
     metadata: ...
 ```
 

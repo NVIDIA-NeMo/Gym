@@ -68,7 +68,7 @@ def _require_apptainer() -> str:
     if path is None:
         raise RuntimeError(
             "The 'apptainer' binary is required for the apptainer sandbox provider. "
-            "Install Apptainer before using env.sandbox.provider.name=apptainer."
+            "Install Apptainer before selecting the 'apptainer' sandbox provider."
         )
     return path
 
@@ -137,6 +137,40 @@ class ApptainerProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+
+
+@dataclass(frozen=True)
+class ApptainerProviderOptions:
+    """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``."""
+
+    binds: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any] | None) -> "ApptainerProviderOptions":
+        if options is None:
+            return cls()
+        if not isinstance(options, Mapping):
+            raise TypeError("Apptainer provider_options must be a mapping")
+
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unknown Apptainer provider option(s): {', '.join(sorted(unknown))}. "
+                f"Supported: {', '.join(sorted(allowed))}"
+            )
+
+        binds = options.get("binds")
+        if binds is None:
+            normalized_binds: tuple[str, ...] = ()
+        elif isinstance(binds, str):
+            normalized_binds = (binds,)
+        elif isinstance(binds, (list, tuple)) and all(isinstance(bind, str) for bind in binds):
+            normalized_binds = tuple(binds)
+        else:
+            raise TypeError("Apptainer provider option 'binds' must be a string or list/tuple of strings")
+
+        return cls(binds=normalized_binds)
 
 
 @dataclass
@@ -218,22 +252,6 @@ def _is_runtime_failure(stderr: str) -> bool:
 def _is_missing_instance(stderr: str) -> bool:
     low = stderr.lower()
     return any(marker in low for marker in APPTAINER_MISSING_INSTANCE_MARKERS)
-
-
-def _coerce_binds(value: Any) -> list[str]:
-    """Normalize ``spec.provider_options['binds']`` into a list of bind strings.
-
-    Accepts a single ``"src:dst[:opts]"`` string or a list of them. These are
-    extra per-sandbox bind mounts, added on top of the staging mount and the
-    provider-level ``exec.default_binds``.
-    """
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, (list, tuple)):
-        return [str(v) for v in value]
-    raise ApptainerCreateError(f"provider_options['binds'] must be a string or list, got {type(value).__name__}")
 
 
 class ApptainerProvider:
@@ -346,7 +364,7 @@ class ApptainerProvider:
            mount_point = self._create_config.mount_point, generate a unique
            name = INSTANCE_NAME_PREFIX + uuid4().hex.
         4. Build argv: [binary, "instance", "start", <--bind staging:mount_point>,
-           <config default_binds>, <spec.provider_options["binds"]>, <--env ...>,
+           <config default_binds>, <provider_options.binds>, <--env ...>,
            _resource_flags(spec.resources), <extra_start_args>, image, name].
         5. await self._run(argv, timeout_s=self._create_config.start_timeout_s);
            on non-zero return, clean up the staging dir and raise
@@ -367,7 +385,7 @@ class ApptainerProvider:
         image = _resolve_image(spec.image)
 
         # Extra per-sandbox bind mounts (validated before we allocate anything).
-        extra_binds = _coerce_binds(spec.provider_options.get("binds"))
+        options = ApptainerProviderOptions.from_mapping(spec.provider_options)
 
         # host staging dir (bind-mounted in), mount point, unique name.
         mount_point = self._create_config.mount_point
@@ -381,7 +399,7 @@ class ApptainerProvider:
         argv += ["--bind", f"{staging_dir}:{mount_point}"]
         for bind in self._exec_config.default_binds:
             argv += ["--bind", bind]
-        for bind in extra_binds:
+        for bind in options.binds:
             argv += ["--bind", bind]
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]

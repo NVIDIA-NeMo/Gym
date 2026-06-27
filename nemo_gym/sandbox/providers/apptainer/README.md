@@ -72,29 +72,61 @@ async def run():
 
 ## Selecting and configuring the provider
 
-The provider config is a single-key mapping: `{"apptainer": {<kwargs>}}`. The kwargs are
-grouped into three optional sections, each of which accepts a plain mapping (e.g. from
-Hydra YAML) or the corresponding dataclass:
+For Hydra-composed agents, use the bundled named provider config:
+
+```bash
+AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+PROVIDER=nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml
+ng_run "+config_paths=[$AGENT,$PROVIDER,$MODEL]"
+```
+
+The config binds the conventional name `sandbox`, which the agent selects with
+`sandbox_provider: sandbox`. It can therefore replace the OpenSandbox config by changing
+only the provider path. `default_metadata` is merged into each `SandboxSpec.metadata`,
+with the agent's explicit metadata taking precedence:
 
 ```yaml
-# Provider config (the value passed as the sandbox provider)
-apptainer:
-  exec:
-    fakeroot_for_root: true
-    default_binds: ["/tmp"]
-    extra_exec_args: ["--writable-tmpfs"]
-    default_timeout_s: 180
-    concurrency: 32
-  create:
-    mount_point: /sandbox
-    start_timeout_s: 600
-    extra_start_args: []
-    apply_resource_limits: true
-  probe:
-    command: printf apptainer-sandbox-ready
-    expected_stdout: apptainer-sandbox-ready
-    deadline_s: 120
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    exec:
+      fakeroot_for_root: false  # instance start establishes fakeroot below
+      default_binds: []
+      extra_exec_args: ["--cleanenv"]
+      default_timeout_s: 180
+      concurrency: 32
+    create:
+      mount_point: /sandbox
+      start_timeout_s: 1200
+      extra_start_args: ["--containall", "--cleanenv", "--fakeroot", "--writable-tmpfs"]
+      apply_resource_limits: false
+    probe:
+      command: printf apptainer-sandbox-ready
+      expected_stdout: apptainer-sandbox-ready
+      timeout_s: 30
+      deadline_s: 120
+      stable_count: 1
+      stable_delay_s: 0.0
 ```
+
+The value under `apptainer` is the provider constructor config. Its three optional
+sections accept either a plain mapping (for example, from Hydra YAML) or the corresponding
+dataclass. Direct Python callers pass the resolved single-key mapping
+`{"apptainer": {<kwargs>}}` to `Sandbox` or `AsyncSandbox`, as shown above.
+
+The bundled config uses `--containall` and `--cleanenv` to suppress Apptainer's standard
+host home/tmp binds and ordinary host environment inheritance. It also starts with
+fakeroot and an ephemeral writable overlay so Mini SWE commands can run as root and
+persistent edits can modify an otherwise read-only SIF image. These flags must be applied
+by `instance start`; adding them only to `exec instance://...` cannot change an existing
+instance's mount/user namespace. The profile therefore disables CPU/memory cgroup flags,
+which Apptainer cannot combine with fakeroot in this provider. A host must support
+fakeroot and writable-tmpfs overlays; adjust `create.extra_start_args` for writable
+sandbox images or hosts without those features. Apptainer's `sessiondir max size`
+controls writable-tmpfs capacity; `SandboxSpec.disk_gib` does not resize it, so raise the
+host limit for Mini SWE workloads.
 
 ### `create` — `ApptainerCreateConfig`
 
@@ -114,9 +146,9 @@ Settings for running commands (`apptainer exec`) and global provider behavior.
 | Field | Default | Meaning |
 |---|---|---|
 | `default_timeout_s` | `180` | Default per-command timeout when the caller doesn't pass one (`None` = no timeout). |
-| `fakeroot_for_root` | `true` | When running as root, add `--fakeroot` (map the host user to root inside the container). |
+| `fakeroot_for_root` | `true` | When `user` is root, request `--fakeroot` on exec. The instance must also have been started with `--fakeroot`; the bundled config does this. |
 | `default_binds` | `[]` | Extra `--bind host:container` mounts added at instance start. |
-| `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--no-home`, `--writable-tmpfs`, `--contain`). |
+| `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--cleanenv` or `--no-eval`). Mount/user namespace flags belong in `create.extra_start_args`. |
 | `concurrency` | `32` | Upper bound on concurrent `apptainer` subprocesses (shared semaphore). |
 
 ### `probe` — `ApptainerProbeConfig`
@@ -145,8 +177,18 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 | `workdir` | Default working directory for `exec` (applied as `--pwd`). |
 | `files` | Seed files written into the sandbox at `start()` (handled by the sandbox API via `upload`). |
 | `resources` | Mapped to cgroup flags (see below). |
-| `provider_options` | `binds`: a `"src:dst[:opts]"` string or list of them — extra per-sandbox `--bind` mounts added at instance start (on top of the staging mount and `exec.default_binds`). |
+| `provider_options` | Validated by `ApptainerProviderOptions`; currently supports only `binds` (see below). |
 | `ttl_s` | **Not supported** — ignored with a warning. Tear down via `stop()`/`close()` instead. |
+
+### Per-sandbox provider options — `ApptainerProviderOptions`
+
+`SandboxSpec.provider_options` is parsed into a frozen dataclass before any instance
+resources are allocated. The only supported option is `binds`: either one
+`"src:dst[:opts]"` string or a list/tuple of strings. These per-sandbox mounts are added
+at instance start after the staging mount and `exec.default_binds`.
+
+Unknown keys, a non-mapping `provider_options` value, and non-string bind entries raise a
+clear validation error instead of being silently ignored.
 
 ## How it works
 
@@ -256,8 +298,13 @@ failed" rather than "the command exited 125".
   per relevant create). Manage lifetime with `stop()` / `close()`.
 - **Numeric uids.** The `su`-based user switch expects a *username*; a bare numeric uid
   may not resolve. Prefer named users.
-- **`--fakeroot` on exec.** Whether `--fakeroot` works on `exec` into an instance that
-  was started *without* fakeroot varies by Apptainer version and host configuration.
+- **Fakeroot is fixed at instance start.** `exec instance://...` cannot retrofit a user
+  namespace onto a non-fakeroot instance; put `--fakeroot` in
+  `create.extra_start_args` when commands must run as root.
+- **Apptainer launcher variables remain significant.** `APPTAINER_BIND`,
+  `APPTAINER_BINDPATH`, `APPTAINER_MOUNT`, `APPTAINERENV_*`, and legacy Singularity
+  aliases can inject mounts or environment values before container-side `--cleanenv`
+  applies. Sanitize these in the worker/launcher environment when running untrusted code.
 - **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
   Disable them with `create.apply_resource_limits: false`.
 - **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
@@ -265,7 +312,8 @@ failed" rather than "the command exited 125".
 
 ## Development
 
-Source: [`provider.py`](./provider.py). The provider implements the
+Source: [`provider.py`](./provider.py); the bundled named config is
+[`configs/apptainer.yaml`](./configs/apptainer.yaml). The provider implements the
 `SandboxProvider` protocol from [`../base.py`](../base.py) structurally (no subclassing)
 and is registered under the name `apptainer` in [`../registry.py`](../registry.py).
 
