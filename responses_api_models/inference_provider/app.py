@@ -188,7 +188,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
         message_lower = message.lower()
         if status in {401, 403} or "api key" in message_lower or "auth" in message_lower:
             return "authentication"
-        if status == 404 or "model" in message_lower and "not found" in message_lower:
+        if status == 404 or ("model" in message_lower and "not found" in message_lower):
             return "model_not_found"
         if status == 429 or "rate limit" in message_lower:
             return "rate_limit"
