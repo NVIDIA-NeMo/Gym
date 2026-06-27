@@ -1,0 +1,25 @@
++ source /opt/miniconda3/bin/activate
++ conda activate testbed
++ git config --global --add safe.directory /testbed
++ cd /testbed
++ git status
++ git restore .
++ git apply -v /tmp/patch.diff
+Checking patch sphinx/ext/autodoc/__init__.py...
+Applied patch sphinx/ext/autodoc/__init__.py cleanly.
+>>>>> Applied Patch
++ git checkout abc123 tests/test_ext_autodoc.py
+Updated 1 path from the index
++ git apply -v /tmp/test_patch.diff
+Checking patch tests/test_ext_autodoc.py...
+Applied patch tests/test_ext_autodoc.py cleanly.
+>>>>> Start Test Output
+============================= test session starts ==============================
+PASSED tests/test_ext_autodoc.py::test_format_signature
+PASSED tests/test_ext_autodoc.py::test_autodoc_inherited
+PASSED tests/test_ext_autodoc.py::test_autodoc_exclude_members
+SKIPPED tests/test_ext_autodoc.py::test_optional_feature
+=================== 3 passed, 1 skipped in 2.41s ===============================
+>>>>> End Test Output
++ git checkout abc123 tests/test_ext_autodoc.py
+Updated 1 path from the index

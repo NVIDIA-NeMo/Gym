@@ -10,19 +10,19 @@ anyswe_claude_code:
       agent_server_class: ClaudeCodeAgent
       agent_config_class: ClaudeCodeAgentConfig
       agent_kwargs:
-        model: aws/anthropic/bedrock-claude-opus-4-7
-        anthropic_api_key: ${anthropic_api_key}
-        anthropic_base_url: https://inference-api.nvidia.com
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        # null -> the claude CLI uses the real Anthropic API (api.anthropic.com). Override with
+        # ++...agent_kwargs.anthropic_base_url=<url> to point at an Anthropic-compatible gateway.
+        anthropic_base_url: null
         max_turns: 100
         timeout: 1800
         system_prompt: "You are fixing a bug in the repository at /testbed. Edit the source files to fix the root cause, then verify. You MUST actually apply the fix with your file-editing tools; do not just describe it."
 
-      container_formatter: data/sifs/{instance_id}.sif
+      container_formatter: docker://swebench/sweb.eval.x86_64.{instance_id}
       swebench_agent_timeout: 2700
       swebench_tests_timeout: 1800
-      apptainer_memory_limit_mb: 32768
-      concurrency: 4
-      skip_eval: false
+      concurrency: 18
 
       # Claude Code calls anthropic_base_url directly.
 

@@ -16,12 +16,10 @@ anyswe_hermes:
         enabled_toolsets: null
         system_prompt: "You are an expert software engineer. The source code repository is at /testbed. Explore the code, reproduce the bug, fix the root cause, and verify the fix. You MUST actually use terminal and file tools to explore, edit, and test the code; do not just describe what to do."
 
-      container_formatter: data/sifs/{instance_id}.sif
+      container_formatter: docker://swebench/sweb.eval.x86_64.{instance_id}
       swebench_agent_timeout: 2700
       swebench_tests_timeout: 1800
-      apptainer_memory_limit_mb: 32768
-      concurrency: 4
-      skip_eval: false
+      concurrency: 18
 
       model_server:
         name: policy_model

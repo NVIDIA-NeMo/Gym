@@ -13,22 +13,21 @@
 # limitations under the License.
 """Unit tests for anyswe_agent.
 
-These exercise pure logic (no Apptainer/Docker): runner-script generation,
-container discovery, deps-key derivation, and config plumbing. Heavy side
-effects in model_post_init (deps + eval harness install) are bypassed via
-pydantic's model_construct.
+Exercise pure logic (no Docker/apptainer): the agent-agnostic runner script, the
+dataset-name -> harness-key shim, docker image-name derivation, SweTask construction
+from a task row, and config plumbing.
 """
 
 import json
 from pathlib import Path
 
-import pytest
-
 from responses_api_agents.anyswe_agent.app import (
     _RUNNER_TEMPLATE,
-    AnySweAgent,
     AnySweAgentConfig,
     GymAgentHarnessProcessor,
+    _benchmark_key,
+    _build_swetask,
+    _instance_image,
 )
 
 
@@ -42,10 +41,28 @@ def _config(**overrides) -> AnySweAgentConfig:
         agent_server_module="responses_api_agents.hermes_agent.app",
         agent_server_class="HermesAgent",
         agent_config_class="HermesAgentConfig",
-        container_formatter="/sifs/{instance_id}.sif",
     )
     base.update(overrides)
     return AnySweAgentConfig(**base)
+
+
+def _problem_info(**overrides) -> dict:
+    inst = {
+        "base_commit": "deadbeef",
+        "FAIL_TO_PASS": ["test_calc.py::test_add"],
+        "PASS_TO_PASS": ["test_calc.py::test_sub"],
+        "test_patch": "--- a/t.py\n+++ b/t.py\n",
+        "repo": "astropy/astropy",
+    }
+    base = dict(
+        instance_id="astropy__astropy-13453",
+        dataset_name="princeton-nlp/SWE-bench_Verified",
+        problem_statement="Fix the bug.",
+        container_formatter="docker://swebench/sweb.eval.x86_64.{instance_id}",
+        instance_dict=json.dumps(inst),
+    )
+    base.update(overrides)
+    return base
 
 
 class TestRunnerTemplate:
@@ -56,15 +73,15 @@ class TestRunnerTemplate:
             agent_cfg_class="HermesAgentConfig",
             agent_class_lower="hermesagent",
         )
-        # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
-        assert '"git", "diff", "HEAD"' in rendered
+        assert "git add -A && git diff --cached" in rendered
 
-    def test_patch_extraction_is_git_diff(self) -> None:
-        # The runner always extracts the patch via `git diff HEAD`, independent
-        # of which agent ran; this is the core agent-agnostic contract.
-        assert '"git", "diff", "HEAD"' in _RUNNER_TEMPLATE
+    def test_patch_extraction_stages_then_diffs(self) -> None:
+        # The runner stages everything before diffing (`git add -A && git diff --cached`) so
+        # newly-created files land in the graded patch, matching SWE-bench's own model-patch
+        # extraction. Agent-agnostic: it runs regardless of which agent produced the changes.
+        assert "git add -A && git diff --cached" in _RUNNER_TEMPLATE
         assert "patch.diff" in _RUNNER_TEMPLATE
 
     def test_sampling_is_forwarded(self) -> None:
@@ -75,8 +92,6 @@ class TestRunnerTemplate:
             agent_class_lower="hermesagent",
         )
         compile(rendered, "<runner>", "exec")
-        # Read from env, forwarded onto the body, and merged into the config
-        # (request value winning over the agent_kwargs default).
         assert "NGSWE_SAMPLING" in rendered
         assert "**SAMPLING," in rendered
         assert "**AGENT_KWARGS, **_cfg_sampling" in rendered
@@ -99,20 +114,53 @@ class TestAgentKey:
         assert proc._agent_key == "claude_code_agent"
 
 
-class TestFindContainer:
-    def test_exact_match(self, tmp_path: Path) -> None:
-        sif = tmp_path / "astropy__astropy-12907.sif"
-        sif.write_text("")
-        found = AnySweAgent._find_container(
-            {"instance_id": "astropy__astropy-12907", "container_formatter": str(tmp_path / "{instance_id}.sif")}
-        )
-        assert found == str(sif)
+class TestBenchmarkKey:
+    def test_verified_maps_to_swe_bench(self) -> None:
+        assert _benchmark_key("princeton-nlp/SWE-bench_Verified") == "swe-bench"
 
-    def test_missing_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError):
-            AnySweAgent._find_container(
-                {"instance_id": "nope__nope-1", "container_formatter": str(tmp_path / "{instance_id}.sif")}
-            )
+    def test_multilingual_and_r2e(self) -> None:
+        assert _benchmark_key("princeton-nlp/SWE-bench_Multilingual") == "swe-bench-multilingual"
+        assert _benchmark_key("R2E-Gym/R2E-Gym-Subset") == "r2e-gym"
+
+    def test_unknown_defaults_to_swe_bench(self) -> None:
+        assert _benchmark_key("some/unknown-dataset") == "swe-bench"
+
+
+class TestInstanceImage:
+    def test_docker_scheme_stripped_and_tag_mangled(self) -> None:
+        img = _instance_image("docker://swebench/sweb.eval.x86_64.{instance_id}", "astropy__astropy-13453")
+        assert img == "swebench/sweb.eval.x86_64.astropy_1776_astropy-13453:latest"
+
+    def test_list_formatter_and_existing_tag(self) -> None:
+        img = _instance_image(["swebench/sweb.eval.x86_64.{instance_id}:v1"], "psf__requests-2317")
+        assert img == "swebench/sweb.eval.x86_64.psf_1776_requests-2317:v1"
+
+    def test_default_formatter(self) -> None:
+        img = _instance_image(None, "django__django-12345")
+        assert img == "swebench/sweb.eval.x86_64.django_1776_django-12345:latest"
+
+    def test_local_sif_path_used_verbatim(self) -> None:
+        # A .sif formatter (local apptainer image) resolves to an on-disk path with the raw
+        # instance_id (no _1776_ mangle) and no :latest tag, so the apptainer provider can
+        # ``instance start`` it directly without a registry pull.
+        img = _instance_image("/sifs/sweb.eval.x86_64.{instance_id}.sif", "astropy__astropy-13453")
+        assert img == "/sifs/sweb.eval.x86_64.astropy__astropy-13453.sif"
+
+
+class TestBuildSweTask:
+    def test_unpacks_instance_dict(self) -> None:
+        task = _build_swetask(_problem_info())
+        assert task.instance_id == "astropy__astropy-13453"
+        assert task.image == "swebench/sweb.eval.x86_64.astropy_1776_astropy-13453:latest"
+        assert task.benchmark == "swe-bench"
+        assert task.base_commit == "deadbeef"
+        assert task.fail_to_pass == ["test_calc.py::test_add"]
+        assert task.pass_to_pass == ["test_calc.py::test_sub"]
+        assert task.repo_workdir == "/testbed"
+
+    def test_flat_eval_flag_is_configurable(self) -> None:
+        assert _build_swetask(_problem_info()).metadata["flat_eval"] is True
+        assert _build_swetask(_problem_info(), flat_eval=False).metadata["flat_eval"] is False
 
 
 class TestSetupScriptsExist:

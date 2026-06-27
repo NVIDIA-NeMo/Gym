@@ -1,1 +1,7 @@
 -e nemo-gym[dev] @ ../../
+# Flat (host-side) grading on docker/opensandbox builds the official SWE-bench eval
+# script via swebench.make_test_spec; the nested/apptainer grading path doesn't need it.
+# Pinned: the resolve verdict depends on swebench's per-repo log parsers, FAIL_ONLY_REPOS,
+# and eval-script templates, which change across releases. Keep in sync with
+# mini_swe_agent_2 (swebench==4.1.0) so the reported numbers stay reproducible.
+swebench==4.1.0

@@ -75,11 +75,18 @@ def _load_opensandbox_provider() -> ProviderClass:
     return OpenSandboxProvider
 
 
+def _load_docker_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.docker import DockerSandboxProvider
+
+    return DockerSandboxProvider
+
+
 def _load_apptainer_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 
     return ApptainerProvider
 
 
-_BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
+_BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
+_BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
