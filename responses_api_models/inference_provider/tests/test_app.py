@@ -77,7 +77,8 @@ def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None,
 def _provider_error(status: int, message: str, response_body: str | None = None) -> ClientResponseError:
     error = ClientResponseError(MagicMock(), (), status=status, message="provider request failed", headers=None)
     error.message = message
-    error.response_content = (response_body or message).encode("utf-8")
+    payload = response_body if response_body is not None else message
+    error.response_content = payload.encode("utf-8")
     return error
 
 
@@ -399,6 +400,25 @@ class TestProviderErrors:
         assert detail["category"] == "transient_upstream_failure"
         assert detail["retryable"] is True
         assert detail["message"] == plain_text_error
+
+    async def test_chat_completion_provider_empty_body_uses_default_message(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=_provider_error(502, "Bad gateway", ""))
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 502
+        assert detail["category"] == "transient_upstream_failure"
+        assert detail["retryable"] is True
+        assert detail["message"] == "Provider request failed"
 
     async def test_chat_completion_provider_error_message_is_truncated_and_compacted(
         self, monkeypatch: MonkeyPatch
