@@ -38,13 +38,16 @@ Skip if you already have one. Otherwise generate the app, config, and test layou
 ng_init_resources_server +entrypoint=resources_servers/my_server
 ```
 
-### 2. Subclass `BaseVerifyResponse` to add `reward_components`
+### 2. Subclass `MultiRewardVerifyResponse`
 
-This is the multi-reward contract: a `{objective_name: score}` dict. Defining it on a subclass (rather than on `BaseVerifyResponse`) keeps every other environment's verify response unchanged.
+This is the shared multi-reward contract: a `{objective_name: score}` dict that already lives on `MultiRewardVerifyResponse`. Keeping it on a dedicated subclass, rather than on `BaseVerifyResponse`, keeps every other environment's verify response unchanged.
 
 ```python
-class MultiRewardResponse(BaseVerifyResponse):
-    reward_components: Dict[str, float] | None = None
+from nemo_gym.base_resources_server import MultiRewardVerifyResponse
+
+
+class MultiRewardResponse(MultiRewardVerifyResponse):
+    pass
 ```
 
 ### 3. Set the scalar `reward`
@@ -113,11 +116,10 @@ The `self._…` helpers (extracting calls, parsing arguments, checking required 
 
 ### 3. Return all three forms
 
-The example's response class adds the `reward_components` dict and the three top-level component fields. The scalar `reward` is already declared on `BaseVerifyResponse`, so it isn't redeclared here — `verify()` computes its value (the sum) in the return below.
+The example's response class inherits the shared `reward_components` dict and adds the three top-level component fields used for aggregate metrics. The scalar `reward` is already declared on `BaseVerifyResponse`, so it isn't redeclared here — `verify()` computes its value (the sum) in the return below.
 
 ```python
-class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
-    reward_components: Dict[str, float] | None = None
+class ToolCallMultiRewardVerifyResponse(MultiRewardVerifyResponse):
     correctness: float = 0.0
     schema_valid: float = 0.0
     format: float = 0.0
