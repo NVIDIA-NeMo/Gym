@@ -202,3 +202,46 @@ class TestApp:
             grading_mode="fraction",
         )
         self._run_verify_test(real_request, False, 0.5, [True, False])
+
+    def test_loose_fields_present(self):
+        real_request = self._create_real_request(
+            instruction_ids=["punctuation:no_comma"],
+            prompt="The output should not contain any commas.",
+            kwargs=[{}],
+            response_content="Hello world without commas",
+        )
+        server = self._create_server()
+        result = asyncio.run(server.verify(real_request))
+        assert isinstance(result.follow_all_instructions_loose, bool)
+        assert isinstance(result.follow_instruction_list_loose, list)
+        assert len(result.follow_instruction_list_loose) == 1
+
+    def test_loose_geq_strict(self):
+        real_request = self._create_real_request(
+            instruction_ids=["punctuation:no_comma"],
+            prompt="No commas please.",
+            kwargs=[{}],
+            response_content="Hello, world",
+        )
+        server = self._create_server()
+        result = asyncio.run(server.verify(real_request))
+        for strict, loose in zip(result.follow_instruction_list, result.follow_instruction_list_loose):
+            assert loose >= strict
+
+    def test_compute_metrics_four_keys(self):
+        server = self._create_server()
+        tasks = [
+            [{"follow_instruction_list": [True, False], "follow_instruction_list_loose": [True, True]}],
+            [{"follow_instruction_list": [True], "follow_instruction_list_loose": [True]}],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert set(metrics.keys()) == {
+            "prompt_strict_accuracy",
+            "instruction_strict_accuracy",
+            "prompt_loose_accuracy",
+            "instruction_loose_accuracy",
+        }
+        assert metrics["prompt_strict_accuracy"] == 50.0
+        assert abs(metrics["instruction_strict_accuracy"] - 200 / 3) < 1e-9
+        assert metrics["prompt_loose_accuracy"] == 100.0
+        assert metrics["instruction_loose_accuracy"] == 100.0
