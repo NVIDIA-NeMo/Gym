@@ -164,6 +164,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
+    chat_template_kwargs_enabled: bool = True
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
 
@@ -280,7 +281,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent = AIAgent(
             base_url=base_url,
-            api_key="gym",  # pragma: allowlist secret
+            api_key=os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
@@ -298,6 +299,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
+            if not self.config.chat_template_kwargs_enabled:
+                return kw
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
