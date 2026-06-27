@@ -342,11 +342,13 @@ class SweRebenchHarness(SweTaskHarness):
         fail_to_pass_set = {_normalize_test_name(n) for n in task.fail_to_pass}
         pass_to_pass_set = {_normalize_test_name(n) for n in task.pass_to_pass}
 
-        # Resolution rule: every FAIL_TO_PASS and PASS_TO_PASS test must be in the
-        # passed set. Resolution is not gated on patch application, and the
-        # F2P/P2P sets are not required to be non-empty (an empty set is a subset
-        # of any set).
-        resolved = (fail_to_pass_set <= passed_set) and (pass_to_pass_set <= passed_set)
+        # Resolution rule: every FAIL_TO_PASS and PASS_TO_PASS test must be in the passed set,
+        # AND the required set must be non-empty. The empty-required guard (matching
+        # compute_resolved's ``if not required: return False``) keeps swe-rebench consistent with
+        # the other families: a degenerate row with no required tests does NOT resolve, instead of
+        # inflating to reward 1.0 (an empty set is a subset of anything). Not gated on patch apply.
+        required = fail_to_pass_set | pass_to_pass_set
+        resolved = bool(required) and fail_to_pass_set <= passed_set and pass_to_pass_set <= passed_set
         return SweEvalReport(
             instance_id=task.instance_id,
             resolved=resolved,

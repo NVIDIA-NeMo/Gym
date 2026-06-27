@@ -54,6 +54,7 @@ class DockerSandboxProvider:
         run_args: list[str] | None = None,
         keep_alive_command: str = "sleep infinity",
         concurrency: int = 32,
+        default_exec_timeout_s: int | float | None = 3600,
         **_: Any,
     ) -> None:
         """Configure the Docker sandbox provider.
@@ -70,6 +71,9 @@ class DockerSandboxProvider:
                 it alive for subsequent ``exec`` calls.
             concurrency: Maximum number of concurrent ``docker`` CLI subprocesses,
                 bounded by a shared semaphore (matches the apptainer provider).
+            default_exec_timeout_s: Default per-``exec`` timeout (seconds) applied when a
+                caller passes none, so a hung in-container command cannot block a rollout
+                forever (e.g. the git-diff extraction in self_drive). None = no default.
             **_: Additional keyword arguments are accepted and ignored.
 
         Raises:
@@ -83,6 +87,7 @@ class DockerSandboxProvider:
         self._run_args = list(run_args or [])
         self._keep_alive = keep_alive_command
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._default_exec_timeout_s = default_exec_timeout_s
 
     async def _run(self, *args: str, timeout_s: int | float | None = None) -> tuple[int, str, str]:
         """Run the ``docker`` CLI with the given arguments and capture output.
@@ -101,12 +106,19 @@ class DockerSandboxProvider:
             text using ``errors="replace"``.
         """
         async with self._semaphore:
-            proc = await asyncio.create_subprocess_exec(
-                self._bin,
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self._bin,
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as exc:
+                # Surface a clear, actionable error instead of a bare FileNotFoundError deep in
+                # create()/exec() (parity with apptainer's _require_apptainer up-front check).
+                raise SandboxCreateError(
+                    f"docker executable {self._bin!r} not found on PATH — install Docker or set docker_bin"
+                ) from exc
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
             except (asyncio.TimeoutError, TimeoutError):
@@ -228,15 +240,16 @@ class DockerSandboxProvider:
             cwd: Working directory for the command; falls back to the workdir
                 recorded at create time.
             env: Extra environment variables for the command.
-            timeout_s: Optional timeout in seconds; on expiry a result with
-                return code 124 and ``error_type="timeout"`` is returned.
+            timeout_s: Optional timeout in seconds; falls back to the provider's
+                ``default_exec_timeout_s`` when None. On expiry a result with return
+                code 124 and ``error_type="timeout"`` is returned.
             user: User (name or UID) to run as; falls back to the provider's
                 default user.
 
         Returns:
             A ``SandboxExecResult`` with stdout, stderr, return code, and an
-            ``error_type`` of ``"sandbox"`` for docker-level failures (125/126/
-            127 with no stdout), ``"timeout"`` on timeout, or None otherwise.
+            ``error_type`` of ``"sandbox"`` for a docker-daemon failure (rc 125 with
+            no stdout), ``"timeout"`` on timeout, or None otherwise.
         """
         args = ["exec"]
         workdir = cwd or handle.raw.get("workdir")
@@ -248,17 +261,22 @@ class DockerSandboxProvider:
         for key, value in (env or {}).items():
             args += ["-e", f"{key}={value}"]
         args += [handle.sandbox_id, "bash", "-c", command]
+        eff_timeout = timeout_s if timeout_s is not None else self._default_exec_timeout_s
         try:
-            rc, out, err = await self._run(*args, timeout_s=timeout_s)
+            rc, out, err = await self._run(*args, timeout_s=eff_timeout)
         except (asyncio.TimeoutError, TimeoutError):
+            # Only the local `docker exec` client is killed here; the in-container process is
+            # reaped when the sandbox is closed (`docker rm -f`), which acquire_sandbox always does.
             return SandboxExecResult(
                 stdout=None,
-                stderr=f"command timed out after {timeout_s}s",
+                stderr=f"command timed out after {eff_timeout}s",
                 return_code=124,
                 error_type="timeout",
             )
-        # docker exec returns 125/126/127 for docker-level failures (container gone, not executable).
-        error_type = "sandbox" if rc in (125, 126, 127) and not out else None
+        # rc 125 is a docker-daemon-level failure (container gone / daemon error). 126 (not
+        # executable) and 127 (command not found) are legitimate *user*-command exit codes when
+        # run via `bash -c`, so only rc 125 with no stdout is classified as an infra failure.
+        error_type = "sandbox" if rc == 125 and not out else None
         return SandboxExecResult(stdout=out, stderr=err, return_code=rc, error_type=error_type)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -275,7 +293,7 @@ class DockerSandboxProvider:
         parent = posixpath.dirname(target_path)
         if parent:
             await self.exec(handle, f"mkdir -p {shlex.quote(parent)}")
-        rc, out, err = await self._run("cp", str(source_path), f"{handle.sandbox_id}:{target_path}")
+        rc, out, err = await self._run("cp", str(source_path), f"{handle.sandbox_id}:{target_path}", timeout_s=300)
         if rc != 0:
             raise RuntimeError(f"docker cp upload failed: {err.strip() or out.strip()}")
 
@@ -292,7 +310,7 @@ class DockerSandboxProvider:
         """
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        rc, out, err = await self._run("cp", f"{handle.sandbox_id}:{source_path}", str(target))
+        rc, out, err = await self._run("cp", f"{handle.sandbox_id}:{source_path}", str(target), timeout_s=300)
         if rc != 0:
             raise RuntimeError(f"docker cp download failed: {err.strip() or out.strip()}")
 
@@ -317,7 +335,12 @@ class DockerSandboxProvider:
         Args:
             handle: Handle identifying the container to remove.
         """
-        await self._run("rm", "-f", handle.sandbox_id)
+        # Best-effort + bounded: teardown runs in acquire_sandbox's finally, so a wedged daemon
+        # must not hang (or crash) it after the result is already in hand.
+        try:
+            await self._run("rm", "-f", handle.sandbox_id, timeout_s=120)
+        except Exception:
+            pass
 
     async def aclose(self) -> None:
         """Release provider-level resources; this provider holds none."""

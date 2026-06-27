@@ -74,6 +74,13 @@ def test_concurrency_bounds_the_semaphore() -> None:
     assert DockerSandboxProvider(concurrency=4)._semaphore._value == 4
 
 
+def test_missing_docker_binary_raises_clear_error() -> None:
+    """A missing docker binary surfaces a clear SandboxCreateError, not a bare FileNotFoundError."""
+    provider = DockerSandboxProvider(docker_bin="nemo-gym-no-such-docker-bin")
+    with pytest.raises(SandboxCreateError, match="not found on PATH"):
+        asyncio.run(provider.create(SandboxSpec(image="img:tag")))
+
+
 # --------------------------------------------------------------------------- #
 # create()
 # --------------------------------------------------------------------------- #
@@ -141,12 +148,27 @@ def test_create_applies_resource_limits(monkeypatch: pytest.MonkeyPatch) -> None
 # --------------------------------------------------------------------------- #
 # exec()
 # --------------------------------------------------------------------------- #
-def test_exec_classifies_docker_level_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """rc 125/126/127 with no stdout is a docker-level (``sandbox``) failure."""
+def test_exec_classifies_docker_daemon_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rc 125 with no stdout is a docker-daemon (``sandbox``) failure."""
     provider, _ = _make_provider(monkeypatch, lambda args: (125, "", "no such container"))
     res = asyncio.run(provider.exec(_handle(), "echo hi"))
     assert res.return_code == 125
     assert res.error_type == "sandbox"
+
+
+def test_exec_126_127_are_user_errors_not_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rc 126 (not executable) / 127 (command not found) are user-command errors, not infra."""
+    for rc in (126, 127):
+        provider, _ = _make_provider(monkeypatch, lambda args, rc=rc: (rc, "", "no"))
+        res = asyncio.run(provider.exec(_handle(), "nope"))
+        assert res.return_code == rc and res.error_type is None
+
+
+def test_exec_uses_provider_default_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """exec() falls back to ``default_exec_timeout_s`` when the caller passes no timeout."""
+    provider, rec = _make_provider(monkeypatch, lambda args: (0, "ok", ""), default_exec_timeout_s=99)
+    asyncio.run(provider.exec(_handle(), "true"))
+    assert rec.calls[-1]["timeout_s"] == 99
 
 
 def test_exec_success_has_no_error_type(monkeypatch: pytest.MonkeyPatch) -> None:

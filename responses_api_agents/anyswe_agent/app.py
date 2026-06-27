@@ -447,7 +447,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         dataset_dir = persistent_dir / "instance_datasets"
         dataset_dir.mkdir(parents=True, exist_ok=True)
         instance_dataset_path = dataset_dir / f"{agent_run_id}.jsonl"
-        instance_dict = json.loads(problem_info["instance_dict"])
+        # Accept instance_dict as a JSON string or an already-parsed dict (mirrors _build_swetask),
+        # so a dict-valued row doesn't raise TypeError and mask the whole run with an opaque error.
+        raw_instance_dict = problem_info["instance_dict"]
+        instance_dict = (
+            json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else dict(raw_instance_dict)
+        )
         instance_dict.setdefault("repo_name", instance_dict.get("repo", ""))
         instance_dataset_path.write_text(json.dumps(instance_dict) + "\n")
 

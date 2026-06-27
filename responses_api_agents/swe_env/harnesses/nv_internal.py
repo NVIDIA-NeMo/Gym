@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.sandbox import SandboxResources, SandboxSpec
@@ -182,7 +183,7 @@ class NVInternalHarness(SweTaskHarness):
         """
         if task.base_commit:
             await env.execute(
-                f"git reset --hard {task.base_commit} && git checkout {task.base_commit}",
+                f"git reset --hard {shlex.quote(task.base_commit)} && git checkout {shlex.quote(task.base_commit)}",
                 cwd=_nv_workdir(task),
             )
 
@@ -229,7 +230,7 @@ class NVInternalHarness(SweTaskHarness):
         # The selected test files are passed positionally.
         test_files = _format_test_files(task.metadata.get("selected_test_files_to_run", []))
         run = await env.execute(
-            f"bash /root/run_script.sh {test_files} > /root/stdout.log 2> /root/stderr.log || true",
+            f"bash /root/run_script.sh {shlex.quote(test_files)} > /root/stdout.log 2> /root/stderr.log || true",
             cwd=workdir,
             is_eval=True,
         )

@@ -30,6 +30,7 @@ contract, its dispatch, and its scoring live in one place.
 
 from __future__ import annotations
 
+import shlex
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -177,7 +178,7 @@ class SweTaskHarness(ABC):
                 are used.
         """
         if task.base_commit:
-            await env.execute(f"git reset --hard {task.base_commit}", cwd=task.repo_workdir)
+            await env.execute(f"git reset --hard {shlex.quote(task.base_commit)}", cwd=task.repo_workdir)
 
     @abstractmethod
     async def run_eval(self, env: "AsyncSweEnvironment", task: SweTask) -> EvalArtifacts:

@@ -465,11 +465,13 @@ def test_run_eval_tests_timeout_absent_defaults_to_1800(tmp_path):
 # ---- grading parity / empty-required ----------------------------------------
 
 
-def test_grade_empty_required_resolves_true(tmp_path):
-    """``resolved`` is purely (fail_to_pass_set <= passed) and
-    (pass_to_pass_set <= passed). With no required tests, both empty sets are
-    subsets of any passed set, so resolved=True — there is no bool(required)
-    requirement."""
+def test_grade_empty_required_does_not_resolve(tmp_path):
+    """A degenerate row with no FAIL_TO_PASS and no PASS_TO_PASS does NOT resolve.
+
+    The empty-required guard (matching ``compute_resolved``) keeps swe-rebench consistent with the
+    other families: an empty required set must not vacuously resolve to reward 1.0 just because the
+    empty set is a subset of any passed set.
+    """
     repo_dir = _write_fake_parsers(tmp_path)
     harness = SweRebenchHarness()
     task = _task(
@@ -479,5 +481,5 @@ def test_grade_empty_required_resolves_true(tmp_path):
     )
     artifacts = EvalArtifacts(test_output="something PASSED\n", patch_applied=True)
     report = harness.grade(task, artifacts)
-    assert report.resolved is True
+    assert report.resolved is False
     assert report.error_kind is None

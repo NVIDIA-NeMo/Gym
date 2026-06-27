@@ -42,11 +42,10 @@ anyswe_openclaw:
                   api: openai-completions
 
       container_formatter: data/sifs/{instance_id}.sif
+      sandbox_provider: {apptainer: {}}
       swebench_agent_timeout: 2100
       swebench_tests_timeout: 1800
-      apptainer_memory_limit_mb: 32768
       concurrency: 2
-      skip_eval: false
 
       datasets:
         - name: example

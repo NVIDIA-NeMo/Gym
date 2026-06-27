@@ -21,7 +21,9 @@ NOTE: the apptainer-only nested ``run_local_evaluation`` path (which produced r2
 ``report.json`` in-container) was removed when PR #1694 took ownership of the apptainer
 provider. Re-wiring r2e-gym's nested grading + ``.sif``/mounts onto #1694's provider is tracked
 for a follow-up PR (see APPTAINER_PR3_TRACKER.md); until then r2e-gym grades flat (it needs an
-``eval_script`` in task metadata, else the flat grader masks the sample as an eval error).
+``eval_script`` in task metadata, else the flat grader records an **unmasked** ``resolved=False``
+— reward 0, kept in the gradient — not an eval-error mask; see
+``test_r2egym.py::test_run_eval_missing_eval_script_is_unmasked_unresolved``).
 """
 
 from __future__ import annotations

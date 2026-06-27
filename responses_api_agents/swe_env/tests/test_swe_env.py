@@ -270,14 +270,43 @@ def test_verify_task_empty_patch_fast_path():
     assert report.resolved is False
 
 
-def test_verify_task_non_timeout_eval_failure_unmasked():
-    """A non-timeout eval-stage failure is unmasked: resolved=False, reward 0.0.
+def test_verify_task_sandbox_create_error_masked():
+    """A ``SandboxCreateError`` (e.g. a docker image-pull failure) is masked as error_kind='sandbox'.
 
-    Mirrors main's app.py, which catches any eval exception, returns no report file
-    (resolved=False) and leaves eval_timed_out False (so mask_sample stays False).
-    Only a genuine wall-clock eval timeout is masked.
+    An infra failure provisioning the eval sandbox must not depress the resolve rate or leak into
+    the training signal, so it is masked (reward 0.0) rather than reported as an unmasked reward-0.
     """
     report = asyncio.run(verify_task({"fake-swe": {"create_error": True}}, _task()))
+    assert report.error_kind == "sandbox"
+    assert report.resolved is False
+    assert reward_from_report(report) == 0.0
+
+
+def test_verify_task_generic_eval_failure_unmasked():
+    """A non-timeout, non-infra eval-stage exception stays unmasked (resolved=False, reward 0.0).
+
+    Mirrors main's app.py, which catches a generic eval exception, scores reward 0, and leaves the
+    sample in the gradient (error_kind=None) — only timeouts and sandbox-create failures are masked.
+    """
+    from responses_api_agents.swe_env.harness import register_harness
+
+    class _BoomGrade(SweBenchExtHarness):
+        name = "boom-grade-test"
+
+        def grade(self, task, artifacts):
+            """Raise a generic error during grading to exercise the unmasked branch.
+
+            Args:
+                task: The task being graded.
+                artifacts: The eval artifacts (unused).
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("boom")
+
+    register_harness(_BoomGrade(), override=True)
+    report = asyncio.run(verify_task({"fake-swe": {"test_output": _PASS_OUTPUT}}, _task(benchmark="boom-grade-test")))
     assert report.error_kind is None
     assert report.resolved is False
     assert reward_from_report(report) == 0.0

@@ -36,7 +36,7 @@ from typing import Any
 # Importing this package registers the swe_env harnesses; the docker/apptainer
 # providers are built into nemo_gym.sandbox and resolve lazily (no import needed).
 import responses_api_agents.swe_env.harnesses  # noqa: F401
-from nemo_gym.sandbox import SandboxProvider
+from nemo_gym.sandbox import SandboxCreateError, SandboxProvider
 from responses_api_agents.swe_env.harness import (
     GraderDependencyError,
     SweEvalReport,
@@ -98,9 +98,10 @@ async def verify_task(
             seconds; falls back to the task metadata or a default.
 
     Returns:
-        SweEvalReport: The grading outcome, with ``error_kind="eval_timeout"`` set
-            only on a genuine wall-clock eval timeout; non-timeout eval-stage
-            failures are reported unmasked (``resolved=False``, ``error_kind=None``).
+        SweEvalReport: The grading outcome. ``error_kind="eval_timeout"`` on a genuine
+            wall-clock eval timeout and ``error_kind="sandbox"`` on a sandbox-create /
+            image-pull failure (both masked); other non-timeout eval-stage failures are
+            reported unmasked (``resolved=False``, ``error_kind=None``).
 
     Raises:
         ProviderCapabilityError: If the task's harness does not support the provider.
@@ -159,6 +160,17 @@ async def verify_task(
             patch_exists=bool(task.model_patch),
             error_kind="eval_timeout",
             tests_status={"timeout_s": timeout},
+        )
+    except SandboxCreateError as exc:
+        # Infra failure provisioning the eval sandbox (e.g. a docker image-pull failure on the
+        # pull-on-demand path). Mask it as a typed error_kind so an infra hiccup doesn't depress
+        # the resolve rate or leak into the training signal — consistent with the harnesses'
+        # sandbox/eval_error masking — rather than degrading to an unmasked reward-0.
+        return SweEvalReport(
+            instance_id=task.instance_id,
+            patch_exists=bool(task.model_patch),
+            error_kind="sandbox",
+            tests_status={"sandbox_create_error": repr(exc)},
         )
     except Exception as exc:  # non-timeout eval-stage failure -> unmasked reward 0
         # A non-timeout eval-stage crash is NOT masked: main's app.py catches any eval

@@ -31,6 +31,7 @@ patches are applied best-effort and grading is on the tests only.
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING
 
 from nemo_gym.sandbox import SandboxResources, SandboxSpec
@@ -148,7 +149,7 @@ class SweBenchExtHarness(SweTaskHarness):
         """
         if task.base_commit:
             workdir = await self._resolve_repo_workdir(env, task)
-            await env.execute(f"git reset --hard {task.base_commit}", cwd=workdir)
+            await env.execute(f"git reset --hard {shlex.quote(task.base_commit)}", cwd=workdir)
 
     async def run_eval(self, env: "AsyncSweEnvironment", task: SweTask) -> EvalArtifacts:
         """Apply patches, run the test command, and capture the evaluation output.
