@@ -3316,6 +3316,30 @@ class TestVLLMConverter:
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
 
+    def test_metadata_none_normalizes_to_empty_dict(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy-model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+        )
+        model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": None,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"][0]["content"] == "hello"
+        assert result["metadata"] == {}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
