@@ -82,6 +82,38 @@ def _provider_error(status: int, message: str, response_body: str | None = None)
     return error
 
 
+class _FakeResponseContent:
+    def __init__(self, response_body: str) -> None:
+        self._response_body = response_body.encode("utf-8")
+        self._consumed = False
+
+    async def read(self) -> bytes:
+        if self._consumed:
+            return b""
+        self._consumed = True
+        return self._response_body
+
+
+class _FakeRetryResponse:
+    def __init__(self, status: int, response_body: str) -> None:
+        self.status = status
+        self.ok = status < 400
+        self.content = _FakeResponseContent(response_body)
+        self.request_info = MagicMock()
+        self.request_info.real_url = "https://api.example.com/v1/chat/completions"
+
+    def raise_for_status(self) -> None:
+        if self.ok:
+            return
+        raise ClientResponseError(
+            self.request_info,
+            (),
+            status=self.status,
+            message="provider request failed",
+            headers=None,
+        )
+
+
 class TestSanity:
     async def test_server_instantiation(self) -> None:
         server = _make_server()
@@ -292,28 +324,6 @@ class TestProviderErrors:
         assert detail["model"] == "test-model"
         assert detail["message"] == "Invalid API key"
 
-    async def test_chat_completion_provider_rate_limit_error_is_retryable(self, monkeypatch: MonkeyPatch) -> None:
-        server = _make_server()
-        app = server.setup_webserver()
-        client = TestClient(app)
-
-        rate_error_content = json.dumps({"error": {"message": "Rate limit exceeded"}})
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_chat_completion = AsyncMock(
-            side_effect=_provider_error(429, "Rate limit exceeded", rate_error_content)
-        )
-
-        response = client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "too much"}]},
-        )
-        assert response.status_code == 429
-        detail = response.json()["detail"]
-        assert detail["provider_status"] == 429
-        assert detail["category"] == "rate_limit"
-        assert detail["retryable"] is True
-        assert detail["message"] == "Rate limit exceeded"
-
     async def test_chat_completion_provider_request_error_is_structured(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
@@ -336,28 +346,6 @@ class TestProviderErrors:
         assert detail["retryable"] is False
         assert detail["message"] == "Missing required field: messages"
 
-    async def test_chat_completion_provider_transient_error_is_retryable(self, monkeypatch: MonkeyPatch) -> None:
-        server = _make_server()
-        app = server.setup_webserver()
-        client = TestClient(app)
-
-        transient_error_content = json.dumps({"error": {"message": "Upstream provider unavailable"}})
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_chat_completion = AsyncMock(
-            side_effect=_provider_error(503, "Service unavailable", transient_error_content)
-        )
-
-        response = client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "retry me"}]},
-        )
-        assert response.status_code == 503
-        detail = response.json()["detail"]
-        assert detail["provider_status"] == 503
-        assert detail["category"] == "transient_upstream_failure"
-        assert detail["retryable"] is True
-        assert detail["message"] == "Upstream provider unavailable"
-
     async def test_chat_completion_provider_status_zero_falls_back_to_500(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
@@ -379,43 +367,33 @@ class TestProviderErrors:
         assert detail["retryable"] is True
         assert detail["message"] == "Connection closed by upstream"
 
-    async def test_chat_completion_provider_plain_text_error_body_is_preserved(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_chat_completion_provider_retry_exhausted_500_uses_default_message(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
         server = _make_server()
         app = server.setup_webserver()
         client = TestClient(app)
 
-        plain_text_error = "gateway timeout while reading upstream response"
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_chat_completion = AsyncMock(
-            side_effect=_provider_error(502, "Bad gateway", plain_text_error)
-        )
+        response_body = json.dumps({"error": {"message": "Upstream provider unavailable"}})
+        retry_responses = [_FakeRetryResponse(500, response_body) for _ in range(3)]
+
+        async def mock_request(**kwargs):
+            return retry_responses.pop(0)
+
+        async def mock_sleep(seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", mock_request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", mock_sleep)
+        server._client = NeMoGymAsyncOpenAI(base_url=server.config.base_url, api_key=server.config.api_key)
 
         response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hello"}]},
         )
-        assert response.status_code == 502
+        assert response.status_code == 500
         detail = response.json()["detail"]
-        assert detail["provider_status"] == 502
-        assert detail["category"] == "transient_upstream_failure"
-        assert detail["retryable"] is True
-        assert detail["message"] == plain_text_error
-
-    async def test_chat_completion_provider_empty_body_uses_default_message(self, monkeypatch: MonkeyPatch) -> None:
-        server = _make_server()
-        app = server.setup_webserver()
-        client = TestClient(app)
-
-        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_chat_completion = AsyncMock(side_effect=_provider_error(502, "Bad gateway", ""))
-
-        response = client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "hello"}]},
-        )
-        assert response.status_code == 502
-        detail = response.json()["detail"]
-        assert detail["provider_status"] == 502
+        assert detail["provider_status"] == 500
         assert detail["category"] == "transient_upstream_failure"
         assert detail["retryable"] is True
         assert detail["message"] == "Provider request failed"
@@ -471,6 +449,44 @@ class TestProviderErrors:
 
 
 class TestProviderErrorHelpers:
+    def test_build_provider_error_payload_marks_rate_limit_as_retryable(self) -> None:
+        server = _make_server()
+        error = _provider_error(429, "Rate limit exceeded", json.dumps({"error": {"message": "Rate limit exceeded"}}))
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 429
+        assert payload["category"] == "rate_limit"
+        assert payload["retryable"] is True
+        assert payload["message"] == "Rate limit exceeded"
+
+    def test_build_provider_error_payload_marks_transient_upstream_failures_as_retryable(self) -> None:
+        server = _make_server()
+        error = _provider_error(
+            503,
+            "Service unavailable",
+            json.dumps({"error": {"message": "Upstream provider unavailable"}}),
+        )
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 503
+        assert payload["category"] == "transient_upstream_failure"
+        assert payload["retryable"] is True
+        assert payload["message"] == "Upstream provider unavailable"
+
+    def test_build_provider_error_payload_preserves_plain_text_provider_bodies(self) -> None:
+        server = _make_server()
+        plain_text_error = "gateway timeout while reading upstream response"
+        error = _provider_error(502, "Bad gateway", plain_text_error)
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 502
+        assert payload["category"] == "transient_upstream_failure"
+        assert payload["retryable"] is True
+        assert payload["message"] == plain_text_error
+
     def test_extract_provider_error_message_reads_top_level_message(self) -> None:
         server = _make_server()
         error = _provider_error(400, "Bad request", json.dumps({"message": "Top-level message"}))
