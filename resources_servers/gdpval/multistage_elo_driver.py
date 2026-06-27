@@ -44,8 +44,8 @@ CLI usage (run from the repo root, against a running comparison server)::
         --output elo_summary.json
 
 where ``refs.json`` is ``{"<ref_id>": <elo>, ...}`` with ids matching the
-server's configured ``reference_models``. Each stage has a set number of 
-tasks and reference models set like ``--stage num_tasks:num_models``. 
+server's configured ``reference_models``. Each stage has a set number of
+tasks and reference models set like ``--stage num_tasks:num_models``.
 See ``--help`` for all flags.
 """
 
