@@ -40,6 +40,10 @@ Harness changes often affect metrics, and some models are better tuned to use sp
 
 NeMo Gym treats an agent as model plus harness. The model server stays stateless; the agent server owns the loop that calls the model, routes tool calls, manages conversation state, and asks the resources server to verify the final attempt.
 
+<Note>
+Outside Gym, “harness” often means the SWE-bench **grading pipeline** (`swebench.harness`) rather than agent orchestration. See [Harness Terminology](/infrastructure/engineering-notes/harness-terminology).
+</Note>
+
 <Cards>
 
 <Card title="Agent Server" href="/agent-server">

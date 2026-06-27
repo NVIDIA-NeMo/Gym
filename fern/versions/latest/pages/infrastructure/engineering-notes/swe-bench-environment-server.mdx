@@ -29,8 +29,24 @@ For cluster-scale SWE RL training topology (Apptainer, CPU sizing), see the olde
 | **Sandbox runtime** | `nemo_gym/sandbox/` | Docker provider (OpenSandbox / Apptainer as needed) |
 
 <Warning>
-**“Harness” overload.** In Gym docs, *agent harness* means orchestration inside an agent server. In SWE-bench, `swebench.harness` is the upstream eval stack. Under `swe_bench`, **`harness.py` / `harnesses/`** are **benchmark-family plugins** (provision + grade recipes keyed by `task.benchmark`). They are Environment-owned, not agent orchestration.
+**“Harness” overload.** In Gym docs, *agent harness* means orchestration inside an agent server. In SWE-bench, `swebench.harness` is the upstream eval stack. Under `swe_bench`, **`harness.py` / `harnesses/`** are **benchmark-family plugins** (provision + grade recipes keyed by `task.benchmark`). They are Environment-owned, not agent orchestration. See [Harness Terminology](/infrastructure/engineering-notes/harness-terminology) for the full map.
 </Warning>
+
+## Environment vs Benchmark vs Task
+
+These names refer to different layers (see also [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks)):
+
+| Layer | SWE-bench example | What it is |
+| --- | --- | --- |
+| **Benchmark** | *SWE-bench Verified* | Fixed eval product: 500-task test split, `% resolved` metric, comparison protocol, leaderboard baselines |
+| **Environment** | `swe_bench` resources server | Executable engine: `seed_session`, `verify`, harness registry, hermetic grading |
+| **Task** | `django__django-13741` | One problem instance in the benchmark (prompt + privileged grading metadata) |
+
+- **`swe_bench` is the Environment** — you can train, dev, or eval with it; it is not the same as the published benchmark.
+- **SWE-bench Verified is a Benchmark** built on that Environment (frozen JSONL + eval config + reporting).
+- **`verified: true`** on the RS means this Environment configuration is **benchmark-grade** (gold-patch baseline, protocol locked) — not merely that the server exists.
+
+One Environment supports multiple benchmarks (Verified, Lite, Multilingual) by swapping **tasks** (dataset) and harness keys — no new resources server per publication.
 
 ## What `swe_bench` exposes
 
@@ -225,12 +241,13 @@ This mirrors SWE-bench's separation between “agent edits” and “official ev
 
 ```text
 resources_servers/swe_bench/
-├── app.py              # HTTP: seed_session, verify
-├── harness.py          # SweTask, SweTaskHarness ABC, registry, compute_resolved
-├── harnesses/          # Per-family plugins (swebench, r2e-gym, …)
+├── app.py              # HTTP: seed_session → SessionDescriptor, verify
+├── task.py             # First-class Task (SweTask, TaskPublic, parse helpers)
+├── session.py          # SessionDescriptor wire models
+├── harness.py          # SweTaskHarness ABC, registry, compute_resolved
+├── harnesses/          # Per-family grading plugins
 ├── verify_task.py      # Fresh-sandbox grading orchestrator
 ├── sandbox.py          # AsyncSweEnvironment + acquire_sandbox
-├── task_builder.py     # JSONL metadata → SweTask
 ├── prepare.py          # HF dataset → Gym JSONL
 └── configs/swe_bench.yaml
 ```

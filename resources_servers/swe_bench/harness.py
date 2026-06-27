@@ -14,6 +14,9 @@
 
 """Task model and harness contract for the SWE environment library.
 
+The first-class **Task** value lives in ``task.py`` (``SweTask``). This module holds
+the harness registry and grading helpers.
+
 The harness contract is intentionally split across a trust boundary:
 
 * ``build_spec`` / ``supports_provider`` / ``materialize`` are **provisioning**
@@ -36,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.sandbox import SandboxSpec
+from resources_servers.swe_bench.task import SweTask
 
 
 if TYPE_CHECKING:
@@ -50,29 +54,6 @@ class GraderDependencyError(RuntimeError):
     the result. ``verify_task`` propagates this rather than swallowing it into an unmasked
     reward-0, so a misconfigured grader fails loudly instead of quietly degrading scores.
     """
-
-
-@dataclass
-class SweTask:
-    """A single SWE task to provision and/or verify.
-
-    Holds the instance metadata needed to launch a sandbox, materialize patches,
-    run the evaluation, and grade the result.
-    """
-
-    instance_id: str
-    image: str | None = None
-    base_commit: str | None = None
-    repo_workdir: str = "/testbed"
-    test_command: str = ""
-    test_framework: str = ""
-    model_patch: str = ""
-    test_patch: str = ""
-    fail_to_pass: list[str] = field(default_factory=list)
-    pass_to_pass: list[str] = field(default_factory=list)
-    benchmark: str = "swe-bench-ext"
-    split: str = "test"
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

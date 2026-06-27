@@ -6,22 +6,32 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 import resources_servers.swe_bench.harnesses  # noqa: F401
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.sandbox import SandboxSpec
 from resources_servers.swe_bench.harness import get_harness
-from resources_servers.swe_bench.task_builder import build_swetask, problem_info_from_row
+from resources_servers.swe_bench.session import (
+    EgressDescriptor,
+    PlacementDescriptor,
+    SandboxDescriptor,
+    SessionDescriptor,
+    SweBenchSeedSessionRequest,
+    SweBenchVerifyRequest,
+    SweBenchVerifyResponse,
+)
+from resources_servers.swe_bench.task import (
+    ENVIRONMENT_NAME,
+    SweTask,
+    parse_submission,
+    parse_task_from_request,
+)
 from resources_servers.swe_bench.verify_task import report_to_reward, verify_task
 
 
@@ -36,43 +46,6 @@ class SweBenchResourcesServerConfig(BaseResourcesServerConfig):
     default_topology: Topology = "agent_in_env"
 
 
-class PlacementDescriptor(BaseModel):
-    topology: Topology
-
-
-class SandboxDescriptor(BaseModel):
-    spec: dict[str, Any]
-
-
-class EgressDescriptor(BaseModel):
-    env: dict[str, str] = Field(default_factory=dict)
-
-
-class SweBenchSeedSessionRequest(BaseSeedSessionRequest):
-    model_config = ConfigDict(extra="allow")
-    verifier_metadata: Optional[dict[str, Any]] = None
-
-
-class SweBenchSeedSessionResponse(BaseSeedSessionResponse):
-    placement: PlacementDescriptor
-    sandbox: SandboxDescriptor
-    egress: EgressDescriptor
-    verifier_metadata: dict[str, Any]
-
-
-class SweBenchVerifyRequest(BaseVerifyRequest):
-    model_config = ConfigDict(extra="allow")
-    verifier_metadata: Optional[dict[str, Any]] = None
-
-
-class SweBenchVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-    resolved: bool = False
-    patch_exists: bool = False
-    mask_sample: bool = False
-    error_kind: Optional[str] = None
-
-
 def _spec_to_dict(spec: SandboxSpec) -> dict[str, Any]:
     payload = dataclasses.asdict(spec)
     resources = payload.get("resources")
@@ -84,34 +57,28 @@ def _spec_to_dict(spec: SandboxSpec) -> dict[str, Any]:
 class SweBenchResourcesServer(SimpleResourcesServer):
     config: SweBenchResourcesServerConfig
 
-    def _task_from_body(self, body: SweBenchSeedSessionRequest | SweBenchVerifyRequest) -> tuple[dict[str, Any], Any]:
-        responses_metadata = (body.responses_create_params.metadata or {}) if body.responses_create_params else {}
-        verifier_metadata = dict(body.verifier_metadata or {})
-        problem_info = problem_info_from_row(verifier_metadata, responses_metadata)
-        task = build_swetask(
-            problem_info,
+    def _parse_task(self, body: SweBenchSeedSessionRequest | SweBenchVerifyRequest) -> SweTask:
+        return parse_task_from_request(
+            body,
             container_formatter=self.config.container_formatter,
             flat_eval=self.config.flat_eval,
+            environment=ENVIRONMENT_NAME,
         )
-        return problem_info, task
 
-    async def seed_session(self, body: SweBenchSeedSessionRequest) -> SweBenchSeedSessionResponse:
-        problem_info, task = self._task_from_body(body)
-        harness = get_harness(task.benchmark)
+    async def seed_session(self, body: SweBenchSeedSessionRequest) -> SessionDescriptor:
+        task = self._parse_task(body)
+        harness = get_harness(task.harness_family)
         if self.config.flat_eval and hasattr(harness, "with_flat_eval"):
             harness = harness.with_flat_eval()
         spec = harness.build_spec(task)
 
-        verifier_metadata = {
-            **problem_info,
-            "instance_id": task.instance_id,
-            "dataset_name": task.metadata.get("dataset_name", problem_info.get("dataset_name", "")),
-            "split": task.split,
-            "benchmark": task.benchmark,
-            "flat_eval": self.config.flat_eval,
-        }
+        verifier_metadata = task.privileged_verifier_metadata(flat_eval=self.config.flat_eval)
+        if body.verifier_metadata:
+            verifier_metadata = {**body.verifier_metadata, **verifier_metadata}
 
-        return SweBenchSeedSessionResponse(
+        return SessionDescriptor(
+            environment=ENVIRONMENT_NAME,
+            task=task.public_view(environment=ENVIRONMENT_NAME),
             placement=PlacementDescriptor(topology=self.config.default_topology),
             sandbox=SandboxDescriptor(spec=_spec_to_dict(spec)),
             egress=EgressDescriptor(env={}),
@@ -119,10 +86,8 @@ class SweBenchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, body: SweBenchVerifyRequest) -> SweBenchVerifyResponse:
-        _, task = self._task_from_body(body)
-        verifier_metadata = dict(body.verifier_metadata or {})
-        model_patch = verifier_metadata.get("model_patch") or verifier_metadata.get("git_patch") or ""
-        task = dataclasses.replace(task, model_patch=model_patch)
+        task = self._parse_task(body)
+        task = task.with_submission(parse_submission(body.verifier_metadata))
 
         report = await verify_task(
             self.config.sandbox_provider,
@@ -134,6 +99,8 @@ class SweBenchResourcesServer(SimpleResourcesServer):
 
         return SweBenchVerifyResponse(
             **body.model_dump(),
+            task_id=task.task_id,
+            environment=ENVIRONMENT_NAME,
             reward=reward,
             resolved=report.resolved,
             patch_exists=report.patch_exists,

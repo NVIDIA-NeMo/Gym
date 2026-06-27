@@ -45,6 +45,7 @@ def _sample_row() -> dict:
         "instance_id": "astropy__astropy-12907",
         "dataset_name": "princeton-nlp/SWE-bench_Verified",
         "split": "test",
+        "problem_statement": "Fix the bug.",
         "instance_dict": json.dumps(inst),
     }
     return {
@@ -60,8 +61,12 @@ def _sample_row() -> dict:
 async def test_seed_session_agent_in_env(server: SweBenchResourcesServer) -> None:
     body = SweBenchSeedSessionRequest(**_sample_row())
     resp = await server.seed_session(body)
+    assert resp.environment == "swe_bench"
     assert resp.placement.topology == "agent_in_env"
     assert resp.sandbox.spec["image"].startswith("swebench/")
+    assert resp.task.task_id == "astropy__astropy-12907"
+    assert resp.task.harness_family == "swe-bench"
+    assert resp.task.dataset_name == "princeton-nlp/SWE-bench_Verified"
     assert resp.verifier_metadata["instance_id"] == "astropy__astropy-12907"
 
 
@@ -83,6 +88,8 @@ async def test_verify_empty_patch(server: SweBenchResourcesServer) -> None:
         ),
     )
     resp = await server.verify(body)
+    assert resp.task_id == "astropy__astropy-12907"
+    assert resp.environment == "swe_bench"
     assert resp.reward == 0.0
     assert resp.patch_exists is False
     assert resp.resolved is False

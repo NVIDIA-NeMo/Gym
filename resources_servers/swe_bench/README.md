@@ -2,7 +2,14 @@
 
 SWE-bench **Environment** resources server: `seed_session` returns a `SessionDescriptor` (topology **C**, per-instance sandbox spec); `verify` grades a model patch in a **fresh** eval sandbox (hermetic twin).
 
-Grading harnesses, parsing, and `verify_task` live as **private modules** under this directory (relocated from `responses_api_agents/swe_env/`).
+Grading eval harnesses, parsing, and `verify_task` live as **private modules** under this directory (relocated from `responses_api_agents/swe_env/`).
+
+Key modules:
+
+- `task.py` — first-class **Task** (`SweTask`, `TaskPublic`, parse helpers)
+- `session.py` — **SessionDescriptor** returned from `seed_session`
+- `app.py` — thin HTTP surface (`seed_session`, `verify`)
+- `harness.py` / `harnesses/` — benchmark-family grading plugins
 
 ## Wiring
 

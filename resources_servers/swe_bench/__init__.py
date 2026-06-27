@@ -21,7 +21,6 @@ authority. Agent servers connect via HTTP ``seed_session`` / ``verify`` only.
 from resources_servers.swe_bench.harness import (
     EvalArtifacts,
     SweEvalReport,
-    SweTask,
     SweTaskHarness,
     compute_resolved,
     get_harness,
@@ -30,17 +29,30 @@ from resources_servers.swe_bench.harness import (
     reward_from_report,
 )
 from resources_servers.swe_bench.sandbox import AsyncSweEnvironment
+from resources_servers.swe_bench.session import SessionDescriptor
+from resources_servers.swe_bench.task import (
+    ENVIRONMENT_NAME,
+    SweTask,
+    TaskPublic,
+    TaskSubmission,
+    parse_task_from_request,
+)
 
 
 __all__ = [
     "AsyncSweEnvironment",
+    "ENVIRONMENT_NAME",
     "EvalArtifacts",
+    "SessionDescriptor",
     "SweEvalReport",
     "SweTask",
     "SweTaskHarness",
+    "TaskPublic",
+    "TaskSubmission",
     "compute_resolved",
-    "reward_from_report",
     "get_harness",
     "list_harnesses",
+    "parse_task_from_request",
     "register_harness",
+    "reward_from_report",
 ]

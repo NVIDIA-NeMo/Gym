@@ -63,7 +63,11 @@ The FastAPI service (under `resources_servers/`) that holds per-task state, expo
 
 **Agent Server (Responses API Agent)**
 
-The FastAPI service (under `responses_api_agents/`) that drives the model through a task — the harness that runs the multi-step / tool-calling loop against a resources server. Gym ships several built-in harnesses (e.g. `simple_agent`, `aviary_agent`, and others under `responses_api_agents/`); pick whichever fits your control flow, or bring your own.
+The FastAPI service (under `responses_api_agents/`) that drives the model through a task — the **agent harness** that runs the multi-step / tool-calling loop against a resources server. Gym ships several built-in harnesses (e.g. `simple_agent`, `aviary_agent`, and others under `responses_api_agents/`); pick whichever fits your control flow, or bring your own.
+
+**Harness (disambiguation)**
+
+“Harness” is overloaded in the agent-eval community. In Gym docs it usually means **agent harness** (orchestration in an agent server). In [SWE-bench](https://www.swebench.com/SWE-bench/reference/harness/), it often means the **grading pipeline** (`swebench.harness`). See [Harness Terminology](/infrastructure/engineering-notes/harness-terminology).
 
 **Model Server (Responses API Model)**
 
