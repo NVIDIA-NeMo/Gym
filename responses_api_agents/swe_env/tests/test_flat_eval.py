@@ -26,18 +26,11 @@ The suite has three layers:
   harnesses (``swe-bench``, ``r2e-gym``) end-to-end with a scripted provider that
   returns a fixture log, asserting ``resolved`` is computed from ``FAIL_TO_PASS``
   / ``PASS_TO_PASS``.
-
-* A golden-patch equivalence scaffold is skipped unless
-  ``SWE_ENV_RUN_REAL_CONTAINERS=1``. Asserting that flat ``resolved`` equals
-  nested ``resolved`` on gold patches needs apptainer, Docker, and published
-  per-instance SWE-bench ``.sif`` images; the scaffold documents the comparison
-  so it can be run on a real cluster.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import pytest
@@ -599,35 +592,3 @@ def test_r2egym_flat_run_eval_resolved_via_task_metadata():
     report, artifacts, _ = _drive_flat(harness, task, log_text=_fixture("resolved_success.log"))
     assert artifacts.raw["flat"] is True
     assert report.resolved is True
-
-
-# ---- infra-gated golden-patch equivalence scaffold --------------------------
-
-
-@pytest.mark.skipif(
-    os.environ.get("SWE_ENV_RUN_REAL_CONTAINERS") != "1",
-    reason=(
-        "Real flat-vs-nested equivalence needs apptainer + Docker + published per-instance "
-        "SWE-bench .sif images, which are not available in CI/this workstation. "
-        "Set SWE_ENV_RUN_REAL_CONTAINERS=1 on a cluster that has them."
-    ),
-)
-def test_flat_vs_nested_equivalence_on_gold():  # pragma: no cover - infra-gated
-    """Scaffold asserting flat ``resolved`` equals nested ``resolved`` on gold patches.
-
-    On a real cluster this would, for a small set of instances with their gold
-    ``model_patch``:
-
-      1. Run the nested path (apptainer): ``SweBenchHarness("swe-bench")`` with
-         ``run_local_evaluation`` to get the nested ``resolved`` verdict.
-      2. Run the flat path (docker/apptainer):
-         ``SweBenchHarness("swe-bench")`` with the SWE-bench
-         ``make_test_spec(instance).eval_script`` to get the flat ``resolved``
-         verdict.
-      3. Assert ``flat_report.resolved == nested_report.resolved`` for every
-         instance (gold patches must resolve under both graders).
-
-    The dataset, .sif images, and both runtimes are provisioned out of band, which
-    is why this is infra-gated.
-    """
-    raise AssertionError("equivalence harness must be implemented against a real cluster")
