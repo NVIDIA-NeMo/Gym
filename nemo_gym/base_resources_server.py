@@ -92,6 +92,10 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class MultiRewardVerifyResponse(BaseVerifyResponse):
+    reward_components: dict[str, float] | None = None
+
+
 class BaseSeedSessionRequest(BaseModel):
     pass
 
