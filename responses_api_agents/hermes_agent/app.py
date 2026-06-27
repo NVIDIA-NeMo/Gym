@@ -165,6 +165,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     compression_enabled: bool = True
     compression_threshold: float = 0.85
     chat_template_kwargs_enabled: bool = True
+    api_key: Optional[str] = None
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
 
@@ -281,7 +282,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent = AIAgent(
             base_url=base_url,
-            api_key=os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
+            api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
