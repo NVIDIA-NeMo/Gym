@@ -450,6 +450,65 @@ class TestProviderErrors:
         assert detail["message"] == "Model test-model does not exist"
 
 
+class TestProviderErrorHelpers:
+    def test_extract_provider_error_message_reads_top_level_message(self) -> None:
+        server = _make_server()
+        error = _provider_error(400, "Bad request", json.dumps({"message": "Top-level message"}))
+
+        assert server._extract_provider_error_message(error) == "Top-level message"
+
+    def test_extract_provider_error_message_reads_top_level_detail(self) -> None:
+        server = _make_server()
+        error = _provider_error(400, "Bad request", json.dumps({"detail": "Top-level detail"}))
+
+        assert server._extract_provider_error_message(error) == "Top-level detail"
+
+    def test_extract_provider_error_message_keeps_raw_json_when_shape_is_unknown(self) -> None:
+        server = _make_server()
+        response_body = json.dumps({"unexpected": "payload"})
+        error = _provider_error(500, "Server error", response_body)
+
+        assert server._extract_provider_error_message(error) == response_body
+
+    def test_extract_provider_error_message_uses_string_response_content_when_non_bytes(self) -> None:
+        server = _make_server()
+        error = ClientResponseError(MagicMock(), (), status=502, message="provider request failed", headers=None)
+        error.response_content = "string-based provider body"
+
+        assert server._extract_provider_error_message(error) == "string-based provider body"
+
+    def test_extract_provider_error_message_falls_back_when_response_content_is_none(self) -> None:
+        server = _make_server()
+        request_info = MagicMock()
+        request_info.real_url = "https://api.example.com/v1/chat/completions"
+        error = ClientResponseError(
+            request_info,
+            (),
+            status=500,
+            message="provider request failed",
+            headers=None,
+        )
+        error.response_content = None
+
+        assert server._extract_provider_error_message(error) == str(error).strip()
+
+    def test_classify_provider_error_uses_message_for_authentication(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "api key invalid") == "authentication"
+        assert server._classify_provider_error(418, "auth token expired") == "authentication"
+
+    def test_classify_provider_error_uses_message_for_model_not_found(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "requested model was not found") == "model_not_found"
+
+    def test_classify_provider_error_uses_message_for_rate_limit(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "rate limit exceeded upstream") == "rate_limit"
+
+
 class TestResponses:
     async def test_basic_responses(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
