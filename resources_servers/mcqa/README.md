@@ -25,8 +25,11 @@ Notes:
 
 ### Grading modes
 - `strict_single_letter_boxed` (default)
-  - Requires exactly one uppercase letter inside a LaTeX box: `\boxed{...}`
-  - Example it accepts: `Final: \boxed{ [C] }`
+  - Extracts a single uppercase answer letter from inside a LaTeX box: `\boxed{...}`
+  - Tolerates a `\text{...}` wrapper around the content, e.g. `\boxed{\text{E}}` and `\boxed{\text{E: <option text>}}`
+  - Tolerates a leading answer letter followed by a label delimiter (`:`, `)`, `.`, `-`) with trailing option text ignored, e.g. `\boxed{E: A polygenic risk score...}`
+  - Tolerates non-letter padding around a bare letter, e.g. `Final: \boxed{ [C] }`
+  - Does NOT match bare option text without a leading letter (that is `lenient_boxed`'s job), so `\boxed{A polygenic risk score...}` is not treated as answer A
 - `lenient_boxed`
   - First tries strict boxed letter.
   - If none, it looks ONLY inside the first `\boxed{...}` and tries to match the option text (normalized, case/whitespace-insensitive). Returns the corresponding letter only if exactly one option matches.
