@@ -146,6 +146,10 @@ class TestApp:
                 verifier_metadata={"unit_tests": {"inputs": ["1\n"], "outputs": ["1"]}},
             )
 
+    def test_verify_target_language_field(self) -> None:
+        resp = CompCodingVerifyResponse(reward=0.0, target_language="ja")
+        assert resp.target_language == "ja"
+
     async def test_verify_no_code_block(self, code_gen_resources_server_client: TestClient) -> None:
         """Test when response contains no code block - should extract raw text"""
         response = NeMoGymResponse(
@@ -326,6 +330,23 @@ class TestComputeMetrics:
         m = server.compute_metrics(tasks)
         assert "pass@1[avg-of-2]/no_answer" in m
         assert m["pass@1[avg-of-2]/no_answer"] == pytest.approx(50.0)
+
+    def test_produces_per_language_subsets(self):
+        server = _make_server()
+        tasks = [
+            [
+                {"reward": 1.0, "extracted_model_code": "print(1)", "target_language": "de"},
+                {"reward": 1.0, "extracted_model_code": "print(1)", "target_language": "de"},
+            ],
+            [
+                {"reward": 0.0, "extracted_model_code": "print(2)", "target_language": "fr"},
+                {"reward": 0.0, "extracted_model_code": "print(2)", "target_language": "fr"},
+            ],
+        ]
+        m = server.compute_metrics(tasks)
+        assert "de/pass@1/accuracy" in m
+        assert "fr/pass@1/accuracy" in m
+        assert m["de/pass@1/accuracy"] > m["fr/pass@1/accuracy"]
 
 
 class TestGetKeyMetrics:
