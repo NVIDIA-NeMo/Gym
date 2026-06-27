@@ -227,6 +227,21 @@ class TestBuildJudgeStage:
         pooled = judge(["a", "b"], ["ref1"])
         assert pooled["ref1"]["wins"] == 2  # both tasks judged after production
 
+    def test_progress_callback_reports_each_unit(self, tmp_path: Path) -> None:
+        _make_cache(tmp_path, ["a", "b"], repeats=("repeat_0", "repeat_1"))
+
+        def fake_verify_one(task_id, deliverables_dir, prompt, reference_ids):
+            return {"per_reference": {"ref1": {"wins": 1, "losses": 0, "ties": 0, "reference_elo": 1000.0}}}
+
+        seen = []
+        judge = build_judge_stage(
+            fake_verify_one, tmp_path, {}, progress=lambda done, total, tid: seen.append((done, total, tid))
+        )
+        judge(["a", "b"], ["ref1"])
+        # 2 tasks x 2 repeats = 4 units; progress reports running done/total.
+        assert [s[0] for s in seen] == [1, 2, 3, 4]
+        assert all(s[1] == 4 for s in seen)
+
 
 class TestRunMultistageElo:
     def test_requires_eval_dir(self, tmp_path: Path) -> None:
@@ -322,7 +337,7 @@ class TestCliMain:
         prompts, refs = self._setup(tmp_path)
         captured = {}
 
-        def fake_run(config, verify_one, task_prompts, *, rng=None, producer=None):
+        def fake_run(config, verify_one, task_prompts, *, rng=None, producer=None, on_event=None, progress=None):
             captured["config"] = config
             captured["rng"] = rng
             return [

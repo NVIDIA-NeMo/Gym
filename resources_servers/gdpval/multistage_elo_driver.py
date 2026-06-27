@@ -44,7 +44,9 @@ CLI usage (run from the repo root, against a running comparison server)::
         --output elo_summary.json
 
 where ``refs.json`` is ``{"<ref_id>": <elo>, ...}`` with ids matching the
-server's configured ``reference_models``. See ``--help`` for all flags.
+server's configured ``reference_models``. Each stage has a set number of 
+tasks and reference models set like ``--stage num_tasks:num_models``. 
+See ``--help`` for all flags.
 """
 
 from __future__ import annotations
@@ -243,6 +245,7 @@ def build_judge_stage(
     *,
     produce_missing: bool = True,
     producer: Optional[ProducerFn] = None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ):
     """Build the ``judge_stage`` callable expected by ``MultiStageEloRunner``.
 
@@ -251,6 +254,9 @@ def build_judge_stage(
     per-reference votes. Missing tasks are produced via ``producer`` when given;
     otherwise ``produce_missing=True`` raises an actionable error and
     ``produce_missing=False`` drops them with a warning.
+
+    ``progress`` is an optional callback invoked as ``progress(done, total,
+    task_id)`` after each ``verify_one`` completes, for live status reporting.
     """
 
     def judge_stage(task_ids: Sequence[str], reference_ids: Sequence[str]) -> PerReferenceTotals:
@@ -272,11 +278,16 @@ def build_judge_stage(
                     flush=True,
                 )
 
+        # Flatten to (task_id, repeat_dir) units up front so progress can report
+        # an accurate done/total across all repeats in the stage.
+        units = [(tid, repeat_dir) for tid in present for repeat_dir in task_repeat_dirs(eval_deliverables_dir, tid)]
+        total = len(units)
         responses: List[Dict[str, Any]] = []
-        for task_id in present:
+        for done, (task_id, repeat_dir) in enumerate(units, start=1):
             prompt = task_prompts.get(task_id, "")
-            for repeat_dir in task_repeat_dirs(eval_deliverables_dir, task_id):
-                responses.append(verify_one(task_id, str(repeat_dir), prompt, list(reference_ids)))
+            responses.append(verify_one(task_id, str(repeat_dir), prompt, list(reference_ids)))
+            if progress is not None:
+                progress(done, total, task_id)
         return pool_per_reference(responses)
 
     return judge_stage
@@ -353,11 +364,17 @@ def run_multistage_elo(
     *,
     rng=None,
     producer: Optional[ProducerFn] = None,
+    on_event: Optional[Callable[[str, dict], None]] = None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[StageResult]:
     """Run the full multi-stage ELO procedure and return per-stage results.
 
     ``config.eval_deliverables_dir`` must be set — it is the source of the eval
     model's (cached or produced) deliverables.
+
+    ``on_event``/``progress`` are optional callbacks for live status reporting:
+    ``on_event`` receives stage-level events (see ``MultiStageEloRunner``) and
+    ``progress`` receives per-(task, repeat) judging progress.
     """
     if not config.eval_deliverables_dir:
         raise ValueError("config.eval_deliverables_dir must be set (source of eval deliverables).")
@@ -373,8 +390,9 @@ def run_multistage_elo(
         task_prompts,
         produce_missing=config.produce_missing,
         producer=producer,
+        progress=progress,
     )
-    runner = MultiStageEloRunner(config, distribution, judge_stage, rng=rng)
+    runner = MultiStageEloRunner(config, distribution, judge_stage, rng=rng, on_event=on_event)
     return runner.run()
 
 
@@ -557,12 +575,66 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Top-level RNG seed for reproducible task sampling and reference selection.",
     )
     parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress live per-stage / per-task progress output on stderr.",
+    )
+    parser.add_argument(
         "--output",
         "-o",
         default=None,
         help="Path to write the JSON ELO summary. Defaults to stdout.",
     )
     return parser
+
+
+def _make_progress_printers():
+    """Return ``(on_event, progress)`` callbacks that print human-readable status to stderr.
+
+    ``on_event`` prints a banner at the start/end of each stage (selected
+    references, task count, fitted ELO); ``progress`` prints a per-(task, repeat)
+    counter as each ``/verify`` completes.
+    """
+
+    def on_event(name: str, data: dict) -> None:
+        if name == "planned":
+            counts = data.get("stage_task_counts", [])
+            print(
+                f"[multistage-elo] planned {data.get('total_stages')} stage(s); tasks per stage: {counts}",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif name == "stage_start":
+            idx = int(data["index"]) + 1
+            total = data["total_stages"]
+            refs = data.get("reference_ids", [])
+            prior = data.get("prior_elo")
+            prior_str = f"{prior:.1f}" if isinstance(prior, (int, float)) else "n/a"
+            print(
+                f"[multistage-elo] stage {idx}/{total}: {data.get('num_tasks')} task(s) "
+                f"vs {len(refs)} ref(s) {refs} (prior ELO: {prior_str})",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif name == "stage_end":
+            idx = int(data["index"]) + 1
+            total = data["total_stages"]
+            elo = data.get("eval_elo")
+            elo_str = f"{elo:.1f}" if isinstance(elo, (int, float)) else "unset (no games)"
+            print(
+                f"[multistage-elo] stage {idx}/{total} done: eval ELO = {elo_str} "
+                f"(fit over {data.get('num_references')} ref(s))",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def progress(done: int, total: int, task_id: str) -> None:
+        short = task_id[:18] + "…" if len(task_id) > 19 else task_id
+        end = "\n" if done == total else "\r"
+        print(f"[multistage-elo]   judged {done}/{total} (task {short})   ", end=end, file=sys.stderr, flush=True)
+
+    return on_event, progress
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -594,7 +666,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     task_prompts = load_task_prompts(prompts_path)
     rng = random.Random(args.seed) if args.seed is not None else None
 
-    results = run_multistage_elo(config, verify_one, task_prompts, rng=rng)
+    on_event, progress = (None, None) if args.quiet else _make_progress_printers()
+    results = run_multistage_elo(config, verify_one, task_prompts, rng=rng, on_event=on_event, progress=progress)
     payload = json.dumps(stage_results_to_dict(results), indent=2, ensure_ascii=False)
 
     if args.output:

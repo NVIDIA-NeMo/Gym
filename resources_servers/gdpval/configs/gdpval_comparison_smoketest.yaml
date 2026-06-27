@@ -1,0 +1,56 @@
+# Scratch config for an end-to-end smoke test of the multi-stage ELO driver.
+#
+# Starts ONLY the two servers the driver needs: the GDPVal resources server in
+# comparison mode (with the five reference models baked in) and the Gemini judge
+# it calls. The Stirrup agent / policy model are intentionally omitted because
+# the driver judges *cached* deliverables and never runs the agent.
+#
+# Usage:
+#   export JUDGE_API_KEY=<your-key>
+#   gym env start "+config_paths=[resources_servers/gdpval/configs/gdpval_comparison_smoketest.yaml]"
+#
+# Delete this file when done; it is a local scratch config, not a committed env.
+
+# Gemini 3.1 Pro judge (proxied via the NVIDIA inference API).
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+      max_concurrent_requests: 4
+
+# GDPVal resources server in multi-reference comparison mode.
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      reward_mode: comparison
+      # Text deliverables (soap_note.txt/.md) need no office->pdf conversion, so
+      # disable preconvert to avoid the libreoffice dependency for the smoke test.
+      preconvert_office_to_pdf: false
+      num_comparison_trials: 1
+      reference_models:
+        glm51:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/Stirrup/output/gdpval/GLM5.1-GDPval-Reference-Outputs
+          elo: 1259
+        minimax_m27:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/MiniMaxAI/MiniMax-M2.7/20260516_133717-5cf449e4fc2a6ffd/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1165
+        nemotron3_ultra_ga:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/Stirrup/output/gdpval/Nemotron-3-Ultra-GA-checkpoint-no-interleaved-reasoning-05-29-2026
+          elo: 1168
+        kimi_k25:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/Stirrup/output/gdpval/Kimi-K2.5-Thinking
+          elo: 1000
+        qwen35_397b:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/Stirrup/output/gdpval/Qwen3.5-397B
+          elo: 956
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      judge_responses_create_params_overrides:
+        model: gcp/google/gemini-3.1-pro-preview

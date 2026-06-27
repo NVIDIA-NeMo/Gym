@@ -268,11 +268,20 @@ class MultiStageEloRunner:
         judge_stage: JudgeStageFn,
         *,
         rng: Optional[random.Random] = None,
+        on_event: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self.config = config
         self.distribution = distribution
         self.judge_stage = judge_stage
         self.rng = rng or random.Random()
+        # Optional progress hook. Called as ``on_event(name, data)`` for the
+        # events "planned", "stage_start", and "stage_end". Kept as a callback so
+        # this module performs no I/O itself; the driver/CLI does the printing.
+        self.on_event = on_event
+
+    def _emit(self, name: str, **data: object) -> None:
+        if self.on_event is not None:
+            self.on_event(name, data)
 
     def run(self) -> List[StageResult]:
         stage_task_sets = plan_stage_task_ids(
@@ -281,16 +290,35 @@ class MultiStageEloRunner:
             rng=self.rng,
             nested=self.config.nested_tasks,
         )
+        total_stages = len(self.config.stages)
+        self._emit("planned", stage_task_counts=[len(s) for s in stage_task_sets], total_stages=total_stages)
 
         results: List[StageResult] = []
         eval_elo: Optional[float] = None
         for index, stage in enumerate(self.config.stages):
             reference_ids = select_references(self.config.reference_elos, eval_elo, stage.num_models)
             task_ids = stage_task_sets[index]
+            self._emit(
+                "stage_start",
+                index=index,
+                total_stages=total_stages,
+                reference_ids=list(reference_ids),
+                num_tasks=len(task_ids),
+                prior_elo=eval_elo,
+            )
             per_reference = self.judge_stage(task_ids, reference_ids)
             stage_elo, normalized, num_references = fit_stage_elo(per_reference, self.config.reference_elos)
             if stage_elo is not None:
                 eval_elo = stage_elo
+            self._emit(
+                "stage_end",
+                index=index,
+                total_stages=total_stages,
+                eval_elo=stage_elo,
+                normalized_elo=normalized,
+                num_references=num_references,
+                per_reference=dict(per_reference),
+            )
             results.append(
                 StageResult(
                     stage_index=index,

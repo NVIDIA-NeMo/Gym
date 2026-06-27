@@ -183,3 +183,24 @@ class TestMultiStageEloRunner:
         results = MultiStageEloRunner(cfg, dist, judge_stage, rng=random.Random(0)).run()
         assert results[0].eval_elo is None
         assert results[0].num_references == 0
+
+    def test_on_event_emits_lifecycle_events(self) -> None:
+        dist = _dist({"x": [f"x{i}" for i in range(10)]})
+
+        def judge_stage(task_ids, reference_ids):
+            return {rid: {"wins": 6, "losses": 4, "ties": 0} for rid in reference_ids}
+
+        events = []
+        cfg = self._config(stages=[StageSpec(num_tasks=2, num_models=None), StageSpec(num_tasks=3, num_models=2)])
+        MultiStageEloRunner(
+            cfg, dist, judge_stage, rng=random.Random(0), on_event=lambda name, data: events.append((name, data))
+        ).run()
+
+        names = [n for n, _ in events]
+        assert names[0] == "planned"
+        assert names.count("stage_start") == 2
+        assert names.count("stage_end") == 2
+        # stage_start carries the selected references and task count.
+        first_start = next(d for n, d in events if n == "stage_start")
+        assert first_start["num_tasks"] == 2
+        assert first_start["reference_ids"] == ["a", "b", "c", "d"]
