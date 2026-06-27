@@ -10,10 +10,10 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -70,6 +70,13 @@ def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None,
     if usage:
         response["usage"] = usage
     return response
+
+
+def _provider_error(status: int, message: str, response_body: str | None = None) -> ClientResponseError:
+    error = ClientResponseError(MagicMock(), (), status=status, message="provider request failed", headers=None)
+    error.message = message
+    error.response_content = (response_body or message).encode("utf-8")
+    return error
 
 
 class TestSanity:
@@ -255,6 +262,77 @@ class TestInferenceProvider:
         content = data["choices"][0]["message"]["content"]
         assert content == "<think>Let me think about this...</think>The answer is 42."
         assert "reasoning_content" not in data["choices"][0]["message"]
+
+
+class TestProviderErrors:
+    async def test_chat_completion_provider_auth_error_is_structured(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        auth_error_content = json.dumps({"error": {"message": "Invalid API key", "type": "authentication_error"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(401, "Authentication failed", auth_error_content)
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "whoami"}]},
+        )
+        assert response.status_code == 401
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 401
+        assert detail["category"] == "authentication"
+        assert detail["retryable"] is False
+        assert detail["provider_context"]["base_url"] == "https://api.example.com/v1"
+        assert detail["model"] == "test-model"
+        assert detail["message"] == "Invalid API key"
+
+    async def test_chat_completion_provider_rate_limit_error_is_retryable(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        rate_error_content = json.dumps({"error": {"message": "Rate limit exceeded"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(429, "Rate limit exceeded", rate_error_content)
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "too much"}]},
+        )
+        assert response.status_code == 429
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 429
+        assert detail["category"] == "rate_limit"
+        assert detail["retryable"] is True
+        assert detail["message"] == "Rate limit exceeded"
+
+    async def test_responses_provider_error_uses_same_structured_contract(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        model_error_content = json.dumps({"error": {"message": "Model test-model does not exist"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(404, "Model not found", model_error_content)
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json={"input": "whoami"},
+        )
+        assert response.status_code == 404
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 404
+        assert detail["category"] == "model_not_found"
+        assert detail["retryable"] is False
+        assert detail["provider_context"]["base_url"] == "https://api.example.com/v1"
+        assert detail["message"] == "Model test-model does not exist"
 
 
 class TestResponses:
