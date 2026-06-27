@@ -42,6 +42,16 @@ if TYPE_CHECKING:
     from responses_api_agents.swe_env.sandbox import AsyncSweEnvironment
 
 
+class GraderDependencyError(RuntimeError):
+    """A required grading dependency is unavailable for a task the harness must grade exactly.
+
+    Raised by a harness when it cannot grade an instance faithfully (e.g. ``swebench`` is
+    missing for a SWE-bench instance) and degrading to a generic parser would silently skew
+    the result. ``verify_task`` propagates this rather than swallowing it into an unmasked
+    reward-0, so a misconfigured grader fails loudly instead of quietly degrading scores.
+    """
+
+
 @dataclass
 class SweTask:
     """A single SWE task to provision and/or verify.

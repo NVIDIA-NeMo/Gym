@@ -212,3 +212,23 @@ def test_grade_masks_on_infra_error():
 
 def test_flat_eval_script_empty_without_instance_dict():
     assert SweBenchHarness("swe-bench")._flat_eval_script(_task()) == ""
+
+
+def test_grade_fails_loud_when_swebench_unavailable(monkeypatch):
+    """A SWE-bench instance whose ``swebench`` install is missing fails loud, not silent-degrade.
+
+    Degrading to the generic pytest-only parser would mis-score non-pytest repos (e.g. django) as
+    unresolved, silently skewing the resolve rate. Instead grading raises ``GraderDependencyError``
+    so the misconfiguration surfaces.
+    """
+    import sys
+
+    from responses_api_agents.swe_env.harness import GraderDependencyError
+
+    # Simulate a missing / broken swebench install for the import inside _swebench_flat_grade.
+    monkeypatch.setitem(sys.modules, "swebench.harness.constants", None)
+    harness = SweBenchHarness("swe-bench")
+    task = _task(metadata={"instance_dict": {"instance_id": "repo__inst-1", "repo": "x/y"}})
+    artifacts = EvalArtifacts(test_output=_PASSING_LOG, return_code=0, raw={})
+    with pytest.raises(GraderDependencyError):
+        harness.grade(task, artifacts)

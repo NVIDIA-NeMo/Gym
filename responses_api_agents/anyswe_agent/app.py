@@ -56,6 +56,7 @@ class SWEBenchMetrics(BaseModel):
     model_patch: Optional[str] = None
 
     agent_timed_out: Optional[bool] = None
+    agent_truncated: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
     error_kind: Optional[str] = None
     mask_sample: Optional[bool] = None
@@ -259,7 +260,8 @@ for candidate in ["/testbed", "/workspace/repo", "/app", "/root/repo"]:
     p = Path(candidate)
     if p.exists() and (p / ".git").exists():
         patch = subprocess.run(
-            ["git", "diff", "HEAD"], capture_output=True, text=True, errors="replace", cwd=str(p)
+            ["bash", "-c", "git add -A && git diff --cached"],
+            capture_output=True, text=True, errors="replace", cwd=str(p),
         ).stdout
         print(f"patch: {{len(patch)}} chars from {{p}}", flush=True)
         break
@@ -605,7 +607,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             eval_timeout_s=params.swebench_tests_timeout,
         )
         resolved = bool(report.resolved)
-        if report.error_kind is not None or agent_timed_out:
+
+        # Read the inner agent's NeMoGymResponse (it self-writes response.json) to recover the
+        # output trajectory and any truncation signal.
+        response_path = params.persistent_dir / "response.json"
+        saved = NeMoGymResponse.model_validate_json(response_path.read_text()) if response_path.exists() else None
+        # The inner agent ran out of turns / blew its context window if it reports the Responses
+        # API "incomplete" status. A patch that happens to pass in that case is an accidental
+        # reward, so mask it (mirrors main's swe_agents, which masks resolved AND
+        # max_iteration/context_window) to keep it out of the training gradient.
+        agent_truncated = bool(saved is not None and saved.status == "incomplete")
+        if report.error_kind is not None or agent_timed_out or (resolved and agent_truncated):
             params.mask_sample = True
 
         update_metrics(
@@ -613,20 +625,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             {
                 "resolved": resolved,
                 "patch_exists": bool(patch.strip()),
+                "model_patch": patch or None,
                 "agent_timed_out": agent_timed_out,
+                "agent_truncated": agent_truncated,
                 "error_kind": report.error_kind,
                 "mask_sample": params.mask_sample,
                 "openhands_run_time": agent_run_time,
             },
         )
 
-        response_path = params.persistent_dir / "response.json"
-        if response_path.exists():
-            saved = NeMoGymResponse.model_validate_json(response_path.read_text())
-            output_items = saved.output
-            tools = saved.tools or []
-        else:
-            output_items, tools = [], []
+        output_items = saved.output if saved is not None else []
+        tools = (saved.tools or []) if saved is not None else []
 
         return NeMoGymResponse(
             id=f"anyswe-{params.instance_id}",

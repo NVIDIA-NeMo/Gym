@@ -37,7 +37,13 @@ from typing import Any
 # providers are built into nemo_gym.sandbox and resolve lazily (no import needed).
 import responses_api_agents.swe_env.harnesses  # noqa: F401
 from nemo_gym.sandbox import SandboxProvider
-from responses_api_agents.swe_env.harness import SweEvalReport, SweTask, get_harness, reward_from_report
+from responses_api_agents.swe_env.harness import (
+    GraderDependencyError,
+    SweEvalReport,
+    SweTask,
+    get_harness,
+    reward_from_report,
+)
 from responses_api_agents.swe_env.sandbox import acquire_sandbox
 
 
@@ -95,6 +101,11 @@ async def verify_task(
         SweEvalReport: The grading outcome, with ``error_kind="eval_timeout"`` set
             only on a genuine wall-clock eval timeout; non-timeout eval-stage
             failures are reported unmasked (``resolved=False``, ``error_kind=None``).
+
+    Raises:
+        ProviderCapabilityError: If the task's harness does not support the provider.
+        GraderDependencyError: If a required grading dependency is unavailable for an
+            instance the harness must grade exactly (propagated, not swallowed).
     """
     harness = get_harness(task.benchmark)
     if task.metadata.get("flat_eval"):
@@ -133,6 +144,12 @@ async def verify_task(
                 return harness.grade(task, artifacts)
 
             return await asyncio.wait_for(_sequence(), timeout=timeout)
+    except GraderDependencyError:
+        # A required grader dependency is missing (e.g. swebench for a SWE-bench instance).
+        # Propagate rather than degrading to an unmasked reward-0 so the misconfiguration is
+        # loud (a crash in the standalone path; every sample masked in the anyswe path) instead
+        # of silently skewing the resolve rate.
+        raise
     except (asyncio.TimeoutError, TimeoutError):
         # Genuine wall-clock eval timeout: mask via error_kind. This mirrors main's
         # app.py, which sets eval_timed_out (-> mask_sample) only when the final eval

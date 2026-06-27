@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+from pathlib import Path
 
 import responses_api_agents.swe_env.harnesses  # noqa: F401  (registers harnesses)
 from nemo_gym.sandbox import (
@@ -49,7 +51,7 @@ class _FakeProvider:
 
     name = "fake-swe"
 
-    def __init__(self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, **_):
+    def __init__(self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, sink=None, **_):
         """Configure the scripted provider's responses.
 
         Args:
@@ -57,14 +59,19 @@ class _FakeProvider:
             test_rc: Return code returned for pytest commands.
             apply_rc: Return code returned for ``git apply`` commands.
             create_error: When True, ``create`` raises a SandboxCreateError.
+            sink: Optional list each created spec is appended to, for asserting on what
+                ``verify_task`` passed the provider (e.g. the stamped ``ttl_s``).
             **_: Ignored extra keyword arguments.
         """
         self._test_output = test_output
         self._test_rc = test_rc
         self._apply_rc = apply_rc
         self._create_error = create_error
+        self._sink = sink
 
     async def create(self, spec):
+        if self._sink is not None:
+            self._sink.append(spec)
         if self._create_error:
             raise SandboxCreateError("simulated create failure")
         return SandboxHandle(sandbox_id="fake", provider_name=self.name, raw={"workdir": spec.workdir})
@@ -165,6 +172,49 @@ def test_compute_resolved_fail_only():
     )
     # Empty required set is still unresolved under fail_only (the validated edge).
     assert compute_resolved(fail_to_pass=[], pass_to_pass=[], passed=[], eval_type="fail_only") is False
+
+
+def test_compute_resolved_pass_and_fail_status_map():
+    """The default ``pass_and_fail`` rule with a populated status_map mirrors swebench.
+
+    This is the path that runs for SWE-bench Verified: a required test is a failure only when it
+    is absent or its status is FAILED/ERROR; PASSED/XFAIL pass and any other status (SKIPPED/XPASS)
+    is neutral (excluded, not a failure). Locking it in guards the swebench-equivalence this PR
+    depends on.
+    """
+    f2p, p2p = ["a"], ["b"]
+    # All required tests PASSED -> resolved.
+    assert compute_resolved(fail_to_pass=f2p, pass_to_pass=p2p, passed=[], status_map={"a": "PASSED", "b": "PASSED"})
+    # A required test FAILED -> unresolved.
+    assert not compute_resolved(
+        fail_to_pass=f2p, pass_to_pass=p2p, passed=[], status_map={"a": "FAILED", "b": "PASSED"}
+    )
+    # A required test ERROR -> unresolved.
+    assert not compute_resolved(
+        fail_to_pass=f2p, pass_to_pass=p2p, passed=[], status_map={"a": "ERROR", "b": "PASSED"}
+    )
+    # A required test absent from the status_map -> unresolved.
+    assert not compute_resolved(fail_to_pass=f2p, pass_to_pass=p2p, passed=[], status_map={"a": "PASSED"})
+    # XFAIL passes; SKIPPED/XPASS are neutral (not failures) -> resolved.
+    assert compute_resolved(fail_to_pass=f2p, pass_to_pass=p2p, passed=[], status_map={"a": "XFAIL", "b": "SKIPPED"})
+
+
+def test_agent_adapters_do_not_call_grading_methods():
+    """Agent-facing swe_env modules never call the grader-only harness methods.
+
+    ``harness.py`` documents a trust boundary: ``reset_repo`` / ``run_eval`` / ``grade`` are used
+    ONLY by the grader (``verify_task``). This AST guard enforces it — the agent adapters
+    (``self_drive``, ``sandbox``) must reach grading through ``verify_task``, never by calling
+    those methods directly — so the boundary the docstring promises cannot silently regress.
+    """
+    grading_only = {"reset_repo", "run_eval", "grade"}
+    adapter_dir = Path(__file__).resolve().parent.parent
+    for module in ("self_drive.py", "sandbox.py"):
+        tree = ast.parse((adapter_dir / module).read_text())
+        referenced = sorted(
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in grading_only
+        )
+        assert not referenced, f"{module} calls grader-only methods {referenced}; route grading via verify_task"
 
 
 def test_reward_from_report():
@@ -281,3 +331,84 @@ def test_unsupported_provider_raises():
     except ProviderCapabilityError:
         return
     raise AssertionError("expected ProviderCapabilityError")
+
+
+def test_verify_task_propagates_grader_dependency_error():
+    """``verify_task`` propagates ``GraderDependencyError`` instead of swallowing it to reward-0.
+
+    A missing grading dependency (e.g. swebench for a SWE-bench instance) must fail loud rather
+    than silently degrade the resolve rate, so it is re-raised, not caught by the unmasked
+    eval-stage handler.
+    """
+    from responses_api_agents.swe_env.harness import GraderDependencyError, register_harness
+
+    class _MissingGrader(SweBenchExtHarness):
+        name = "missing-grader-test"
+
+        def grade(self, task, artifacts):
+            """Simulate a harness whose required grading dependency is unavailable.
+
+            Args:
+                task: The task being graded.
+                artifacts: The eval artifacts (unused).
+
+            Raises:
+                GraderDependencyError: Always, to exercise the propagation path.
+            """
+            raise GraderDependencyError("grading dependency missing")
+
+    register_harness(_MissingGrader(), override=True)
+    try:
+        asyncio.run(verify_task({"fake-swe": {"test_output": _PASS_OUTPUT}}, _task(benchmark="missing-grader-test")))
+    except GraderDependencyError:
+        return
+    raise AssertionError("expected GraderDependencyError to propagate")
+
+
+def test_verify_task_flat_eval_metadata():
+    """``metadata['flat_eval']`` routes grading through the harness's flat variant."""
+    provider = {"fake-swe": {"test_output": _PASS_OUTPUT, "test_rc": 0}}
+    report = asyncio.run(verify_task(provider, _task(metadata={"flat_eval": True})))
+    assert report.resolved is True
+    assert reward_from_report(report) == 1.0
+
+
+def test_verify_task_stamps_ttl_when_unset():
+    """``verify_task`` stamps ``ttl_s = eval_timeout_s + slack`` when the harness leaves it unset.
+
+    The stamp lets TTL-honoring backends (opensandbox) self-expire an eval sandbox orphaned by a
+    hard crash; harnesses that already set ``ttl_s`` (e.g. swe-bench-ext) keep their own value.
+    """
+    import dataclasses
+
+    from responses_api_agents.swe_env.harness import register_harness
+    from responses_api_agents.swe_env.verify_task import _TTL_SLACK_S
+
+    class _NoTtl(SweBenchExtHarness):
+        name = "no-ttl-test"
+
+        def build_spec(self, task):
+            """Build the swe-bench-ext spec but clear ``ttl_s`` so verify_task must stamp it.
+
+            Args:
+                task: The task to build a spec for.
+
+            Returns:
+                The base spec with ``ttl_s`` reset to None.
+            """
+            return dataclasses.replace(super().build_spec(task), ttl_s=None)
+
+    register_harness(_NoTtl(), override=True)
+    captured: list = []
+    provider = {"fake-swe": {"test_output": _PASS_OUTPUT, "sink": captured}}
+    asyncio.run(verify_task(provider, _task(benchmark="no-ttl-test"), eval_timeout_s=120))
+    assert captured, "expected create() to be called with a stamped spec"
+    assert captured[-1].ttl_s == 120 + _TTL_SLACK_S
+
+
+def test_report_to_reward_wrapper():
+    """``report_to_reward`` is a thin wrapper that scores a report like ``reward_from_report``."""
+    from responses_api_agents.swe_env.verify_task import report_to_reward
+
+    assert report_to_reward(SweEvalReport(instance_id="i", resolved=True)) == 1.0
+    assert report_to_reward(SweEvalReport(instance_id="i", resolved=False)) == 0.0

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import posixpath
 import shlex
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ class DockerSandboxProvider:
         network: str | None = None,
         run_args: list[str] | None = None,
         keep_alive_command: str = "sleep infinity",
+        concurrency: int = 32,
         **_: Any,
     ) -> None:
         """Configure the Docker sandbox provider.
@@ -66,16 +68,28 @@ class DockerSandboxProvider:
                 invocation.
             keep_alive_command: Command run as the container's entrypoint to keep
                 it alive for subsequent ``exec`` calls.
+            concurrency: Maximum number of concurrent ``docker`` CLI subprocesses,
+                bounded by a shared semaphore (matches the apptainer provider).
             **_: Additional keyword arguments are accepted and ignored.
+
+        Raises:
+            ValueError: If ``concurrency`` is less than 1.
         """
+        if concurrency < 1:
+            raise ValueError("concurrency must be >= 1")
         self._bin = docker_bin
         self._default_user = default_user
         self._network = network
         self._run_args = list(run_args or [])
         self._keep_alive = keep_alive_command
+        self._semaphore = asyncio.Semaphore(concurrency)
 
     async def _run(self, *args: str, timeout_s: int | float | None = None) -> tuple[int, str, str]:
         """Run the ``docker`` CLI with the given arguments and capture output.
+
+        Concurrency is bounded by the provider's shared semaphore so a busy SWE hot
+        path (one sandbox per rollout, many ``exec`` each) cannot spawn unbounded
+        ``docker`` subprocesses.
 
         Args:
             *args: Arguments passed to the ``docker`` executable.
@@ -86,23 +100,24 @@ class DockerSandboxProvider:
             A tuple of ``(return_code, stdout, stderr)`` with output decoded as
             text using ``errors="replace"``.
         """
-        proc = await asyncio.create_subprocess_exec(
-            self._bin,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except (asyncio.TimeoutError, TimeoutError):
-            proc.kill()
-            await proc.wait()
-            raise
-        return (
-            proc.returncode if proc.returncode is not None else -1,
-            out.decode(errors="replace"),
-            err.decode(errors="replace"),
-        )
+        async with self._semaphore:
+            proc = await asyncio.create_subprocess_exec(
+                self._bin,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            except (asyncio.TimeoutError, TimeoutError):
+                proc.kill()
+                await proc.wait()
+                raise
+            return (
+                proc.returncode if proc.returncode is not None else -1,
+                out.decode(errors="replace"),
+                err.decode(errors="replace"),
+            )
 
     @staticmethod
     def _resources(spec: SandboxSpec) -> SandboxResources:
@@ -140,7 +155,11 @@ class DockerSandboxProvider:
         """
         if not spec.image:
             raise SandboxCreateError("DockerSandboxProvider requires spec.image")
-        args = ["run", "-d", "--init"]
+        # Pre-assign a unique name so a container the daemon may have started can still be reaped
+        # if the CLI client dies (e.g. on timeout) before we capture its id (mirrors apptainer's
+        # uuid-named instances).
+        name = f"nemo-gym-{uuid.uuid4().hex}"
+        args = ["run", "-d", "--init", "--name", name]
         if self._network:
             args += ["--network", self._network]
         res = self._resources(spec)
@@ -159,17 +178,37 @@ class DockerSandboxProvider:
         try:
             rc, out, err = await self._run(*args, timeout_s=spec.ready_timeout_s or 600)
         except (asyncio.TimeoutError, TimeoutError) as exc:
+            await self._reap_orphan(name)
             raise SandboxCreateError(f"docker run timed out for image {spec.image!r}") from exc
         if rc != 0:
+            await self._reap_orphan(name)
             raise SandboxCreateError(f"docker run failed (rc={rc}) for {spec.image!r}: {err.strip() or out.strip()}")
-        container_id = out.strip().splitlines()[-1].strip()
+        lines = out.strip().splitlines()
+        container_id = lines[-1].strip() if lines else ""
         if not container_id:
+            await self._reap_orphan(name)
             raise SandboxCreateError("docker run did not return a container id")
         return SandboxHandle(
             sandbox_id=container_id,
             provider_name=self.name,
             raw={"image": spec.image, "workdir": spec.workdir},
         )
+
+    async def _reap_orphan(self, name: str) -> None:
+        """Best-effort force-remove a container by its pre-assigned name.
+
+        Used to clean up a ``docker run`` that may have started a container on the daemon even
+        though the CLI client failed (timeout / non-zero rc / no id returned) before a handle was
+        captured. Swallows all errors and bounds itself with a short timeout — a missing or
+        already-gone container is fine.
+
+        Args:
+            name: The pre-assigned ``--name`` of the container to remove.
+        """
+        try:
+            await self._run("rm", "-f", name, timeout_s=30)
+        except Exception:
+            pass
 
     async def exec(
         self,

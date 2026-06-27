@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from nemo_gym.sandbox import SandboxResources, SandboxSpec
 from responses_api_agents.swe_env.harness import (
     EvalArtifacts,
+    GraderDependencyError,
     SweEvalReport,
     SweTask,
     SweTaskHarness,
@@ -175,8 +176,10 @@ class SweBenchHarness(SweTaskHarness):
         The SWE-bench family spans repos with different test runners (pytest, django's unittest
         runner, etc.). The generic flat parser is pytest-only and silently scores non-pytest
         repos (e.g. django) unresolved — even the gold patch. Grade with swebench's official
-        per-repo log parser when importable; fall back to the generic parser only when swebench
-        is absent.
+        per-repo log parser; if ``swebench`` cannot be imported for a real SWE-bench instance
+        this raises ``GraderDependencyError`` (fail loud) rather than silently mis-scoring. The
+        generic parser is used only for the legitimate cases where there is no instance dict or
+        the eval spec cannot be built (matching main's behavior for unbuildable instances).
 
         Args:
             task: The task being graded.
@@ -184,6 +187,9 @@ class SweBenchHarness(SweTaskHarness):
 
         Returns:
             A ``SweEvalReport`` recording resolution, patch state, and any error kind.
+
+        Raises:
+            GraderDependencyError: If ``swebench`` is unavailable for a real SWE-bench instance.
         """
         report = self._swebench_flat_grade(task, artifacts)
         return report if report is not None else flat_eval.flat_grade(task, artifacts)
@@ -202,8 +208,12 @@ class SweBenchHarness(SweTaskHarness):
             artifacts: The artifacts produced by :func:`flat_eval.flat_run_eval`.
 
         Returns:
-            A ``SweEvalReport`` with the official verdict, or ``None`` when swebench is
-            unavailable / the spec cannot be built (caller falls back to the generic parser).
+            A ``SweEvalReport`` with the official verdict, or ``None`` when there is no instance
+            dict or the eval spec cannot be built (caller falls back to the generic parser).
+
+        Raises:
+            GraderDependencyError: If ``swebench`` cannot be imported for a real SWE-bench
+                instance (fail loud rather than silently degrading to the generic parser).
         """
         # Mirror flat_grade's infra masks so a genuine sandbox/timeout never scores 0. An
         # unbuildable/empty eval spec is NOT masked here (it grades unmasked unresolved via
@@ -223,8 +233,15 @@ class SweBenchHarness(SweTaskHarness):
             from swebench.harness.constants import FAIL_ONLY_REPOS
             from swebench.harness.grading import get_logs_eval
             from swebench.harness.test_spec.test_spec import make_test_spec
-        except Exception:
-            return None  # swebench absent -> caller falls back to the generic parser
+        except Exception as exc:
+            # Fail loud instead of degrading to the generic pytest-only parser, which mis-scores
+            # non-pytest repos (e.g. django) as unresolved even for a correct patch. swebench is a
+            # pinned hard dependency (requirements.txt: swebench==4.1.0); a missing/broken install
+            # is a misconfiguration that must surface, not silently skew the SWE-bench resolve rate.
+            raise GraderDependencyError(
+                "swebench is required to grade SWE-bench instances faithfully (per-repo log "
+                "parsers) but could not be imported; install the pinned 'swebench==4.1.0'."
+            ) from exc
         log_fp = None
         try:
             spec = make_test_spec(instance, namespace="swebench")

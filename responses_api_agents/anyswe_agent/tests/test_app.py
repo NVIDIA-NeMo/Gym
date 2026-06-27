@@ -75,12 +75,13 @@ class TestRunnerTemplate:
         )
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
-        assert '"git", "diff", "HEAD"' in rendered
+        assert "git add -A && git diff --cached" in rendered
 
-    def test_patch_extraction_is_git_diff(self) -> None:
-        # The runner always extracts the patch via `git diff HEAD`, independent of which
-        # agent ran; this is the core agent-agnostic contract.
-        assert '"git", "diff", "HEAD"' in _RUNNER_TEMPLATE
+    def test_patch_extraction_stages_then_diffs(self) -> None:
+        # The runner stages everything before diffing (`git add -A && git diff --cached`) so
+        # newly-created files land in the graded patch, matching SWE-bench's own model-patch
+        # extraction. Agent-agnostic: it runs regardless of which agent produced the changes.
+        assert "git add -A && git diff --cached" in _RUNNER_TEMPLATE
         assert "patch.diff" in _RUNNER_TEMPLATE
 
     def test_sampling_is_forwarded(self) -> None:
