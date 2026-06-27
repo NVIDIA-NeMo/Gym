@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="3" failures="1" errors="0" skipped="0">
+    <testcase classname="tests.test_core" name="test_fix_applied" time="0.01"/>
+    <testcase classname="tests.test_core" name="test_regression_guard" time="0.02"/>
+    <testcase classname="tests.test_core" name="test_unrelated_broken" time="0.01">
+      <failure message="AssertionError">boom</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
