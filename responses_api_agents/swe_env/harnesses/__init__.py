@@ -14,10 +14,13 @@
 
 """SWE dataset-family harnesses. Importing this package registers all families.
 
-Flat host-graded families run on any exec-capable provider (including docker):
-``swe-bench-ext``, ``nv-internal-1``, ``swe-rebench``. Nested-harness families
-run an in-container evaluation and require an apptainer provider, failing fast on
-exec-only providers: ``swe-bench``, ``swe-bench-multilingual``, ``r2e-gym``.
+Every built-in family is flat and host-graded: it runs the instance's evaluation
+inside a single sandbox, parses the output host-side, and works on any
+exec-capable provider (including docker). The registered families are
+``swe-bench-ext``, ``nv-internal-1``, ``swe-rebench``, ``swe-bench``,
+``swe-bench-multilingual``, and ``r2e-gym``. (The previously apptainer-only nested
+grading for ``swe-bench``/``swe-bench-multilingual``/``r2e-gym`` was removed when
+PR #1694 took ownership of the apptainer provider.)
 """
 
 from responses_api_agents.swe_env.harness import list_harnesses, register_harness

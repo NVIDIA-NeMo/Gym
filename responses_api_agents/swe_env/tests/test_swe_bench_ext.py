@@ -299,6 +299,8 @@ class _FakeExtProvider:
         test_output: The transcript returned for the wrapped eval command.
         apply_rc: Return code for ``git apply`` commands.
         run_cmd: Substring identifying the wrapped eval command.
+        git_dir: Directory whose ``.git`` probe succeeds; ``None`` means every
+            probed dir reports a checkout (so the first ladder entry wins).
     """
 
     name = "fake-ext"

@@ -251,9 +251,8 @@ def test_grade_unresolved_missing_pass_to_pass(tmp_path):
 
 def test_grade_no_patch_applied_gate(tmp_path):
     """``resolved`` is the test verdict ONLY and does not gate on patch_applied.
-    The report reports patch_successfully_applied=True, so even when the model
-    patch failed to apply, a run where every F2P/P2P test passes scores
-    resolved=True."""
+    So even when the model patch failed to apply (``patch_applied=False``), a run
+    where every F2P/P2P test passes scores resolved=True."""
     repo_dir = _write_fake_parsers(tmp_path)
     harness = SweRebenchHarness()
     task = _task(

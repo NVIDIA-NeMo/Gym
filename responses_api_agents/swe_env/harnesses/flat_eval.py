@@ -33,13 +33,11 @@ these markers and per-test status tokens without importing ``swebench``, so
 grading can run in environments where that package (and its Docker
 dependencies) is absent.
 
-Flat mode is selected when the harness is constructed in flat mode
-(``flat_eval=True`` on the constructor) or when a task opts in via
-``SweTask.metadata["flat_eval"]``. Only the harness-level flag lifts the
-apptainer-only ``supports_provider`` restriction; a per-task flag alone affects
-only ``run_eval`` / ``grade`` dispatch on an already-flat-capable harness,
-because the provider is chosen at provisioning time from the harness capability
-before task metadata is consulted.
+``flat_eval_enabled`` reports whether flat mode applies to a task: when the harness
+selects it or the task opts in via ``SweTask.metadata["flat_eval"]``. The verifier
+honors that per-task key by calling ``SweTaskHarness.with_flat_eval()`` — a no-op for
+the built-in families, which already grade host-side. (A previously apptainer-only
+nested grading path for swe-bench / r2e-gym was removed in PR #1694.)
 """
 
 from __future__ import annotations
@@ -266,19 +264,17 @@ def flat_grade(task: SweTask, artifacts: EvalArtifacts) -> SweEvalReport:
 
 
 def flat_eval_enabled(harness_flag: bool, task: SweTask) -> bool:
-    """Return whether flat mode should be used for this task.
+    """Return whether flat (host-side) mode should be used for this task.
 
-    Flat mode is selected when the harness was constructed in flat mode
-    (``harness_flag``) or the task opts in via ``metadata["flat_eval"]``. The
-    harness flag lifts the ``supports_provider`` apptainer-only gate; the
-    per-task key only affects ``run_eval`` / ``grade`` dispatch on an
-    already-flat-capable harness.
+    Flat mode applies when the harness flag selects it or the task opts in via
+    ``metadata["flat_eval"]``. This is a pure predicate; it neither swaps the
+    harness nor changes provider support.
 
     Args:
-        harness_flag: Whether the harness instance was constructed in flat mode.
+        harness_flag: Whether the harness itself selects flat grading.
         task: The task whose ``metadata["flat_eval"]`` is consulted.
 
     Returns:
-        ``True`` when flat mode applies to this task, otherwise ``False``.
+        ``True`` when either source selects flat mode, otherwise ``False``.
     """
     return bool(harness_flag) or bool(task.metadata.get("flat_eval", False))

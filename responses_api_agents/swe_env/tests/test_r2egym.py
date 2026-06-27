@@ -18,7 +18,7 @@ r2e-gym now grades host-side via the shared flat-eval path (the apptainer-only n
 ``run_local_evaluation`` grader was removed when PR #1694 took over the apptainer provider; the
 nested re-wiring is tracked for a follow-up PR). These tests cover provisioning, the agent-phase
 test-hiding command shape, ``reset_repo``, and the flat ``run_eval`` + ``grade`` path against a
-scripted ``FakeSandbox``.
+scripted ``_FakeProvider``.
 """
 
 from __future__ import annotations

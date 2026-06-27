@@ -128,7 +128,8 @@ class SweTaskHarness(ABC):
     def supports_provider(self, provider_name: str) -> bool:
         """Report whether this harness can run on the named provider.
 
-        Nested-Docker families override this to reject exec-only providers.
+        The base harness accepts every provider; flat host-graded families work on any
+        exec-capable provider.
 
         Args:
             provider_name (str): The name of the sandbox provider.
@@ -141,9 +142,7 @@ class SweTaskHarness(ABC):
     def with_flat_eval(self) -> "SweTaskHarness":
         """Return a variant that grades host-side (flat) on any exec-capable provider.
 
-        Flat-graded families already grade host-side and return themselves. Nested-Docker
-        families override this to return a flat-constructed copy, lifting the apptainer-only
-        gate so they can grade on docker/opensandbox.
+        All families already grade host-side, so the base implementation returns ``self``.
 
         Returns:
             SweTaskHarness: A harness whose grading runs host-side.

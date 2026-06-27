@@ -116,7 +116,8 @@ class AsyncSweEnvironment:
             user (str | int | None): User to run the command as. Defaults to
                 ``"root"``.
             timeout_s (int | float | None): Optional timeout in seconds.
-            is_eval (bool): Marks the command as part of evaluation.
+            is_eval (bool): Accepted for caller bookkeeping; it does not affect
+                how the command is executed.
 
         Returns:
             dict[str, Any]: A dict with ``output`` (combined stdout and stderr),

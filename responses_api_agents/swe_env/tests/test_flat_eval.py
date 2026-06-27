@@ -14,7 +14,7 @@
 
 """Unit tests for the opt-in flat (host-graded) eval mode of the nested families.
 
-The suite has three layers:
+The suite has two layers:
 
 * Parser unit tests on recorded fixture logs cover the SWE-bench eval-script log
   parser (``parse_eval_log``) on a success log, a failure log, the bad-code logs

@@ -17,7 +17,7 @@
 The harness runs the instance's eval script in the sandbox and grades the produced log
 host-side (swebench's per-repo parser, falling back to the generic flat parser), so it runs on
 any exec-capable provider. These tests validate provisioning (``build_spec`` / ``materialize``),
-the flat ``run_eval`` + ``grade`` path, and family validation, against a scripted ``FakeSandbox``.
+the flat ``run_eval`` + ``grade`` path, and family validation, against a scripted ``_FakeProvider``.
 """
 
 from __future__ import annotations

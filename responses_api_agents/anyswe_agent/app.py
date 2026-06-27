@@ -470,15 +470,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         """Build a sandbox provider with the per-instance mounts the runner needs.
 
         The deps prefix, the NeMo Gym tree, and the run dir are bind-mounted at the fixed
-        paths the runner expects; ``--network host`` lets the in-container agent reach a
-        host-side model server over loopback.
+        paths the runner expects. For docker, ``docker_network`` (default ``"host"``) lets the
+        in-container agent reach a host-side model server over loopback. For apptainer, the
+        mounts are applied as ``--bind`` (via ``exec.default_binds``) and ``--writable-tmpfs``
+        is added so ``/testbed`` is editable.
 
         Args:
             params: The per-instance config carrying the run dir + host mount sources.
 
         Returns:
-            A ``SandboxProvider`` (docker) configured with the mounts, or the configured
-            ``sandbox_provider`` mapping for non-docker backends.
+            An ``ApptainerProvider`` (apptainer) or ``DockerSandboxProvider`` (docker) configured
+            with the mounts, or the configured ``sandbox_provider`` mapping for other backends.
         """
         name = next(iter(self.config.sandbox_provider), "docker")
         if name == "apptainer":
