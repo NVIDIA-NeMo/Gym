@@ -599,7 +599,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         # Grade the patch in a fresh sandbox (hermetic). task.metadata['flat_eval']=True so the
         # nested families grade host-side on docker.
-        report = await verify_task(self._grading_provider(), dataclasses.replace(task, model_patch=patch))
+        report = await verify_task(
+            self._grading_provider(),
+            dataclasses.replace(task, model_patch=patch),
+            eval_timeout_s=params.swebench_tests_timeout,
+        )
         resolved = bool(report.resolved)
         if report.error_kind is not None or agent_timed_out:
             params.mask_sample = True
