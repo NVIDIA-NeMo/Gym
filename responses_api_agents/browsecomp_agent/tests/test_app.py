@@ -99,8 +99,25 @@ class TestApp:
         assert config.nudge_steps is True
         assert config.max_context_tokens == 196608
         assert config.context_reset_pct == 0.3
+        assert config.context_reset_tokens == 0
         assert config.context_reset_keep_rounds == 3
         assert config.max_run_retries == 1
+
+    # ---- _reset_threshold ----
+
+    def test_reset_threshold_pct_fallback(self) -> None:
+        # context_reset_tokens == 0 (default) -> max_context_tokens * context_reset_pct
+        config = _make_config()
+        assert BrowsecompAgent._reset_threshold(config) == int(196608 * 0.3)  # 58982
+
+    def test_reset_threshold_absolute_overrides_pct(self) -> None:
+        # context_reset_tokens > 0 takes precedence over the pct calc (50k standard)
+        config = _make_config(context_reset_tokens=50000)
+        assert BrowsecompAgent._reset_threshold(config) == 50000
+
+    def test_reset_threshold_disabled(self) -> None:
+        config = _make_config(context_reset_tokens=0, max_context_tokens=0)
+        assert BrowsecompAgent._reset_threshold(config) == 0
 
     # ---- _compact_old_tool_messages ----
 

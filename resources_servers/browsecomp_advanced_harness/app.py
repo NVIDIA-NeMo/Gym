@@ -16,6 +16,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import threading
 from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -33,6 +35,8 @@ from tavily.errors import BadRequestError
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
@@ -56,6 +60,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     debug: bool = False
     dump_session_id_to_metrics_on_exit: bool = False
+    # Terminal/disk mode: "none" = inline content (original behavior);
+    # "per_session" = search/browse write pages to a per-session disk workspace
+    # and a read-only bash_command tool is exposed for the model to grep/read them.
+    workspace: str = "none"
+    workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
+    bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
+    bash_max_concurrency: int = 64
+    max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
 
 
 class TavilySearchRequest(BaseModel):
@@ -122,6 +134,15 @@ class BrowseRequest(BaseModel):
 
 
 class BrowseResponse(BaseModel):
+    results_string: str
+
+
+class BashCommandRequest(BaseModel):
+    keystrokes: Optional[str] = None
+    duration: float = 10.0
+
+
+class BashCommandResponse(BaseModel):
     results_string: str
 
 
@@ -235,6 +256,225 @@ class TavilySearchAIOHTTPClient(BaseModel):
         )
 
 
+# ---------------------------------------------------------------------------
+# Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
+# read-only bash tool. Ported from the bc_frankie harness.
+# ---------------------------------------------------------------------------
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
+
+_BASH_HEAD_BYTES = 8192
+_BASH_TAIL_BYTES = 4096
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    s = (text or "").lower()
+    s = _SLUG_RE.sub("-", s).strip("-")
+    s = s[:max_len].rstrip("-")
+    return s or "untitled"
+
+
+def _slug_from_url(url: str) -> str:
+    m = _URL_RE.match(url or "")
+    if not m:
+        return _slugify(url)
+    host = (m.group(1) or "").replace("www.", "")
+    tail = (m.group(2) or "").rstrip("/").rsplit("/", 1)[-1]
+    return _slugify(f"{host} {tail}")
+
+
+def _bash_truncate(s: str) -> str:
+    if len(s) <= _BASH_HEAD_BYTES + _BASH_TAIL_BYTES + 64:
+        return s
+    omitted = len(s) - _BASH_HEAD_BYTES - _BASH_TAIL_BYTES
+    return (
+        f"{s[:_BASH_HEAD_BYTES]}\n"
+        f"[...truncated {omitted} bytes; head shown above, tail follows...]\n"
+        f"{s[-_BASH_TAIL_BYTES:]}"
+    )
+
+
+# --- bash_command guards (ported byte-for-byte from the bc_frankie_bash_tool
+# harness @ ee72d54: _bash_denylisted + _bash_allowlisted). Layered deny-first,
+# then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
+# _run_bash_readonly is the kernel backstop); these block destructive/network/
+# interpreter commands + command/process substitution + find -exec / sed -i. ---
+_BASH_DENY_COMMANDS = {
+    # destructive file ops / writes
+    "rm", "rmdir", "unlink", "shred", "srm", "wipe",
+    "mv", "cp", "dd", "truncate", "install", "ln", "tee",
+    "mkfs", "mke2fs", "mkswap", "fsck",
+    # permissions / metadata
+    "chmod", "chown", "chgrp", "chattr", "touch",
+    # privilege / escape / process / system control
+    "sudo", "su", "doas", "pkexec", "chroot", "unshare", "nsenter",
+    "mount", "umount", "kill", "pkill", "killall",
+    "reboot", "shutdown", "halt", "poweroff", "init",
+    "systemctl", "service", "crontab", "at", "batch",
+    # network / exfiltration
+    "curl", "wget", "nc", "ncat", "netcat", "telnet",
+    "ssh", "scp", "sftp", "rsync", "ftp", "tftp", "socat",
+    # interpreters / shells / arbitrary-code engines & wrappers
+    "bash", "sh", "zsh", "ksh", "dash", "csh", "tcsh", "fish",
+    "python", "python2", "python3", "perl", "ruby", "node", "nodejs",
+    "php", "lua", "rscript", "awk", "gawk", "mawk",
+    "eval", "exec", "command", "builtin", "source", "xargs",
+    "nohup", "setsid", "timeout", "nice", "watch", "stdbuf", "ionice",
+    # environment / secret disclosure
+    "env", "printenv", "export", "set", "declare", "typeset",
+}
+
+# Patterns blocked anywhere (evaluated on the quote-stripped command).
+_BASH_DENY_GLOBAL_PATTERNS = [
+    (r"`", "backtick command substitution"),
+    (r"\$\((?!\()", "$(...) command substitution"),
+    (r"[<>]\(", "process substitution"),
+    (r":\s*\(\s*\)\s*\{", "fork bomb"),
+    (r"(?:^|[;|&])\s*\.\s+\S", "sourcing a script with '.'"),
+]
+
+_FIND_WRITE_RE = re.compile(r"-(delete|exec|execdir|fprintf|fprint|fls|ok|okdir)\b")
+_SED_INPLACE_RE = re.compile(r"(?:^|\s)-i\b")
+
+
+def _bash_denylisted(keystrokes):
+    """Return a reason string if the command is denied, else None.
+
+    Pragmatic speed-bump only — NOT a security boundary. See _BASH_DENY_*.
+    """
+    s = keystrokes or ""
+    # Strip quoted strings so search terms (grep ">" / grep "rm") don't trip rules.
+    unq = re.sub(r"'[^']*'", " ", s)
+    unq = re.sub(r'"[^"]*"', " ", unq)
+
+    for pat, why in _BASH_DENY_GLOBAL_PATTERNS:
+        if re.search(pat, unq):
+            return why
+
+    # Output redirection to a real file (allow /dev/null and fd dups like 2>&1).
+    redir = re.sub(r"(?:\d*|&)>{1,2}\s*(?:/dev/null|&\s*\d+|&\s*-)", " ", unq)
+    if re.search(r">{1,2}", redir):
+        return "output redirection to a file (writes blocked)"
+
+    # Command-position check on each pipeline / list segment.
+    for seg in re.split(r"[;\n|&]+", unq):
+        words = seg.split()
+        idx = 0
+        while idx < len(words) and re.match(r"^[A-Za-z_]\w*=", words[idx]):
+            idx += 1  # skip leading VAR=val assignments
+        if idx >= len(words):
+            continue
+        prog = Path(words[idx].lstrip("\\")).name
+        if prog in _BASH_DENY_COMMANDS:
+            return f"command '{prog}' is blocked"
+        if prog == "find" and _FIND_WRITE_RE.search(seg):
+            return "find write/exec action (-delete/-exec/...) is blocked"
+        if prog == "sed" and _SED_INPLACE_RE.search(seg):
+            return "sed -i (in-place file edit) is blocked"
+    return None
+
+
+# Default-deny companion: a command passes only if EVERY command-position program
+# is in this read-only set. Closes the denylist's gap for unenumerated binaries.
+_BASH_ALLOW_COMMANDS = {
+    "grep", "cat", "head", "tail", "sed", "ls", "wc", "sort", "uniq", "cut",
+    "tr", "nl", "strings", "file", "find", "diff", "echo", "printf", "cd",
+}
+
+# Shell keywords permitted as structural glue (pipelines, for-loops, conditionals).
+_BASH_KEYWORD_SKIP = {"if", "elif", "then", "else", "while", "until", "do",
+                      "!", "time", "{", "(", "[["}
+_BASH_KEYWORD_STANDALONE = {"done", "fi", "esac", "}", ")"}
+_BASH_KEYWORD_HEADER = {"for", "case", "select", "function"}
+
+# fd-dups / &-redirections contain '&' which would otherwise phantom-split a segment.
+_BASH_FD_DUP_RE = re.compile(r"\d*[<>]&\s*[-\d]+")
+_BASH_AMP_REDIR_RE = re.compile(r"&>>?\s*\S+")
+
+
+def _bash_allowlisted(keystrokes):
+    """Return a reason string if any command-position program is NOT read-only,
+    else None. Default-deny companion to _bash_denylisted."""
+    s = keystrokes or ""
+    # Strip quoted strings so search terms (grep ">" / grep "rm") don't trip rules.
+    unq = re.sub(r"'[^']*'", " ", s)
+    unq = re.sub(r'"[^"]*"', " ", unq)
+    # Neutralize &-bearing redirections so they don't split segments.
+    unq = _BASH_FD_DUP_RE.sub(" ", unq)
+    unq = _BASH_AMP_REDIR_RE.sub(" ", unq)
+
+    for seg in re.split(r"[;\n|&]+", unq):
+        words = seg.split()
+        idx = 0
+        while idx < len(words):
+            w = words[idx]
+            if re.match(r"^[A-Za-z_]\w*=", w):
+                idx += 1  # leading VAR=val assignment
+            elif w in _BASH_KEYWORD_HEADER:
+                idx = len(words)  # loop/case header: no command to check
+            elif w in _BASH_KEYWORD_SKIP or w in _BASH_KEYWORD_STANDALONE:
+                idx += 1  # structural keyword; real command (if any) follows
+            else:
+                break
+        if idx >= len(words):
+            continue
+        prog = Path(words[idx].lstrip("\\")).name
+        if prog not in _BASH_ALLOW_COMMANDS:
+            return f"command '{prog}' not in read-only allow-list"
+    return None
+
+
+class _PageWriter:
+    """Per-session disk persistence for search/browse content.
+
+    Each retrieved page lands at workspace/pages/<idx>_<kind>_<slug>[_rN].txt
+    with a row appended to workspace/manifest.tsv. The workspace is wiped at
+    construction so each session starts from a clean slate.
+    """
+
+    MANIFEST_HEADER = "page_id\tkind\tsource\ttitle\tbytes\n"
+
+    def __init__(self, workspace_dir):
+        self.workspace = Path(workspace_dir)
+        if self.workspace.exists():
+            shutil.rmtree(self.workspace, ignore_errors=True)
+        self.pages_dir = self.workspace / "pages"
+        self.pages_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_path = self.workspace / "manifest.tsv"
+        self.manifest_path.write_text(self.MANIFEST_HEADER)
+        self._lock = threading.Lock()
+        self._counter = 0
+
+    def _next_idx(self) -> int:
+        with self._lock:
+            self._counter += 1
+            return self._counter
+
+    def _append_manifest(self, idx, kind, source, title, n_bytes) -> None:
+        src = (source or "").replace("\t", " ").replace("\n", " ")[:300]
+        ttl = (title or "").replace("\t", " ").replace("\n", " ")[:200]
+        line = f"{idx:04d}\t{kind}\t{src}\t{ttl}\t{n_bytes}\n"
+        with self._lock:
+            with self.manifest_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+
+    def write_search_result(self, query, result_idx, title, url, content) -> str:
+        idx = self._next_idx()
+        fname = f"{idx:04d}_search_{_slugify(query)}_r{result_idx}.txt"
+        body = f"[Query]: {query}\n[URL]: {url}\n[Title]: {title}\n\n{content}"
+        (self.pages_dir / fname).write_text(body, errors="replace")
+        self._append_manifest(idx, "search", query, title, len(content))
+        return f"pages/{fname}"
+
+    def write_browse_page(self, url, title, content) -> str:
+        idx = self._next_idx()
+        fname = f"{idx:04d}_browse_{_slug_from_url(url)}.txt"
+        body = f"[URL]: {url}\n[Title]: {title}\n\n{content}"
+        (self.pages_dir / fname).write_text(body, errors="replace")
+        self._append_manifest(idx, "browse", url, title, len(content))
+        return f"pages/{fname}"
+
+
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 5
@@ -242,6 +482,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
+    _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
+    _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
+    _workspace_root: Optional[str] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
     JUDGE_MAX_ATTEMPTS: int = 10
@@ -268,6 +511,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
         print(f"Excluded domains: {self._exclude_domains}")
+
+        # Terminal/disk mode setup
+        self._bash_semaphore = asyncio.Semaphore(self.config.bash_max_concurrency)
+        self._workspace_root = self.config.workspace_root or os.environ.get(
+            "BROWSECOMP_WS_ROOT", "/tmp/browsecomp_ws"
+        )
+        if self.config.workspace == "per_session":
+            Path(self._workspace_root).mkdir(parents=True, exist_ok=True)
+            print(f"Terminal mode ON; per-session workspaces under {self._workspace_root}")
+
         if self.config.debug:
             print("Debug mode enabled")
 
@@ -276,6 +529,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         app.post("/search")(self.search)
         app.post("/browse")(self.browse)
+        app.post("/bash_command")(self.bash_command)
 
         main_app_lifespan = app.router.lifespan_context
 
@@ -296,6 +550,85 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        if self.config.workspace == "per_session":
+            sid = request.session[SESSION_ID_KEY]
+            self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+        return BaseSeedSessionResponse()
+
+    def _get_page_writer(self, sid: str) -> Optional["_PageWriter"]:
+        if self.config.workspace != "per_session":
+            return None
+        pw = self._session_workspaces.get(sid)
+        if pw is None:  # lazily create if /seed_session was skipped
+            pw = _PageWriter(Path(self._workspace_root) / sid)
+            self._session_workspaces[sid] = pw
+        return pw
+
+    def _cleanup_workspace(self, sid: str) -> None:
+        pw = self._session_workspaces.pop(sid, None)
+        if pw is not None:
+            shutil.rmtree(pw.workspace, ignore_errors=True)
+
+    async def bash_command(self, request: Request, body: BashCommandRequest) -> BashCommandResponse:
+        sid = request.session[SESSION_ID_KEY]
+        page_writer = self._get_page_writer(sid)
+        if page_writer is None:
+            return BashCommandResponse(
+                results_string="[bash error: terminal workspace is not enabled for this server]"
+            )
+        duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
+        out = await self._run_bash_readonly(body.keystrokes or "", duration, str(page_writer.workspace))
+        return BashCommandResponse(results_string=out)
+
+    async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
+        # Layered guard (ported from bc_frankie @ ee72d54): deny-list first
+        # (specific reason), then default-deny read-only allow-list. Either one
+        # blocking returns [blocked: ...] and skips execution.
+        blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
+        if blocked is not None:
+            print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
+            return f"[blocked: {blocked}]\n[exit_code=-3]"
+        # Read-only enforcement backstop: `ulimit -f 0` sets RLIMIT_FSIZE=0 so the
+        # command cannot write/grow ANY file; reads + pipes still work. cwd is
+        # pinned to the session workspace; env is minimal (no inherited secrets).
+        wrapped = f"ulimit -c 0 2>/dev/null; ulimit -f 0 2>/dev/null; {keystrokes}"
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": cwd, "LC_ALL": "C.UTF-8"}
+        async with self._bash_semaphore:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    "-c",
+                    wrapped,
+                    cwd=cwd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+            except Exception as e:
+                return f"[bash error: {e}]\n[exit_code=-2]"
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=duration)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+                return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+
+        stdout = _bash_truncate(stdout_b.decode(errors="replace"))
+        stderr = _bash_truncate(stderr_b.decode(errors="replace"))
+        truncated = len(stdout_b) + len(stderr_b) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
+        parts = []
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append("--- stderr ---")
+            parts.append(stderr)
+        parts.append(f"[exit_code={proc.returncode}{' truncated' if truncated else ''}]")
+        return "\n".join(parts)
+
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
         self._num_requests += 1
@@ -305,6 +638,38 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if len(query) > 400:
             return "Query is too long"
 
+        client = self._select_tavily_client()
+        print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
+        call_start = time()
+        try:
+            results = await client.search(
+                query,
+                max_results=self.MAX_RESULTS,
+                exclude_domains=self._exclude_domains,
+                search_depth="advanced",
+                include_raw_content=True,
+            )
+        except BadRequestError as e:
+            print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        except Exception as e:
+            print(
+                f"[tavily_call function=search status=error duration_s={time() - call_start:.2f} query={query[:80]!r} error_type={type(e).__name__} error={str(e)[:200]}]",
+                flush=True,
+            )
+            raise
+
+        print(
+            f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
+            flush=True,
+        )
+        postprocessed_results = self._postprocess_search_results(query, results, max_length)
+        return postprocessed_results
+
+    async def _search_one_to_disk(self, query: str, page_writer: "_PageWriter", max_per_query: int) -> str:
+        """Terminal mode: run one search, write each result's raw content to disk, return
+        title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
+        (disk mode) formatting exactly."""
         client = self._select_tavily_client()
         try:
             results = await client.search(
@@ -318,11 +683,30 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
 
-        postprocessed_results = self._postprocess_search_results(query, results, max_length)
-        return postprocessed_results
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        for ri, result in enumerate(results.get("results", []), start=1):
+            title = result.get("title", "") or ""
+            url = result.get("url", "") or ""
+            snippet = (result.get("content") or "")[:500]
+            raw = result.get("raw_content") or result.get("content") or ""
+            if raw:
+                if len(raw) > self.config.max_page_bytes:
+                    raw = raw[: self.config.max_page_bytes]
+                saved = page_writer.write_search_result(query, ri, title, url, raw)
+                saved_line = f"[Saved to]: {saved} ({len(raw)} bytes)\n"
+            else:
+                saved_line = ""
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n{saved_line}"
+            if running_len + len(entry) > max_per_query:
+                break
+            blocks.append(entry)
+            running_len += len(entry)
+        return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        sid = request.session[SESSION_ID_KEY]
+        metrics = self._session_id_to_metrics[sid]
 
         if self.config.debug:
             print("\n\n body.queries: ", body.queries)
@@ -330,21 +714,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return TavilySearchResponse(results_string="Query is none or empty")
 
-        # set max length per query
+        page_writer = self._get_page_writer(sid)
         max_per_query_length = body.max_total_length // len(body.queries)
-
-        # search for queries
         start_time = time()
-        results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
+        if page_writer is not None:
+            # terminal mode: write each result to disk, return metadata + paths
+            results = await asyncio.gather(
+                *[self._search_one_to_disk(q, page_writer, max_per_query_length) for q in body.queries]
+            )
+        else:
+            # inline mode: return content directly
+            results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
             )
         )
 
-        # concat results
-        postprocessed_results = "\n\n".join(results)
-        return TavilySearchResponse(results_string=postprocessed_results)
+        return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
@@ -363,16 +750,25 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # search for urls
         async_tavily_client = self._select_tavily_client()
+        print(
+            f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
+            flush=True,
+        )
         start_time = time()
         try:
-            results = await async_tavily_client.extract(
-                urls=urls,
-                query=body.goal,  # optional hint to prioritize relevant content
-            )
+            # NOTE: do NOT pass query/goal — the harness extracts the full page content.
+            # Passing a query triggers relevance-focused extraction that returns far less
+            # (e.g. ~2k vs ~15k bytes for the same URL). `goal` stays a tool-schema field
+            # for the model to state intent, but is not sent to Tavily (matches the harness).
+            results = await async_tavily_client.extract(urls=urls)
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="success", start_time=start_time, end_time=time()
                 )
+            )
+            print(
+                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(urls)} n_results={len(results.get('results', []))}]",
+                flush=True,
             )
         except Exception as e:
             # return if failed to call api
@@ -389,7 +785,27 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
-        # concat results
+        page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
+        if page_writer is not None:
+            # terminal mode: write each page to disk, return metadata + preview.
+            # Mirrors the bc_frankie harness tavily_extract (disk mode) formatting exactly.
+            blocks = []
+            for result in result_list:
+                url = result.get("url", "") or ""
+                content = result.get("raw_content", "") or ""
+                if content:
+                    if len(content) > self.config.max_page_bytes:
+                        content = content[: self.config.max_page_bytes]
+                    saved = page_writer.write_browse_page(url, "", content)
+                    preview = content[:500].replace("\n", " ")
+                    blocks.append(
+                        f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n"
+                    )
+                else:
+                    blocks.append(f"[URL]: {url}\n[Empty content]\n")
+            return BrowseResponse(results_string="\n\n".join(blocks))
+
+        # inline mode: return content directly
         blocks = []
         for result in result_list:
             url = result.get("url", "")
@@ -417,13 +833,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
         if agent_num_tool_calls is None:
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
-        return TavilySearchVerifyResponse(
+        verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=agent_num_tool_calls,
             reset_count=getattr(body.response, "reset_count", 0) or 0,
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
+
+        # terminal mode: clean up this session's disk workspace
+        if self.config.workspace == "per_session":
+            self._cleanup_workspace(request.session[SESSION_ID_KEY])
+
+        return verify_response
 
     ###### UTILITY FUNCTIONS ######
 
@@ -479,10 +901,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_response = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
+            judge_call_start = time()
             try:
                 temp = 0.0 if attempt == 0 else min(0.3 + 0.1 * attempt, 1.0)
                 judge_create_params.temperature = temp
 
+                print(
+                    f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp={temp}]",
+                    flush=True,
+                )
                 http_response = await self.server_client.post(
                     server_name=self.config.judge_model_server.name,
                     url_path="/v1/responses",
@@ -493,6 +920,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
                 is_correct, extracted, parsed_ok = self._parse_judge(text)
                 if parsed_ok:
+                    print(
+                        f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
+                        flush=True,
+                    )
                     return JudgeEvaluation(
                         judge_response_create_params=judge_create_params,
                         reasoning=text,
@@ -500,10 +931,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         reward=1.0 if is_correct else 0.0,
                         judge_response=judge_response,
                     )
+                print(
+                    f"[judge_call attempt={attempt + 1} status=parse_error duration_s={time() - judge_call_start:.2f} raw_output={text[:200]!r}]",
+                    flush=True,
+                )
 
-            except Exception:
-                await sleep(min(2**attempt, 30))
+            except Exception as e:
+                sleep_s = min(2**attempt, 30)
+                print(
+                    f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error_type={type(e).__name__} error={str(e)[:200]} backoff_s={sleep_s}]",
+                    flush=True,
+                )
+                await sleep(sleep_s)
 
+        print(
+            f"[judge_exhausted max_attempts={self.JUDGE_MAX_ATTEMPTS} had_response={judge_response is not None}]",
+            flush=True,
+        )
         return JudgeEvaluation(
             judge_response_create_params=judge_create_params,
             reasoning="",
