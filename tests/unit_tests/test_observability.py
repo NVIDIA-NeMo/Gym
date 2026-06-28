@@ -511,6 +511,9 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
     # A Responses `output` list may contain non-dict junk; it must be skipped, not crash.
     resp = {"output": [None, "junk", {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]}
     assert _tool_calls_and_reasoning(resp) == ([{"call_id": "c", "name": "f", "arguments": {}}], None)
+    # Same guard on the Anthropic content blocks.
+    anth = {"content": [None, "junk", {"type": "tool_use", "id": "t", "name": "g", "input": {"b": 2}}]}
+    assert _tool_calls_and_reasoning(anth) == ([{"call_id": "t", "name": "g", "arguments": {"b": 2}}], None)
 
 
 def test_assemble_chat_wire_trajectory(tmp_path):
