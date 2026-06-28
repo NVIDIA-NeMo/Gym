@@ -58,6 +58,15 @@ QUERY_SUFFIX = (
     "Confidence: {your confidence score between 0% and 100% for your answer}"
 )
 
+WORKSPACE_SYSTEM_ADDENDUM = (
+    "\n\n## Tool output and the pages/ workspace\n"
+    "The `search` and `browse` tools save retrieved content to local files in "
+    "pages/ and return only metadata (title, URL, snippet, [Saved to] path) "
+    "in the tool response. Use the `bash_command` tool (with grep, head, sed, "
+    "etc.) to read or search those files. After a context reset, `ls pages/` "
+    "and `cat manifest.tsv` show everything you've already retrieved."
+)
+
 TOOLS = [
     {
         "type": "function",
@@ -66,7 +75,11 @@ TOOLS = [
             "Web Search API, works like Google Search. "
             "All queries will be searched in parallel. "
             "If you want to search with multiple keywords, "
-            "put them in a single query."
+            "put them in a single query. "
+            "Each result's full raw content is saved to "
+            "pages/<idx>_search_<slug>_rN.txt under the current workspace; "
+            "the tool response returns the per-result title, URL, snippet, "
+            "and [Saved to] path. Use bash_command to read the saved files."
         ),
         "parameters": {
             "type": "object",
@@ -85,9 +98,13 @@ TOOLS = [
         "type": "function",
         "name": "browse",
         "description": (
-            "Visit specific webpage(s) and return their full text content. "
-            "Use this to read the complete content of web pages found "
-            "during search."
+            "Visit specific webpage(s) and save their full text content "
+            "to local files. Use this to fetch the complete content of "
+            "web pages found during search. Each page is written to "
+            "pages/<idx>_browse_<slug>.txt under the current workspace; "
+            "the tool response returns the per-URL title, [Saved to] "
+            "path, byte count, and a short preview. Use bash_command "
+            "to read the full content."
         ),
         "parameters": {
             "type": "object",
@@ -103,6 +120,48 @@ TOOLS = [
                 },
             },
             "required": ["urls"],
+        },
+        "strict": False,
+    },
+    {
+        "type": "function",
+        "name": "bash_command",
+        "description": (
+            "Run a shell command in the current sample's workspace and "
+            "return stdout/stderr (truncated to ~12 KB head+tail).\n\n"
+            "cwd layout (pinned per sample; do not navigate outside):\n"
+            "  pages/<idx:04d>_<kind>_<slug>[_rN].txt    one file per search result or browsed page\n"
+            "  manifest.tsv                              page_id<TAB>kind<TAB>source<TAB>title<TAB>bytes\n\n"
+            "Useful recipes:\n"
+            "  ls pages/ | wc -l                              # how many pages saved so far\n"
+            "  ls pages/ | head                                # glance at filenames (slugged from query/URL)\n"
+            "  grep -l \"<phrase>\" pages/*.txt | head           # which files mention X\n"
+            "  grep -m 5 -B 2 -A 4 \"<phrase>\" pages/0042_*     # context around hits in one file\n"
+            "  head -c 2000 pages/0042_*                       # peek at start of a file\n"
+            "  sed -n '100,200p' pages/0042_*                  # specific line range\n"
+            "  cut -f3 manifest.tsv | sort -u                  # all queries / URLs you've tried\n\n"
+            "Each call is one-shot (cwd resets between calls). Chain with "
+            "`;` or `&&` inside one keystrokes string.\n\n"
+            "Read-only allow-list: only inspection commands are permitted "
+            "(ls cat grep head tail sed cut sort uniq wc tr nl strings file find "
+            "diff echo printf cd), composed with pipes / for-loops / conditionals. "
+            "Anything else — destructive, network, interpreter, install, or "
+            "redirection-to-file (rm, mv, curl, python, pip, `>`, …) — is blocked "
+            "and returns `[blocked: …]`."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keystrokes": {
+                    "type": "string",
+                    "description": "Shell command to run.",
+                },
+                "duration": {
+                    "type": "number",
+                    "description": "Max seconds to wait (1-60, default 10).",
+                },
+            },
+            "required": ["keystrokes", "duration"],
         },
         "strict": False,
     },
@@ -132,7 +191,7 @@ def map_browsecomp_sample_to_rl_sample(row: dict) -> dict:
     answer = decrypt(row["answer"], row["canary"])
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    base_system = SYSTEM_PROMPT.format(date=date_str)
+    base_system = SYSTEM_PROMPT.format(date=date_str) + WORKSPACE_SYSTEM_ADDENDUM
     messages = [
         {"role": "system", "content": base_system},
         {"role": "user", "content": problem + QUERY_SUFFIX},

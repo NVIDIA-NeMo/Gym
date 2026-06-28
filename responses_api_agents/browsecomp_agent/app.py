@@ -61,6 +61,10 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     nudge_steps: bool = True
     max_context_tokens: int = 196608
     context_reset_pct: float = 0.3
+    # Absolute token threshold for context reset. When > 0 it OVERRIDES
+    # max_context_tokens * context_reset_pct. 50000 = the token-based reset
+    # standard (matches the bc_frankie_bash_tool baselines).
+    context_reset_tokens: int = 0
     context_reset_keep_rounds: int = 3
     max_run_retries: int = 1
     # Cap on the number of context resets per trajectory (None = unlimited).
@@ -107,6 +111,17 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
         return app
 
+    @staticmethod
+    def _reset_threshold(config: "BrowsecompAgentConfig") -> int:
+        """Token count past which the context is reset. Absolute
+        context_reset_tokens (50k standard) takes precedence; otherwise fall back
+        to max_context_tokens * context_reset_pct. 0 disables reset."""
+        if config.context_reset_tokens:
+            return int(config.context_reset_tokens)
+        if config.max_context_tokens and config.context_reset_pct:
+            return int(config.max_context_tokens * config.context_reset_pct)
+        return 0
+
     async def responses(
         self,
         request: Request,
@@ -126,9 +141,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
-        reset_threshold = 0
-        if self.config.max_context_tokens and self.config.context_reset_pct:
-            reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
+        reset_threshold = self._reset_threshold(self.config)
 
         # --- snapshot keys + per-trajectory counters (ported from gym-gitlab fe9845ee) ---
         task_index, attempt = None, None
