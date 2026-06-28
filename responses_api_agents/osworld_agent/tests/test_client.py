@@ -162,7 +162,7 @@ def test_prompt_agent_template_escape_preserves_json_and_password_placeholder() 
     escaped = osworld_client._escape_prompt_agent_format_template(template)
 
     assert (
-        escaped.format(CLIENT_PASSWORD="pw")
+        escaped.format(CLIENT_PASSWORD="pw")  # pragma: allowlist secret
         == """Password: pw
 {
     "action_type": "click",
@@ -364,7 +364,7 @@ def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_
         agent_class_path="fake.FakePointerAgent",
         agent_kwargs={"provider_name": "anthropic"},
         policy_base_url="https://inference-api.nvidia.com",
-        policy_api_key="test-key",
+        policy_api_key="test-key",  # pragma: allowlist secret
         policy_model_name="azure/anthropic/claude-opus-4-7",
         sleep_after_execution=0,
         task_timeout=10,
@@ -409,7 +409,10 @@ def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missin
     assert result.finished is True
     assert osworld_client.os.environ["ANTHROPIC_API_KEY"] == "test-key"
     assert osworld_client.os.environ["ANTHROPIC_BASE_URL"] == "https://inference-api.nvidia.com"
-    assert osworld_client.os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"
+    assert (
+        osworld_client.os.environ["PARALLEL_API_KEY"]
+        == "__nemo_gym_parallel_tools_disabled__"  # pragma: allowlist secret
+    )
     pointer = FakePointerAgent.instances[0]
     assert pointer.kwargs["provider_name"] == "anthropic"
     assert "disable_parallel_tools" not in pointer.kwargs
@@ -453,7 +456,7 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
 
     assert osworld_client._pointer_anthropic_client_options(
         "https://inference-api.nvidia.com/",
-        api_key="client-key",
+        api_key="client-key",  # pragma: allowlist secret
     ) == {
         "api_key": "client-key",
         "base_url": "https://inference-api.nvidia.com",
@@ -461,7 +464,10 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
         "timeout": 45.5,
     }
 
-    assert osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["api_key"] == "env-key"
+    assert (
+        osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["api_key"]
+        == "env-key"  # pragma: allowlist secret
+    )
 
 
 def test_pointer_config_sync_uses_anthropic_provider_for_policy_endpoint(monkeypatch) -> None:

@@ -236,7 +236,7 @@ def _configure_pointer_runtime(
         os.environ["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
     if disable_parallel_tools and not os.environ.get("PARALLEL_API_KEY"):
-        os.environ["PARALLEL_API_KEY"] = "__nemo_gym_parallel_tools_disabled__"
+        os.environ["PARALLEL_API_KEY"] = "__nemo_gym_parallel_tools_disabled__"  # pragma: allowlist secret
         LOG.warning(
             "PARALLEL_API_KEY is not set; disabling PointerAgent optional "
             "web_search/web_fetch tools. Provide PARALLEL_API_KEY if those "
