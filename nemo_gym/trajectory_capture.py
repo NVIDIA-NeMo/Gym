@@ -356,6 +356,8 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
             if not message:
                 continue
             for tc in message.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
                 fn = tc.get("function") or {}
                 tool_calls.append(
                     {"call_id": tc.get("id"), "name": fn.get("name"), "arguments": _as_arguments(fn.get("arguments"))}
@@ -370,6 +372,8 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
     content = response.get("content")
     if isinstance(content, list):  # Anthropic Messages
         for block in content:
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "tool_use":
                 tool_calls.append(
                     {"call_id": block.get("id"), "name": block.get("name"), "arguments": block.get("input") or {}}
