@@ -13,7 +13,7 @@ It is a model-server middleware (no standalone proxy) and is harness-agnostic: i
 | Term | Meaning |
 |------|---------|
 | **Trial** | A single attempt at completing a task. |
-| **Turn** | One round-trip interaction boundary between the agent and the external world within a trial. |
+| **Turn** | One boundary where the agent hands control back to its caller (e.g. after a tool result is consumed) within a trial. `turn_index` is currently reserved — see below. |
 | **Step** | One micro-cycle inside the agent's loop (model generates → tool runs → observation). Capture records the **model-call portion** of each step. |
 | **Trajectory** | The ordered sequence of step records produced during a trial. |
 
@@ -43,19 +43,19 @@ One record per model call, typed as `StepRecord` (Pydantic; JSONSchema via `Step
 
 | Field | Description |
 |-------|-------------|
-| `trial_index`, `turn_index`, `step_index` | Position of the call. `step_index` is server-derived; `trial_index` / `turn_index` come from request headers (see [Correlation](#correlating-calls-to-a-rollout)). |
+| `trial_index`, `turn_index`, `step_index` | Position of the call. `step_index` is server-derived and authoritative. `trial_index` / `turn_index` are read from optional request headers and are `None` unless a Gym-orchestrated caller sets them (today's path leaves them `None`); `num_turns` then reports `None` rather than guessing from the step count. |
 | `tokens_in`, `tokens_out`, `tokens_reasoning`, `tokens_total` | Token accounting, aggregable to per-turn and per-trial totals. |
 | `request`, `response` | The full model-call request and response payloads. |
 | `tool_calls` | Structured tool calls (`name`, `arguments`, `call_id`). |
 | `reasoning_content` | Reasoning text as a structured field, not flattened into the response. |
 | `cache_hit`, `cached_tokens` | Prompt-cache hit/miss and cached-token count. |
-| `latency_total_ms` | Wall-clock latency of the model call. |
+| `latency_total_ms`, `latency_ttft_ms` | Wall-clock latency of the model call; `latency_ttft_ms` is the time to the first streamed byte (set for streamed calls). |
 | `error_category`, `status_code` | Normalized failure classification for non-2xx or raised calls. |
 | `model_server`, `dialect` | Which server produced the call, and which API shape (`responses` / `chat` / `messages`). |
 
 ### Streaming responses
 
-The middleware is pure-ASGI: it forwards response chunks downstream unchanged, so it composes with streaming (SSE) responses — for example the Claude Code CLI's `stream: true` `/v1/messages` calls pass through unaltered. Streamed bodies are **not** buffered, so for a streamed call `response` (and the response-derived `tokens_*` / `tool_calls`) is `null`, while `request`, correlation, `latency_total_ms`, and `status_code` are still recorded. Non-streamed calls capture the full response as usual.
+The middleware is pure-ASGI: it forwards response chunks downstream unchanged, so it composes with streaming (SSE) responses — for example the Claude Code CLI's `stream: true` `/v1/messages` calls pass through unaltered. The streamed events are also reassembled into the final response object (off the hot path), so `response`, `tokens_*`, `tool_calls`, and `reasoning_content` are captured for streamed calls just like non-streamed ones, and `latency_ttft_ms` records the time to first byte. Reassembly is best-effort and per dialect (Anthropic Messages, Chat Completions, Responses): if a stream cannot be parsed, `response` is `null` but `request`, correlation, `latency_total_ms`, and `status_code` are still recorded.
 
 ## Correlating calls to a rollout
 

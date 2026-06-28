@@ -333,6 +333,8 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
     output = response.get("output")
     if output is not None:  # Responses
         for item in output:
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == "function_call":
                 tool_calls.append(
                     {
@@ -359,8 +361,11 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
                 tool_calls.append(
                     {"call_id": tc.get("id"), "name": fn.get("name"), "arguments": _as_arguments(fn.get("arguments"))}
                 )
-            if message.get("reasoning_content"):
-                reasoning.append(message["reasoning_content"])
+            # vLLM and newer OpenAI-compatible servers emit `reasoning`; `reasoning_content` is the
+            # older field. Accept either (reasoning_content wins when both are present).
+            reasoning_text = message.get("reasoning_content") or message.get("reasoning")
+            if reasoning_text:
+                reasoning.append(reasoning_text)
         return tool_calls, ("\n".join(reasoning) or None)
 
     content = response.get("content")
@@ -444,6 +449,7 @@ def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Opti
         error_category=exchange.get("error_category"),
         retry_count=exchange.get("retry_count"),
         latency_total_ms=exchange.get("latency_ms"),
+        latency_ttft_ms=exchange.get("latency_ttft_ms"),
         **tokens,
     )
 
@@ -463,6 +469,9 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
         values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
         return sum(values) if values else None
 
+    # num_turns counts distinct turn boundaries; None (not num_steps) when no caller set turn_index,
+    # since a turn (control returned to the caller) is not the same as a model step. num_steps stays
+    # authoritative. Populating turn_index is gated on the orchestrator/tree-capture decision (#1483).
     turns = {s.turn_index for s in steps if s.turn_index is not None}
     return {
         "tokens_in": _sum("tokens_in"),
@@ -470,7 +479,7 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
         "tokens_reasoning": _sum("tokens_reasoning"),
         "tokens_total": _sum("tokens_total"),
         "latency_total_ms": _sum("latency_total_ms"),
-        "num_turns": len(turns) if turns else (len(steps) or None),
+        "num_turns": len(turns) if turns else None,
         "num_steps": len(steps),
     }
 
