@@ -8,8 +8,8 @@ Docker, QEMU, and model servers.
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List
 
@@ -161,12 +161,15 @@ def test_prompt_agent_template_escape_preserves_json_and_password_placeholder() 
 
     escaped = osworld_client._escape_prompt_agent_format_template(template)
 
-    assert escaped.format(CLIENT_PASSWORD="pw") == """Password: pw
+    assert (
+        escaped.format(CLIENT_PASSWORD="pw")
+        == """Password: pw
 {
     "action_type": "click",
     "x": 1
 }
 """
+    )
 
 
 def test_prompt_agent_computer_13_action_normalization() -> None:

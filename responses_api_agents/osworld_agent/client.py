@@ -294,9 +294,7 @@ def _patch_pointer_optional_parallel_tools(disable_parallel_tools: bool) -> None
         return schema.get("name", "") if isinstance(schema, dict) else ""
 
     if hasattr(gate_module, "GATE_TOOLS"):
-        gate_module.GATE_TOOLS[:] = [
-            tool for tool in gate_module.GATE_TOOLS if _tool_name(tool) not in disabled_names
-        ]
+        gate_module.GATE_TOOLS[:] = [tool for tool in gate_module.GATE_TOOLS if _tool_name(tool) not in disabled_names]
     if hasattr(planner_module, "PLANNER_TOOLS"):
         planner_module.PLANNER_TOOLS[:] = [
             tool for tool in planner_module.PLANNER_TOOLS if _tool_name(tool) not in disabled_names
@@ -325,8 +323,8 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
     if not base_url:
         return
     try:
-        from mm_agents.pointer import llm_context_manager as pointer_context_manager  # type: ignore
         from mm_agents.pointer import llm_client as pointer_llm_client  # type: ignore
+        from mm_agents.pointer import llm_context_manager as pointer_context_manager  # type: ignore
         from mm_agents.pointer import utils as pointer_utils  # type: ignore
     except Exception:  # noqa: BLE001 - pointer is an optional runtime dependency.
         return
@@ -387,13 +385,17 @@ def _record_video_for_task(task_config: Dict[str, Any]) -> bool:
         with open(task_ids_path, encoding="utf-8") as fh:
             selected_task_ids = {line.strip() for line in fh if line.strip() and not line.lstrip().startswith("#")}
     except OSError:
-        LOG.exception("Failed to read OSWORLD_RECORD_VIDEO_TASK_IDS_FILE=%s; recording disabled for this task", task_ids_path)
+        LOG.exception(
+            "Failed to read OSWORLD_RECORD_VIDEO_TASK_IDS_FILE=%s; recording disabled for this task", task_ids_path
+        )
         return False
 
     return task_id in selected_task_ids
 
 
-def _setup_pointer_task_logger(task_config: Dict[str, Any], task_results_dir: str) -> tuple[logging.Logger, logging.Handler]:
+def _setup_pointer_task_logger(
+    task_config: Dict[str, Any], task_results_dir: str
+) -> tuple[logging.Logger, logging.Handler]:
     os.makedirs(task_results_dir, exist_ok=True)
     logger_name = f"nemo_gym.osworld_agent.pointer.{_safe_task_id(task_config)}.{os.getpid()}"
     task_logger = logging.getLogger(logger_name)
