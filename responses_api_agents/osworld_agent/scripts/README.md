@@ -6,32 +6,13 @@ Host-prep helpers plus a native `PromptAgent` smoke runner.
 |---|---|---|
 | [`bringup_local_host.sh`](bringup_local_host.sh) | **Mode A** — `ng_run` and the docker VM host are the **same** machine | apt-installs docker / git / curl / unzip / ffmpeg / xvfb / tigervnc-viewer · enables the docker daemon · adds `$USER` to the `docker` group · installs `uv` · symlinks `uv` into `/usr/local/bin` (so `ng_run`'s non-interactive `bash -c "uv run …"` subshells can find it) · pre-flight verify (docker daemon up, `/dev/kvm` present, uv visible to `bash -c`) |
 | [`bringup_remote_host.sh`](bringup_remote_host.sh) | **Mode B** — controller runs locally, but the docker VM host is a **separate** machine reached via SSH | passwordless-SSH check · same apt installs over SSH · stages `Ubuntu.qcow2` via rsync · `docker pull happysixd/osworld-docker` on the remote · pre-flight verify (kvm + image + ports free on the remote) |
-| [`setup_colossus_runtime.sh`](setup_colossus_runtime.sh) | Colossus git checkout setup for Mode A | creates `~/osworld-run` runtime dirs · symlinks repo `env.yaml` and `docker_vm_data/Ubuntu.qcow2` to private assets · writes `.colossus-runtime.env` · verifies git / uv / docker / KVM / env / qcow2 without committing secrets or large files |
 | [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Quick functional smoke for OSWorld's native `mm_agents.agent.PromptAgent` path | starts `ng_run` with `osworld_agent_native_prompt_agent.yaml`, collects one rollout from `data/example.jsonl`, and prints a compact reward/step/error summary |
 | [`run_multienv_osworld_agent.sh`](run_multienv_osworld_agent.sh) | OSWorld-style multi-environment runner through Gym | starts `ng_run`, waits for the agent/model servers, then runs `ng_collect_rollouts` with `NUM_ENVS` mapped to `+num_samples_in_parallel`; optionally records per-task VM mp4s |
 
 The host-prep scripts stop short of cloning the repo, running `uv sync`, or
-prestaging `Ubuntu.qcow2`. For Colossus runs, clone this repo first, keep
-`env.yaml` under `~/osworld-run/private/`, keep `Ubuntu.qcow2` under
-`~/osworld-run/osworld-vm-data/`, then run `setup_colossus_runtime.sh` from the
-git checkout. The setup script runs `uv sync --extra dev` by default and adds
-the checkout's `.venv/bin` to `.colossus-runtime.env`, so the normal Gym CLI
-commands are available without wrapping them in `uv run`.
-
-## Colossus git-checkout flow
-
-```bash
-git clone -b feature/osworld2 git@github.com:JeffPengCoder/Gym.git \
-  ~/osworld-run/gym-osworld-git
-cd ~/osworld-run/gym-osworld-git
-
-# env.yaml is copied from desktop out-of-band and is not committed.
-# Ubuntu.qcow2 is also kept outside git.
-bash responses_api_agents/osworld_agent/scripts/setup_colossus_runtime.sh
-
-DRY_RUN=1 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
-bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
-```
+prestaging `Ubuntu.qcow2`. Keep private configuration and VM images outside
+Git, then expose them to the checkout through `env.yaml` and
+`docker_vm_data/Ubuntu.qcow2` before starting the Gym servers.
 
 ## Mode A flow (using `bringup_local_host.sh`)
 

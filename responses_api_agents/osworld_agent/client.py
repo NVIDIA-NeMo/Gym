@@ -225,8 +225,8 @@ def _configure_pointer_runtime(
 
     Pointer reads model names from environment variables when
     ``mm_agents.pointer.config`` is imported. Set them before loading the
-    agent so Colossus runs use the same API endpoint/model namespace as the
-    Gym policy config.
+    agent so proxied Gym deployments use the same API endpoint/model namespace
+    as the Gym policy config.
     """
 
     if api_key and use_policy_endpoint:
