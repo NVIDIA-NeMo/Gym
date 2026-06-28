@@ -3355,8 +3355,8 @@ class TestTokenIDInformation:
                     "message": {"role": "assistant", "content": "hi"},
                     "logprobs": {
                         "content": [
-                            {"token": "token_id:11", "logprob": -0.1},
-                            {"token": "token_id:12", "logprob": -0.2},
+                            {"token": "token_id:11", "logprob": -9.1},
+                            {"token": "token_id:12", "logprob": -9.2},
                         ]
                     },
                 }
@@ -3365,6 +3365,49 @@ class TestTokenIDInformation:
                 "engine_data": {
                     "prompt_token_ids": [1, 2, 3],
                     "completion_token_ids": [11, 12],
+                    "completion_logprobs": [-0.1, -0.2],
+                    "finished": True,
+                },
+            },
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("must not tokenize"))
+        model._clients = [mock_client]
+
+        response = await model.chat_completions(_make_chat_request(), body)
+
+        message = response.choices[0].message
+        assert message.prompt_token_ids == [1, 2, 3]
+        assert message.generation_token_ids == [11, 12]
+        assert message.generation_log_probs == [-0.1, -0.2]
+        mock_client.create_tokenize.assert_not_awaited()
+
+    async def test_native_engine_data_ignores_postprocessed_choice_logprobs(self) -> None:
+        model = _make_token_information_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+        chat_completion = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {"role": "assistant", "content": None},
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:12", "logprob": -9.2},
+                        ]
+                    },
+                }
+            ],
+            "nvext": {
+                "engine_data": {
+                    "prompt_token_ids": [1, 2, 3],
+                    "completion_token_ids": [11, 12],
+                    "completion_logprobs": [-0.1, -0.2],
                     "finished": True,
                 },
             },

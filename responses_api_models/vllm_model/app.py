@@ -155,11 +155,19 @@ class VLLMModel(SimpleResponsesAPIModel):
         except (KeyError, TypeError, ValueError) as e:
             raise ValueError("Every logprob entry must include numeric `logprob`.") from e
 
+    @staticmethod
+    def _coerce_float_list(value: Any, field_name: str) -> List[float]:
+        if not isinstance(value, list):
+            raise ValueError(f"Expected {field_name} to be a list.")
+        try:
+            return [float(logprob) for logprob in value]
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Expected {field_name} to contain only numeric logprobs.") from e
+
     def _attach_native_token_information(
         self,
         chat_completion_dict: Dict[str, Any],
         choice_dict: Dict[str, Any],
-        generation_log_probs: List[float],
     ) -> bool:
         response_nvext = chat_completion_dict.get("nvext")
         if not isinstance(response_nvext, dict):
@@ -175,6 +183,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         generation_token_ids = self._coerce_token_id_list(
             engine_data.get("completion_token_ids"),
             "nvext.engine_data.completion_token_ids",
+        )
+        generation_log_probs = self._coerce_float_list(
+            engine_data.get("completion_logprobs"),
+            "nvext.engine_data.completion_logprobs",
         )
         if len(generation_token_ids) != len(generation_log_probs):
             raise ValueError(
@@ -520,9 +532,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if "required_prefix_token_ids" not in body_dict:
             for message in reversed(body_dict.get("messages", [])):
                 if "prompt_token_ids" in message:
-                    body_dict["required_prefix_token_ids"] = (
-                        list(message["prompt_token_ids"])
-                        + list(message["generation_token_ids"])
+                    body_dict["required_prefix_token_ids"] = list(message["prompt_token_ids"]) + list(
+                        message["generation_token_ids"]
                     )
                     break
 
@@ -591,16 +602,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
-            log_probs = self._extract_logprob_content(choice_dict)
-            generation_log_probs = self._generation_log_probs_from_logprobs(log_probs)
-            message_dict = choice_dict["message"]
-
             has_native_tokens = self._attach_native_token_information(
                 chat_completion_dict,
                 choice_dict,
-                generation_log_probs,
             )
             if not has_native_tokens:
+                log_probs = self._extract_logprob_content(choice_dict)
+                generation_log_probs = self._generation_log_probs_from_logprobs(log_probs)
+                message_dict = choice_dict["message"]
                 generation_token_ids = self._generation_token_ids_from_logprobs(log_probs)
 
                 # The tokenize endpoint doesn't accept any sampling parameters.
