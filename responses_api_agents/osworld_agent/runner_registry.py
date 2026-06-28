@@ -15,7 +15,7 @@ from importlib import import_module
 from typing import Any, Dict, Literal, Optional
 
 
-RunnerKind = Literal["gym_policy", "prompt_agent", "pointer_agent"]
+RunnerKind = Literal["gym_policy", "prompt_agent", "pointer_agent", "m3_agent"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,7 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
+_M3_AGENT = "mm_agents.m3.M3Agent"
 
 
 RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
@@ -106,6 +107,17 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         action_space="pyautogui",
         observation_type="som",
         agent_class_path=_PROMPT_AGENT,
+    ),
+    # Official MiniMax M3 OSWorld scaffold. M3Agent owns its Anthropic
+    # Messages transport, prompt, history, relative-coordinate parser, and
+    # retry policy. Gym supplies the InferenceHub endpoint and wraps the
+    # resulting actions in the normal rollout/evaluation envelope.
+    "m3_agent": RunnerSpec(
+        name="m3_agent",
+        kind="m3_agent",
+        action_space="pyautogui",
+        observation_type="screenshot",
+        agent_class_path=_M3_AGENT,
     ),
     # OSWorld-Verified leaderboard's "Pointer Agent w/ Opus 4.7" path. This
     # keeps Pointer's own planner/executor/verifier loop intact and only wraps

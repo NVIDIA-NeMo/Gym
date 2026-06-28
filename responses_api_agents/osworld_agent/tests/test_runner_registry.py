@@ -51,6 +51,15 @@ def test_pointer_agent_runner_uses_upstream_pointer_agent() -> None:
     assert spec.agent_kwargs == {"provider_name": "anthropic"}
 
 
+def test_m3_agent_runner_uses_official_osworld_scaffold() -> None:
+    spec = resolve_runner_spec("m3_agent")
+
+    assert spec.kind == "m3_agent"
+    assert spec.agent_class_path == "mm_agents.m3.M3Agent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+
+
 @pytest.mark.parametrize(
     ("runner_name", "action_space", "observation_type"),
     [

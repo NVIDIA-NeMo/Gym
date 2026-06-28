@@ -197,6 +197,43 @@ def _patch_native_prompt_agent_templates(agent_cls: Any) -> None:
     setattr(module, "_NEMO_GYM_PROMPT_FORMAT_SAFE", True)
 
 
+def _patch_m3_native_tool_use(agent: Any) -> None:
+    """Translate InferenceHub tool blocks into M3Agent's text protocol.
+
+    Upstream M3Agent asks MiniMax for textual ``<tool_call>`` blocks and only
+    collects Anthropic ``text``/``thinking`` response blocks. InferenceHub may
+    instead return the same computer action as a native ``tool_use`` block.
+    Preserve the upstream prompt/parser and adapt only that transport shape.
+    """
+    original_call = getattr(agent, "_call_llm", None)
+    if not callable(original_call) or getattr(agent, "_NEMO_GYM_NATIVE_TOOL_USE_PATCHED", False):
+        return
+
+    def _call_llm(messages: List[Dict[str, Any]]):
+        response_text, raw_response = original_call(messages)
+        if "<tool_call>" in (response_text or ""):
+            return response_text, raw_response
+
+        wrapped_calls: List[str] = []
+        for block in getattr(raw_response, "content", []) or []:
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type != "tool_use":
+                continue
+            name = block.get("name") if isinstance(block, dict) else getattr(block, "name", None)
+            tool_input = block.get("input") if isinstance(block, dict) else getattr(block, "input", None)
+            if not name or not isinstance(tool_input, dict):
+                continue
+            tool_call = {"name": name, "arguments": tool_input}
+            wrapped_calls.append("<tool_call>\n" + json.dumps(tool_call, ensure_ascii=False) + "\n</tool_call>")
+
+        if wrapped_calls:
+            response_text = "\n".join(part for part in [response_text, *wrapped_calls] if part)
+        return response_text, raw_response
+
+    agent._call_llm = _call_llm
+    agent._NEMO_GYM_NATIVE_TOOL_USE_PATCHED = True
+
+
 def _inferencehub_anthropic_model(short_name: str) -> str:
     return short_name if short_name.startswith("azure/anthropic/") else f"azure/anthropic/{short_name}"
 
@@ -557,6 +594,40 @@ def run_osworld_task(
                 native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
                 native_agent.reset(LOG)
+        elif runner_spec.kind == "m3_agent":
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            m3_kwargs: Dict[str, Any] = {
+                "platform": "ubuntu",
+                "model": policy_model_name or "policy_model",
+                "max_tokens": policy_max_tokens,
+                "top_p": policy_top_p,
+                "temperature": policy_temperature,
+                "action_space": runner_spec.action_space,
+                "observation_type": runner_spec.observation_type,
+                "max_trajectory_length": max_trajectory_length,
+                "client_password": client_password,
+                "base_url": _normalize_anthropic_base_url(policy_base_url),
+                "api_key": policy_api_key,
+            }
+            m3_kwargs.update(runner_spec.agent_kwargs)
+            native_agent = agent_cls(**m3_kwargs)
+            _patch_m3_native_tool_use(native_agent)
+            try:
+                native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
+            except TypeError:
+                native_agent.reset(LOG)
+            if hasattr(native_agent, "set_api_log_dir"):
+                m3_results_base = os.environ.get(
+                    "OSWORLD_M3_RESULTS_DIR",
+                    os.path.join(cache_dir, "m3_runs"),
+                )
+                m3_task_dir = os.path.join(
+                    m3_results_base,
+                    f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{_safe_task_id(task_config)}",
+                )
+                native_agent.set_api_log_dir(os.path.join(m3_task_dir, "api_logs"))
         elif runner_spec.kind == "pointer_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")

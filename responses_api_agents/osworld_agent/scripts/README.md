@@ -8,6 +8,7 @@ Host-prep helpers plus a native `PromptAgent` smoke runner.
 | [`bringup_remote_host.sh`](bringup_remote_host.sh) | **Mode B** — controller runs locally, but the docker VM host is a **separate** machine reached via SSH | passwordless-SSH check · same apt installs over SSH · stages `Ubuntu.qcow2` via rsync · `docker pull happysixd/osworld-docker` on the remote · pre-flight verify (kvm + image + ports free on the remote) |
 | [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Quick functional smoke for OSWorld's native `mm_agents.agent.PromptAgent` path | starts `ng_run` with `osworld_agent_native_prompt_agent.yaml`, collects one rollout from `data/example.jsonl`, and prints a compact reward/step/error summary |
 | [`run_multienv_osworld_agent.sh`](run_multienv_osworld_agent.sh) | OSWorld-style multi-environment runner through Gym | starts `ng_run`, waits for the agent/model servers, then runs `ng_collect_rollouts` with `NUM_ENVS` mapped to `+num_samples_in_parallel`; optionally records per-task VM mp4s |
+| [`run_m3_multienv.sh`](run_m3_multienv.sh) | MiniMax M3 through the official OSWorld M3Agent | selects the M3 Gym runner, InferenceHub model id, and leaderboard-oriented M3 config before delegating to `run_multienv_osworld_agent.sh` |
 
 The host-prep scripts stop short of cloning the repo, running `uv sync`, or
 prestaging `Ubuntu.qcow2`. Keep private configuration and VM images outside

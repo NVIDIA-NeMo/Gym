@@ -545,6 +545,22 @@ also supports a lightweight a11y-only diagnostic mode via
 mode blanks the screenshot from the Gym-built prompt but does not use
 OSWorld's native `PromptAgent` prompt templates.
 
+### MiniMax M3 Agent
+
+Use `responses_api_agents/osworld_agent/configs/osworld_agent_m3.yaml` for
+OSWorld's official `mm_agents.m3.M3Agent` scaffold. It uses screenshot-only
+1920x1080 observations, relative `[0,1000]` coordinates, text
+`<tool_call>` actions, and Anthropic-compatible `/v1/messages` transport.
+M3Agent calls the configured `policy_base_url` directly and converts its
+structured computer actions to pyautogui inside the upstream OSWorld parser.
+
+Run a small smoke test with:
+
+```bash
+LIMIT=4 NUM_ENVS=1 \
+  bash responses_api_agents/osworld_agent/scripts/run_m3_multienv.sh
+```
+
 ### Pointer Agent
 
 Use `responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml`
