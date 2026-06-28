@@ -130,6 +130,14 @@ async def verify_task(
 
     spec = harness.build_spec(task)
     timeout = eval_timeout_s if eval_timeout_s is not None else float(task.metadata.get("eval_timeout_s", 1800))
+    # Give the in-sandbox eval command the same budget as the overall sequence. The flat harness runs
+    # the test command with task.metadata['tests_timeout']; if a caller passed an eval_timeout_s but no
+    # tests_timeout, propagate it so the configured budget reaches the command itself instead of
+    # falling back to the provider's exec default (apptainer 180s vs docker 3600s) -- otherwise a long
+    # suite is masked as a timeout on apptainer only, regardless of eval_timeout_s. The outer wait_for
+    # below stays the hard cap.
+    if "tests_timeout" not in task.metadata:
+        task = dataclasses.replace(task, metadata={**task.metadata, "tests_timeout": timeout})
     # Stamp a TTL so backends that honor it (opensandbox) self-expire an eval sandbox
     # orphaned by a hard crash. docker ignores ttl_s; its finally-teardown covers it.
     if spec.ttl_s is None:

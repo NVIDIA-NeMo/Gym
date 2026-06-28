@@ -51,7 +51,7 @@ class _FakeProvider:
 
     name = "fake-swe"
 
-    def __init__(self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, sink=None, **_):
+    def __init__(self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, sink=None, cmd_timeouts=None, **_):
         """Configure the scripted provider's responses.
 
         Args:
@@ -68,6 +68,7 @@ class _FakeProvider:
         self._apply_rc = apply_rc
         self._create_error = create_error
         self._sink = sink
+        self._cmd_timeouts = cmd_timeouts
 
     async def create(self, spec):
         if self._sink is not None:
@@ -77,6 +78,8 @@ class _FakeProvider:
         return SandboxHandle(sandbox_id="fake", provider_name=self.name, raw={"workdir": spec.workdir})
 
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if self._cmd_timeouts is not None:
+            self._cmd_timeouts.append((command, timeout_s))
         if "pytest" in command:
             return SandboxExecResult(stdout=self._test_output, stderr="", return_code=self._test_rc)
         if "git apply" in command:
@@ -253,6 +256,39 @@ def test_verify_task_resolved():
     assert report.resolved is True
     assert report.patch_applied is True
     assert reward_from_report(report) == 1.0
+
+
+def test_verify_task_injects_default_eval_command_timeout():
+    """The in-sandbox eval command must run with an explicit 1800s budget, not None.
+
+    None lets the command inherit the provider's exec default (apptainer 180s vs docker 3600s), so a
+    >180s suite is masked as a timeout on apptainer only. verify_task injects tests_timeout so the
+    budget is provider-independent.
+    """
+    calls: list = []
+    provider = {"fake-swe": {"test_output": _PASS_OUTPUT, "cmd_timeouts": calls}}
+    asyncio.run(verify_task(provider, _task()))
+    eval_timeouts = [t for c, t in calls if "pytest" in c]
+    assert eval_timeouts and eval_timeouts[0] == 1800
+
+
+def test_verify_task_propagates_eval_timeout_to_command():
+    """A caller's ``eval_timeout_s`` reaches the eval command itself (not just the outer guard)."""
+    calls: list = []
+    provider = {"fake-swe": {"test_output": _PASS_OUTPUT, "cmd_timeouts": calls}}
+    asyncio.run(verify_task(provider, _task(), eval_timeout_s=999))
+    eval_timeouts = [t for c, t in calls if "pytest" in c]
+    assert eval_timeouts and eval_timeouts[0] == 999
+
+
+def test_verify_task_explicit_tests_timeout_not_overridden():
+    """An explicit ``tests_timeout`` in task metadata is preserved (verify_task doesn't clobber it)."""
+    calls: list = []
+    provider = {"fake-swe": {"test_output": _PASS_OUTPUT, "cmd_timeouts": calls}}
+    task = _task(metadata={"tests_timeout": 600})
+    asyncio.run(verify_task(provider, task, eval_timeout_s=999))
+    eval_timeouts = [t for c, t in calls if "pytest" in c]
+    assert eval_timeouts and eval_timeouts[0] == 600
 
 
 def test_verify_task_unresolved():

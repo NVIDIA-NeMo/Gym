@@ -235,6 +235,10 @@ class NVInternalHarness(SweTaskHarness):
             f"bash /root/run_script.sh {shlex.quote(test_files)} > /root/stdout.log 2> /root/stderr.log || true",
             cwd=workdir,
             is_eval=True,
+            # Provider-independent eval budget (see flat_eval): without it the test run inherits the
+            # provider exec default (apptainer 180s vs docker 3600s), masking long suites as timeouts
+            # on apptainer only. verify_task propagates the caller's eval_timeout_s into tests_timeout.
+            timeout_s=task.metadata.get("tests_timeout", 1800),
         )
         if run.get("error_type") in {"sandbox", "timeout"}:
             return EvalArtifacts(

@@ -203,7 +203,15 @@ class SweBenchExtHarness(SweTaskHarness):
         base_command = task.test_command
         test_cmd = get_test_command_with_output(base_command, framework)
         result_file = (get_framework_config(framework, base_command) or {}).get("result_file")
-        result = await env.execute(self._wrap_eval_command(test_cmd, result_file), cwd=workdir, is_eval=True)
+        result = await env.execute(
+            self._wrap_eval_command(test_cmd, result_file),
+            cwd=workdir,
+            is_eval=True,
+            # Provider-independent eval budget (see flat_eval): without it the command inherits the
+            # provider exec default (apptainer 180s vs docker 3600s), masking long suites as timeouts
+            # on apptainer only. verify_task propagates the caller's eval_timeout_s into tests_timeout.
+            timeout_s=task.metadata.get("tests_timeout", 1800),
+        )
         return EvalArtifacts(
             test_output=result["output"],
             return_code=result["returncode"],
