@@ -80,83 +80,6 @@ def _headers_content_type(headers: list) -> bytes:
 _ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
 
 
-# --- Compact per-call telemetry (utility; the canonical record is the full exchange) ---
-def _usage(usage: Any) -> Optional[dict[str, Any]]:
-    """Normalize token usage across Responses, Chat Completions, and Anthropic Messages."""
-    if not usage:
-        return None
-    tokens_in = usage.get("input_tokens")
-    if tokens_in is None:
-        tokens_in = usage.get("prompt_tokens")
-    tokens_out = usage.get("output_tokens")
-    if tokens_out is None:
-        tokens_out = usage.get("completion_tokens")
-    tokens_total = usage.get("total_tokens")
-    if tokens_total is None and tokens_in is not None and tokens_out is not None:
-        tokens_total = tokens_in + tokens_out
-    details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
-    return {
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "tokens_total": tokens_total,
-        "tokens_reasoning": details.get("reasoning_tokens"),
-    }
-
-
-def summarize_response(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compact CLU telemetry for a response payload (token stats + tool/message/reasoning signals).
-
-    Handles all three response shapes: Responses (``output``), Chat Completions
-    (``choices``), and Anthropic Messages (``content``).
-    """
-    summary: dict[str, Any] = {
-        "model": payload.get("model"),
-        "usage": _usage(payload.get("usage")),
-        "num_tool_calls": 0,
-        "tool_names": [],
-        "num_messages": 0,
-        "has_reasoning": False,
-    }
-
-    output = payload.get("output")
-    if output is not None:  # Responses
-        tool_calls = [item for item in output if item.get("type") == "function_call"]
-        summary.update(
-            num_tool_calls=len(tool_calls),
-            tool_names=[call.get("name") for call in tool_calls],
-            num_messages=sum(item.get("type") == "message" for item in output),
-            has_reasoning=any(item.get("type") == "reasoning" for item in output),
-        )
-        return summary
-
-    choices = payload.get("choices")
-    if choices is not None:  # Chat Completions
-        messages = [c.get("message") for c in choices if isinstance(c, dict) and c.get("message")]
-        tool_calls = [tc for message in messages for tc in (message.get("tool_calls") or [])]
-        summary.update(
-            num_tool_calls=len(tool_calls),
-            tool_names=[(tc.get("function") or {}).get("name") for tc in tool_calls],
-            num_messages=len(messages),
-            has_reasoning=any(message.get("reasoning_content") for message in messages),
-        )
-        return summary
-
-    content = payload.get("content")
-    if isinstance(content, list):  # Anthropic Messages
-        tool_calls = [block for block in content if block.get("type") == "tool_use"]
-        text_blocks = [block for block in content if block.get("type") == "text"]
-        thinking = [block for block in content if block.get("type") in ("thinking", "redacted_thinking")]
-        summary.update(
-            num_tool_calls=len(tool_calls),
-            tool_names=[block.get("name") for block in tool_calls],
-            num_messages=1 if text_blocks else 0,
-            has_reasoning=bool(thinking),
-        )
-        return summary
-
-    return summary
-
-
 # --- Full per-rollout exchange capture (the canonical trajectory source) ---
 def _default_capture_dir(server_name: str) -> str:
     env_dir = os.environ.get("NEMO_GYM_TRAJECTORY_DIR")
@@ -208,6 +131,157 @@ def _classify_exception(exc: BaseException) -> str:
     return "exception"
 
 
+# --- SSE reconstruction: rebuild a final response object from a streamed body ---
+def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
+    """Parse an SSE byte stream into its JSON ``data:`` payloads (best-effort; non-JSON skipped)."""
+    events: list[dict[str, Any]] = []
+    for block in raw.decode("utf-8", errors="replace").split("\n\n"):
+        data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
+        if not data_lines:
+            continue
+        payload = "\n".join(data_lines)
+        if payload == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return events
+
+
+def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Rebuild a complete Anthropic Messages response from its streamed events (usage folds the
+    message_start input + message_delta output; tool input_json is concatenated then parsed)."""
+    message: Optional[dict[str, Any]] = None
+    blocks: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
+    tool_json: dict[int, str] = {}
+    for event in events:
+        etype = event.get("type")
+        if etype == "message_start":
+            msg = event.get("message") or {}
+            message = {k: msg.get(k) for k in ("id", "type", "role", "model", "stop_reason") if msg.get(k) is not None}
+            usage.update(msg.get("usage") or {})
+        elif etype == "content_block_start":
+            blocks[event.get("index", len(blocks))] = dict(event.get("content_block") or {})
+        elif etype == "content_block_delta":
+            idx = event.get("index", 0)
+            block = blocks.setdefault(idx, {})
+            delta = event.get("delta") or {}
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                block["type"] = block.get("type") or "text"
+                block["text"] = (block.get("text") or "") + (delta.get("text") or "")
+            elif dtype == "thinking_delta":
+                block["type"] = block.get("type") or "thinking"
+                block["thinking"] = (block.get("thinking") or "") + (delta.get("thinking") or "")
+            elif dtype == "input_json_delta":
+                tool_json[idx] = tool_json.get(idx, "") + (delta.get("partial_json") or "")
+        elif etype == "message_delta":
+            usage.update(event.get("usage") or {})
+            stop = (event.get("delta") or {}).get("stop_reason")
+            if message is not None and stop:
+                message["stop_reason"] = stop
+    if message is None and not blocks:
+        return None
+    content = []
+    for idx in sorted(blocks):
+        block = blocks[idx]
+        if block.get("type") == "tool_use" and idx in tool_json and not block.get("input"):
+            try:
+                block["input"] = json.loads(tool_json[idx]) if tool_json[idx] else {}
+            except Exception:
+                block["input"] = {"_raw": tool_json[idx]}
+        content.append(block)
+    result: dict[str, Any] = {**(message or {}), "type": "message", "content": content}
+    if usage:
+        result["usage"] = usage
+    return result
+
+
+def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Rebuild a Chat Completions response from streamed chunks (concatenates delta content,
+    reasoning, and per-index tool-call arguments; usage from the final chunk if present)."""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    usage: Optional[dict[str, Any]] = None
+    model: Optional[str] = None
+    role = "assistant"
+    finish_reason: Optional[str] = None
+    saw_choice = False
+    for chunk in events:
+        model = chunk.get("model") or model
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for choice in chunk.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            saw_choice = True
+            delta = choice.get("delta") or {}
+            role = delta.get("role") or role
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning:
+                reasoning_parts.append(reasoning)
+            for tc in delta.get("tool_calls") or []:
+                slot = tool_calls.setdefault(
+                    tc.get("index", 0), {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+    if not saw_choice:
+        return None
+    message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    result: dict[str, Any] = {
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    }
+    if usage:
+        result["usage"] = usage
+    return result
+
+
+def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Rebuild a Responses API response: the terminal envelope carries the full response object."""
+    for event in reversed(events):
+        if event.get("type") in ("response.completed", "response.incomplete", "response.failed") and isinstance(
+            event.get("response"), dict
+        ):
+            return event["response"]
+    for event in reversed(events):
+        if isinstance(event.get("response"), dict):
+            return event["response"]
+    return None
+
+
+def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[str, Any]]:
+    """Best-effort: reassemble a final response object from a streamed (SSE) body, by dialect."""
+    events = _parse_sse_events(raw)
+    if not events:
+        return None
+    if dialect == "messages":
+        return _reconstruct_anthropic_sse(events)
+    if dialect == "responses":
+        return _reconstruct_responses_sse(events)
+    return _reconstruct_chat_sse(events)
+
+
 def _record(
     store: CaptureStore,
     scope: dict[str, Any],
@@ -220,6 +294,7 @@ def _record(
     status_code: Optional[int],
     error_category: Optional[str],
     latency_ms: float,
+    ttft_ms: Optional[float] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     try:
@@ -231,6 +306,7 @@ def _record(
                 "trial_index": _scope_header_int(scope, TRIAL_HEADER),
                 "turn_index": _scope_header_int(scope, TURN_HEADER),
                 "latency_ms": round(latency_ms, 2),
+                "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
                 "status_code": status_code,
                 "error_category": error_category,
                 "request": json.loads(request_bytes) if request_bytes else None,
@@ -289,7 +365,7 @@ class _CaptureMiddleware:
                 request_body.extend(message.get("body", b"") or b"")
             return message
 
-        state: dict[str, Any] = {"status": None, "streaming": False, "body": bytearray()}
+        state: dict[str, Any] = {"status": None, "streaming": False, "body": bytearray(), "ttft_ms": None}
         start = time.perf_counter()
 
         async def _send(message: dict[str, Any]) -> None:
@@ -298,8 +374,11 @@ class _CaptureMiddleware:
                 state["status"] = message.get("status")
                 content_type = _headers_content_type(message.get("headers") or [])
                 state["streaming"] = content_type.startswith(b"text/event-stream")
-            elif message_type == "http.response.body" and not state["streaming"]:
-                state["body"].extend(message.get("body", b"") or b"")
+            elif message_type == "http.response.body":
+                chunk = message.get("body", b"") or b""
+                if chunk and state["ttft_ms"] is None:
+                    state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
+                state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
             await send(message)  # forward unchanged -> streaming is preserved
 
         try:
@@ -318,16 +397,20 @@ class _CaptureMiddleware:
                 status_code=None,
                 error_category=_classify_exception(exc),
                 latency_ms=(time.perf_counter() - start) * 1000.0,
+                ttft_ms=state["ttft_ms"],
             )
             raise
 
         latency_ms = (time.perf_counter() - start) * 1000.0
         response_body = None
-        if not state["streaming"] and state["body"]:
-            try:
-                response_body = json.loads(bytes(state["body"]))
-            except Exception:
-                response_body = None
+        if state["body"]:
+            if state["streaming"]:
+                response_body = _reconstruct_streamed_response(bytes(state["body"]), dialect)
+            else:
+                try:
+                    response_body = json.loads(bytes(state["body"]))
+                except Exception:
+                    response_body = None
         status = state["status"]
         # Offload the blocking write+fsync so it never stalls the event loop.
         await asyncio.to_thread(
@@ -342,6 +425,7 @@ class _CaptureMiddleware:
             status_code=status,
             error_category=_classify_status(status) if status is not None else None,
             latency_ms=latency_ms,
+            ttft_ms=state["ttft_ms"],
         )
 
 
