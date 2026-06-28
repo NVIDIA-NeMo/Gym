@@ -455,6 +455,7 @@ class _FakeFlatProvider:
         self._error_type = error_type
         self._stream_empty = stream_empty
         self.commands: list[str] = []
+        self.exec_calls: list[tuple[str, object]] = []
         self.uploaded: dict[str, str] = {}
 
     async def create(self, spec):
@@ -462,6 +463,7 @@ class _FakeFlatProvider:
 
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.commands.append(command)
+        self.exec_calls.append((command, timeout_s))
         if command.startswith("cat "):
             return SandboxExecResult(stdout=self._log_text, stderr="", return_code=0)
         # The eval script run.
@@ -537,6 +539,32 @@ def test_swebench_flat_run_eval_resolved():
     assert artifacts.raw["flat"] is True
     assert report.resolved is True
     assert reward_from_report(report) == 1.0
+
+
+def _eval_run_timeout(provider):
+    """Return the timeout_s the eval-script command was executed with (the `bash <script>` call)."""
+    return next(t for c, t in provider.exec_calls if c.startswith("bash "))
+
+
+def test_flat_run_eval_defaults_tests_timeout_to_1800():
+    """The eval command must carry an explicit 1800s budget, NOT None.
+
+    None would fall back to each provider's exec default -- docker 3600s vs apptainer 180s -- so a
+    >180s suite (scikit-learn / sympy / under concurrency) is silently masked as a timeout on
+    apptainer but resolves on docker. A provider-independent default keeps grading consistent.
+    """
+    harness = SweBenchHarness("swe-bench")
+    task = _task(metadata={"eval_script": "echo running", "flat_eval": True})
+    _, _, provider = _drive_flat(harness, task, log_text=_fixture("resolved_success.log"))
+    assert _eval_run_timeout(provider) == 1800
+
+
+def test_flat_run_eval_respects_explicit_tests_timeout():
+    """An explicit ``tests_timeout`` in the task metadata overrides the default."""
+    harness = SweBenchHarness("swe-bench")
+    task = _task(metadata={"eval_script": "echo running", "flat_eval": True, "tests_timeout": 600})
+    _, _, provider = _drive_flat(harness, task, log_text=_fixture("resolved_success.log"))
+    assert _eval_run_timeout(provider) == 600
     # The eval script was uploaded into the sandbox.
     assert provider.uploaded.get(flat_eval.EVAL_SCRIPT_PATH, "").startswith("echo running")
 

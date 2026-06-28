@@ -196,7 +196,12 @@ async def flat_run_eval(env: "AsyncSweEnvironment", task: SweTask) -> EvalArtifa
         f"bash {EVAL_SCRIPT_PATH} 2>&1 | tee {EVAL_LOG_PATH}; exit ${{PIPESTATUS[0]}}",
         cwd=task.repo_workdir,
         is_eval=True,
-        timeout_s=task.metadata.get("tests_timeout"),
+        # Default to a provider-INDEPENDENT eval-command timeout (matches swe_rebench). Without a
+        # default this is None, so the eval inherits each provider's exec default -- docker 3600s vs
+        # apptainer 180s -- and a >180s test suite (e.g. scikit-learn, sympy, or any suite under
+        # concurrency) is silently masked as a timeout on apptainer but resolves on docker. Defaulting
+        # here makes the per-command budget the same on every backend.
+        timeout_s=task.metadata.get("tests_timeout", 1800),
     )
     log_text = result["output"]
     if not log_text.strip() and result.get("error_type") not in {"sandbox", "timeout"}:
