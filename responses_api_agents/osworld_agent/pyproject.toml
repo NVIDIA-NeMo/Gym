@@ -19,9 +19,9 @@ version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    # OSWorld with the remote_docker provider plus native PromptAgent support.
-    # Once the upstream PR lands, switch this source back to xlang-ai/OSWorld.
-    "osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@faa1046bc494d8c4c25cd2a2d18ac2873ffbf0a7",
+    # Official OSWorld through fe8c78e1, plus the remote_docker provider and
+    # packaging fixes required by Gym's distributed runtime.
+    "osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@4c155eb11fd2667cf9777c559a708ae1bf780f58",
     "docker==7.1.0",
     # Needed by OSWorld's mm_agents.pointer implementation.
     "anthropic",

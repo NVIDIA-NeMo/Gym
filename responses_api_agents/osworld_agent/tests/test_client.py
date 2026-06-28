@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -123,6 +123,29 @@ class FakePointerAgent:
         self.log_usage_calls += 1
 
 
+class FakeM3Agent:
+    instances: List["FakeM3Agent"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.reset_calls = []
+        self.api_log_dirs: List[str] = []
+        self.predict_calls = 0
+        FakeM3Agent.instances.append(self)
+
+    def reset(self, *_args: Any, **kwargs: Any) -> None:
+        self.reset_calls.append(kwargs)
+
+    def set_api_log_dir(self, path: str) -> None:
+        self.api_log_dirs.append(path)
+
+    def predict(self, instruction: str, obs: Dict[str, Any]):
+        self.predict_calls += 1
+        assert instruction == "Use official M3Agent."
+        assert obs["screenshot"] == b"not-black"
+        return "M3 response", ["DONE"]
+
+
 class FakePointerEnv(FakeEnv):
     def evaluate(self, eval_logger: Any) -> float:
         assert eval_logger is not None
@@ -134,6 +157,7 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakePromptAgent.call_llm_responses.clear()
     FakePromptAgent.next_actions = [{"action_type": "DONE"}]
     FakePointerAgent.instances.clear()
+    FakeM3Agent.instances.clear()
 
     def fake_load_attr(import_path: str):
         if import_path == "fake.FakeEnv":
@@ -144,6 +168,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
             return FakePromptAgent
         if import_path == "fake.FakePointerAgent":
             return FakePointerAgent
+        if import_path == "fake.FakeM3Agent":
+            return FakeM3Agent
         raise AssertionError(f"unexpected import path: {import_path}")
 
     monkeypatch.setattr(osworld_client, "load_attr", fake_load_attr)
@@ -188,6 +214,35 @@ def test_prompt_agent_computer_13_action_normalization() -> None:
     assert osworld_client._normalize_prompt_agent_computer_13_action(
         {"action_type": "TRIPLE_CLICK", "parameters": {"x": 1, "y": 2}}
     ) == {"action_type": "CLICK", "parameters": {"x": 1, "y": 2, "button": "left", "num_clicks": 3}}
+
+
+def test_m3_native_tool_use_is_translated_to_upstream_text_protocol() -> None:
+    raw_response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="thinking", thinking="Inspect the screenshot."),
+            SimpleNamespace(
+                type="tool_use",
+                name="computer",
+                input={"action": "left_click", "coordinate": [516, 71]},
+            ),
+            SimpleNamespace(type="text", text="Action: Click the address bar."),
+        ]
+    )
+
+    class Agent:
+        def _call_llm(self, _messages):
+            return "Action: Click the address bar.", raw_response
+
+    agent = Agent()
+    osworld_client._patch_m3_native_tool_use(agent)
+    osworld_client._patch_m3_native_tool_use(agent)
+
+    text, returned_response = agent._call_llm([])
+
+    assert returned_response is raw_response
+    assert text.count("<tool_call>") == 1
+    assert '"name": "computer"' in text
+    assert '"arguments": {"action": "left_click", "coordinate": [516, 71]}' in text
 
 
 def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> None:
@@ -383,6 +438,55 @@ def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_
     assert pointer.predict_calls == 1
     assert pointer.log_usage_calls == 1
     assert (Path(pointer.reset_calls[0]["task_results_dir"]) / "pointer.log").exists()
+
+
+def test_m3_agent_runner_uses_messages_endpoint_and_native_predict_loop(monkeypatch, tmp_path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_M3_RESULTS_DIR", str(tmp_path))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-m3", "instruction": "Use official M3Agent."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("m3_agent should not use model_fn")),
+        runner_name="m3_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeM3Agent",
+        policy_base_url="https://inference-api.nvidia.com/v1/messages",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="nvidia/minimaxai/minimax-m3",
+        policy_max_tokens=8192,
+        policy_temperature=0.6,
+        policy_top_p=None,
+        max_trajectory_length=10,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.finished is True
+    assert result.steps[0].model_text == "M3 response"
+    assert result.steps[0].actions == ["DONE"]
+    assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
+    assert FakeEnv.instances[0].actions == ["DONE"]
+
+    agent = FakeM3Agent.instances[0]
+    assert agent.kwargs == {
+        "platform": "ubuntu",
+        "model": "nvidia/minimaxai/minimax-m3",
+        "max_tokens": 8192,
+        "top_p": None,
+        "temperature": 0.6,
+        "action_space": "pyautogui",
+        "observation_type": "screenshot",
+        "max_trajectory_length": 10,
+        "client_password": "password",  # pragma: allowlist secret
+        "base_url": "https://inference-api.nvidia.com",
+        "api_key": "test-key",  # pragma: allowlist secret
+    }
+    assert agent.predict_calls == 1
+    assert len(agent.api_log_dirs) == 1
+    assert Path(agent.api_log_dirs[0]).name == "api_logs"
+    assert Path(agent.api_log_dirs[0]).parent.name.endswith("-task-m3")
+    assert Path(agent.api_log_dirs[0]).is_relative_to(tmp_path)
 
 
 def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missing(monkeypatch, tmp_path) -> None:
