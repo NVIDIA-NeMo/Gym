@@ -40,7 +40,7 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
         default=False,
         description=(
             "Capture per-rollout model-call trajectories (token stats, tool calls, "
-            "messages, reasoning). Opt-in; off by default (per the #1483 contract)."
+            "messages, reasoning). Opt-in; off by default."
         ),
     )
     trajectory_capture_dir: Optional[str] = Field(

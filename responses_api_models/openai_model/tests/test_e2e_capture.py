@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end #1483 contract check through a real Gym model server.
+"""End-to-end capture contract check through a real Gym model server.
 
 Drives the actual SimpleModelServer.setup_webserver() install path (only the upstream OpenAI
 client mocked), so the captured response is a real NeMoGymResponse that went through
