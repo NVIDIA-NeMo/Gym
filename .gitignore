@@ -143,7 +143,6 @@ celerybeat.pid
 
 # Environments
 .env
-.colossus-runtime.env
 .venv
 env.yaml
 env/
