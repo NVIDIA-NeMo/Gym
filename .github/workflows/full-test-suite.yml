@@ -52,7 +52,12 @@ jobs:
           curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh
           uv venv --python 3.12
           source .venv/bin/activate
-          uv sync --extra dev
+          # --extra sandbox installs tenacity/opensandbox so the opensandbox provider
+          # tests actually run. Without it they self-skip, leaving provider.py largely
+          # uncovered, which drops total coverage below fail_under (96%) and turns this
+          # post-merge suite red on main. The pre-merge unit-tests workflow already syncs
+          # this extra; this keeps the two flows in sync.
+          uv sync --extra dev --extra sandbox
 
       - name: Test
         run: |
