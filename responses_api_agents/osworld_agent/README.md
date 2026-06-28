@@ -553,6 +553,10 @@ OSWorld's official `mm_agents.m3.M3Agent` scaffold. It uses screenshot-only
 `<tool_call>` actions, and Anthropic-compatible `/v1/messages` transport.
 M3Agent calls the configured `policy_base_url` directly and converts its
 structured computer actions to pyautogui inside the upstream OSWorld parser.
+The M3 overlay uses the leaderboard-aligned 100-step limit, with an 8192-token
+response limit and 10-observation trajectory window. The M3 launch wrapper also
+passes `MAX_STEPS=100` explicitly so the shared 15-step default cannot take
+effect silently.
 
 Run a small smoke test with:
 

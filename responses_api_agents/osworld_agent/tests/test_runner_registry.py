@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from responses_api_agents.osworld_agent.runner_registry import (
     DEFAULT_RUNNER_NAME,
@@ -58,6 +61,23 @@ def test_m3_agent_runner_uses_official_osworld_scaffold() -> None:
     assert spec.agent_class_path == "mm_agents.m3.M3Agent"
     assert spec.action_space == "pyautogui"
     assert spec.observation_type == "screenshot"
+
+
+def test_m3_config_overrides_the_osworld_server_config() -> None:
+    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_m3.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    assert server_config == {
+        "runner_name": "m3_agent",
+        "max_steps": 100,
+        "max_trajectory_length": 10,
+        "max_tokens": 8192,
+        "temperature": 0.6,
+        "top_p": None,
+        "sleep_after_execution": 3.0,
+        "task_timeout": 7200,
+    }
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export RUNNER_NAME="${RUNNER_NAME:-m3_agent}"
 export POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-nvidia/minimaxai/minimax-m3}"
+export MAX_STEPS="${MAX_STEPS:-100}"
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
 export TEMPERATURE="${TEMPERATURE:-0.6}"
 export NUM_ENVS="${NUM_ENVS:-1}"
