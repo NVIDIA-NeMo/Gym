@@ -27,16 +27,24 @@ Everything is provider-neutral, running over the `nemo_gym.sandbox` providers
 A gold-patch census validates the grader end-to-end: feed each instance's ground-truth
 patch through the flat grader and it should resolve. On the **docker** provider
 (pull-on-demand images, host-side flat grading) the full 500-instance census resolves
-**486 / 500** (`patch_exists` 500/500, **0** infra errors), in line with the
-apptainer / `.sif` nested reference of **492 / 500** (whose 8 misses are documented
-upstream env-flaky gold-failures). An empty patch resolves **0 / 500**, as expected.
+**493 / 500** (`patch_exists` 500/500, **0** infra errors), matching the apptainer / `.sif`
+nested reference of **492 / 500** to within environment noise. An empty patch resolves
+**0 / 500**, as expected.
 
-The remaining ~14 docker misses are instance-specific — the documented astropy/django
-upstream flaky gold-failures, plus a few where a single required test does not run in the
-container — not a systematic grader defect. (An earlier census surfaced one that *was*
-systematic: swebench 4.1.0's sphinx/sklearn eval command runs pytest without `-rA`, hiding
-passing tests from the host-side parser; fixed by forcing `PYTEST_ADDOPTS=-rA` in the flat
-eval — see `harnesses/swebench.py::_flat_eval_script` — which recovered ~45 instances, 445→486.)
+The two are at parity (docker and apptainer both use the host-side flat grader — same parser,
+same result; the `.sif` figure is swebench's *nested* `run_evaluation`). Their misses are a small
+symmetric difference: 4 are shared genuine upstream env-flaky gold-failures (astropy-7606/8707/8872,
+django-10097); docker additionally resolves 4 that `.sif` misses (pylint-6528/7277, sphinx-8595/9711)
+and misses 3 that `.sif` resolves (sphinx-8120/8265/8269, instance-specific parser/eval quirks).
+
+Reaching parity required closing two flat↔nested **reconstruction** gaps the census surfaced
+(445 → 486 → 493):
+- **`PYTEST_ADDOPTS=-rA`** — swebench 4.1.0's eval command for some families (sphinx via tox,
+  several sklearn) runs pytest without `-rA`, so passing tests print only as dots and the host-side
+  parser (`parse_log_pytest_v2`) saw zero passes (445 → 486).
+- **drop `GIT_CONFIG_GLOBAL=/dev/null`** — older instance images' git can't parse `/dev/null`, so
+  the eval script's `git checkout` + test-patch `git apply` failed and required tests came back
+  "absent" (486 → 493). See `harnesses/swebench.py`.
 
 ### Reproduce
 
