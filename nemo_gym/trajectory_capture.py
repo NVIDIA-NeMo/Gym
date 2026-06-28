@@ -12,14 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Rollout-keyed capture store, eval trajectory assembly, and the #1483 StepRecord.
+"""Rollout-keyed capture store, eval trajectory assembly, and the StepRecord contract.
 
 - CaptureStore: append-only per-rollout JSONL of model exchanges (durable, fsynced).
 - assemble_trajectory / assemble_rollout: ordered NeMoGym output items for the eval view
-  (content, tool calls, tool outputs); token-ids / log-probs are intentionally not surfaced
-  (on-policy RL trajectory assembly is owned by the RL side and consumes this same capture).
+  (content, tool calls, tool outputs); token-ids / log-probs are not surfaced here.
 - StepRecord / build_step_record / assemble_step_records / aggregate_rollout_metrics: the
-  #1483 per-step stats contract and its per-rollout aggregates.
+  per-step stats contract and its per-rollout aggregates.
 """
 
 from __future__ import annotations
@@ -259,7 +258,7 @@ def assemble_rollout(store: CaptureStore, rollout_id: str) -> list[Any]:
     return assemble_trajectory(exchanges, wire=wire)
 
 
-# --- #1483 step contract: typed StepRecord + builders ---
+# --- Step contract: typed StepRecord + builders ---
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
 
@@ -383,7 +382,7 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
 
 
 class StepRecord(BaseModel):
-    """Per-step model-call record (#1483 contract); field names align with OpenAI shapes."""
+    """Per-step model-call record; field names align with OpenAI shapes."""
 
     run_id: Optional[str] = None
     # step_index is always server-derived and authoritative. trial_index is set from a run's rollout
@@ -460,7 +459,7 @@ def assemble_step_records(store: CaptureStore, rollout_id: str, run_id: Optional
 
 
 def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
-    """Per-rollout token / latency / turn totals from already-assembled StepRecords (#1483).
+    """Per-rollout token / latency / turn totals from already-assembled StepRecords.
 
     Pure (no IO) so callers that already hold the steps don't re-read the capture file.
     """
@@ -469,9 +468,8 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
         values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
         return sum(values) if values else None
 
-    # num_turns counts distinct turn boundaries; None (not num_steps) when no caller set turn_index,
-    # since a turn (control returned to the caller) is not the same as a model step. num_steps stays
-    # authoritative. Populating turn_index is gated on the orchestrator/tree-capture decision (#1483).
+    # num_turns is None (not num_steps) when no caller set turn_index: a turn (control returned to
+    # the caller) is not a model step, so num_steps stays the authoritative count.
     turns = {s.turn_index for s in steps if s.turn_index is not None}
     return {
         "tokens_in": _sum("tokens_in"),
@@ -485,5 +483,5 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
 
 
 def aggregate_rollout_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
-    """Per-rollout token / latency / turn totals, for the existing per-rollout record (#1483)."""
+    """Per-rollout token / latency / turn totals, for the existing per-rollout record."""
     return aggregate_step_records(assemble_step_records(store, rollout_id))

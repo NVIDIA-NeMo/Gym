@@ -152,8 +152,7 @@ def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
 
 
 def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a complete Anthropic Messages response from its streamed events (usage folds the
-    message_start input + message_delta output; tool input_json is concatenated then parsed)."""
+    """Rebuild a complete Anthropic Messages response from its streamed events."""
     message: Optional[dict[str, Any]] = None
     blocks: dict[int, dict[str, Any]] = {}
     usage: dict[str, Any] = {}
@@ -202,8 +201,7 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
 
 
 def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a Chat Completions response from streamed chunks (concatenates delta content,
-    reasoning, and per-index tool-call arguments; usage from the final chunk if present)."""
+    """Rebuild a Chat Completions response from streamed chunks."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}

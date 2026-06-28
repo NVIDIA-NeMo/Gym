@@ -33,7 +33,7 @@ def test_make_capture_store_disabled_returns_none():
     assert make_capture_store(SimpleNamespace(observability_enabled=False)) is None
 
 
-# --- #1483 StepRecord contract ---
+# --- StepRecord contract ---
 def test_build_step_record_from_exchange():
     exchange = {
         "dialect": "responses",
@@ -93,7 +93,7 @@ def test_step_record_json_schema_has_contract_fields():
 # --- full per-rollout capture + assembly (trajectory + StepRecords) ---
 def test_capture_assembles_trajectory_and_step_records(tmp_path):
     """Capture two model calls and assemble both the eval-only trajectory (no token-ids) and the
-    typed #1483 StepRecords; also exercises request-body replay."""
+    typed StepRecords; also exercises request-body replay."""
     turns = [
         {
             "model": "m",
@@ -167,7 +167,7 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     ]
     assert not hasattr(items[0], "generation_token_ids")  # eval view carries no token-ids
 
-    # Typed #1483 StepRecords.
+    # Typed StepRecords.
     steps = assemble_step_records(CaptureStore(tmp_path), "rollout-x", run_id="run-1")
     assert [s.step_index for s in steps] == [0, 1]
     assert [s.turn_index for s in steps] == [0, 1]
