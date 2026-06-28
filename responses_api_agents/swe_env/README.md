@@ -32,19 +32,24 @@ an empty patch resolves **0 / 500**):
 | grader | resolved | |
 |---|---|---|
 | **docker-flat** (this library) | **493 / 500** | host-side flat grading, pull-on-demand images |
-| **apptainer-flat** (this library) | **490 / 500** | same host-side grader; same resolved set as docker modulo the footnotes below |
+| **apptainer-flat** (this library) | **491 / 500** | same host-side grader as docker — misses the *identical* 7; the only gap to 493 is the httpbin outage below |
 | official `swebench run_evaluation` (nested, docker) | 490 / 500 | the canonical tool, for reference |
 
+> The earlier apptainer figure of **492** was swebench's *nested* `run_evaluation` on a `.sif`
+> (a different grader) — not this flat grader. The flat grader resolves **493** on **both** docker
+> and apptainer; the numbers above differ only by transient run-time conditions, never by grading.
+
 **docker-flat ≡ apptainer-flat.** Both run the *identical* host-side grader (same eval script +
-per-repo parser); only the sandbox the eval script executes in differs. apptainer-flat never
-resolves anything docker doesn't (the over-resolve set is empty). The apptainer-vs-docker deltas are
-environmental/operational, not grading:
-- **psf/requests-1724, -2317** — their tests hit the external `httpbin.org`, which was returning
-  HTTP 503 during the apptainer run (`curl http://httpbin.org/get` → 503). docker fails them
-  identically when httpbin is down (the official audit reproduced the 503s); docker-flat resolved
-  them earlier when httpbin was up. External-service flakiness, not a sandbox difference.
-- **scikit-learn-14710** — hit the eval timeout under `--concurrency 12`; resolves in isolation. A
-  concurrency artifact, not a grading difference.
+per-repo parser) and miss the **same 7** instances; only the sandbox the eval script executes in
+differs, and apptainer-flat never resolves anything docker doesn't (the over-resolve set is empty).
+The apptainer-vs-docker count gap is entirely environmental/operational, not grading:
+- **psf/requests-1724, -2317** (the 491→493 gap) — their tests hit the external `httpbin.org`, which
+  was returning HTTP 503 during the apptainer run (`curl http://httpbin.org/get` → 503). docker fails
+  them identically when httpbin is down (the official audit reproduced the 503s); docker-flat
+  resolved them earlier when httpbin was up. External-service flakiness, not a sandbox difference —
+  so flat-apptainer ties flat-docker at **493** whenever httpbin is reachable.
+- **scikit-learn-14710** — hit the eval timeout under `--concurrency 12`; re-graded in isolation it
+  resolves (folded into the 491 above). A concurrency artifact, not a grading difference.
 
 Two apptainer sandbox fixes were required for this parity (see `anyswe_agent/app.py` + `harnesses/`):
 - **`--no-mount home`** — apptainer bind-mounts the host `$HOME` by default, leaking the host
