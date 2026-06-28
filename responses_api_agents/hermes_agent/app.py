@@ -374,11 +374,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
+            # Serialize the run body once; reused for seed + verify and for rollout correlation
+            # (rollout_call_kwargs accepts the dict, so the id is derived without re-dumping).
+            body_dump = body.model_dump()
 
             seed_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
-                json=body.model_dump(),
+                json=body_dump,
                 cookies=cookies,
             )
             await raise_for_status(seed_resp)
@@ -390,7 +393,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 url_path="/v1/responses",
                 json=body.responses_create_params,
                 cookies=cookies,
-                **self.rollout_call_kwargs(body),
+                **self.rollout_call_kwargs(body_dump),
             )
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
@@ -399,7 +402,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body_dump | {"response": agent_resp_json},
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)

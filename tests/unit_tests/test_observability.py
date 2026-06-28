@@ -12,12 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from types import SimpleNamespace
 
 from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 
-from nemo_gym.observability import install_trajectory_capture, make_capture_store, summarize_response
+from nemo_gym.observability import install_trajectory_capture, make_capture_store
 from nemo_gym.trajectory_capture import (
     CaptureStore,
     StepRecord,
@@ -26,58 +27,6 @@ from nemo_gym.trajectory_capture import (
     assemble_step_records,
     build_step_record,
 )
-
-
-_RESPONSES_PAYLOAD = {
-    "model": "m",
-    "usage": {
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "total_tokens": 15,
-        "output_tokens_details": {"reasoning_tokens": 3},
-    },
-    "output": [
-        {"type": "reasoning"},
-        {"type": "message", "content": [{"type": "output_text", "text": "hi there"}]},
-        {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": '{"city": "SF"}'},
-    ],
-}
-
-
-# --- summarize_response telemetry utility (all three response shapes) ---
-def test_summarize_responses_shape():
-    summary = summarize_response(_RESPONSES_PAYLOAD)
-    assert summary["usage"] == {"tokens_in": 10, "tokens_out": 5, "tokens_total": 15, "tokens_reasoning": 3}
-    assert summary["num_tool_calls"] == 1 and summary["tool_names"] == ["get_weather"]
-    assert summary["num_messages"] == 1 and summary["has_reasoning"] is True
-
-
-def test_summarize_chat_completions_shape():
-    payload = {
-        "model": "m",
-        "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
-        "choices": [
-            {"message": {"content": "hi", "tool_calls": [{"function": {"name": "f"}}], "reasoning_content": "r"}}
-        ],
-    }
-    summary = summarize_response(payload)
-    assert summary["usage"]["tokens_in"] == 7
-    assert summary["num_tool_calls"] == 1 and summary["tool_names"] == ["f"] and summary["has_reasoning"] is True
-
-
-def test_summarize_anthropic_messages_shape():
-    payload = {
-        "model": "m",
-        "usage": {"input_tokens": 8, "output_tokens": 6},
-        "content": [
-            {"type": "thinking", "thinking": "let me think"},
-            {"type": "text", "text": "hi there"},
-            {"type": "tool_use", "name": "get_weather", "input": {"city": "SF"}},
-        ],
-    }
-    summary = summarize_response(payload)
-    assert summary["usage"] == {"tokens_in": 8, "tokens_out": 6, "tokens_total": 14, "tokens_reasoning": None}
-    assert summary["num_tool_calls"] == 1 and summary["num_messages"] == 1 and summary["has_reasoning"] is True
 
 
 def test_make_capture_store_disabled_returns_none():
@@ -259,6 +208,28 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     assert steps[0].status_code == 500
 
 
+def test_raised_call_is_captured_then_reraised(tmp_path):
+    """A model call that raises (not just a non-2xx) is captured with an exception category and the
+    error is re-raised (response unchanged for the caller)."""
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _boom(body: dict = Body()) -> dict:
+        raise RuntimeError("kaboom")
+
+    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
+    install_trajectory_capture(app, config)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-raise"})
+    assert r.status_code == 500  # error propagated, response unchanged
+
+    steps = assemble_step_records(CaptureStore(tmp_path), "r-raise")
+    assert len(steps) == 1
+    assert steps[0].error_category == "exception" and steps[0].response is None
+    assert steps[0].latency_ttft_ms is None  # nothing streamed before the raise
+
+
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     """A caller can attribute calls by a base_url path prefix (no header). The /v1/... route is
     reached unchanged (prefix stripped), an explicit header still wins, and plain URLs are
@@ -438,11 +409,6 @@ def test_capture_store_read_skips_blank_and_bad_lines(tmp_path):
     assert store.read("r") == [{"a": 1}, {"b": 2}]
 
 
-def test_summarize_empty_payload():
-    summary = summarize_response({})
-    assert summary["num_tool_calls"] == 0 and summary["num_messages"] == 0 and summary["has_reasoning"] is False
-
-
 def test_capture_records_non_json_response_as_none(tmp_path):
     from fastapi.responses import PlainTextResponse
 
@@ -526,6 +492,27 @@ def test_tool_calls_and_reasoning_chat_and_anthropic():
     assert _tool_calls_and_reasoning({"unrelated": 1}) == ([], None)
 
 
+def test_tool_calls_and_reasoning_accepts_reasoning_alias():
+    from nemo_gym.trajectory_capture import _tool_calls_and_reasoning
+
+    # vLLM / newer servers emit `reasoning` (no `reasoning_content`).
+    assert _tool_calls_and_reasoning({"choices": [{"message": {"content": "hi", "reasoning": "because"}}]}) == (
+        [],
+        "because",
+    )
+    # `reasoning_content` wins when both are present.
+    both = {"choices": [{"message": {"reasoning_content": "rc", "reasoning": "r"}}]}
+    assert _tool_calls_and_reasoning(both) == ([], "rc")
+
+
+def test_tool_calls_and_reasoning_skips_non_dict_output_items():
+    from nemo_gym.trajectory_capture import _tool_calls_and_reasoning
+
+    # A Responses `output` list may contain non-dict junk; it must be skipped, not crash.
+    resp = {"output": [None, "junk", {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]}
+    assert _tool_calls_and_reasoning(resp) == ([{"call_id": "c", "name": "f", "arguments": {}}], None)
+
+
 def test_assemble_chat_wire_trajectory(tmp_path):
     """The chat-wire assembler: tool results arrive in the next request as role:tool messages."""
     store = CaptureStore(tmp_path)
@@ -595,9 +582,13 @@ def test_base_agent_resolve_model_base_url_and_call_kwargs(monkeypatch):
     assert SimpleResponsesAPIAgent.rollout_call_kwargs(fake_self, {}) == {}
 
 
-def test_capture_streams_sse_and_records_metadata(tmp_path):
-    """SSE/streaming responses (e.g. stream:true /v1/messages) are forwarded unchanged (the stream
-    is preserved) and recorded with request + metadata; the streamed body is not buffered."""
+def _sse(event_type: str, data: dict) -> bytes:
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
+    """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
+    response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
     from fastapi.responses import StreamingResponse
 
     app = FastAPI()
@@ -605,8 +596,66 @@ def test_capture_streams_sse_and_records_metadata(tmp_path):
     @app.post("/v1/messages")
     async def _stream(body: dict = Body()) -> StreamingResponse:
         async def gen():
-            yield b"event: a\n"
-            yield b'data: {"x": 1}\n\n'
+            yield _sse(
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 5,
+                            "cache_creation_input_tokens": 2,
+                        },
+                        "content": [],
+                    },
+                },
+            )
+            yield _sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+            )
+            yield _sse(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "let me think"},
+                },
+            )
+            yield _sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+            )
+            yield _sse(
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "hi there"}},
+            )
+            yield _sse(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 2,
+                    "content_block": {"type": "tool_use", "id": "t1", "name": "calc", "input": {}},
+                },
+            )
+            yield _sse(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 2,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"x": 1}'},
+                },
+            )
+            yield _sse(
+                "message_delta",
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}},
+            )
+            yield _sse("message_stop", {"type": "message_stop"})
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -614,14 +663,96 @@ def test_capture_streams_sse_and_records_metadata(tmp_path):
     install_trajectory_capture(app, config)
     client = TestClient(app)
 
-    r = client.post("/v1/messages", json={"stream": True}, headers={"x-nemo-gym-rollout-id": "rs"})
-    assert r.status_code == 200 and "data: " in r.text  # stream content intact
+    r = client.post("/ng-rollout/3-0/v1/messages", json={"stream": True})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")  # stream preserved
+    assert "event:" in r.text and "data:" in r.text  # SSE content flowed through
 
-    records = CaptureStore(tmp_path).read("rs")
-    assert len(records) == 1
-    assert records[0]["dialect"] == "messages" and records[0]["status_code"] == 200
-    assert records[0]["request"] == {"stream": True}
-    assert records[0]["response"] is None  # streamed SSE body intentionally not buffered
+    records = CaptureStore(tmp_path).read("3-0")
+    assert len(records) == 1 and records[0]["response"] is not None  # reassembled, not dropped
+
+    steps = assemble_step_records(CaptureStore(tmp_path), "3-0")
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.dialect == "messages"
+    assert step.tokens_in == 17 and step.tokens_out == 7  # 10 + cache_read 5 + cache_creation 2; output from delta
+    assert step.cached_tokens == 5 and step.cache_creation_tokens == 2
+    assert step.reasoning_content == "let me think"
+    assert step.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
+    assert step.latency_ttft_ms is not None
+
+
+def test_reconstruct_chat_sse():
+    from nemo_gym.observability import _reconstruct_streamed_response
+
+    chunks = [
+        {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
+        {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": '{"a":'}}]
+                    },
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
+    ]
+    raw = b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n"
+    resp = _reconstruct_streamed_response(raw, "chat")
+    msg = resp["choices"][0]["message"]
+    assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
+    assert msg["tool_calls"][0]["function"] == {"name": "f", "arguments": '{"a":1}'}
+    assert resp["usage"]["total_tokens"] == 8
+
+
+def test_reconstruct_responses_sse_uses_terminal_envelope():
+    from nemo_gym.observability import _reconstruct_streamed_response
+
+    raw = b"".join(
+        _sse(c["type"], c)
+        for c in [
+            {"type": "response.created", "response": {"id": "r", "output": []}},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "r",
+                    "output": [{"type": "message"}],
+                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                },
+            },
+        ]
+    )
+    resp = _reconstruct_streamed_response(raw, "responses")
+    assert resp["output"] == [{"type": "message"}] and resp["usage"]["total_tokens"] == 6
+
+    # Fallback: no terminal envelope, but an interim event still carries a response object.
+    interim = _sse("response.in_progress", {"type": "response.in_progress", "response": {"id": "r2", "output": []}})
+    assert _reconstruct_streamed_response(interim, "responses")["id"] == "r2"
+
+
+def test_reconstruct_streamed_response_best_effort_none():
+    from nemo_gym.observability import _reconstruct_streamed_response
+
+    assert _reconstruct_streamed_response(b"", "chat") is None  # no events
+    assert _reconstruct_streamed_response(b"event: ping\ndata: not-json\n\n", "messages") is None  # unparseable
+    assert _reconstruct_streamed_response(b"data: 123\n\n", "chat") is None  # non-dict JSON skipped
+    # Non-empty events that carry nothing reconstructable -> None for each dialect.
+    ping = _sse("ping", {"type": "ping"})
+    assert _reconstruct_streamed_response(ping, "messages") is None
+    assert _reconstruct_streamed_response(ping, "chat") is None
+    assert _reconstruct_streamed_response(ping, "responses") is None
 
 
 def test_rollout_id_from_run_body_attempt_suffix():
@@ -744,6 +875,15 @@ def test_aggregate_step_records_sums_and_counts():
         "num_turns": None,
         "num_steps": 0,
     }
+
+
+def test_aggregate_num_turns_is_none_without_turn_markers():
+    from nemo_gym.trajectory_capture import StepRecord, aggregate_step_records
+
+    # No caller set turn_index -> num_turns is None (a turn != a model step), num_steps stays exact.
+    steps = [StepRecord(step_index=0, tokens_in=1), StepRecord(step_index=1, tokens_in=2)]
+    agg = aggregate_step_records(steps)
+    assert agg["num_steps"] == 2 and agg["num_turns"] is None
 
 
 # --- P0 review regressions: prefix routing + capture-dir resolution ---
