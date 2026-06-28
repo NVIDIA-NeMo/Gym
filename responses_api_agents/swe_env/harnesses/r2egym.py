@@ -67,7 +67,9 @@ class R2EGymHarness(SweTaskHarness):
             workdir=task.repo_workdir,
             ttl_s=task.metadata.get("ttl_s", 1800),
             ready_timeout_s=task.metadata.get("ready_timeout_s", 600),
-            env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_PAGER": "cat"},
+            # GIT_PAGER=cat avoids pager hangs; not GIT_CONFIG_GLOBAL=/dev/null (older images' git
+            # can't parse it -> the eval's git checkout / test-patch apply fail -> false misses).
+            env={"GIT_PAGER": "cat"},
             metadata={
                 "instance_id": task.instance_id[:63],
                 "benchmark": task.benchmark,

@@ -418,7 +418,9 @@ def test_build_spec_injects_dockerfile_env():
     task = _task(metadata={"base_dockerfile": "ENV PATH=/custom/bin:$PATH\n"})
     spec = NVInternalHarness().build_spec(task)
     # Existing git env preserved; dockerfile ENV injected.
-    assert spec.env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert spec.env["GIT_PAGER"] == "cat"
+    # GIT_CONFIG_GLOBAL=/dev/null is deliberately NOT set — older images' git can't parse it.
+    assert "GIT_CONFIG_GLOBAL" not in spec.env
     assert spec.env["PATH"] == "/custom/bin:$PATH"
 
 

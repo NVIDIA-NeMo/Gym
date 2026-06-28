@@ -202,9 +202,10 @@ class SweRebenchHarness(SweTaskHarness):
         Returns:
             SandboxSpec: The sandbox specification for running the task.
         """
-        # _JAVA_OPTIONS forces IPv4 for SWE-rebench tasks.
+        # _JAVA_OPTIONS forces IPv4 for SWE-rebench tasks; GIT_PAGER=cat avoids pager hangs.
+        # Do NOT set GIT_CONFIG_GLOBAL=/dev/null: older images' git can't parse /dev/null and the
+        # eval script's git checkout / test-patch apply then fail -> required tests un-run -> false misses.
         env = {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_PAGER": "cat",
             "_JAVA_OPTIONS": _JAVA_OPTIONS,
         }

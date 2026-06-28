@@ -119,7 +119,9 @@ class NVInternalHarness(SweTaskHarness):
             A :class:`SandboxSpec` describing the image, workdir, timeouts,
             environment, metadata, resources, and provider options.
         """
-        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_PAGER": "cat"}
+        # GIT_PAGER=cat avoids pager hangs; not GIT_CONFIG_GLOBAL=/dev/null (older images' git
+        # can't parse it -> the eval's git checkout / test-patch apply fail -> false misses).
+        env = {"GIT_PAGER": "cat"}
         env.update(_parse_dockerfile_env(task))
         return SandboxSpec(
             image=task.image,
