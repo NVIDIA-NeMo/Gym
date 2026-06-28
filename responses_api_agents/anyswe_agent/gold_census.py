@@ -26,8 +26,11 @@ Examples:
     # docker (images pull on demand; --rmi caps disk by removing each after grading)
     HF_HOME=/tmp/hf_cache python responses_api_agents/anyswe_agent/gold_census.py --rmi
     python responses_api_agents/anyswe_agent/gold_census.py --limit 50 --concurrency 8 --rmi
-    # apptainer (point the formatter at pre-built local .sif images)
+    # apptainer (pre-built local .sif images)
     python responses_api_agents/anyswe_agent/gold_census.py --provider apptainer \\
+        --container-formatter 'data/sifs/{instance_id}.sif'
+    # apptainer (build each missing .sif on-demand from docker://, delete after grading)
+    python responses_api_agents/anyswe_agent/gold_census.py --provider apptainer --apptainer-build --rmi \\
         --container-formatter 'data/sifs/{instance_id}.sif'
 """
 
@@ -51,6 +54,29 @@ from responses_api_agents.anyswe_agent.app import _build_swetask  # noqa: E402
 from responses_api_agents.swe_env.verify_task import verify_task  # noqa: E402
 
 
+def _mangled(instance_id: str) -> str:
+    """SWE-bench publishes eval images with ``__`` -> ``_1776_`` and lowercased."""
+    return instance_id.replace("__", "_1776_").lower()
+
+
+async def _build_apptainer_sif(instance_id: str, sif_path: Path) -> None:
+    """Build a local .sif on-demand from the instance's docker image (unprivileged, --disable-cache)."""
+    sif_path.parent.mkdir(parents=True, exist_ok=True)
+    img = f"docker://swebench/sweb.eval.x86_64.{_mangled(instance_id)}"
+    proc = await asyncio.create_subprocess_exec(
+        "apptainer",
+        "pull",
+        "--disable-cache",
+        str(sif_path),
+        img,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"apptainer pull rc={proc.returncode}: {err.decode(errors='replace')[-300:]}")
+
+
 def main() -> None:
     """Parse arguments, grade every instance's gold patch, and print the resolve tally."""
     parser = argparse.ArgumentParser(description="Gold-patch census for the swe_env grader.")
@@ -61,7 +87,22 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="0 = all instances")
     parser.add_argument("--concurrency", type=int, default=12)
     parser.add_argument("--out", default="gold_census_results.json")
-    parser.add_argument("--rmi", action="store_true", help="docker rmi each image after grading (bounds disk)")
+    parser.add_argument(
+        "--rmi", action="store_true", help="remove each image/on-demand-built sif after grading (bounds disk)"
+    )
+    parser.add_argument(
+        "--tests-timeout",
+        type=int,
+        default=0,
+        help="per-eval timeout in seconds (0 = grader default 1800). Raise (e.g. 3600) to avoid "
+        "concurrency-induced eval timeouts when comparing providers for exact parity.",
+    )
+    parser.add_argument(
+        "--apptainer-build",
+        action="store_true",
+        help="apptainer: build each missing .sif on-demand from docker://swebench/... (--disable-cache); "
+        "with --rmi the on-demand-built sifs are deleted after grading (pre-existing sifs are kept).",
+    )
     args = parser.parse_args()
 
     # Mirror anyswe's grading provider (app.py `_grading_provider`): apptainer's base image is
@@ -92,8 +133,14 @@ def main() -> None:
         }
         task = dataclasses.replace(_build_swetask(problem_info, flat_eval=True), model_patch=inst["patch"])
         async with sem:
+            built_sif: Path | None = None  # set only when WE build it -> only those are --rmi'd
             try:
-                report = await verify_task(provider_cfg, task)
+                if args.apptainer_build and args.provider == "apptainer":
+                    sif = Path(task.image)
+                    if not sif.exists():
+                        await _build_apptainer_sif(instance_id, sif)
+                        built_sif = sif
+                report = await verify_task(provider_cfg, task, eval_timeout_s=args.tests_timeout or None)
                 results[instance_id] = {"resolved": bool(report.resolved), "error_kind": report.error_kind}
             except Exception as exc:  # keep the census going; record the failure for this row
                 results[instance_id] = {"resolved": "ERR", "error": repr(exc)[:200]}
@@ -107,6 +154,8 @@ def main() -> None:
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await proc.wait()
+            if args.rmi and built_sif is not None and built_sif.exists():
+                built_sif.unlink()  # remove only on-demand-built sifs; pre-existing sifs are kept
         done[0] += 1
         if done[0] % 10 == 0:
             resolved = sum(1 for v in results.values() if v.get("resolved") is True)

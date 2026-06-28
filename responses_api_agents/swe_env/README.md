@@ -86,21 +86,30 @@ agent — it feeds each instance's gold patch through the flat grader and tallie
 ```bash
 # docker: images pull on demand; --rmi removes each after grading to cap disk
 HF_HOME=/tmp/hf_cache python responses_api_agents/anyswe_agent/gold_census.py \
-    --provider docker --concurrency 12 --rmi
+    --provider docker --concurrency 8 --tests-timeout 3600 --rmi
 # (quick smoke on a subset)
 python responses_api_agents/anyswe_agent/gold_census.py --provider docker --limit 25 --rmi
 
-# apptainer: point the formatter at pre-built local .sif images
+# apptainer: pre-built local .sif images ...
 python responses_api_agents/anyswe_agent/gold_census.py --provider apptainer \
-    --container-formatter 'data/sifs/{instance_id}.sif' --concurrency 12
+    --container-formatter 'data/sifs/{instance_id}.sif' --concurrency 8 --tests-timeout 3600
+# ... or build each missing .sif on-demand from docker:// and delete after grading
+HF_HOME=/tmp/hf_cache python responses_api_agents/anyswe_agent/gold_census.py \
+    --provider apptainer --apptainer-build --rmi --concurrency 8 --tests-timeout 3600 \
+    --container-formatter 'data/sifs/{instance_id}.sif'
 ```
 
 The script applies the two apptainer parity fixes automatically: `--no-mount home` (host-`$HOME`
-isolation) and the 1800s eval-command timeout. It checkpoints to `gold_census_results.json`
-(resumable) and prints `gold resolved N/500` plus the not-resolved list. A clean run has **0**
-`error_kind` (infra) failures; a resolved instance means the gold patch passed that instance's
-FAIL_TO_PASS + PASS_TO_PASS tests under the host-side grader. docker and apptainer resolve the same
-set (both use the flat grader) — the provider is just the sandbox the eval script runs in.
+isolation) and the eval-command timeout (1800s, or `--tests-timeout`). It checkpoints to
+`gold_census_results.json` (resumable) and prints `gold resolved N/500` plus the not-resolved list.
+A clean run has **0** `error_kind` (infra) failures; a resolved instance means the gold patch passed
+that instance's FAIL_TO_PASS + PASS_TO_PASS tests under the host-side grader.
+
+**For EXACT docker↔apptainer parity** (identical passing set), run both **in the same time window**
+(so the external `httpbin.org` state is the same for the `requests` instances) and with
+`--tests-timeout 3600` (so no heavy suite is masked by a concurrency-induced timeout). Under those
+conditions the two providers resolve the *identical* set — the grader is host-side and
+provider-neutral, so the sandbox only changes where the eval script runs, never the verdict.
 
 To cross-check against the canonical *nested* grader (note: `run_evaluation` 4.1.0 undercounts
 sphinx-via-tox instances — it runs pytest without `-rA` — and depends on external `httpbin.org` for
