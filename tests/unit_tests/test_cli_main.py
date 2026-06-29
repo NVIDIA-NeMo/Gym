@@ -262,6 +262,27 @@ class TestEnvTestResourceServerFlag:
         assert overrides == ["+entrypoint=resources_servers/gpqa"]
 
 
+class TestEnvComposeFlags:
+    def test_compose_dispatches_to_compose_config(self, monkeypatch: MonkeyPatch) -> None:
+        target, _ = _dispatch_for(monkeypatch, ["env", "compose", "--benchmark", "gsm8k"])
+        assert target == "nemo_gym.cli.env:compose_config"
+
+    def test_compose_flags_map_to_namespaced_hydra_keys(self, monkeypatch: MonkeyPatch) -> None:
+        # --agent/--num-repeats/--prompt-config are namespaced (compose_*) so they don't collide with
+        # server-config keys or eval run's --agent/agent_name.
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "compose", "--agent", "simple_agent", "--num-repeats", "4", "--prompt-config", "p.yaml"],
+        )
+        assert "+compose_agent=simple_agent" in overrides
+        assert "+compose_num_repeats=4" in overrides
+        assert "+compose_prompt_config=p.yaml" in overrides
+
+    def test_compose_benchmark_selector_resolves_to_config_paths(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "compose", "--benchmark", "gsm8k"])
+        assert any(o.startswith("+config_paths=[") and "gsm8k" in o for o in overrides)
+
+
 class TestDatasetFlags:
     def test_upload_hf_default(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
