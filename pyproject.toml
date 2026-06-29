@@ -286,6 +286,9 @@ dev = [
 ]
 
 [build-system]
+# setuptools >= 62.3 is required for recursive `**` globs in [tool.setuptools.package-data] (used to
+# ship the built-in configs / example data); pinned to 64 for a safe margin. Build-time only — this
+# does not constrain the installed/runtime setuptools.
 requires = ["setuptools>=64", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
@@ -330,14 +333,13 @@ exclude-dependencies = [
 
 [tool.setuptools.package-data]
 nemo_gym = ["resources/*.py"]
-# Ship built-in assets so a wheel install can list/run components by name from any cwd:
-# every config, README, and prepare script, plus small example data — but NOT the bulk
-# train/validation JSONL (those are fetched on demand via a dataset `source:` / `--download`).
-resources_servers = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
-responses_api_agents = ["**/*.yaml", "**/*.yml", "**/README.md"]
-responses_api_models = ["**/*.yaml", "**/*.yml", "**/README.md"]
-environments = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
-benchmarks = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py"]
+# Ship built-in assets so a wheel install can list/run components by name from any cwd: every config,
+# README, and prepare script, plus small example data — but NOT the bulk train/validation JSONL
+# (fetched on demand via a dataset `source:` / `--download`). The "*" key applies these globs to every
+# discovered package (the asset trees: resources_servers, responses_api_agents, responses_api_models,
+# benchmarks, environments), so the patterns live in one place instead of being repeated per tree.
+# The recursive `**` patterns require setuptools >= 62.3 (see [build-system].requires).
+"*" = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
