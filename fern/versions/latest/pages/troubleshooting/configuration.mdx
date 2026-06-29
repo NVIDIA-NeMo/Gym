@@ -84,7 +84,8 @@ Check the path is spelled correctly and is relative to your working directory or
 **When**: A `config_paths` entry (in a config file or a `--config` flag) points at a file that doesn't
 exist under any search root. The error lists every location that was searched.
 
-**Fix**: Correct the path, or run from the repository root so relative `config_paths` resolve.
+**Fix**: Correct the path. A relative entry is resolved against your working directory and then the
+Gym install root, so running from the repository root usually fixes it; an absolute path also works.
 
 ### Malformed `config_paths`
 
