@@ -136,6 +136,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in body.input], default=str))
 
         new_outputs = []
+        full_trajectory = []  # never-trimmed; mirrors new_outputs appends across resets
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
@@ -149,6 +150,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             task_index = body.metadata.pop("task_index", None)
             attempt = body.metadata.pop("attempt", None)
         reset_count = 0
+        reset_steps = []  # step numbers at which a context reset fired (for the trajectory header)
         num_tool_calls = 0
         max_reset_count = self.config.max_reset_count
 
@@ -172,6 +174,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     and (max_reset_count is None or reset_count < max_reset_count)
                 ):
                     reset_count += 1
+                    reset_steps.append(step)
                     if self.config.snap_dir:
                         self._save_snapshot(
                             messages=body.input + new_outputs,
@@ -218,6 +221,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 and (max_reset_count is None or reset_count < max_reset_count)
             ):
                 reset_count += 1
+                reset_steps.append(step)
                 if self.config.snap_dir:
                     self._save_snapshot(
                         messages=body.input + new_outputs,
@@ -234,6 +238,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+            full_trajectory.extend(output)
 
             if not usage:
                 usage = model_response.usage
@@ -288,6 +293,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     output=tool_output,
                 )
                 new_outputs.append(tool_response)
+                full_trajectory.append(tool_response)
 
             # --- Nudge the model at milestone steps ---
             if self.config.nudge_steps and all_fn_calls:
@@ -325,6 +331,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     last_tool = new_outputs[-1]
                     new_output = last_tool.output + nudge_msg
                     new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
+                    if full_trajectory:
+                        full_trajectory[-1] = new_outputs[-1]
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
@@ -340,12 +348,22 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 reset_count=None,
                 is_final=True,
             )
+            # Full untrimmed conversation (bc_frankie parity: one trajectory.jsonl per sample).
+            self._save_trajectory(
+                input_messages=body.input,
+                full_trajectory=full_trajectory,
+                task_index=task_index,
+                attempt=attempt,
+                reset_steps=reset_steps,
+                reset_count=reset_count,
+                num_tool_calls=num_tool_calls,
+            )
 
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
-        model_response.output = new_outputs
+        model_response.output = full_trajectory
         model_response.usage = usage
         # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
         # NeMoGymResponse(Response) has extra="allow", so these round-trip to /verify.
@@ -510,6 +528,33 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             sample_path = f"{sample_dir}/attempt_{attempt}_reset_{reset_count}.jsonl"
         with open(sample_path, "w", encoding="utf-8") as f:
             for msg in messages:
+                f.write(msg.model_dump_json() + "\n")
+
+    def _save_trajectory(
+        self, input_messages, full_trajectory, task_index, attempt, reset_steps, reset_count, num_tool_calls
+    ):
+        """Save the FULL untrimmed conversation for one sample to
+        {snap_dir}/sample_{task_index}/attempt_{attempt}_trajectory.jsonl.
+        Line 1 = metadata header; remaining lines = input prefix + every model/tool item, in order
+        (never trimmed at context resets). (bc_frankie parity: one trajectory.jsonl per sample.)"""
+        sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        path = f"{sample_dir}/attempt_{attempt}_trajectory.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "type": "metadata",
+                        "task_index": task_index,
+                        "attempt": attempt,
+                        "reset_count": reset_count,
+                        "num_tool_calls": num_tool_calls,
+                        "reset_steps": reset_steps,
+                    }
+                )
+                + "\n"
+            )
+            for msg in list(input_messages) + full_trajectory:
                 f.write(msg.model_dump_json() + "\n")
 
     async def _count_prompt_tokens(self, body) -> int:
