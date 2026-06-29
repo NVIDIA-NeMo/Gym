@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -154,20 +153,6 @@ class GDPValTask(TaskStrategy):
             return _render_template(config.user_prompt_template, task=task_info)
         return task_info["prompt"]
 
-    def prepare_input_files(self, task_info: Dict[str, Any]) -> Optional[str]:
-        ref_files = task_info.get("reference_files")
-        ref_urls = task_info.get("reference_file_urls")
-        if not ref_files or not ref_urls:
-            return None
-
-        input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_")
-        downloaded = _download_reference_files(ref_files, ref_urls, Path(input_files_dir))
-        if downloaded:
-            print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
-            return input_files_dir
-
-        return None
-
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         container_path = getattr(config, "gdpval_container_path", None)
         if not container_path:
@@ -186,9 +171,15 @@ class GDPValTask(TaskStrategy):
             f"[gdpval] Using Apptainer container {container_path} for task {task_info.get('task_id', '?')}", flush=True
         )
 
+        # ``working_dir="/root"`` rather than ``/workspace``: ``/root`` is
+        # guaranteed by the ``--home /root`` flag we pass to apptainer, while
+        # ``/workspace`` only exists if the container's ``%post`` actually ran
+        # ``mkdir -p /workspace`` — and the previous ``%post`` could silently
+        # skip that step on apt failure. Using ``/root`` makes the per-task
+        # apptainer flow robust to a partial container build.
         return ApptainerCodeExecToolProvider(
             sif_path=container_path,
-            working_dir="/workspace",
+            working_dir="/root",
             memory_limit_mb=getattr(config, "apptainer_memory_limit_mb", None),
             capture_git_diff=False,
             env_passthrough=["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"],

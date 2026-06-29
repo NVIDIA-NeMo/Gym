@@ -2,16 +2,20 @@
 
 ## Overview
 
-Evaluates vision-language models on scientific figure and table question answering
-from [LABBench2](https://huggingface.co/datasets/EdisonScientific/labbench2).
-The model receives a scientific figure or table alongside a free-form question.
+Evaluates vision-language models on scientific figure and table question answering,
+and protocol troubleshooting, from
+[LABBench2](https://huggingface.co/datasets/EdisonScientific/labbench2).
+For figure/table tasks the model receives a scientific figure or table alongside a
+free-form question. For `protocolqa2`, PDFs can be rendered as images or text-extracted
+via `media_mode` on the agent (see below).
 Verification uses an LLM-as-judge to compare the model's answer against the gold
 answer. Binary reward (1.0 = equivalent, 0.0 = not equivalent).
 
-- Task type: single-turn VLM QA
+- Task type: single-turn QA (multimodal or text-only for protocols)
 - Domain: `knowledge`
-- Subtasks: `figqa2-img`, `figqa2-pdf`, `tableqa2-img`, `tableqa2-pdf`
-- Grading: LLM judge with configurable equivalence labels (`[[A=B]]` / `[[A!=B]]`)
+- Subtasks: `figqa2-img`, `figqa2-pdf`, `tableqa2-img`, `tableqa2-pdf`, `protocolqa2`
+- Grading: LLM judge with configurable equivalence labels (`[[A=B]]` / `[[A!=B]]`).
+  `protocolqa2` uses a dedicated judge prompt that may include `reference_passage` from the dataset.
 
 ## Server Composition
 
@@ -26,11 +30,19 @@ Use LABBench2 VLM with:
 
 JSONL rows are lightweight (text-only, no base64). The custom agent
 `labbench2_vlm_agent` extends `simple_agent` and overrides `run()` to embed
-images/PDFs from disk before sending the request to the model. It imports
+images/PDFs from disk (as rendered pages), or to extract PDF text when
+``media_mode=text`` **and** `verifier_metadata.tag` is `protocolqa2`, before
+sending the request to the model. Other tags always keep image rendering even if
+`media_mode=text` is set, so a single mixed JSONL (e.g. `example.jsonl`) can use
+`+media_mode=text` and still run figure/table items as VLM input. It imports
 `embed_media_into_row` from `prepare_data.py` and resolves
 `verifier_metadata.media_dir` against the configured `media_base_dir`.
 
-`pymupdf` (for PDF rendering) is only required in the agent's venv
+Use `media_mode=image` (default) for all-VLM runs. Use `+media_mode=text` when you
+want protocol rows as extracted text (including mixed splits); `run.sh` passes
+this for the dedicated protocolqa2 rollout loop.
+
+`pymupdf` (for PDF rendering and text extraction) is only required in the agent's venv
 (`responses_api_agents/labbench2_vlm_agent/requirements.txt`), not in the
 resource server or core `nemo_gym`.
 
@@ -44,7 +56,8 @@ Each JSONL row contains:
 - `responses_create_params.input[0].content`: an `input_text` block with the
   question (no images — those are injected by the agent).
 - `verifier_metadata.ideal`: gold answer string.
-- `verifier_metadata.tag`: subtask identifier (e.g. `figqa2-img`, `tableqa2-pdf`).
+- `verifier_metadata.tag`: subtask identifier (e.g. `figqa2-img`, `tableqa2-pdf`, `protocolqa2`).
+- `verifier_metadata.reference_passage`: (protocolqa2 only) excerpt used by the judge; not shown to the policy model.
 - `verifier_metadata.id`: unique task identifier.
 - `verifier_metadata.media_dir`: relative path to the directory containing the
   image or PDF for this question (e.g. `media/figs/imgs/<uuid>` or
@@ -60,6 +73,7 @@ See `data/example.jsonl` for concrete examples.
 | figqa2-pdf | `data/figqa2_pdf_validation.jsonl` | Figure QA (PDF-rendered input) |
 | tableqa2-img | `data/tableqa2_img_validation.jsonl` | Table QA (image input) |
 | tableqa2-pdf | `data/tableqa2_pdf_validation.jsonl` | Table QA (PDF-rendered input) |
+| protocolqa2 | `data/protocolqa2_validation.jsonl` | Protocol troubleshooting (PDF); use `+media_mode=text` for extracted text |
 
 ### Media storage
 
@@ -74,6 +88,7 @@ data/
     figs/pdfs/<uuid>/paper.pdf
     tables/imgs/<uuid>/table.png
     tables/pdfs/<uuid>/paper.pdf
+    protocols/<uuid>/protocol.pdf
   test_media/                             # committed, 5 examples
     figs/imgs/<uuid>/figure.png
     ...
@@ -113,7 +128,7 @@ the highest-k values for `pass@1[avg-of-{k}]/accuracy` and `pass@{k}/accuracy`.
 Media files (scientific figures and table images/PDFs) are downloaded from a
 public GCS bucket by `prepare_data.py`. Validation JSONL can also be
 downloaded via `gitlab_identifier` (for internal NVIDIA users) using
-`ng_prepare_data +should_download=true +data_source=gitlab`.
+`gym dataset collate +should_download=true +data_source=gitlab`.
 
 Media files must always be downloaded separately via `prepare_data.py` --
 the `gitlab_identifier` mechanism only handles the lightweight JSONL files.
@@ -163,22 +178,28 @@ putting them in `env.yaml`.
 Start the servers:
 
 ```bash
-ng_run "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
+  --model-type openai_model
 ```
 
 Collect rollouts:
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=labbench2_vlm_simple_agent \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-  +input_jsonl_fpath=resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl \
-  +output_jsonl_fpath=results/figqa2_img_rollouts.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 2048, reasoning: {effort: high}}"
+gym eval run --no-serve \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
+  --model-type openai_model \
+  --agent labbench2_vlm_simple_agent \
+  --input resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl \
+  --output results/figqa2_img_rollouts.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 2048 \
+  ++responses_create_params.reasoning.effort=high
 ```
 
-`ng_collect_rollouts` writes sidecar files next to `output_jsonl_fpath`:
+`gym eval run --no-serve` writes sidecar files next to the `--output` file:
 
 - `*_materialized_inputs.jsonl`
 - `*_aggregate_metrics.json`
@@ -187,13 +208,16 @@ Run the example data for a quick smoke test (works immediately after `git clone`
 because `data/test_media/` and `data/example.jsonl` are committed):
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=labbench2_vlm_simple_agent \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-  +input_jsonl_fpath=resources_servers/labbench2_vlm/data/example.jsonl \
-  +output_jsonl_fpath=resources_servers/labbench2_vlm/data/example_rollouts.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 2048, reasoning: {effort: high}}"
+gym eval run --no-serve \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
+  --model-type openai_model \
+  --agent labbench2_vlm_simple_agent \
+  --input resources_servers/labbench2_vlm/data/example.jsonl \
+  --output resources_servers/labbench2_vlm/data/example_rollouts.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 2048 \
+  ++responses_create_params.reasoning.effort=high
 ```
 
 `example_rollouts.jsonl` is gitignored (42MB+ due to embedded base64 in the
@@ -201,20 +225,22 @@ rollout output). Regenerate it locally with the command above.
 
 ### One-shot alternative
 
-`ng_e2e_collect_rollouts` starts the server stack, preprocesses, and collects
-rollouts in a single command (don't run `ng_run` separately). Input path and
+`gym eval run` starts the server stack, preprocesses, and collects
+rollouts in a single command (don't run `gym env start` separately). Input path and
 agent ref are auto-derived from the dataset entry in the chained config
-(`++split` picks which one):
+(`--split` picks which one):
 
 ```bash
-ng_e2e_collect_rollouts \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-  ++split=validation \
-  ++output_jsonl_fpath=results/labbench2_vlm_validation.jsonl \
-  +num_samples_in_parallel=16
+gym eval run \
+  --resources-server labbench2_vlm \
+  --resources-server labbench2_vlm/judge_model_openai \
+  --model-type openai_model \
+  --split validation \
+  --output results/labbench2_vlm_validation.jsonl \
+  --concurrency 16
 ```
 
-For a fast smoke test, add `+limit=10 +num_repeats=1`.
+For a fast smoke test, add `--limit 10 --num-repeats 1`.
 
 ## Throttling
 
@@ -223,10 +249,10 @@ endpoints see roughly `2 × num_samples_in_parallel` concurrent requests.
 On a hosted endpoint you'll likely hit rate limits or socket errors
 (`Hit N global ClientOSError`) well before saturating your machine.
 
-Cap concurrency with `+num_samples_in_parallel=<N>`:
+Cap concurrency with `--concurrency <N>`:
 
 ```bash
-ng_collect_rollouts ... +num_samples_in_parallel=16
+gym eval run --no-serve ... --concurrency 16
 ```
 
 Start around 16 and bump up if it holds.

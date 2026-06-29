@@ -16,6 +16,6 @@ mobench_math_formal_lean_simple_agent:
       - name: mobench
         type: benchmark
         jsonl_fpath: benchmarks/mobench/data/mobench_benchmark.jsonl
-        prompt_config: benchmarks/prompts/lean4_formal_proof_deepseek_prover_v2.yaml
+        prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
         prepare_script: benchmarks/mobench/prepare.py
         num_repeats: 32

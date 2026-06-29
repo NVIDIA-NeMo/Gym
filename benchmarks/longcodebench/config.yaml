@@ -9,6 +9,6 @@ longcodebench_mcqa_simple_agent:
       - name: longcodebench
         type: benchmark
         jsonl_fpath: benchmarks/longcodebench/data/longcodebench_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/longcodebench/prepare.py
         license: Creative Commons Attribution 4.0 International

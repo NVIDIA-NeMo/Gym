@@ -1,2 +1,0 @@
-system: "Your task is to solve a math problem.  Make sure to put the answer (and only the answer) inside \\boxed{{}}."
-user: "{question}"

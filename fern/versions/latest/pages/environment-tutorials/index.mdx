@@ -1,5 +1,5 @@
 ---
-title: "Overview"
+title: "Build Environments"
 subtitle: "Build your own custom environment"
 description: ""
 position: 1
@@ -11,13 +11,15 @@ Looking to use an existing environment rather than build your own? See the [Avai
 
 </Tip>
 
+<Note>
+These guides focus on resources server implementation — tools, state management, and verification logic. For verification pattern reference (equivalence match, execution-based checking, LLM-as-Judge, reward models), see [Verification Patterns](/build-verifiers/verification-patterns). For data preparation, see [Prepare Data](/data). For agent harness setup, see [Agent Server](/agent-server). For running and analyzing evaluations, see [Evaluation](/evaluation).
+</Note>
+
 <Accordion title="Key Concepts">
 Before diving in, review these foundational pages:
 
-- [core-components](/latest/about/concepts/core-components) — Model, Resources, and Agent servers
-- [architecture](/latest/about/concepts/architecture) — How components interact during startup and execution
-- [task-verification](/latest/about/concepts/task-verification) — Reward computation and verification patterns
-- [configuration-concepts](/latest/about/concepts/configuration) — YAML configuration system
+- [Environment Components](/about/architecture) — Model, Resources, and Agent servers
+- [Verification Patterns](/build-verifiers/verification-patterns) — common scoring approaches (equivalence match, execution and state match, LLM-as-Judge, and more)
 </Accordion>
 
 ---
@@ -28,34 +30,44 @@ Start with the single-step tutorial, then progress through increasingly complex 
 
 <Cards>
 
-<Card title="Single-Step Environment" href="/latest/environment-tutorials/single-step-environment">
+<Card title="Single-Step Environment" href="/environment-tutorials/single-step-environment">
 Build a complete environment from scratch: scaffolding, task data, tools, verification, testing, and rollout collection.
 
 <Badge intent="success" minimal outlined>start here</Badge>
 </Card>
 
-<Card title="Multi-Step Environment" href="/latest/environment-tutorials/multi-step-environment">
+<Card title="Multi-Step Environment" href="/environment-tutorials/multi-step-environment">
 Multiple sequential tool calls with ground-truth verification.
 
 <Badge intent="success" minimal outlined>intermediate</Badge>
 </Card>
 
-<Card title="Stateful Environment" href="/latest/environment-tutorials/stateful-environment">
+<Card title="Stateful Environment" href="/environment-tutorials/stateful-environment">
 Per-episode session state with `SESSION_ID_KEY`.
 
 <Badge intent="success" minimal outlined>intermediate</Badge>
 </Card>
 
-<Card title="Real-World Environment" href="/latest/environment-tutorials/real-world-environment">
+<Card title="Real-World Environment" href="/environment-tutorials/real-world-environment">
 Production environment with dynamic routing and state-based verification.
 
 <Badge intent="success" minimal outlined>advanced</Badge>
 </Card>
 
-<Card title="LLM-as-Judge Verification" href="/latest/environment-tutorials/llm-as-judge-verification">
-Configure a second model to score rollouts from `verify()` when ground truth is semantic or rubric-based.
+<Card title="Build Verifiers" href="/build-verifiers">
+How environments compute rewards — equivalence matching, execution-based checking, LLM-as-Judge, and reward models.
+</Card>
 
-<Badge minimal outlined>verification</Badge>
+<Card title="Integrate External Libraries" href="/environment-tutorials/integrate-external-environments">
+Wrap a third-party benchmark or agent framework as a NeMo Gym agent server.
+
+<Badge minimal outlined>advanced</Badge>
+</Card>
+
+<Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
+End-to-end checklist for contributing a new benchmark — data, config, tests, and baselining.
+
+<Badge minimal outlined>contributor</Badge>
 </Card>
 
 </Cards>
@@ -74,7 +86,7 @@ Training environments can be broadly characterized along five dimensions:
 2. **Core capabilities**: The behaviors or skills that a model needs in order to succeed in a given use case.
 3. **Knowledge domain**: What subject area, area of expertise, or field of study is involved.
 4. **Task type**: The high-level use case that is represented in the training environment.
-5. **Verification method**: How the environment computes rewards from model responses. See [Task Verification](/latest/about/concepts/task-verification) for details.
+5. **Verification method**: How the environment computes rewards from model responses.
 
 Below are a subset of rollout structures and core capabilities found across NeMo Gym environments. We plan to add these as structured metadata to environments in the future. If you have ideas for additional properties, please let us know by [opening an issue](https://github.com/NVIDIA-NeMo/Gym/issues).
 

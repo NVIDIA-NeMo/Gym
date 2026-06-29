@@ -23,18 +23,15 @@ Build a complete environment end-to-end, from scaffolding to RL-ready rollouts.
 
 </Info>
 
-<NavButton href="/latest/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
+<NavButton href="/environment-tutorials" label="Back to Environment Tutorials" direction="back" />
 
 ---
 
 ## Prerequisites
 
-Complete **[Detailed Setup](/latest/get-started/detailed-setup)** before starting — clone the repository, install dependencies, configure your API key, and verify servers start correctly.
+Complete **[Getting Started](/get-started/quickstart)** before starting.
 
-<Tip>
-If you followed the [Quickstart](/latest/get-started), you're ready to proceed.
 
-</Tip>
 
 <Info>
 Run all commands from the **repository root** directory (where `pyproject.toml` is located).
@@ -45,7 +42,7 @@ Run all commands from the **repository root** directory (where `pyproject.toml` 
 
 ## How It Works
 
-NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [core-components](/latest/about/concepts/core-components) for the full architecture and diagram.
+NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/about/architecture) for the full architecture and diagram.
 
 In most cases, the **Resources Server** is where your changes go: define your tool endpoints and a `verify()` method that returns a reward. NeMo Gym ships several pre-built agent servers (`simple_agent`, `swe_agents`, etc.) and model servers (`openai_model`, `vllm_model`) that you can use as-is, or you can bring your own.
 
@@ -56,7 +53,7 @@ In most cases, the **Resources Server** is where your changes go: define your to
 Resource servers live in the `resources_servers/` directory. Scaffold a weather server that provides weather information to models:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
+gym env init --resources-server my_weather_tool
 ```
 
 This generates the following structure along with a paired simple agent configuration:
@@ -266,7 +263,7 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=reward)
 ```
 
-This example checks tool *usage*, not argument correctness. See [task-verification](/latest/about/concepts/task-verification) for the full verification patterns and best practices, or jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for quick examples.
+This example checks tool *usage*, not argument correctness. Jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for more examples.
 
 #### Configure - Wiring the pieces together
 
@@ -297,8 +294,8 @@ my_weather_tool_simple_agent:
         type: example
         jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
       # The scaffold also generates train/validation dataset entries
-      # with gitlab_identifier blocks. Those are omitted here since
-      # we only have example data at this stage.
+      # (which can declare a `source:` block — the unified dataset source).
+      # Those are omitted here since we only have example data at this stage.
 ```
 
 The `domain` field categorizes your resource server and is **required**. Common values: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`.
@@ -396,7 +393,7 @@ async def test_verify_without_tool_call(server):
 Run the tests:
 
 ```bash
-ng_test +entrypoint=resources_servers/my_weather_tool
+gym env test --resources-server my_weather_tool
 ```
 
 For detailed test output:
@@ -416,13 +413,12 @@ pytest -v
 Start the servers:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
-
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server my_weather_tool
 ```
 
-`ng_run` reads the config files and starts all three components from the architecture diagram:
+`gym env start` reads the config files and starts all three components from the architecture diagram:
 
 1. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
 2. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
@@ -451,7 +447,7 @@ Never commit API keys directly in YAML files.
 </Tip>
 
 <Tip>
-If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See [model-server-vllm](/latest/model-server/vllm).
+If you don't want to use the OpenAI API, you can try using a local vLLM server (requires GPU access) instead! See [model-server-vllm](/model-server/vllm).
 
 </Tip>
 
@@ -478,12 +474,13 @@ Before training, you collect rollouts to validate that your environment works en
 With your servers still running, collect rollouts against your example inputs:
 
 ```bash
-ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
-    +input_jsonl_fpath=resources_servers/my_weather_tool/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/my_weather_tool/data/example_rollouts.jsonl \
-    +limit=null \
-    +num_repeats=null \
-    +num_samples_in_parallel=null
+gym eval run --no-serve \
+    --agent my_weather_tool_simple_agent \
+    --input resources_servers/my_weather_tool/data/example.jsonl \
+    --output resources_servers/my_weather_tool/data/example_rollouts.jsonl \
+    --limit null \
+    --num-repeats null \
+    --concurrency null
 ```
 
 <Note>
@@ -499,11 +496,11 @@ Once you've collected rollouts and validated your environment, run training with
 
 <Cards>
 
-<Card title="NeMo RL (GRPO)" href="/latest/training-tutorials/nemo-rl-grpo">
+<Card title="NeMo RL (GRPO)" href="/training-tutorials/nemo-rl-grpo">
 Train models using GRPO with NeMo RL.
 </Card>
 
-<Card title="Unsloth" href="/latest/training-tutorials/unsloth">
+<Card title="Unsloth" href="/training-tutorials/unsloth">
 Train with Unsloth for fast fine-tuning.
 </Card>
 
@@ -548,7 +545,7 @@ We'd love to see your contributions! Please make sure your PR includes accurate 
 
 You've learned how to:
 
-- Initialize a resource server with `ng_init_resources_server`
+- Initialize a resources server with `gym env init`
 - Prepare task data in JSONL format
 - Implement tool endpoints and verification logic
 - Configure the required `domain` field and wire components together
@@ -558,11 +555,13 @@ You've learned how to:
 
 ---
 
-<NavButton href="/latest/environment-tutorials/multi-step-environment" label="Multi-Step Environment" direction="next" />
+<NavButton href="/environment-tutorials/multi-step-environment" label="Multi-Step Environment" direction="next" />
 
 ---
 
 ## Advanced: Verification Patterns
+
+For a catalog of common scoring approaches and when to use each, see [Verification Patterns](/build-verifiers/verification-patterns).
 
 <Accordion title="Multi-step verification with output parsing">
 
@@ -605,7 +604,7 @@ The custom request model (`MultiStepVerifyRequest`) is required for extra fields
 </Info>
 </Accordion>
 
-<Accordion title="LLM-as-judge verification">
+<Accordion title="LLM-as-Judge verification">
 
 For tasks with multiple valid answers, use an LLM to judge correctness.
 
@@ -657,7 +656,7 @@ Check server status and logs:
 
 ```bash
 # View running servers
-ng_status
+gym env status
 
 # For detailed logs, run the server directly:
 cd resources_servers/my_weather_tool
@@ -665,4 +664,4 @@ source .venv/bin/activate
 python app.py
 ```
 
-Server logs appear in the terminal where `ng_run` was executed.
+Server logs appear in the terminal where `gym env start` was executed.

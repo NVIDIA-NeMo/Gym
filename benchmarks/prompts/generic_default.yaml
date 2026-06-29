@@ -1,2 +1,0 @@
-# Shared passthrough prompt mirroring NeMo Skills' generic/default behavior.
-user: "{question}"

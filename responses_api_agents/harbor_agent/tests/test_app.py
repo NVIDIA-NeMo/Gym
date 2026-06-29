@@ -55,6 +55,7 @@ def _make_step_agent(
     logprobs: Optional[List[float]] = None,
     prompt_tokens: int = 500,
     completion_tokens: int = 100,
+    metrics_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     step: Dict[str, Any] = {
         "step_id": step_id,
@@ -74,6 +75,8 @@ def _make_step_agent(
         metrics["completion_token_ids"] = completion_token_ids
     if logprobs is not None:
         metrics["logprobs"] = logprobs
+    if metrics_extra is not None:
+        metrics["extra"] = metrics_extra
     step["metrics"] = metrics
     return step
 
@@ -321,6 +324,59 @@ class TestApp:
         assert len(response.responses_create_params.input) == 1
         assert "Fix the bug" in response.responses_create_params.input[0].content
 
+    async def test_run_with_routed_experts_in_metrics_extra(self):
+        routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+            [[4, 5]],
+            [[6, 7]],
+        ]
+        trajectory = _make_trajectory(
+            steps=[
+                _USER_STEP,
+                _make_step_agent(
+                    2,
+                    "Analysis: I will look at foo.py.\nPlan: Read the file.",
+                    prompt_token_ids=[100, 101],
+                    completion_token_ids=[200, 201],
+                    logprobs=[-0.01, -0.02],
+                    metrics_extra={"routed_experts": routed_experts},
+                ),
+            ],
+        )
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=trajectory):
+            response = await server.run(_make_run_request())
+
+        msg0 = response.response.output[0]
+        assert msg0.routed_experts == routed_experts
+
+    async def test_run_preserves_empty_top_level_routed_experts(self):
+        fallback_routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+        ]
+        trajectory = _make_trajectory(
+            steps=[
+                _USER_STEP,
+                _make_step_agent(
+                    2,
+                    "Analysis: I will look at foo.py.\nPlan: Read the file.",
+                    prompt_token_ids=[100],
+                    completion_token_ids=[200],
+                    logprobs=[-0.01],
+                    metrics_extra={"routed_experts": fallback_routed_experts},
+                ),
+            ],
+        )
+        trajectory["steps"][1]["metrics"]["routed_experts"] = []
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=trajectory):
+            response = await server.run(_make_run_request())
+
+        msg0 = response.response.output[0]
+        assert msg0.routed_experts == []
+
     async def test_run_without_token_details(self):
         server = _make_server()
         trial_result = {
@@ -370,6 +426,71 @@ class TestApp:
         assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-1] == "DeepSeek-V3.2"
         assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-3] == "20260210"
         assert server._get_results_output_dir("my-plain-model", "scientific", ts).parts[-1] == "my-plain-model"
+
+    def test_build_job_config_uses_daytona_type_when_import_path_is_clear(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_environment_type="daytona",
+            harbor_environment_import_path=None,
+            harbor_environment_kwargs={"network_block_all": False},
+            harbor_agent_kwargs={"max_turns": 3, "collect_rollout_details": True},
+        )
+
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] == "daytona"
+        assert config["environment"]["import_path"] is None
+        assert config["environment"]["kwargs"] == {"network_block_all": False}
+        assert config["agents"][0]["kwargs"]["max_turns"] == 3
+        assert config["agents"][0]["kwargs"]["collect_rollout_details"] is True
+
+    def test_build_job_config_import_path_overrides_environment_type(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_environment_type="daytona",
+            harbor_environment_import_path="custom.module:CustomEnvironment",
+        )
+
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] is None
+        assert config["environment"]["import_path"] == "custom.module:CustomEnvironment"
+
+    def test_build_job_config_supports_registry_dataset_with_daytona(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_datasets={"terminal_bench": {"dataset_name": "terminal-bench", "dataset_version": "2.0"}},
+            harbor_environment_type="daytona",
+            harbor_environment_import_path=None,
+        )
+
+        config = server._build_job_config(
+            dataset_alias="terminal_bench",
+            task_name="fix-git",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+
+        assert config["environment"]["type"] == "daytona"
+        assert config["datasets"][0]["name"] == "terminal-bench"
+        assert config["datasets"][0]["version"] == "2.0"
+        assert config["datasets"][0]["task_names"] == ["fix-git"]
 
     @pytest.mark.parametrize(
         "instance_id, expected_alias, expected_task",

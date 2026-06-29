@@ -21,6 +21,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
@@ -48,6 +49,47 @@ def load_example_multi_step_test_global_config_dict() -> DictConfig:
                 "policy_model_name": "",
             }
         ),
+    )
+
+
+def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPIAgentServerInstanceConfig":
+    """Build an in-memory ResponsesAPIAgentServerInstanceConfig with the given datasets."""
+
+    def _default_license(dataset_type: str) -> str | None:
+        return None if dataset_type == "example" else "Apache 2.0"
+
+    server_type_config_dict = {
+        "responses_api_agents": {
+            "simple_agent": {
+                "host": "127.0.0.1",
+                "port": 12345,
+                "entrypoint": "app.py",
+                "datasets": [
+                    {
+                        "name": d["name"],
+                        "type": d["type"],
+                        "jsonl_fpath": d.get("jsonl_fpath", f"path/{d['name']}.jsonl"),
+                        "num_repeats": d.get("num_repeats", 1),
+                        "gitlab_identifier": d.get("gitlab_identifier"),
+                        "license": d.get("license", _default_license(d["type"])),
+                    }
+                    for d in dataset_specs
+                ],
+                "resources_server": {
+                    "type": "resources_servers",
+                    "name": f"{name}_resources_server",
+                },
+                "model_server": {
+                    "type": "responses_api_models",
+                    "name": "policy_model",
+                },
+            }
+        }
+    }
+    return ResponsesAPIAgentServerInstanceConfig(
+        name=name,
+        server_type_config_dict=DictConfig(server_type_config_dict),
+        responses_api_agents=server_type_config_dict["responses_api_agents"],
     )
 
 
@@ -84,6 +126,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "type": "example",
                                 "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                                 "num_repeats": 1,
+                                "source": None,
                                 "gitlab_identifier": None,
                                 "huggingface_identifier": None,
                                 "license": None,
@@ -105,6 +148,54 @@ class TestLoadAndValidateServerInstanceConfigs:
             c.model_dump(mode="json", warnings="none") for c in actual_agent_configs_with_data
         ]
         assert expected_agent_configs_with_data_dict == actual_agent_configs_with_data_dict
+
+    def test_load_and_validate_server_instance_configs_filters_out_of_scope_datasets(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The returned list must (a) drop agents whose datasets are all out
+        of scope for the mode, and (b) restrict mixed agents to their
+        in-scope datasets only."""
+        agent_in_scope_only = _make_agent_instance_config("agent_in_scope_only", [{"name": "ex", "type": "example"}])
+        agent_out_of_scope_only = _make_agent_instance_config(
+            "agent_out_of_scope_only", [{"name": "train", "type": "train"}]
+        )
+        agent_mixed = _make_agent_instance_config(
+            "agent_mixed",
+            [
+                {"name": "ex", "type": "example"},
+                {"name": "train", "type": "train"},
+            ],
+        )
+
+        monkeypatch.setattr(
+            GlobalConfigDictParser,
+            "filter_for_server_instance_configs",
+            lambda self, _global_config_dict: [
+                agent_in_scope_only,
+                agent_out_of_scope_only,
+                agent_mixed,
+            ],
+        )
+
+        config = TrainDataProcessorConfig(
+            output_dirpath="",
+            mode="example_validation",
+            should_download=False,
+        )
+        processor = TrainDataProcessor()
+        result = processor.load_and_validate_server_instance_configs(
+            config=config,
+            global_config_dict=DictConfig({}),
+        )
+
+        result_names = [c.name for c in result]
+        assert result_names == ["agent_in_scope_only", "agent_mixed"], result_names
+
+        result_datasets = {c.name: [(d.name, d.type) for d in c.datasets] for c in result}
+        assert result_datasets == {
+            "agent_in_scope_only": [("ex", "example")],
+            "agent_mixed": [("ex", "example")],
+        }
 
 
 class TestLoadDatasets:
@@ -486,7 +577,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if filename == "resources_servers/example_multi_step/data/example.jsonl":
+            if Path(filename) == _resolve_under_cwd_or_install(
+                "resources_servers/example_multi_step/data/example.jsonl"
+            ):
                 return original_open(filename, mode)
             elif filename == Path("resources_servers/example_multi_step/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
@@ -1026,6 +1119,26 @@ class TestCollateSamples:
             Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
+
+    def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
+        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
+        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        missing_dir = tmp_path / "does" / "not" / "exist"
+        assert not missing_dir.exists()
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(missing_dir / "data.jsonl")}]
+        )
+        processor = TrainDataProcessor()
+        # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
+        monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
+
+        paths = processor._collate_samples_single_type("example", [cfg])
+
+        prepare_path = missing_dir / "data_prepare.jsonl"
+        assert paths == [prepare_path]
+        assert prepare_path.exists()  # parent dir auto-created; write did not crash
+        assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()

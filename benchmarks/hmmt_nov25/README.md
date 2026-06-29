@@ -13,7 +13,7 @@ symbolic equivalence of the model-extracted `\boxed{...}` answer against
 
 ## Prompt
 
-References the shared `benchmarks/prompts/generic_math.yaml` — the same
+References the shared `benchmarks/prompts/generic/math.yaml` — the same
 prompt `gsm8k`, `hendrycks_math`, and other `eval_type=math` benchmarks
 use. Rendered-equivalent to NeMo Skills' `generic/math.yaml`: Skills'
 template is `{examples}{problem}` with `{examples}` empty by default;
@@ -35,20 +35,22 @@ on the same inputs.
 
 ```bash
 # Prepare benchmark data (downloads from HuggingFace)
-ng_prepare_benchmark "+config_paths=[benchmarks/hmmt_nov25/config.yaml]"
+gym eval prepare --benchmark hmmt_nov25
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/hmmt_nov25/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark hmmt_nov25
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=hmmt_nov25_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl \
-    +output_jsonl_fpath=results/hmmt_nov25_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic_math.yaml \
-    +num_repeats=16 \
-    +num_repeats_add_seed=true \
-    "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 65536}"
+gym eval run --no-serve \
+    --agent hmmt_nov25_math_with_judge_simple_agent \
+    --input benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl \
+    --output results/hmmt_nov25_rollouts.jsonl \
+    --prompt-config benchmarks/prompts/generic/math.yaml \
+    --num-repeats 16 \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --max-output-tokens 65536 \
+    +num_repeats_add_seed=true
 ```

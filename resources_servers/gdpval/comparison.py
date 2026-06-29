@@ -24,10 +24,13 @@ import base64
 import math
 import os
 import shutil
+import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from openai import APITimeoutError
 
 
 JUDGE_PROMPT = (
@@ -64,6 +67,19 @@ REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
 REQUEST_BACKOFF_MULTIPLIER = 2.0
 REQUEST_MAX_BACKOFF_SECONDS = 60.0
+# Per-request OpenAI client timeout. Multimodal payloads through a flaky
+# proxy have historically taken hours when this defaulted to 600 s × 5
+# retries (50 min/trial × 4 trials = 200 min/verify worst case). 120 s here,
+# combined with non-retryable ``APITimeoutError`` below, bounds wall-clock
+# damage to ~8 min/verify when the upstream is genuinely down.
+JUDGE_REQUEST_TIMEOUT_SECONDS = 120.0
+# Per-file size cap on multimodal content blocks. Above this the file is
+# replaced with a one-line text marker so the judge still knows what was
+# claimed without us pushing 100s of MB of base64 through the proxy.
+# Set high enough (250 MB) that normal multi-stem audio and reference
+# videos in the GDPVal task set still go through; only catches the truly
+# pathological cases (e.g. ``task_a941b6d8`` 657 MB overlay clip).
+MAX_FILE_BYTES_FOR_JUDGE = 250 * 1024 * 1024
 RETRYABLE_ERROR_MARKERS = (
     "429",
     "502",
@@ -80,8 +96,6 @@ RETRYABLE_ERROR_MARKERS = (
     "service unavailable",
     "upstream",
     "temporarily unavailable",
-    "timeout",
-    "timed out",
     "connection error",
 )
 
@@ -114,17 +128,25 @@ def _convert_to_pdf(path: str | Path) -> bytes | None:
     return None
 
 
-def _maybe_unzip(path: str | Path) -> list[Path]:
+def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
+    """Extract a zip into a per-call tempdir; never write into ``path.parent``.
+
+    The reference deliverables tree is mounted read-only in production, so the
+    previous behaviour of ``extractall(path.parent)`` raised ``PermissionError``
+    and failed /verify outright. Returns ``(extract_dir, member_paths)`` —
+    callers are responsible for ``shutil.rmtree(extract_dir)`` after they're
+    done reading the members.
+    """
     path = Path(path)
-    extracted_paths: list[Path] = []
     try:
         with zipfile.ZipFile(path, "r") as zip_ref:
+            extract_dir = Path(tempfile.mkdtemp(prefix="gdpval_unzip_"))
+            zip_ref.extractall(extract_dir)
             members = zip_ref.namelist()
-            zip_ref.extractall(path.parent)
-            extracted_paths = [path.parent / Path(member) for member in members if member]
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError):
-        pass
-    return extracted_paths
+            extracted_paths = [extract_dir / Path(member) for member in members if member]
+        return extract_dir, extracted_paths
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError, OSError):
+        return None, []
 
 
 FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -188,6 +210,17 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     full_path = os.path.join(file_dir, file_name)
 
     try:
+        size_bytes = os.path.getsize(full_path)
+    except OSError:
+        return None
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        size_mb = size_bytes / (1024 * 1024)
+        return {
+            "type": "text",
+            "text": f"[oversize: {file_name} {size_mb:.1f}MB — not included]",
+        }
+
+    try:
         if file_type == "TXT":
             raw_text = file_converter(full_path)
             return {"type": "text", "text": raw_text}
@@ -215,8 +248,9 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
 def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
-    Skips files in ``IGNORE_FILES``.  Extracts zips first.  Returns a list
-    of content block dicts suitable for OpenAI messages.
+    Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
+    (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
+    Returns a list of content block dicts suitable for OpenAI messages.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -224,24 +258,37 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
     section: list[dict] = []
     no_files = True
 
+    extracted_dirs: list[Path] = []
     if file_dir is not None and os.path.exists(file_dir):
         for file_name in os.listdir(file_dir):
             if file_name.lower().endswith(".zip"):
-                extracted_paths = _maybe_unzip(os.path.join(file_dir, file_name))
-                clean_up_list.extend(extracted_paths)
+                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
+                if extract_dir is not None:
+                    clean_up_list.append(extract_dir)
+                    extracted_dirs.append(extract_dir)
+
+    def _emit(directory: str, file_name: str) -> None:
+        nonlocal no_files
+        if file_name in IGNORE_FILES:
+            return
+        section.append({"type": "text", "text": f"\n{file_name}:\n"})
+        block = get_file_content_block(directory, file_name)
+        if block is not None:
+            section.append(block)
+            no_files = False
 
     if file_dir is not None and os.path.exists(file_dir):
         for file_name in sorted(os.listdir(file_dir)):
             full_path = os.path.join(file_dir, file_name)
             if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
                 continue
-            if file_name in IGNORE_FILES:
+            _emit(file_dir, file_name)
+
+    for extract_dir in extracted_dirs:
+        for member in sorted(extract_dir.rglob("*")):
+            if not member.is_file():
                 continue
-            section.append({"type": "text", "text": f"\n{file_name}:\n"})
-            block = get_file_content_block(file_dir, file_name)
-            if block is not None:
-                section.append(block)
-                no_files = False
+            _emit(str(member.parent), member.name)
 
     if no_files:
         section.append({"type": "text", "text": "None"})
@@ -282,6 +329,11 @@ def construct_judge_messages(
 
 
 def _is_retryable(error: Exception) -> bool:
+    # Timeouts on multimodal payloads are deterministic — the payload is too
+    # large for the judge endpoint to digest in time, and retrying just burns
+    # another full timeout window per attempt. Fail the trial fast instead.
+    if isinstance(error, APITimeoutError):
+        return False
     error_text = str(error).lower()
     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)
 
@@ -375,15 +427,21 @@ def run_trials(
     submission_b: list[dict],
     num_trials: int = 4,
     max_output_tokens: int = 65535,
+    return_raw_responses: bool = False,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
     ``tie_count``, and ``task_count``.
+
+    When ``return_raw_responses`` is True, the dict also carries
+    ``raw_responses``: a list of the per-trial judge completion strings,
+    ordered by trial index (so trial ``i`` was swapped iff ``i % 2 != 0``).
     """
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
+    raw_responses: list[str] = []
 
     for i in range(num_trials):
         swapped = i % 2 != 0
@@ -397,6 +455,8 @@ def run_trials(
             submission_b=current_b,
         )
         response_text = send_judge_request(client, model, messages, max_output_tokens)
+        if return_raw_responses:
+            raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
         win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
@@ -407,13 +467,16 @@ def run_trials(
     else:
         winner = TIE_RESPONSE
 
-    return {
+    result: dict = {
         "winner": winner,
         "win_count_a": win_count_a,
         "win_count_b": win_count_b,
         "tie_count": tie_count,
         "task_count": num_trials,
     }
+    if return_raw_responses:
+        result["raw_responses"] = raw_responses
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +494,87 @@ def calculate_elo(win_rate: float, ref_elo: float) -> tuple[float, float]:
     elo = ref_elo - 400.0 * (math.log10(1.0 - win_rate) - math.log10(win_rate))
     normalized_elo = (elo - 500.0) / 2000.0
     return elo, normalized_elo
+
+
+def calculate_mle_elo(
+    battles: list[tuple[float, float, float, float]],
+    scale: float = 400.0,
+    base: float = 10.0,
+) -> tuple[float, float] | None:
+    """Anchored Bradley-Terry MLE ELO for one eval model vs N fixed references.
+
+    This is the multi-reference generalization of ``calculate_elo``. It applies
+    the traditional ELO rating system (logistic / Bradley-Terry) to the pooled
+    pairwise comparisons, estimating the eval model's rating globally rather
+    than inverting a single win rate against a single anchor.
+
+    ``battles`` is a list of ``(reference_elo, wins, losses, ties)`` where the
+    counts are the eval model's win / loss / tie vote totals against that
+    reference model (ties counted as half a win). The reference ratings are
+    held **fixed** at their known ELOs (e.g. published Arena/AA numbers); the
+    eval model's rating ``R`` is the single free parameter, found by maximizing
+    the Bradley-Terry log-likelihood
+
+        L(R) = sum_i [ s_i * log(p_i) + (n_i - s_i) * log(1 - p_i) ]
+
+    with ``p_i = 1 / (1 + base**((reference_elo_i - R) / scale))``, ``n_i`` the
+    number of games vs reference ``i`` and ``s_i = wins_i + 0.5 * ties_i``.
+
+    For a single reference this reduces exactly to ``calculate_elo``. Returns
+    ``(elo, normalized_elo)`` with ``normalized_elo = (elo - 500) / 2000``, or
+    ``None`` when there are no games to fit.
+    """
+    data: list[tuple[float, float, float]] = []
+    for ref_elo, wins, losses, ties in battles:
+        n = float(wins) + float(losses) + float(ties)
+        if n <= 0:
+            continue
+        s = float(wins) + 0.5 * float(ties)
+        data.append((float(ref_elo), s, n))
+
+    if not data:
+        return None
+
+    total_s = sum(s for _, s, _ in data)
+    total_n = sum(n for _, _, n in data)
+    eps = 1e-3
+
+    overall_win_rate = total_s / total_n
+    if overall_win_rate <= eps or overall_win_rate >= 1.0 - eps:
+        # Degenerate: the eval model won (or lost) every battle, so the MLE
+        # rating diverges to ±inf. Clamp exactly like ``calculate_elo`` does,
+        # anchored to the game-weighted mean reference ELO.
+        clamped = min(max(overall_win_rate, eps), 1.0 - eps)
+        mean_ref = sum(ref_elo * n for ref_elo, _, n in data) / total_n
+        elo = mean_ref - scale * (math.log10(1.0 - clamped) - math.log10(clamped))
+        return elo, (elo - 500.0) / 2000.0
+
+    def gradient(rating: float) -> float:
+        # dL/dR up to the positive constant ln(base)/scale: sum_i (s_i - n_i*p_i).
+        # Strictly decreasing in ``rating``, so the root is unique.
+        total = 0.0
+        for ref_elo, s, n in data:
+            p = 1.0 / (1.0 + base ** ((ref_elo - rating) / scale))
+            total += s - n * p
+        return total
+
+    # gradient(lo) > 0 and gradient(hi) < 0 are guaranteed once the overall win
+    # rate is strictly inside (0, 1); bisect for the unique root.
+    lo = min(ref_elo for ref_elo, _, _ in data) - 4000.0
+    hi = max(ref_elo for ref_elo, _, _ in data) + 4000.0
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if gradient(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+    elo = 0.5 * (lo + hi)
+    return elo, (elo - 500.0) / 2000.0
+
+
+def predict_win_rate(eval_elo: float, ref_elo: float, scale: float = 400.0, base: float = 10.0) -> float:
+    """Expected eval-model win probability vs a reference at ``ref_elo``."""
+    return 1.0 / (1.0 + base ** ((ref_elo - eval_elo) / scale))
 
 
 def compute_comparison_reward(winner: str) -> float:

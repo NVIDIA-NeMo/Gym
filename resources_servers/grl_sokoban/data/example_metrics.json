@@ -1,0 +1,8 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/grl_sokoban/data/example.jsonl",
+    "gitlab_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5
+}

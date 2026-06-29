@@ -12,14 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import multiprocessing as mp
 from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from math_verify.errors import TimeoutException
 from pydantic import ValidationError
-from pytest import approx, fixture, raises
+from pytest import approx, fixture, raises, skip
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -37,7 +39,49 @@ from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
     LibraryJudgeMathVerifyRequest,
+    _run_math_verify,
 )
+
+
+def _geometric_series_terms(num_terms: int) -> str:
+    return "+".join("1" if exponent == 0 else f"x^{exponent}" for exponent in range(num_terms))
+
+
+def _verify_pathological_sympy_expression(result_connection: Any) -> None:
+    config = LibraryJudgeMathResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        should_use_judge=False,
+        library_verifier_timeout_seconds=1.0,
+        judge_model_server=ModelServerRef(
+            type="responses_api_models",
+            name="math_judge",
+        ),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    resources_server = LibraryJudgeMathResourcesServer(
+        config=config,
+        server_client=MagicMock(spec=ServerClient),
+    )
+    generated_answer = "\\boxed{\\frac{x^{800}-1}{x-1}-(" + _geometric_series_terms(800) + ")}"
+
+    try:
+        result_connection.send(asyncio.run(resources_server._verify_answer("question", "0", generated_answer)))
+    except BaseException as e:
+        result_connection.send(e)
+    finally:
+        result_connection.close()
+
+
+def _sleeping_library_verifier_process(result_connection: Any) -> None:
+    import time
+
+    try:
+        time.sleep(60)
+    finally:
+        result_connection.close()
 
 
 class TestApp:
@@ -308,38 +352,160 @@ class TestApp:
             second_judge_equal_item,
         )
 
-    def test_verify_answer_with_library(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+    def test_library_verifier_returns_promptly_for_pathological_sympy_expression(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This regression test requires fork to bound a stuck SymPy verifier.")
+
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_verify_pathological_sympy_expression, args=(child_connection,))
+        process.start()
+        child_connection.close()
+        process.join(timeout=2.0)
+
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+            raise AssertionError("library verifier did not return promptly for a real math_verify/SymPy expression")
+
+        assert process.exitcode == 0
+        if not result_connection.poll():
+            raise AssertionError("library verifier process exited without returning a result") from None
+        result = result_connection.recv()
+        result_connection.close()
+
+        if isinstance(result, BaseException):
+            raise result
+
+        reward, extracted_answer, library_reward, judge_evaluations = result
+        # This is a real SymPy/math_verify pathological case, so the exact result
+        # depends on whether it finishes before the subprocess timeout. The
+        # regression is that either outcome returns promptly instead of hanging.
+        assert reward == approx(0.0) or reward == approx(1.0)
+        assert extracted_answer is None or isinstance(extracted_answer, str)
+        assert library_reward == approx(reward)
+        assert judge_evaluations is None
+
+    async def test_library_verifier_process_is_cleaned_up_on_cancellation(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This cancellation test requires fork.")
+
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_sleeping_library_verifier_process, args=(child_connection,))
+        process.start()
+        child_connection.close()
+
+        try:
+            task = asyncio.create_task(
+                LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+                    process,
+                    result_connection,
+                    60.0,
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with raises(asyncio.CancelledError):
+                await task
+
+            assert not process.is_alive()
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+
+    async def test_library_verifier_process_is_cleaned_up_on_timeout(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This timeout test requires fork.")
+
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_sleeping_library_verifier_process, args=(child_connection,))
+        process.start()
+        child_connection.close()
+
+        try:
+            assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+                process,
+                result_connection,
+                0.01,
+            ) == (approx(0.0), None)
+            assert not process.is_alive()
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+
+    async def test_library_verifier_process_errors_return_zero_reward(self) -> None:
+        process = MagicMock()
+        process.is_alive.return_value = False
+        process.exitcode = 1
+        result_connection = MagicMock()
+
+        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+            process,
+            result_connection,
+            1.0,
+        ) == (approx(0.0), None)
+        result_connection.close.assert_called_once()
+
+        process = MagicMock()
+        process.is_alive.return_value = False
+        process.exitcode = 0
+        result_connection = MagicMock()
+        result_connection.poll.return_value = True
+        result_connection.recv.side_effect = EOFError()
+
+        assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
+            process,
+            result_connection,
+            1.0,
+        ) == (approx(0.0), None)
+        result_connection.close.assert_called_once()
+
+    async def test_verify_answer_with_library_async(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-        assert resources_server._verify_answer_with_library("4", "2 + 2 = \\boxed{4}") == (approx(1.0), "4")
-        assert resources_server._verify_answer_with_library("\\boxed{12}", "3 * 4 = \\boxed{12}") == (
+        assert await resources_server._verify_answer_with_library_async("4", "2 + 2 = \\boxed{4}") == (
+            approx(1.0),
+            "4",
+        )
+        assert await resources_server._verify_answer_with_library_async("\\boxed{12}", "3 * 4 = \\boxed{12}") == (
             approx(1.0),
             "12",
         )
-        assert resources_server._verify_answer_with_library("\\boxed{5}", "10 - 5 = \\boxed{5}") == (approx(1.0), "5")
-        assert resources_server._verify_answer_with_library("4.0", "2 + 2 = \\boxed{\\frac{8}{2}}") == (
+        assert await resources_server._verify_answer_with_library_async("\\boxed{5}", "10 - 5 = \\boxed{5}") == (
+            approx(1.0),
+            "5",
+        )
+        assert await resources_server._verify_answer_with_library_async("4.0", "2 + 2 = \\boxed{\\frac{8}{2}}") == (
             approx(1.0),
             "4",
         )
 
-        assert resources_server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13") == (approx(0.0), "13")
-        assert resources_server._verify_answer_with_library("17.001", "17") == (
+        assert await resources_server._verify_answer_with_library_async("\\boxed{12}", "3 * 4 = 13") == (
+            approx(0.0),
+            "13",
+        )
+        assert await resources_server._verify_answer_with_library_async("17.001", "17") == (
             approx(0.0),
             "17",
         )
 
-        assert resources_server._verify_answer_with_library("", "") == (
+        assert await resources_server._verify_answer_with_library_async("", "") == (
             approx(0.0),
             None,
         )
 
-        assert resources_server._verify_answer_with_library("3", "3") == (
+        assert await resources_server._verify_answer_with_library_async("3", "3") == (
             approx(1.0),
             "3",
         )
+
+    def test_run_math_verify_handles_timeout_exception(self) -> None:
         timeout_mock = MagicMock(side_effect=TimeoutException())
-        resources_server._library_verifier = timeout_mock
-        assert resources_server._verify_answer_with_library("3", "3") == (
+        assert _run_math_verify(timeout_mock, "3", "3") == (
             approx(0.0),
             None,
         )
@@ -581,8 +747,6 @@ class TestApp:
 # ──────────────────────────────────────────────────────────
 # Math metrics tests
 # ──────────────────────────────────────────────────────────
-
-from pytest import approx
 
 
 class TestComputeMetricsIntegration:

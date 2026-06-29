@@ -35,6 +35,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TextIO
 
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
 from stirrup.tools.code_backends.base import (
@@ -95,6 +96,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         self._temp_dir: Path | None = None
         self._patch: str | None = None
         self._stderr_log: Path | None = None
+        self._stderr_fh: TextIO | None = None
         self._has_timeout_cmd: bool = False
 
     def _serializable_kwargs(self) -> dict:
@@ -128,17 +130,27 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             mount_args.append(extra)
         mount_str = " ".join(mount_args)
 
+        # NOTE: ``HOME`` inside the container is set via the ``--home`` flag
+        # (not ``--env HOME=...``). Apptainer 1.4+ rejects setting HOME via
+        # ``--env`` because that flag forwards values through the
+        # ``APPTAINERENV_HOME`` mechanism, which it explicitly disallows for
+        # HOME with a startup-time stderr warning. That warning is harmless
+        # in isolation but our ``echo ready`` health-check below treats any
+        # non-empty stderr as fatal, so the agent fails to enter the shell
+        # even though apptainer would otherwise run fine. ``--home`` is the
+        # supported way to set ``$HOME`` in the container.
         env_args = " ".join(
             f"--env {var}={shlex.quote(os.environ.get(var, ''))}"
             for var in self._env_passthrough
             if os.environ.get(var)
         )
-        env_section = f"--env HOME=/root {env_args}" if env_args else "--env HOME=/root"
+        env_section = env_args
 
         exec_cmd = (
             f"apptainer exec "
             f"--writable-tmpfs --cleanenv --pid "
             f"--no-mount home,tmp,bind-paths "
+            f"--home /root "
             f"{env_section} "
             f"{mount_str} "
             f"{shlex.quote(self._sif_path)} "
@@ -150,42 +162,76 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             exec_cmd = f"ulimit -v {memory_kb} && {exec_cmd}"
 
         self._stderr_log = self._temp_dir / "apptainer_stderr.log"
-        stderr_fh = open(self._stderr_log, "w")
+        self._stderr_fh = open(self._stderr_log, "w")
 
         self._process = await asyncio.create_subprocess_shell(
             exec_cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=stderr_fh,
+            stderr=self._stderr_fh,
         )
 
-        # Verify the shell is alive by running a trivial command
-        rc, _, _ = await self._exec("echo ready", timeout=30)
-        if rc != 0:
-            appt_stderr = ""
-            if self._stderr_log and self._stderr_log.exists():
-                appt_stderr = self._stderr_log.read_text(errors="replace")[:2000]
-            raise RuntimeError(f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}")
+        # __aexit__ is skipped when __aenter__ raises, so a readiness failure
+        # here must release the subprocess, stderr handle, and temp dir itself.
+        try:
+            # Verify the shell is alive by running a trivial command
+            rc, _, _ = await self._exec("echo ready", timeout=30)
+            if rc != 0:
+                appt_stderr = ""
+                if self._stderr_log and self._stderr_log.exists():
+                    appt_stderr = self._stderr_log.read_text(errors="replace")[:2000]
+                raise RuntimeError(f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}")
 
-        # Mark all directories as safe for git (needed because --cleanenv
-        # strips the environment, and the container user may differ from the
-        # owner of /testbed).
-        await self._exec("git config --global --add safe.directory '*'", timeout=10)
+            # Mark all directories as safe for git (needed because --cleanenv
+            # strips the environment, and the container user may differ from the
+            # owner of /testbed).
+            await self._exec("git config --global --add safe.directory '*'", timeout=10)
 
-        # Check if GNU `timeout` is available for per-command time limits.
-        # When present, each command is wrapped so that a hung command is
-        # killed by the OS instead of blocking all subsequent commands on the
-        # shared stdin/stdout stream.
-        rc_to, _, _ = await self._exec("command -v timeout >/dev/null 2>&1", timeout=5)
-        self._has_timeout_cmd = rc_to == 0
-        if not self._has_timeout_cmd:
-            logger.warning(
-                "timeout command not found in container — "
-                "in-shell time limits disabled; hung commands will block the stream"
-            )
+            # Check if GNU `timeout` is available for per-command time limits.
+            # When present, each command is wrapped so that a hung command is
+            # killed by the OS instead of blocking all subsequent commands on the
+            # shared stdin/stdout stream.
+            rc_to, _, _ = await self._exec("command -v timeout >/dev/null 2>&1", timeout=5)
+            self._has_timeout_cmd = rc_to == 0
+            if not self._has_timeout_cmd:
+                logger.warning(
+                    "timeout command not found in container — "
+                    "in-shell time limits disabled; hung commands will block the stream"
+                )
+        except BaseException:
+            await self._cleanup_failed_start()
+            raise
 
         logger.info("Started Apptainer shell (pid=%s) from %s", self._process.pid, self._sif_path)
         return self.get_code_exec_tool()
+
+    async def _cleanup_failed_start(self) -> None:
+        """Tear down a partially-started session: terminate -> wait -> kill ->
+        wait the shell, close the stderr log handle, and remove the temp dir."""
+        proc = self._process
+        if proc is not None and proc.returncode is None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+        self._process = None
+
+        if self._stderr_fh is not None:
+            try:
+                self._stderr_fh.close()
+            finally:
+                self._stderr_fh = None
+
+        if self._temp_dir is not None and self._temp_dir.exists():
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+        self._temp_dir = None
 
     async def __aexit__(
         self,
@@ -261,6 +307,12 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             f"(len={len(self._patch) if self._patch else 0})",
             flush=True,
         )
+
+        if self._stderr_fh is not None:
+            try:
+                self._stderr_fh.close()
+            finally:
+                self._stderr_fh = None
 
         if self._temp_dir and self._temp_dir.exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)

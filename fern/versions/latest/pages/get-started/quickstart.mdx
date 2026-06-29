@@ -1,132 +1,140 @@
 ---
 title: "Quickstart"
-description: ""
-position: 2
----
-This is the quickstart—get running in under 5 minutes. For a more detailed walkthrough, see the [Detailed Setup Guide](/latest/get-started/detailed-setup).
-
-## Before You Start
-
-Make sure you have these prerequisites ready:
-
-- **Git** for cloning the repository
-- **OpenAI API key** with available credits (requires ~$0.01-0.10 for all tutorials)
-
+description: "Run your first agent evaluation with NeMo Gym."
+position: 3
 ---
 
-## Quickstart
+<Info>
+See [Installation](/get-started/installation) if you need to install NeMo Gym.
+</Info>
 
-Follow the tabs sequentially to install NeMo Gym, start the servers, and collect your first verified rollouts for RL training.
+<Tip>
+Working with an AI coding assistant? NeMo Gym ships [Agent Skills](/contribute/agent-skills) — vetted workflows for tasks like adding benchmarks, debugging rollouts, and editing docs.
+</Tip>
 
-<Tabs>
-<Tab title="1. Set Up">
+## Configure Your Model
 
-**Install NeMo Gym**
+Create an `env.yaml` file in the project root with your model endpoint credentials:
 
-Get NeMo Gym installed and ready to use:
+```yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: <your-openai-api-key>
+policy_model_name: gpt-4.1-2025-04-14
+```
+
+<Note>
+This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](/model-server) for vLLM, Fireworks, OpenRouter, and others.
+</Note>
+
+## Run Evaluation
+
+Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) with the [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) (multiple-choice Q&A) environment and its included example data.
+
+**1. Start servers**
+
+NeMo Gym uses local servers to coordinate your model, agent, and task verification. Start them first:
 
 ```bash
-# Clone the repository
-git clone git@github.com:NVIDIA-NeMo/Gym.git
-cd Gym
+gym env start \
+    --resources-server mcqa \
+    --model-type openai_model
+```
 
-# Install UV (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
+You should see three server instances starting:
 
-# Create virtual environment
-uv venv --python 3.12
+```text
+[1] mcqa (resources_servers/mcqa)
+[2] mcqa_simple_agent (responses_api_agents/simple_agent)
+[3] policy_model (responses_api_models/openai_model)
+```
+
+**2. Evaluate your agent**
+
+In a new terminal, run your agent on a single task to verify everything works:
+
+```bash
 source .venv/bin/activate
 
-# Install NeMo Gym
-uv sync --extra dev --group docs
+gym eval run --no-serve \
+    --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl \
+    --limit 5 \
+    --num-repeats 1
 ```
 
-**Configure Your API Key**
+You should see a progress bar followed by aggregate metrics:
 
-Create an `env.yaml` file that contains your OpenAI API key and the **Policy Model** you want to use. Replace `your-openai-api-key` with your actual key. This file helps keep your secrets out of version control while still making them available to NeMo Gym.
+```text
+Collecting rollouts: 100%|██████| 5/5 [01:22<00:00, 16.44s/it]
+
+Key metrics for mcqa_simple_agent:
+{
+    "mean/reward": 0.8,
+    "pass@1[avg-of-1]/accuracy": 80.0,
+    "pass@1/accuracy": 80.0
+}
+Finished rollout collection! View results at:
+Fully materialized inputs: results/mcqa_rollouts_materialized_inputs.jsonl
+Rollouts: results/mcqa_rollouts.jsonl
+Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
+```
+
+For per-task pass rates, see `gym eval profile` in the [CLI Reference](/reference/cli-commands).
+
+## Explore
+
+Now that you have a working setup, explore what's available.
+
+NeMo Gym ships with environments across many domains. You can use these existing environments in addition to building your own.
 
 ```bash
-echo "policy_base_url: https://api.openai.com/v1
-policy_api_key: your-openai-api-key
-policy_model_name: gpt-4.1-2025-04-14" > env.yaml
+gym list benchmarks
 ```
 
-> **Note:** We use GPT-4.1 in this quickstart because it provides low latency (no reasoning step) and works reliably out-of-the-box. NeMo Gym is **not limited to OpenAI models**—you can use self-hosted models via vLLM or any OpenAI-compatible inference server that supports function calling. Refer to the [Detailed Setup Guide](/latest/get-started/detailed-setup) for details.
+```text
+Available benchmarks in NeMo Gym
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Benchmark name   ┃ Agent name                        ┃ Num repeats ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ aalcr            │ aalcr_benchmark_simple_agent      │ 16          │
+│ aime25           │ aime25_math_with_judge_simple_ag… │ 32          │
+│ browsecomp       │ browsecomp_tavily_search_simple_… │ 1           │
+│ gpqa             │ gpqa_mcqa_simple_agent            │ 8           │
+│ ifbench          │ ifbench_benchmark_simple_agent    │ 5           │
+| ...              | ...                               | ...         |
+│ tau2             │ tau2_benchmark_agent              │ 8           │
+│ xstest           │ xstest_benchmark_simple_agent     │ 4           │
+└──────────────────┴───────────────────────────────────┴─────────────┘
+```
 
-</Tab>
+This lists benchmarks with pre-configured agents. For the full set of environments (including training environments), see the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table.
 
-<Tab title="2. Start Servers">
-
-**Terminal 1** (start servers):
+Every CLI command supports `-h` or `--help` for detailed usage information:
 
 ```bash
-# Start servers (this will keep running)
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym --help
+gym env start --help
 ```
-
-**Terminal 2** (interact with agent):
-
-```bash
-# In a NEW terminal, activate environment
-source .venv/bin/activate
-
-# Interact with your agent
-python responses_api_agents/simple_agent/client.py
-```
-
-</Tab>
-
-<Tab title="3. Collect Rollouts">
-
-**Terminal 2** (keep servers running in Terminal 1):
-
-```bash
-# Create a simple dataset with one query
-echo '{"responses_create_params":{"input":[{"role":"developer","content":"You are a helpful assistant."},{"role":"user","content":"What is the weather in Seattle?"}]}}' > weather_query.jsonl
-
-# Collect verified rollouts
-ng_collect_rollouts \
-    +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=weather_query.jsonl \
-    +output_jsonl_fpath=weather_rollouts.jsonl
-
-# View the result
-cat weather_rollouts.jsonl | python -m json.tool
-```
-
-This generates training data with verification scores!
-
-</Tab>
-
-<Tab title="4. Clean Up Servers">
-
-**Terminal 1** with the running servers: Ctrl+C to stop the `ng_run` process.
-
-</Tab>
-</Tabs>
 
 ## Next Steps
 
-Now that you can generate rollouts, choose your path:
-
 <Cards>
 
-<Card title="Start Training" href="/latest/training-tutorials">
-
-Train models using NeMo Gym with your preferred RL framework.
+<Card title="Browse Environments" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+Browse available environments for evaluation and training.
 </Card>
 
-<Card title="Use an Existing Environment" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
-
-Explore environments available for training and evaluation.
+<Card title="Agents" href="/agent-server">
+Explore available agent harnesses and learn how to integrate your own agent.
 </Card>
 
-<Card title="Build a Custom Environment" href="/latest/environment-tutorials">
+<Card title="Training" href="/training-tutorials">
+Improve your agent or model with RL or fine-tuning.
+</Card>
 
-Implement or integrate existing tools and define task verification logic.
+<Card title="Build Custom Environments" href="/environment-tutorials">
+Create your own evaluation or training environments.
 </Card>
 
 </Cards>
