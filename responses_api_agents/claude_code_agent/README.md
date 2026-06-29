@@ -142,6 +142,55 @@ The agent defaults to a plain `bare` CLI call for simplicity and reproducibility
 
 The per-run `CLAUDE_CONFIG_DIR` is created fresh for each request and removed afterward, so opted-in content is staged per rollout and does not leak between runs. This is the staging seam reused by skills evaluation (placing skills under `CLAUDE_CONFIG_DIR/skills/`).
 
+## Skills evaluation
+
+Skills are evaluated as a run-level variable, not a dataset field — the same skill-agnostic dataset is reused across skill variants (mirroring how `prompt_config` works). You point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `ng_collect_rollouts`, and the agent stages them into each request's `CLAUDE_CONFIG_DIR/skills/` so Claude Code's native discovery picks them up. When skills are present, `--bare` is forced off for that request regardless of the `bare` config.
+
+Expected layout (each skill is a directory with a `SKILL.md`):
+
+```
+skills/variant_a/
+├── cot_enhanced/
+│   └── SKILL.md
+├── tool_focused/
+│   ├── SKILL.md
+│   └── references/
+│       └── api_spec.md
+└── baseline/
+    └── SKILL.md
+```
+
+Compare two variants over the same dataset by changing only `skills.path`:
+
+```bash
+ng_collect_rollouts +agent_name=reasoning_gym_claude_code_agent \
+    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
+    +output_jsonl_fpath=rollouts_variant_a.jsonl \
+    +skills.path=skills/variant_a/
+
+ng_collect_rollouts +agent_name=reasoning_gym_claude_code_agent \
+    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
+    +output_jsonl_fpath=rollouts_variant_b.jsonl \
+    +skills.path=skills/variant_b/
+```
+
+Each rollout result is stamped with a `skills_ref` for provenance and grouping during reward profiling:
+
+```json
+{
+  "reward": 1.0,
+  "skills_ref": {
+    "path": "skills/variant_a/",
+    "hash": "a1b2c3…",
+    "skills": [{"name": "cot_enhanced", "description": "..."}]
+  }
+}
+```
+
+`hash` is a content digest of the skill directory, so optimizer loops (e.g. ACE, GEPA, EvoSkill) that mutate a skill **in place** at the same path still produce distinguishable variants. For concurrent candidate evaluation, give each candidate its own directory (`skills/cand-0/`, `skills/cand-1/`, …) to avoid a path-reuse read/write race.
+
+The skills path is resolved like `input_jsonl_fpath` (relative paths check the working directory, then the Gym root). For distributed runs the directory must be on storage accessible to the agent process.
+
 ## Limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.

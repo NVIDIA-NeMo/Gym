@@ -38,6 +38,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
@@ -51,6 +52,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+from nemo_gym.skills import SkillsConfig, load_skill_directory
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    skills: Optional[SkillsConfig] = Field(
+        default=None,
+        description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
+    )
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
@@ -268,6 +274,17 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
+        # Resolve skills once for the whole run (hash is content-derived, computed at startup).
+        skills_ref_dict = None
+        if config.skills:
+            skills_ref = load_skill_directory(config.skills.path)
+            skills_ref_dict = skills_ref.model_dump()
+            print(
+                f"Using skills from {config.skills.path} "
+                f"(hash={skills_ref.hash}, {len(skills_ref.skills)} skill(s): "
+                f"{', '.join(s.name for s in skills_ref.skills)})"
+            )
+
         _input_path = Path(config.input_jsonl_fpath)
         if not _input_path.is_absolute():
             _cwd_path = Path.cwd() / _input_path
@@ -304,6 +321,11 @@ class RolloutCollectionHelper(BaseModel):
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
             )
+
+            # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
+            # /run request body and propagated to results. The source dataset stays untouched.
+            if skills_ref_dict is not None:
+                row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
             # Resolve task index. Honor a caller-provided value when present (e.g. when an
             # upstream slicer has stamped a globally-stable index across chunks so that
@@ -467,6 +489,8 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if SKILLS_REF_KEY_NAME in row:
+                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
