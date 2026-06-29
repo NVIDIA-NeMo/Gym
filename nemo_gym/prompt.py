@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from nemo_gym import resolve_under_cwd_or_install
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
 
@@ -36,16 +36,6 @@ class PromptConfig(BaseModel):
 
     user: str
     system: Optional[str] = None
-
-
-def _resolve_path(path: str) -> Path:
-    """Resolve a prompt-config path: cwd first (the user's project), then the Gym install root.
-
-    Consistent with ``config_paths`` resolution. Resolving cwd first lets a user pass a relative
-    ``--prompt-config`` from their own project, while built-in prompt YAMLs still resolve by their
-    repo-relative path from any cwd (e.g. a wheel install).
-    """
-    return resolve_under_cwd_or_install(path)
 
 
 @lru_cache(maxsize=64)
@@ -59,7 +49,7 @@ def load_prompt_config(path: str) -> PromptConfig:
     Each value is a string template with ``{placeholder}`` syntax.
     Results are cached so the same file is only parsed once.
     """
-    resolved = _resolve_path(path)
+    resolved = _resolve_under_cwd_or_install(path)
     with open(resolved) as f:
         data = yaml.safe_load(f)
     return PromptConfig.model_validate(data)
@@ -127,7 +117,7 @@ def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str)
         output_jsonl: Path to write materialized JSONL (with responses_create_params.input).
     """
     prompt_cfg = load_prompt_config(prompt_config)
-    resolved_prompt_path = str(_resolve_path(prompt_config))
+    resolved_prompt_path = str(_resolve_under_cwd_or_install(prompt_config))
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

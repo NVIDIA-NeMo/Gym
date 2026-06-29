@@ -21,7 +21,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
-from nemo_gym import resolve_under_cwd_or_install
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
@@ -577,7 +577,7 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if Path(filename) == resolve_under_cwd_or_install(
+            if Path(filename) == _resolve_under_cwd_or_install(
                 "resources_servers/example_multi_step/data/example.jsonl"
             ):
                 return original_open(filename, mode)

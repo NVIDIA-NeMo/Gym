@@ -25,7 +25,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
 
-from nemo_gym import resolve_under_cwd_or_install
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
@@ -427,7 +427,7 @@ class TrainDataProcessor(BaseModel):
             for d in c.datasets:
                 # Read check: a built-in dataset path resolves under the install root too, so a
                 # bundled example dataset counts as "found" (no download) from an external cwd.
-                jsonl_fpath = resolve_under_cwd_or_install(d.jsonl_fpath)
+                jsonl_fpath = _resolve_under_cwd_or_install(d.jsonl_fpath)
                 if jsonl_fpath.exists():
                     local_datasets_found[c.name].append(d)
                 else:
@@ -526,7 +526,7 @@ class TrainDataProcessor(BaseModel):
             )
 
         # Don't load everything into memory at once. Throw things away immediately.
-        with open(resolve_under_cwd_or_install(dataset_config.jsonl_fpath)) as f:
+        with open(_resolve_under_cwd_or_install(dataset_config.jsonl_fpath)) as f:
             for line in tqdm(f, desc=f"{dataset_config.jsonl_fpath}"):
                 for _ in range(repeats):
                     yield line

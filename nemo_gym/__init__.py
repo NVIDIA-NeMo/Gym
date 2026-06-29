@@ -38,7 +38,7 @@ RESULTS_DIR = WORKING_DIR / "results"
 sys.path.append(str(PARENT_DIR))
 
 
-def resolve_under_cwd_or_install(path) -> Path:
+def _resolve_under_cwd_or_install(path) -> Path:
     """Resolve a possibly-relative path for *reading* a built-in or user-supplied file.
 
     Absolute paths are returned unchanged. A relative path is tried first under the current working
