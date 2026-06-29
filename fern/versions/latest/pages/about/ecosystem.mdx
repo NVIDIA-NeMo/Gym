@@ -3,7 +3,9 @@ title: "Ecosystem"
 description: "How NeMo Gym fits within the NVIDIA NeMo platform and the broader agentic ecosystem."
 position: 3
 ---
-NeMo Gym is one of several specialized libraries in the NVIDIA NeMo platform. While NeMo RL handles post-training and NeMo Evaluator runs benchmark evaluations, NeMo Gym focuses on the *environments* agents act in — pairing a dataset, agent harness, and verifier so the same environment can drive both evaluation and training.
+NeMo Gym is one of several specialized libraries in the NVIDIA NeMo platform. Alongside NeMo RL for
+post-training, NeMo Gym focuses on the *environments* agents act in — pairing a dataset, agent harness, and
+verifier so the same environment can drive both evaluation and training.
 
 <Tip>
 For what NeMo Gym does and when to use it, see the [Overview](/about) and [What NeMo Gym Provides](/about#what-nemo-gym-provides). For how environments are implemented as composable servers, see [Architecture](/about/architecture).
@@ -18,20 +20,8 @@ NVIDIA NeMo is a GPU-accelerated platform for training generative AI models and 
 - **NeMo Curator**: Prepares, filters, and deduplicates training data at scale.
 - **NeMo Gym**: Defines the environments — dataset, agent harness, and verifier — that agents are evaluated and trained in *(this library)*.
 - **NeMo RL**: Runs scalable post-training (GRPO, DPO, and SFT) against those environments.
-- **NeMo Evaluator**: Benchmarks model quality across standard evaluations.
 
 **NeMo Gym's role**: NeMo Gym is where a task becomes an interactive environment. It standardizes how an agent interacts with the world (the agent harness), how task completion is scored (the verifier), and how per-task state is isolated — producing the rollouts and reward signals that training frameworks like NeMo RL consume, and the consistent scoring that evaluation depends on.
-
-## Choosing Between NeMo Gym and NeMo Evaluator
-
-Readers often compare these libraries because both touch evaluation, but they solve nearby problems at different layers.
-
-| Aspect | NeMo Gym | NeMo Evaluator |
-| --- | --- | --- |
-| **Primary focus** | Interactive environments — including multi-turn, tool-using agentic tasks — scored by a verifier | Standardized model evaluation and benchmarking |
-| **Use it to** | Evaluate *and* improve (via RL or SFT) agents in interactive environments | Benchmark model quality across established evaluations |
-| **Produces** | Rollouts and reward signals usable for both evaluation and training | Benchmark scores and reports |
-| **When to use** | You need agentic, tool-calling tasks, or evaluation data that doubles as RL training signal | You need apples-to-apples scores on standard model benchmarks |
 
 ## Environment Libraries
 
