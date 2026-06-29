@@ -601,3 +601,4 @@ lines-after-imports = 2
 quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
