@@ -16,11 +16,14 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
+import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -37,6 +40,14 @@ from responses_api_agents.claude_code_agent.app import (
     _extract_instruction,
     parse_stream_json,
 )
+
+
+def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
+    skills_dir = root / "variant_a"
+    skill = skills_dir / name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A skill.\n---\n# Body\n")
+    return skills_dir
 
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
@@ -125,6 +136,17 @@ class TestBuildCommand:
         cmd = agent._build_command("m", "x", mcp_config="/tmp/dynamic.json")
         assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/dynamic.json"
 
+    def test_skills_active_forces_bare_off(self) -> None:
+        # Default config has bare=True, but staged skills must be discoverable, so --bare is dropped.
+        agent = _make_agent()
+        cmd = agent._build_command("m", "x", skills_active=True)
+        assert "--bare" not in cmd
+
+    def test_skills_inactive_keeps_bare(self) -> None:
+        agent = _make_agent()
+        cmd = agent._build_command("m", "x", skills_active=False)
+        assert "--bare" in cmd
+
     def test_optional_flags_threaded_through(self) -> None:
         agent = _make_agent(
             allowed_tools="Bash,Read",
@@ -184,6 +206,109 @@ class TestSetupConfigDir:
 
             _shutil.rmtree(config_dir, ignore_errors=True)
 
+    def test_stages_skills_into_config_dir(self, tmp_path: Path) -> None:
+        skills_dir = _write_skill_dir(tmp_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()
+        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+            config_dir = agent._setup_config_dir(skills_path=str(skills_dir))
+        try:
+            assert (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
+        finally:
+            import shutil as _shutil
+
+            _shutil.rmtree(config_dir, ignore_errors=True)
+
+
+class _FakeHttpResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.cookies: dict = {}
+        self.ok = True
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self._payload)
+
+
+def _gym_response(text: str = "done") -> dict:
+    return {
+        "id": "resp_x",
+        "created_at": 0.0,
+        "model": "claude-sonnet-4-6",
+        "object": "response",
+        "output": [
+            {
+                "id": "msg_x",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "usage": {
+            "input_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 2,
+        },
+    }
+
+
+class TestRunForwardsSkillsPath:
+    """run() reads skills_ref off the request's model_extra (extra='allow') and forwards its path
+    directly to _create_response/_run_claude_code."""
+
+    def _seed_and_verify_post(self):
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            if url_path == "/verify":
+                return _FakeHttpResp(
+                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
+                )
+            return _FakeHttpResp({})
+
+        return AsyncMock(side_effect=_post)
+
+    def _run(self, agent: ClaudeCodeAgent, body: ClaudeCodeAgentRunRequest, run_claude_code: AsyncMock):
+        agent.server_client.post = self._seed_and_verify_post()
+        req = MagicMock()
+        req.cookies = {}
+        # Stub the CLI invocation; _create_response still runs for real, so we exercise the full
+        # run() -> _create_response -> _run_claude_code argument threading.
+        with patch.object(
+            ClaudeCodeAgent,
+            "_run_claude_code",
+            run_claude_code,
+        ):
+            return asyncio.run(agent.run(req, body))
+
+    def test_skills_ref_path_forwarded(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6"))
+        body = ClaudeCodeAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": []},
+                SKILLS_REF_KEY_NAME: {"path": "skills/variant_a/", "hash": "abc123", "skills": []},
+            }
+        )
+
+        self._run(agent, body, run_claude_code)
+
+        assert run_claude_code.call_args.kwargs["skills_path"] == "skills/variant_a/"
+
+    def test_no_skills_ref_forwards_none(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6"))
+        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+
+        self._run(agent, body, run_claude_code)
+
+        assert run_claude_code.call_args.kwargs["skills_path"] is None
+
 
 class TestRunClaudeCode:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
@@ -221,6 +346,49 @@ class TestRunClaudeCode:
         assert not Path(captured["config_dir"]).exists()
         assert "result" in stdout
         assert model == "claude-sonnet-4-6"
+
+    def test_skills_staged_and_bare_dropped(self, tmp_path: Path) -> None:
+        skills_dir = _write_skill_dir(tmp_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()  # bare defaults to True
+        captured: dict = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+            captured["cmd"] = list(cmd)
+            captured["skill_staged"] = (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hello", skills_path=str(skills_dir)))
+
+        assert captured["skill_staged"] is True
+        # skills present => --bare must be dropped even though config.bare is True
+        assert "--bare" not in captured["cmd"]
+
+    def test_bad_skills_path_does_not_leak_config_dir(self, tmp_path: Path) -> None:
+        # stage_skills raises for a missing skills dir; the partially-created config dir must
+        # still be cleaned up (setup happens inside the try whose finally rmtree's it).
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()
+
+        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+            with pytest.raises(ValueError):
+                asyncio.run(agent._run_claude_code("hello", skills_path=str(tmp_path / "does_not_exist")))
+
+        leaked = home / ".claude_code_agent"
+        assert not leaked.exists() or not any(leaked.iterdir())
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
@@ -357,7 +525,7 @@ class TestRolloutMCPConfig:
 
         captured: dict = {}
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None):
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
@@ -413,7 +581,7 @@ class TestRolloutMCPConfig:
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None):
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
             captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
                 "headers"
             ]["X-NeMo-Gym-Session-Token"]
