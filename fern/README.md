@@ -60,9 +60,8 @@ fern/
 ├── versions/
 │   ├── main.yml              # Nav for the bleeding-edge train — paths point at ./latest/pages/
 │   ├── latest/pages/         # Bleeding-edge MDX content (edited on every PR; published at /main/...)
-│   ├── v0.2.1.yml            # Nav for the frozen 0.2.1 GA snapshot — paths point at ./v0.2.1/pages/
-│   ├── v0.2.1/pages/         # Frozen 0.2.1 content (back-ports only)
-│   └── latest.yml            # GA alias — symlink to v0.2.1.yml; retargeted at next GA cut
+│   ├── v<release>.yml        # Nav for each frozen GA snapshot — paths point at ./v<release>/pages/
+│   └── v<release>/pages/     # Frozen GA content (back-ports only)
 └── product-docs/             # GENERATED Python API reference (gitignored — `npm run generate:library` rebuilds)
 ```
 
@@ -70,11 +69,11 @@ fern/
 File path                                              Published URL
 ─────────────────────────────────────────────────────  ─────────────────────────────────────────────────
 fern/versions/latest/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/main/get-started/quickstart
-fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/v0.2.1/get-started/quickstart
-                                                       docs.nvidia.com/nemo/gym/latest/get-started/quickstart  (latest aliases v0.2.1)
+fern/versions/v<release>/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/v<release>/get-started/quickstart
+docs.nvidia.com/nemo/gym/latest/get-started/quickstart      redirects to docs.nvidia.com/nemo/gym/main/get-started/quickstart
 ```
 
-The folder name `latest/` is historical — it holds the **bleeding-edge** tree and is mounted under the `main` slug via `main.yml`. `v0.2.1/pages/` is the frozen GA snapshot, only changed via deliberate back-port. `latest.yml` is a symlink to `v0.2.1.yml` so `/latest/...` URLs serve the current GA — at the next GA cut, the symlink retargets to the new train.
+The folder name `latest/` is historical — it holds the **bleeding-edge** tree and is mounted under the `main` slug via `main.yml`. Versioned folders are frozen GA snapshots, only changed via deliberate back-port. There is no `latest` Fern version; legacy `/latest/...` URLs are handled by redirects in `docs.yml`.
 
 ## Local development
 
@@ -134,10 +133,10 @@ Use **version-prefixed paths** matching the slug of the tree the page lives in:
 
 ```mdx
 [Quickstart](/main/get-started/quickstart)        // links inside versions/latest/pages/
-[Quickstart](/v0.2.1/get-started/quickstart)      // links inside versions/v0.2.1/pages/
+[Quickstart](/v<release>/get-started/quickstart)  // links inside versions/v<release>/pages/
 ```
 
-Cross-version links (e.g. from a `main/` page to a `v0.2.1/` page) trigger broken-link warnings in `fern docs dev`; those are **false positives** — Fern's local validator does not resolve cross-version slugs from `docs.yml`. The published site renders them correctly.
+Cross-version links (for example, from a `main/` page to a versioned GA page) trigger broken-link warnings in `fern docs dev`; those are **false positives** — Fern's local validator does not resolve cross-version slugs from `docs.yml`. The published site renders them correctly.
 
 ### Cross-repo references (yaml configs, source files)
 
@@ -149,22 +148,22 @@ Repository source paths like `resources_servers/example_single_tool_call/...` or
 
 ## Versioning
 
-`docs.yml` `versions:` lists three entries:
+`docs.yml` `versions:` is the source of truth for the current published version list. It follows this pattern:
 
 | display-name | slug | availability | path |
 |---|---|---|---|
-| `Latest` | `latest` | `stable` | `./versions/latest.yml` (symlink → `v0.2.1.yml`) |
-| `Main` | `main` | `beta` | `./versions/main.yml` |
-| `0.2.1` | `v0.2.1` | `stable` | `./versions/v0.2.1.yml` |
+| `Main` | `main` | beta or default | `./versions/main.yml` |
+| current GA | `v<release>` | `stable` | `./versions/v<release>.yml` |
+| supported older GA | `v<older-release>` | `stable` | `./versions/v<older-release>.yml` |
 
-**`main` is the bleeding-edge tree** — every PR lands in `versions/latest/pages/` and publishes under the `main` slug. **`v0.2.1` is the frozen GA snapshot** with its own copy of every page; it only changes via deliberate back-port from `main`. `latest.yml` is a symlink to the current GA's yml (today: `v0.2.1.yml`), so `/latest/...` URLs serve the GA.
+**`main` is the bleeding-edge tree** — ordinary docs PRs land in `versions/latest/pages/` and publish under the `main` slug. **Versioned `v<release>/` folders are frozen GA snapshots** with their own copy of every page; change them only by deliberate back-port. Legacy `/latest/...` URLs are redirects in `docs.yml`, not a mounted version.
 
-When the next GA cuts (e.g. `v0.3.0`):
+When the next GA cuts (for example, `v0.4.0`):
 
-1. `cp -r versions/latest versions/v0.3.0` — fresh frozen snapshot of the bleeding-edge tree
-2. `cp versions/main.yml versions/v0.3.0.yml`, then rewrite `./latest/` path prefixes to `./v0.3.0/`
-3. Retarget the GA alias symlink: `cd versions && ln -sfn v0.3.0.yml latest.yml`
-4. Add the new frozen-pin entry to `docs.yml` `versions:` (`display-name: "0.3.0"`, `slug: v0.3.0`, `availability: stable`); demote/remove the previous GA snapshot per the support policy
+1. `cp -r versions/latest versions/v0.4.0` — fresh frozen snapshot of the bleeding-edge tree
+2. `cp versions/main.yml versions/v0.4.0.yml`, then rewrite `./latest/` path prefixes to `./v0.4.0/`
+3. Add the new frozen-pin entry to `docs.yml` `versions:` (`display-name: "0.4.0"`, `slug: v0.4.0`, `availability: stable`); demote/remove previous GA snapshots per the support policy
+4. Keep the `/latest` redirect rules in `docs.yml` pointed at the intended legacy target, currently `/main`
 5. `versions/latest/pages/` keeps moving forward as the bleeding-edge tree
 
 See [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.

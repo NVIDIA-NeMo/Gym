@@ -35,7 +35,7 @@ A multi-reward verifier is a normal resources server with one change to what `ve
 Skip if you already have one. Otherwise generate the app, config, and test layout:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_server
+gym env init --resources-server my_server
 ```
 
 ### 2. Subclass `BaseVerifyResponse` to add `reward_components`
@@ -152,14 +152,14 @@ See [`resources_servers/example_tool_call_multireward/app.py`](https://github.co
 Collect rollouts as with any other environment:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/example_tool_call_multireward/configs/example_tool_call_multireward.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server example_tool_call_multireward
 
-ng_collect_rollouts +agent_name=example_tool_call_multireward_simple_agent \
-    +input_jsonl_fpath=resources_servers/example_tool_call_multireward/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/example_tool_call_multireward/data/example_rollouts.jsonl \
-    +limit=null +num_repeats=null +num_samples_in_parallel=null
+gym eval run --no-serve --agent example_tool_call_multireward_simple_agent \
+    --input resources_servers/example_tool_call_multireward/data/example.jsonl \
+    --output resources_servers/example_tool_call_multireward/data/example_rollouts.jsonl \
+    --limit null --num-repeats null --concurrency null
 ```
 
 Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
