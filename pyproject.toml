@@ -329,6 +329,12 @@ exclude-dependencies = [
 ]
 
 [tool.setuptools.package-data]
+# The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
+# benchmarks, environments — all under [tool.setuptools.packages.find]) ship their configs, READMEs,
+# and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
+# files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
+# train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
+# Only nemo_gym's own non-package resource scripts need an explicit entry here.
 nemo_gym = ["resources/*.py"]
 
 [tool.setuptools.dynamic]
@@ -445,6 +451,8 @@ include = [
     "responses_api_agents.*",
     "responses_api_models",
     "responses_api_models.*",
+    "environments",
+    "environments.*",
     "nemo_gym",
     "nemo_gym.*",
 ]

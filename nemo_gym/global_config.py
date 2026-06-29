@@ -38,8 +38,10 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AlmostServerError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerInstanceConfig,
@@ -509,7 +511,7 @@ For example, on the command line:
             # absent key still errors clearly.
             node = dict_config._get_node(k) if isinstance(dict_config, DictConfig) else None
             if node is None:
-                raise ValueError(f"Path specified does not exist in config: {path}")
+                raise InheritPathNotFoundError(f"Path specified does not exist in config: {path}")
 
             # The referenced value (or an ancestor of it) is unset. Return the _MISSING_REF sentinel
             # so the caller makes the swap/copy/inherit target '???' too (instead of calling .pop()/
@@ -621,7 +623,7 @@ Pass each config with --config (it builds the list for you), e.g.:
 Found global config dict yaml:
 {config_to_log_yaml}"""
 
-                raise ValueError(error_msg)
+                raise AlmostServerError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
