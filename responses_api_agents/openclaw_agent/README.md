@@ -12,11 +12,11 @@ OpenClaw must be installed (or it is auto-installed on first start).
 Make sure `env.yaml` is also set.
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_openclaw_agent.yaml]"
+gym env start --resources-server math_with_judge/math_with_judge_openclaw_agent
 
-ng_collect_rollouts +agent_name=math_with_judge_openclaw_agent \
-  +input_jsonl_fpath=resources_servers/math_with_judge/data/example.jsonl \
-  +output_jsonl_fpath=openclaw_rollout.jsonl +limit=3
+gym eval run --no-serve --agent math_with_judge_openclaw_agent \
+  --input resources_servers/math_with_judge/data/example.jsonl \
+  --output openclaw_rollout.jsonl --limit 3
 ```
 
 ## Model id
