@@ -13,11 +13,13 @@
 # limitations under the License.
 """Generate PinchBench Gym datasets.
 
-Each line is one PinchBench task, referenced by `task_id` — the full task
-definition (prompt, grading code, assets) is reconstructed inside the container
-from the skill at run time, so the JSONL stays tiny. The 5-task example.jsonl is
-committed; full.jsonl (147 tasks) is read from the task manifest of a PinchBench
-skill checkout (the skill is not vendored — see Dockerfile.benchmark):
+Each line carries the task's human-readable prompt (extracted from the skill's task
+`.md` `## Prompt` section) in `input`, plus `verifier_metadata.task_id`. `task_id` is
+the authoritative selector: at run time benchmark.py loads the full task (prompt +
+assets + grading) from the skill BY task_id (run_task.sh `--suite`), and you pick which
+tasks to run by including only the rows you want. The 5-task example.jsonl is committed;
+full.jsonl (147 tasks) follows the skill's task manifest. Regenerate from a (non-vendored)
+skill checkout (see Dockerfile.benchmark):
 
     git clone -b v2.0.0 https://github.com/pinchbench/skill /tmp/pb-skill
     PINCHBENCH_SKILL_DIR=/tmp/pb-skill python responses_api_agents/pinchbench/dataset_preprocess.py
@@ -25,6 +27,7 @@ skill checkout (the skill is not vendored — see Dockerfile.benchmark):
 
 import json
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -46,21 +49,25 @@ EXAMPLE_TASKS = [
 ]
 
 
+def _prompt_for(task_id: str) -> str:
+    """The task's human-readable prompt = the `## Prompt` section of its skill `.md`."""
+    md = (Path(_SKILL_DIR) / "tasks" / f"{task_id}.md").read_text()
+    m = re.search(r"##\s*Prompt\s*\n(.*?)(?:\n##\s|\Z)", md, re.S)
+    return (m.group(1).strip() if m else "").strip()
+
+
 def _record(task_id: str) -> dict:
+    # `input` carries the real prompt for transparency / readability; `task_id` is the
+    # authoritative selector — run_task.sh runs `benchmark.py --suite <task_id>`, which
+    # loads the full task (prompt + assets + grading) from the skill, so the dataset stays
+    # tiny and you subset by simply choosing which rows to include.
     return {
-        "responses_create_params": {
-            "input": [{"role": "user", "content": "<placeholder; real prompt loaded from the task .md at run time>"}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": _prompt_for(task_id)}]},
         "verifier_metadata": {"task_id": task_id},
     }
 
 
 def _all_task_ids() -> list[str]:
-    if not _SKILL_DIR:
-        raise SystemExit(
-            "Set PINCHBENCH_SKILL_DIR to a checkout of github.com/pinchbench/skill@v2.0.0 "
-            "to regenerate full.jsonl (the committed example.jsonl needs no skill)."
-        )
     manifest = yaml.safe_load((Path(_SKILL_DIR) / "tasks" / "manifest.yaml").read_text())
     ids: list[str] = list(manifest.get("run_first", []))
     for cat_ids in (manifest.get("categories") or {}).values():
@@ -78,12 +85,15 @@ def _write(path: Path, task_ids: list[str]) -> None:
 
 
 def main() -> None:
+    if not _SKILL_DIR:
+        raise SystemExit(
+            "Set PINCHBENCH_SKILL_DIR to a checkout of github.com/pinchbench/skill@v2.0.0 to "
+            "(re)generate the datasets with real prompts. The committed example.jsonl is "
+            "self-contained and needs no skill to *use*."
+        )
     _DATA.mkdir(parents=True, exist_ok=True)
-    _write(_DATA / "example.jsonl", EXAMPLE_TASKS)  # committed smoke set (no skill needed)
-    if _SKILL_DIR:
-        _write(_DATA / "full.jsonl", _all_task_ids())  # gitignored; needs the skill checkout
-    else:
-        print("PINCHBENCH_SKILL_DIR unset -> skipping full.jsonl (set it to regenerate)")
+    _write(_DATA / "example.jsonl", EXAMPLE_TASKS)  # committed smoke set
+    _write(_DATA / "full.jsonl", _all_task_ids())  # gitignored (147 tasks)
 
 
 if __name__ == "__main__":
