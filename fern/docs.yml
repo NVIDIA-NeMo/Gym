@@ -3,6 +3,7 @@ instances:
     custom-domain: docs.nvidia.com/nemo/gym
 
 title: NeMo Gym
+multi-source: true
 
 global-theme: nvidia
 
