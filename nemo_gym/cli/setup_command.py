@@ -176,12 +176,16 @@ def run_command(command: str, working_dir_path: Path, server_name: str = "") -> 
     global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
+    # The server dir on PYTHONPATH lets `import app` work; the project root (the dir containing
+    # resources_servers/, responses_api_agents/, ...) lets generated `resources_servers.<name>.app`
+    # style imports resolve, which otherwise fail when running from outside a repo checkout.
+    project_root = f"{working_dir_path.absolute().parent.parent}"
     custom_env = environ.copy()
-    py_path = custom_env.get("PYTHONPATH", None)
-    if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
-    else:
-        custom_env["PYTHONPATH"] = work_dir
+    py_path_entries = [work_dir, project_root]
+    existing_py_path = custom_env.get("PYTHONPATH")
+    if existing_py_path:
+        py_path_entries.append(existing_py_path)
+    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 

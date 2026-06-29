@@ -260,14 +260,16 @@ class TestCLISetupCommandRunCommand:
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
         )
 
         expected_args = call(
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            # The server dir plus the project root (its grandparent, the dir holding the server-type
+            # dirs) so `resources_servers.<name>`-style imports resolve.
+            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -280,14 +282,17 @@ class TestCLISetupCommandRunCommand:
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
         )
 
         expected_args = call(
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
+            env={
+                "PYTHONPATH": "/root/resources_servers/my_server:/root:existing pythonpath",
+                "UV_CACHE_DIR": "default uv cache dir",
+            },
             stdout="stdout",
             stderr="stderr",
         )
@@ -301,14 +306,14 @@ class TestCLISetupCommandRunCommand:
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
         )
 
         expected_args = call(
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
+            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "my uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -430,7 +435,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
             server_name="my_resources/my_server",
         )
 
@@ -438,7 +443,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -455,14 +460,14 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my path.log",
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
