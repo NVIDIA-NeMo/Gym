@@ -533,11 +533,7 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
-    # include_dev_extra=True so the per-server venv gets pytest (nemo-gym's `[dev]` extra) when
-    # nemo-gym is installed from an index rather than editable — `gym env test` runs `&& pytest`.
-    command = (
-        f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix, include_dev_extra=True)} && pytest"""
-    )
+    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix)} && pytest"""
     return run_command(command, test_config.dir_path)
 
 
