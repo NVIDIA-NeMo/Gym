@@ -18,7 +18,7 @@ import json
 import pytest
 import yaml
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, resolve_under_cwd_or_install
 from nemo_gym.prompt import (
     PromptConfig,
     _resolve_path,
@@ -88,6 +88,38 @@ class TestResolvePath:
             assert resolved.exists()
         finally:
             test_file.unlink()
+
+    def test_relative_path_resolves_to_cwd_first(self, tmp_path, monkeypatch):
+        # A user's own relative prompt config (in their cwd) resolves there, not the install root.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "my_prompt.yaml").write_text("user: '{q}'")
+        resolved = _resolve_path("my_prompt.yaml")
+        assert resolved == tmp_path / "my_prompt.yaml"
+
+
+class TestResolveUnderCwdOrInstall:
+    def test_absolute_returned_unchanged(self, tmp_path):
+        assert resolve_under_cwd_or_install(str(tmp_path / "x.yaml")) == tmp_path / "x.yaml"
+
+    def test_cwd_preferred_over_install_root(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "rel.yaml").write_text("{}")
+        assert resolve_under_cwd_or_install("rel.yaml") == tmp_path / "rel.yaml"
+
+    def test_falls_back_to_install_root(self, tmp_path, monkeypatch):
+        # cwd lacks the file; a file present under the install root resolves there.
+        monkeypatch.chdir(tmp_path)
+        rel = "test_resolve_install_fallback.yaml"
+        install_file = PARENT_DIR / rel
+        install_file.write_text("{}")
+        try:
+            assert resolve_under_cwd_or_install(rel) == install_file
+        finally:
+            install_file.unlink()
+
+    def test_missing_returns_cwd_candidate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert resolve_under_cwd_or_install("nope.yaml") == tmp_path / "nope.yaml"
 
 
 class TestFillPrompt:
