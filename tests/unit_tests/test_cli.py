@@ -32,6 +32,8 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    TestConfig,
+    _resolve_server_dir,
     _select_shard,
     exit_cleanly_on_config_error,
     init_resources_server,
@@ -190,6 +192,28 @@ class TestCLI:
             dir_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / Path("resources_servers", "arc_agi")
 
         assert dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+class TestResolveServerDir:
+    """`_resolve_server_dir` resolves a relative server dir against cwd first, then the install root."""
+
+    def test_prefers_local_server_in_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        local = tmp_path / "resources_servers" / "my_server"
+        local.mkdir(parents=True)
+        (local / "requirements.txt").write_text("nemo-gym\n")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/my_server")) == local
+
+    def test_falls_back_to_install_root(self, tmp_path: Path, monkeypatch) -> None:
+        # Empty cwd (no local server) -> the built-in resolves under the install root.
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        cfg = TestConfig(entrypoint="resources_servers/arc_agi")
+        assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
 class TestRunHelperShutdownReap:
