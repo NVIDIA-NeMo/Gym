@@ -539,15 +539,20 @@ gym eval run --no-serve \
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--input-glob`, `-i` | Glob (or comma-separated globs) matching the rollout shards to aggregate. |
 | `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
 
 ```bash
-gym eval aggregate --output results/merged.jsonl
+gym eval aggregate \
+    --config benchmarks/aime24/config.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
+    --output results/rollouts.jsonl
 ```
 
 ### `gym eval profile`
@@ -623,6 +628,7 @@ The most common Hydra overrides now have dedicated flags:
 | `"+config_paths=[a.yaml,b.yaml]"` | `--config a.yaml --config b.yaml` |
 | `+agent_name=...` | `--agent`, `-a` |
 | `+input_jsonl_fpath=...` | `--input`, `-i` |
+| `+input_glob=...` | `--input-glob`, `-i` |
 | `+output_jsonl_fpath=...` | `--output`, `-o` |
 | `+limit=...` | `--limit` |
 | `+num_repeats=...` | `--num-repeats` |
