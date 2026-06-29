@@ -26,6 +26,9 @@ import pytest
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
 
 
+pytestmark = pytest.mark.sandbox
+
+
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
 
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
