@@ -53,15 +53,15 @@ Claude Opus 4.5 and 19.4% for OpenAI GPT-5.1 on the Research track.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/frontierscience_research/config.yaml]"
+gym eval prepare --benchmark frontierscience_research
 
 # Running servers
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/frontierscience_research/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start "+config_paths=[$config_paths]"
 
 # Collect rollouts
-ng_collect_rollouts \
+gym eval run --no-serve \
     +agent_name=frontierscience_research_frontierscience_judge_simple_agent \
     +input_jsonl_fpath=benchmarks/frontierscience_research/data/frontierscience_research_benchmark.jsonl \
     +prompt_config=benchmarks/prompts/generic/default.yaml \
