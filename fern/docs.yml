@@ -44,8 +44,6 @@ versions:
     availability: stable
 
 redirects:
-  # With `experimental.basepath-aware: true`, both source and destination must include
-  # the full `/nemo/gym/` basepath with a leading slash. See nemo-curator's docs.yml.
   # Legacy Sphinx top-level entry points (Main is now the default version)
   - source: "/nemo/gym/index.html"
     destination: "/nemo/gym/main"
