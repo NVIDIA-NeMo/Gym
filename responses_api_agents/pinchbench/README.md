@@ -75,9 +75,11 @@ git clone -b v2.0.0 https://github.com/pinchbench/skill /tmp/pb-skill
 PINCHBENCH_SKILL_DIR=/tmp/pb-skill python responses_api_agents/pinchbench/dataset_preprocess.py
 ```
 
-Each JSONL line references a task by `task_id`; the full task definition (prompt, grading code,
-assets) is reconstructed inside the sandbox from the cloned skill at run time, so the dataset stays
-tiny.
+Each JSONL line carries the task's human-readable prompt in `input` (for transparency) plus
+`verifier_metadata.task_id`. **`task_id` is the authoritative selector**: at run time `benchmark.py`
+loads the full task (prompt + assets + grading) from the skill *by* `task_id` (`run_task.sh --suite`),
+and you run a subset simply by including only the rows you want — so the dataset stays tiny.
+`data/example_rollouts.jsonl` holds 5 example rollouts (the 5 example tasks, with response + reward).
 
 ## Run
 
