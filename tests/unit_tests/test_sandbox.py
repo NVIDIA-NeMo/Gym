@@ -44,6 +44,9 @@ from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
+pytestmark = pytest.mark.sandbox
+
+
 def _has_module(module_name: str) -> bool:
     try:
         return importlib.util.find_spec(module_name) is not None
