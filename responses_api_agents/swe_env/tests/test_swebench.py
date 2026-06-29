@@ -246,10 +246,21 @@ def test_flat_eval_script_forces_pytest_addopts(monkeypatch):
         repo = "sphinx-doc/sphinx"
         eval_script = "tox --current-env -epy39 -v -- tests/test_x.py\n"
 
-    monkeypatch.setattr(
-        "swebench.harness.test_spec.test_spec.make_test_spec",
-        lambda instance, namespace="swebench": _Spec(),
-    )
+    # ``_flat_eval_script`` does ``from swebench.harness.test_spec.test_spec import make_test_spec``.
+    # Stub that module + its parent packages in sys.modules so the test runs even where swebench is
+    # not installed (the swe_env unit-test venv intentionally does not pin it — the grader's swebench
+    # paths are covered via recorded fixtures + the GraderDependencyError test). A string-target
+    # ``monkeypatch.setattr`` would instead import swebench to resolve it and fail with
+    # ModuleNotFoundError in that venv.
+    import sys
+    import types
+
+    stub = types.ModuleType("swebench.harness.test_spec.test_spec")
+    stub.make_test_spec = lambda instance, namespace="swebench": _Spec()
+    for pkg in ("swebench", "swebench.harness", "swebench.harness.test_spec"):
+        monkeypatch.setitem(sys.modules, pkg, types.ModuleType(pkg))
+    monkeypatch.setitem(sys.modules, "swebench.harness.test_spec.test_spec", stub)
+
     harness = SweBenchHarness("swe-bench")
     task = _task(metadata={"instance_dict": {"instance_id": "repo__inst-1", "repo": "sphinx-doc/sphinx"}})
     script = harness._flat_eval_script(task)
