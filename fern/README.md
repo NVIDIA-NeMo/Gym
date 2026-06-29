@@ -61,8 +61,7 @@ fern/
 │   ├── main.yml              # Nav for the bleeding-edge train — paths point at ./latest/pages/
 │   ├── latest/pages/         # Bleeding-edge MDX content (edited on every PR; published at /main/...)
 │   ├── v<release>.yml        # Nav for each frozen GA snapshot — paths point at ./v<release>/pages/
-│   ├── v<release>/pages/     # Frozen GA content (back-ports only)
-│   └── latest.yml            # GA alias — symlink to the current GA snapshot yml
+│   └── v<release>/pages/     # Frozen GA content (back-ports only)
 └── product-docs/             # GENERATED Python API reference (gitignored — `npm run generate:library` rebuilds)
 ```
 
@@ -71,10 +70,10 @@ File path                                              Published URL
 ─────────────────────────────────────────────────────  ─────────────────────────────────────────────────
 fern/versions/latest/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/main/get-started/quickstart
 fern/versions/v<release>/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/v<release>/get-started/quickstart
-                                                           docs.nvidia.com/nemo/gym/latest/get-started/quickstart  (latest aliases current GA)
+docs.nvidia.com/nemo/gym/latest/get-started/quickstart      redirects to docs.nvidia.com/nemo/gym/main/get-started/quickstart
 ```
 
-The folder name `latest/` is historical — it holds the **bleeding-edge** tree and is mounted under the `main` slug via `main.yml`. Versioned folders are frozen GA snapshots, only changed via deliberate back-port. `latest.yml` is a symlink to the current GA snapshot yml, so `/latest/...` URLs serve the current GA. Check `readlink versions/latest.yml` and `docs.yml` `versions:` for the current target.
+The folder name `latest/` is historical — it holds the **bleeding-edge** tree and is mounted under the `main` slug via `main.yml`. Versioned folders are frozen GA snapshots, only changed via deliberate back-port. There is no `latest` Fern version; legacy `/latest/...` URLs are handled by redirects in `docs.yml`.
 
 ## Local development
 
@@ -157,14 +156,14 @@ Repository source paths like `resources_servers/example_single_tool_call/...` or
 | current GA | `v<release>` | `stable` | `./versions/v<release>.yml` |
 | supported older GA | `v<older-release>` | `stable` | `./versions/v<older-release>.yml` |
 
-**`main` is the bleeding-edge tree** — ordinary docs PRs land in `versions/latest/pages/` and publish under the `main` slug. **Versioned `v<release>/` folders are frozen GA snapshots** with their own copy of every page; change them only by deliberate back-port. `latest.yml` is a symlink to the current GA's yml, so `/latest/...` URLs serve the GA without copying Main changes into the GA tree.
+**`main` is the bleeding-edge tree** — ordinary docs PRs land in `versions/latest/pages/` and publish under the `main` slug. **Versioned `v<release>/` folders are frozen GA snapshots** with their own copy of every page; change them only by deliberate back-port. Legacy `/latest/...` URLs are redirects in `docs.yml`, not a mounted version.
 
 When the next GA cuts (for example, `v0.4.0`):
 
 1. `cp -r versions/latest versions/v0.4.0` — fresh frozen snapshot of the bleeding-edge tree
 2. `cp versions/main.yml versions/v0.4.0.yml`, then rewrite `./latest/` path prefixes to `./v0.4.0/`
-3. Retarget the GA alias symlink: `cd versions && ln -sfn v0.4.0.yml latest.yml`
-4. Add the new frozen-pin entry to `docs.yml` `versions:` (`display-name: "0.4.0"`, `slug: v0.4.0`, `availability: stable`); demote/remove previous GA snapshots per the support policy
+3. Add the new frozen-pin entry to `docs.yml` `versions:` (`display-name: "0.4.0"`, `slug: v0.4.0`, `availability: stable`); demote/remove previous GA snapshots per the support policy
+4. Keep the `/latest` redirect rules in `docs.yml` pointed at the intended legacy target, currently `/main`
 5. `versions/latest/pages/` keeps moving forward as the bleeding-edge tree
 
 See [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.
