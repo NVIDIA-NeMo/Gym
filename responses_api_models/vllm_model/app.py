@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import logging
+import os
 import re
 from copy import deepcopy
 from time import time
@@ -66,6 +67,117 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_LOGPROB_TOKEN_ID_SOURCES = {"logprob", "logprobs", "logprob_tokens"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUE_ENV_VALUES
+
+
+def _metadata_json_dict(value: Any, *, field_name: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        value = json.loads(value.strip() or "{}")
+    elif isinstance(value, BaseModel):
+        value = value.model_dump(exclude_unset=True)
+
+    if not isinstance(value, dict):
+        raise TypeError(f"metadata.{field_name} must be a JSON object")
+    return value
+
+
+def _summarize_forwarded_extra_body(extra_body: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    for key, value in extra_body.items():
+        if key == "required_prompt_token_ids":
+            if isinstance(value, list):
+                summary[key] = {
+                    "count": len(value),
+                    "first8": value[:8],
+                    "last8": value[-8:],
+                    "checksum": sum((idx + 1) * int(token_id) for idx, token_id in enumerate(value))
+                    % 1_000_000_007,
+                }
+            else:
+                summary[key] = type(value).__name__
+            continue
+
+        if key == "mm_processor_kwargs" and isinstance(value, dict):
+            mm_summary = deepcopy(value)
+            precomputed = mm_summary.get("precomputed_imgs_sizes")
+            if isinstance(precomputed, list):
+                mm_summary["precomputed_imgs_sizes"] = {
+                    "count": len(precomputed),
+                    "first": precomputed[:1],
+                    "last": precomputed[-1:],
+                }
+            summary[key] = mm_summary
+            continue
+
+        summary[key] = value
+    return summary
+
+
+def _vllm_token_id_source() -> str:
+    return os.environ.get("NEMO_GYM_VLLM_TOKEN_ID_SOURCE", "native").strip().lower()
+
+
+def _logprob_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("logprob")
+    else:
+        value = getattr(value, "logprob", None)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _prompt_logprob_for_token(entry: Any, token_id: int) -> Optional[float]:
+    if not isinstance(entry, dict) or not entry:
+        return None
+
+    for key in (token_id, str(token_id), f"token_id:{token_id}"):
+        if key in entry:
+            return _logprob_value(entry[key])
+
+    for key, value in entry.items():
+        try:
+            if int(str(key).removeprefix("token_id:")) == token_id:
+                return _logprob_value(value)
+        except ValueError:
+            pass
+
+    if len(entry) == 1:
+        return _logprob_value(next(iter(entry.values())))
+    return None
+
+
+def _extract_prompt_logprobs_for_tokens(
+    prompt_logprobs: Any,
+    token_ids: List[int],
+    start_idx: int,
+) -> Tuple[List[float], str]:
+    if not isinstance(prompt_logprobs, list):
+        return [], "missing_prompt_logprobs"
+    end_idx = start_idx + len(token_ids)
+    if len(prompt_logprobs) < end_idx:
+        return [], f"prompt_logprobs_short:{len(prompt_logprobs)}<{end_idx}"
+
+    values: List[float] = []
+    for rel_idx, token_id in enumerate(token_ids):
+        value = _prompt_logprob_for_token(prompt_logprobs[start_idx + rel_idx], token_id)
+        if value is None:
+            return values, f"missing_token_logprob_at:{rel_idx}"
+        values.append(value)
+    return values, "ok"
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -121,6 +233,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._session_id_to_client_idx: Dict[str, int] = dict()
 
         self._converter = self.get_converter()
 
@@ -160,7 +273,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     @staticmethod
     def _get_tokenize_body_dict(body_dict: Dict[str, Any]) -> Dict[str, Any]:
         tokenize_body_dict = {}
-        for key in ("model", "messages", "tools", "chat_template_kwargs"):
+        for key in ("model", "messages", "tools", "chat_template_kwargs", "mm_processor_kwargs"):
             if key in body_dict:
                 tokenize_body_dict[key] = body_dict[key]
         return tokenize_body_dict
@@ -193,6 +306,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         choice = chat_completion_response.choices[0]
+        selected_base_url = getattr(request.state, "nemo_gym_vllm_base_url", None)
+        selected_client_idx = getattr(request.state, "nemo_gym_vllm_client_idx", None)
+        response_metadata = body.metadata
+        if selected_base_url is not None:
+            response_metadata = dict(response_metadata or {})
+            response_metadata["nemo_gym_vllm_base_url"] = str(selected_base_url)
+            if selected_client_idx is not None:
+                response_metadata["nemo_gym_vllm_client_idx"] = str(selected_client_idx)
 
         response_output = self._converter.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
@@ -236,7 +357,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             text=body.text,
             top_logprobs=body.top_logprobs,
             truncation=body.truncation,
-            metadata=body.metadata,
+            metadata=response_metadata,
             instructions=body.instructions,
             user=body.user,
             incomplete_details=incomplete_details,
@@ -291,6 +412,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
 
+        body_dict = {key: value for key, value in body_dict.items() if value is not None}
         body_dict["model"] = self.config.model
 
         chat_template_kwargs = {}
@@ -298,10 +420,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
 
         metadata = body_dict.get("metadata") or dict()
+        if isinstance(metadata, BaseModel):
+            metadata = metadata.model_dump(exclude_unset=True)
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dict")
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
-        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
-        chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
+        chat_template_kwargs.update(
+            _metadata_json_dict(
+                metadata.get("chat_template_kwargs"),
+                field_name="chat_template_kwargs",
+            )
+        )
 
         if chat_template_kwargs:
             body_dict["chat_template_kwargs"] = chat_template_kwargs
@@ -311,16 +441,33 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
 
-        metadata_extra_body_str = metadata.get("extra_body", "{}")
-        extra_body.update(json.loads(metadata_extra_body_str))
+        extra_body.update(
+            _metadata_json_dict(
+                metadata.get("extra_body"),
+                field_name="extra_body",
+            )
+        )
 
         if self.config.return_token_id_information:
+            token_id_source = _vllm_token_id_source()
             body_dict |= dict(
                 logprobs=True,
                 return_tokens_as_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
             )
+            debug_top_logprobs_k = int(
+                os.environ.get("NEMO_GYM_VLLM_DEBUG_TOP_LOGPROBS_K", "0") or "0"
+            )
+            if debug_top_logprobs_k > 0:
+                body_dict["top_logprobs"] = debug_top_logprobs_k
+            return_native_token_ids = _env_flag(
+                "NEMO_GYM_VLLM_RETURN_TOKEN_IDS",
+                default=token_id_source not in _LOGPROB_TOKEN_ID_SOURCES,
+            )
+            if return_native_token_ids:
+                # Native sampled token ids are the canonical sequence to score
+                # with the policy. logprobs.content is still used for behavior
+                # logprobs and can be selected explicitly for diagnostics.
+                body_dict["return_token_ids"] = True
 
         if self.config.uses_reasoning_parser:
             for message_dict in body_dict["messages"]:
@@ -360,7 +507,20 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         if extra_body:
-            body_dict = extra_body | body_dict
+            body_dict = deepcopy(extra_body) | body_dict
+            if _env_flag("NRL_DEBUG") or _env_flag("NEMO_GYM_VLLM_DEBUG_EXTRA_BODY"):
+                extra_body_summary = _summarize_forwarded_extra_body(extra_body)
+                LOGGER.info(
+                    "[VLLM_EXTRA_BODY_FORWARD] keys=%s summary=%s",
+                    sorted(str(key) for key in extra_body),
+                    extra_body_summary,
+                )
+                print(
+                    "[VLLM_EXTRA_BODY_FORWARD] "
+                    f"keys={sorted(str(key) for key in extra_body)} "
+                    f"summary={extra_body_summary}",
+                    flush=True,
+                )
 
         return body_dict
 
@@ -374,10 +534,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         prompt_token_ids: Optional[List[int]] = None
         vllm_max_model_len: Optional[int] = None
 
-        should_tokenize_prompt = (
-            self.config.return_token_id_information
-            or self.config.max_input_tokens is not None
-        )
+        should_tokenize_prompt = self.config.max_input_tokens is not None
         if should_tokenize_prompt:
             tokenize_response = await self._get_tokenize_response(client, body_dict)
             prompt_token_ids = tokenize_response["tokens"]
@@ -442,10 +599,20 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
-                res = self._create_empty_chat_completion()
-                res.choices[0].finish_reason = "length"
-                return res
+                if prompt_token_ids is None:
+                    try:
+                        prompt_token_ids = await self._get_prompt_token_ids(client, body_dict)
+                    except Exception:
+                        prompt_token_ids = None
+
+                return self._create_context_length_exceeded_chat_completion(prompt_token_ids)
             else:
+                LOGGER.error(
+                    "vLLM chat-completions request rejected: status=%s body=%s payload_keys=%s",
+                    e.status,
+                    result_content_str,
+                    sorted(body_dict.keys()),
+                )
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
@@ -473,15 +640,186 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = (choice_dict.get("logprobs") or {}).get("content") or []
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            # Looks like `"token_id:151667"` when
-            # return_tokens_as_token_ids=True.
-            generation_token_ids = [
-                log_prob["token"].removeprefix("token_id:")
-                for log_prob in log_probs
-            ]
+            def _token_id_from_logprob_token(token: Any) -> int:
+                if isinstance(token, str) and token.startswith("token_id:"):
+                    return int(token.removeprefix("token_id:"))
+                raise ValueError(
+                    "Cannot recover a token id from logprobs.content token "
+                    f"{token!r}. Expected vLLM return_tokens_as_token_ids=True "
+                    "format like 'token_id:151667'."
+                )
 
-            tokenize_response = await self._get_tokenize_response(client, body_dict)
-            prompt_token_ids = tokenize_response["tokens"]
+            def _extract_top_logprobs_for_debug() -> tuple[List[List[Dict[str, Any]]], str]:
+                if not int(
+                    os.environ.get("NEMO_GYM_VLLM_DEBUG_TOP_LOGPROBS_K", "0") or "0"
+                ):
+                    return [], "disabled"
+                per_token: List[List[Dict[str, Any]]] = []
+                try:
+                    for log_prob in log_probs:
+                        entries: List[Dict[str, Any]] = []
+                        for top_item in log_prob.get("top_logprobs") or []:
+                            try:
+                                token_id = _token_id_from_logprob_token(top_item.get("token"))
+                            except Exception:
+                                continue
+                            entries.append(
+                                {
+                                    "token_id": int(token_id),
+                                    "logprob": float(top_item["logprob"]),
+                                }
+                            )
+                        per_token.append(entries)
+                except Exception as exc:
+                    LOGGER.warning("vLLM top-logprob diagnostic parse failed", exc_info=True)
+                    return [], f"error:{type(exc).__name__}"
+                return per_token, "ok"
+
+            token_id_source = _vllm_token_id_source()
+            use_logprob_token_ids = token_id_source in _LOGPROB_TOKEN_ID_SOURCES
+            debug_generation_top_logprobs, debug_generation_top_logprobs_status = (
+                _extract_top_logprobs_for_debug()
+            )
+
+            logprob_token_ids = None
+            mismatch_positions: List[int] = []
+            direct_generation_token_ids = choice_dict.get("token_ids")
+            if direct_generation_token_ids is not None:
+                generation_token_ids = [int(token_id) for token_id in direct_generation_token_ids]
+                try:
+                    logprob_token_ids = [
+                        _token_id_from_logprob_token(log_prob["token"])
+                        for log_prob in log_probs
+                    ]
+                except ValueError:
+                    logprob_token_ids = None
+                if logprob_token_ids is not None and logprob_token_ids != generation_token_ids:
+                    mismatch_positions = [
+                        idx
+                        for idx, (direct_token_id, logprob_token_id) in enumerate(
+                            zip(generation_token_ids, logprob_token_ids)
+                        )
+                        if direct_token_id != logprob_token_id
+                    ]
+                    LOGGER.warning(
+                        "vLLM native token_ids differ from logprobs token strings "
+                        "at %d/%d positions; token source=%s. First mismatches: %s",
+                        len(mismatch_positions),
+                        len(generation_token_ids),
+                        token_id_source,
+                        mismatch_positions[:10],
+                    )
+                if use_logprob_token_ids and logprob_token_ids is not None:
+                    generation_token_ids = logprob_token_ids
+            else:
+                if not use_logprob_token_ids:
+                    LOGGER.warning(
+                        "vLLM response did not include native token_ids while "
+                        "NEMO_GYM_VLLM_TOKEN_ID_SOURCE=%s; falling back to "
+                        "logprobs.content token strings. Set "
+                        "NEMO_GYM_VLLM_RETURN_TOKEN_IDS=1 or use a vLLM build "
+                        "that supports return_token_ids.",
+                        token_id_source,
+                    )
+                generation_token_ids = [
+                    _token_id_from_logprob_token(log_prob["token"])
+                    for log_prob in log_probs
+                ]
+
+            if len(generation_token_ids) != len(generation_log_probs):
+                raise ValueError(
+                    "vLLM returned mismatched generation token/logprob lengths: "
+                    f"len(generation_token_ids)={len(generation_token_ids)}, "
+                    f"len(generation_log_probs)={len(generation_log_probs)}"
+                )
+
+            native_prompt_token_ids = chat_completion_dict.get("prompt_token_ids")
+            if native_prompt_token_ids is not None:
+                prompt_token_ids = [int(token_id) for token_id in native_prompt_token_ids]
+            elif prompt_token_ids is None:
+                prompt_token_ids = await self._get_prompt_token_ids(client, body_dict)
+
+            debug_prefill_logprob_info: Dict[str, Any] = {}
+            prefill_log_probs_for_generation: Optional[List[float]] = None
+            refit_generation_logprobs = _env_flag("NEMO_GYM_VLLM_REFIT_GENERATION_LOGPROBS", default=False)
+            debug_prefill_logprobs = _env_flag("NEMO_GYM_VLLM_DEBUG_PREFILL_LOGPROBS", default=False)
+            if debug_prefill_logprobs or refit_generation_logprobs:
+                debug_status = "skipped_empty_generation"
+                if prompt_token_ids and generation_token_ids:
+                    sequence_token_ids = prompt_token_ids + generation_token_ids
+                    max_context = vllm_max_model_len or max_input_tokens
+                    if max_context is not None and len(sequence_token_ids) >= int(max_context):
+                        debug_status = (
+                            f"skipped_context_full:{len(sequence_token_ids)}>={int(max_context)}"
+                        )
+                    else:
+                        rescore_body_dict = deepcopy(body_dict)
+                        rescore_body_dict["required_prompt_token_ids"] = sequence_token_ids
+                        rescore_body_dict["prompt_logprobs"] = 0
+                        rescore_body_dict["max_tokens"] = 1
+                        rescore_body_dict.pop("max_completion_tokens", None)
+                        rescore_body_dict["logprobs"] = False
+                        rescore_body_dict["top_logprobs"] = 0
+                        rescore_body_dict["return_token_ids"] = False
+                        try:
+                            rescore_dict = await client.create_chat_completion(
+                                **rescore_body_dict
+                            )
+                            prefill_log_probs, debug_status = (
+                                _extract_prompt_logprobs_for_tokens(
+                                    rescore_dict.get("prompt_logprobs"),
+                                    generation_token_ids,
+                                    start_idx=len(prompt_token_ids),
+                                )
+                            )
+                            if debug_status == "ok":
+                                prefill_log_probs_for_generation = prefill_log_probs
+                                diffs = [
+                                    abs(float(decode_lp) - float(prefill_lp))
+                                    for decode_lp, prefill_lp in zip(
+                                        generation_log_probs, prefill_log_probs
+                                    )
+                                ]
+                                debug_prefill_logprob_info.update(
+                                    {
+                                        "debug_vllm_prefill_generation_log_probs": prefill_log_probs,
+                                        "debug_vllm_prefill_generation_logprob_count": len(prefill_log_probs),
+                                        "debug_vllm_prefill_generation_logprob_error_mean": sum(diffs) / len(diffs)
+                                        if diffs
+                                        else 0.0,
+                                        "debug_vllm_prefill_generation_logprob_error_max": max(diffs)
+                                        if diffs
+                                        else 0.0,
+                                    }
+                                )
+                        except Exception as exc:
+                            debug_status = f"error:{type(exc).__name__}"
+                            LOGGER.warning("vLLM prefill-logprob diagnostic failed", exc_info=True)
+                debug_prefill_logprob_info[
+                    "debug_vllm_prefill_generation_logprob_status"
+                ] = debug_status
+
+            if refit_generation_logprobs:
+                refit_strict = _env_flag("NEMO_GYM_VLLM_REFIT_GENERATION_LOGPROBS_STRICT", default=True)
+                if not generation_log_probs:
+                    debug_prefill_logprob_info["debug_vllm_generation_logprob_source"] = "decode_empty_generation"
+                elif (
+                    prefill_log_probs_for_generation is not None
+                    and len(prefill_log_probs_for_generation) == len(generation_log_probs)
+                ):
+                    debug_prefill_logprob_info[
+                        "debug_vllm_decode_generation_log_probs"
+                    ] = generation_log_probs
+                    generation_log_probs = [float(lp) for lp in prefill_log_probs_for_generation]
+                    debug_prefill_logprob_info["debug_vllm_generation_logprob_source"] = "prefill_refit"
+                else:
+                    source = f"decode_refit_unavailable:{debug_prefill_logprob_info.get('debug_vllm_prefill_generation_logprob_status', 'unknown')}"
+                    debug_prefill_logprob_info["debug_vllm_generation_logprob_source"] = source
+                    if refit_strict:
+                        raise RuntimeError(
+                            "NEMO_GYM_VLLM_REFIT_GENERATION_LOGPROBS=1 but vLLM "
+                            f"prefill/rescore logprobs were unavailable: {source}"
+                        )
 
             message_dict = choice_dict["message"]
             message_dict.update(
@@ -489,11 +827,28 @@ class VLLMModel(SimpleResponsesAPIModel):
                     prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
+                    generation_token_id_source=token_id_source,
+                    native_generation_token_ids_count=len(direct_generation_token_ids)
+                    if direct_generation_token_ids is not None
+                    else None,
+                    logprob_generation_token_ids_count=len(logprob_token_ids)
+                    if logprob_token_ids is not None
+                    else None,
+                    native_logprob_token_id_mismatch_count=len(mismatch_positions)
+                    if direct_generation_token_ids is not None and logprob_token_ids is not None
+                    else None,
+                    native_logprob_token_id_first_mismatches=mismatch_positions[:10]
+                    if mismatch_positions
+                    else [],
+                    finish_reason=choice_dict.get("finish_reason"),
+                    debug_vllm_generation_top_logprobs=debug_generation_top_logprobs,
+                    debug_vllm_generation_top_logprobs_status=debug_generation_top_logprobs_status,
+                    **debug_prefill_logprob_info,
                 )
             )
 
             # Clean the duplicated information
-            choice_dict.pop("logprobs")
+            choice_dict.pop("logprobs", None)
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
 
@@ -525,7 +880,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             client_idx = len(self._session_id_to_client) % len(self._clients)
             client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
+            self._session_id_to_client_idx[session_id] = client_idx
         client = self._session_id_to_client[session_id]
+        client_idx = self._session_id_to_client_idx.get(session_id)
+        request.state.nemo_gym_vllm_base_url = client.base_url
+        request.state.nemo_gym_vllm_client_idx = client_idx
 
         return client
 
@@ -709,6 +1068,47 @@ class VLLMConverter(BaseModel):
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
+                    case "image_url":
+                        image_url = part_param.get("image_url", "")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url", "")
+                        detail = part_param.get("detail", "auto")
+                        converted_parts.append(
+                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+                        )
+                    case "input_video":
+                        video_url = part_param.get("video_url", part_param.get("video", ""))
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        converted_parts.append(
+                            {"type": "video_url", "video_url": {"url": video_url}}
+                        )
+                    case "video_url":
+                        video_url = part_param.get("video_url", "")
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        converted_parts.append(
+                            {"type": "video_url", "video_url": {"url": video_url}}
+                        )
+                    case "input_audio":
+                        if "input_audio" in part_param:
+                            converted_parts.append(
+                                {"type": "input_audio", "input_audio": part_param["input_audio"]}
+                            )
+                        else:
+                            audio_url = part_param.get("audio_url", part_param.get("audio", ""))
+                            if isinstance(audio_url, dict):
+                                audio_url = audio_url.get("url", "")
+                            converted_parts.append(
+                                {"type": "audio_url", "audio_url": {"url": audio_url}}
+                            )
+                    case "audio_url":
+                        audio_url = part_param.get("audio_url", "")
+                        if isinstance(audio_url, dict):
+                            audio_url = audio_url.get("url", "")
+                        converted_parts.append(
+                            {"type": "audio_url", "audio_url": {"url": audio_url}}
+                        )
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
             content = converted_parts
@@ -855,11 +1255,33 @@ class VLLMConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            token_info_keys = (
+                "prompt_token_ids",
+                "generation_token_ids",
+                "generation_log_probs",
+                "generation_token_id_source",
+                "native_generation_token_ids_count",
+                "logprob_generation_token_ids_count",
+                "native_logprob_token_id_mismatch_count",
+                "native_logprob_token_id_first_mismatches",
+                "finish_reason",
+                "debug_vllm_prefill_generation_log_probs",
+                "debug_vllm_prefill_generation_logprob_count",
+                "debug_vllm_prefill_generation_logprob_error_mean",
+                "debug_vllm_prefill_generation_logprob_error_max",
+                "debug_vllm_prefill_generation_logprob_status",
+                "debug_vllm_decode_generation_log_probs",
+                "debug_vllm_generation_logprob_source",
+                "debug_vllm_generation_top_logprobs",
+                "debug_vllm_generation_top_logprobs_status",
+            )
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
+                **{
+                    key: message_dict[key]
+                    for key in token_info_keys
+                    if key in message_dict
+                },
             )
 
         return response_output

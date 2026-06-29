@@ -1,0 +1,31 @@
+omni_verifier:
+  resources_servers:
+    omni_verifier:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Omni GRPO verifier resource wrapping NeMo RL mmpr_filtered_reward
+      value: Preserve Omni GRPO reward semantics inside NeMo-Gym
+omni_verifier_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: omni_verifier
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/omni_verifier/data/train.jsonl
+      - name: validation
+        type: validation
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/omni_verifier/data/validation.jsonl
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/omni_verifier/data/example.jsonl
