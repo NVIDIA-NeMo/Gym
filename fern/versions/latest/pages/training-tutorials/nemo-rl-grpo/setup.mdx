@@ -205,7 +205,7 @@ uv run python -c "import ray; ray.shutdown()"
 
 **Estimated time**: ~5 minutes
 
-The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `ng_prepare_data` to download and validate the dataset, and to add an `agent_ref` property to each example that tells NeMo Gym which agent server should handle that example.
+The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `gym dataset collate` to download and validate the dataset, and to add an `agent_ref` property to each example that tells NeMo Gym which agent server should handle that example.
 
 Clone and setup the Gym Python environment:
 
@@ -226,13 +226,12 @@ echo "hf_token: {your HF token}" >> env.yaml
 Prepare the data:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
-
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/workplace_assistant \
-    +mode=train_preparation \
-    +should_download=true \
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server workplace_assistant \
+    --output-dir data/workplace_assistant \
+    --mode train_preparation \
+    --download \
     +data_source=huggingface
 ```
 

@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import sys
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
@@ -36,7 +38,12 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AlmostServerError,
     ConfigMissingValuesError,
+    ConfigPathNotFoundError,
+    InheritPathNotFoundError,
+    MalformedConfigPathsError,
+    NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
     WANDBConfig,
@@ -76,6 +83,9 @@ DELETE_KEY_KEY_NAME = "_delete_key"
 # real config value (e.g. a literal "???" or a DictConfig) for "missing".
 _MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+VERBOSE_KEY_NAME = "verbose"
+JSON_OUTPUT_KEY_NAME = "json"
+QUERY_KEY_NAME = "query"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -98,6 +108,9 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    VERBOSE_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
+    QUERY_KEY_NAME,
 ]
 
 # Data keys
@@ -106,6 +119,7 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+SKILLS_REF_KEY_NAME = "skills_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
@@ -191,6 +205,12 @@ class GlobalConfigDictParser(BaseModel):
 
         inner_hydra_wrapper()
 
+        # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
+        # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+                handler.setStream(sys.stderr)
+
         global_config_dict: DictConfig = config_list[0]
 
         return global_config_dict
@@ -205,13 +225,26 @@ class GlobalConfigDictParser(BaseModel):
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for config_path in config_paths:
+            original_entry = config_path
             config_path = Path(config_path)
             # Check cwd first for user's local configs, then install location
+            searched_locations = [config_path]
             if not config_path.is_absolute():
                 cwd_path = Path.cwd() / config_path
-                config_path = cwd_path if cwd_path.exists() else PARENT_DIR / config_path
+                install_path = PARENT_DIR / config_path
+                # cwd and the install root coincide when run from the repo; list each location once.
+                searched_locations = [cwd_path] if cwd_path == install_path else [cwd_path, install_path]
+                config_path = cwd_path if cwd_path.exists() else install_path
 
-            extra_config = OmegaConf.load(config_path)
+            try:
+                extra_config = OmegaConf.load(config_path)
+            except FileNotFoundError as e:
+                searched = "\n".join(f"  - {p}" for p in searched_locations)
+                raise ConfigPathNotFoundError(
+                    f"""config_paths entry '{original_entry}' was not found. Looked in:
+{searched}
+Check the path is spelled correctly and is relative to your working directory or the Gym install root."""
+                ) from e
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
@@ -244,6 +277,21 @@ Duplicate config paths:
                 server_instance_configs.append(maybe_server_instance_config)
 
         return server_instance_configs
+
+    def raise_on_no_server_instances(self, global_config_dict: DictConfig) -> None:
+        """Fail fast if a run has no server instances to start.
+
+        Without this, `gym env start` with an empty/omitted `config_paths` starts the head server and Ray
+        and then hangs with nothing to run. We catch it before Ray initialises with an actionable
+        message instead.
+        """
+        if self.filter_for_server_instance_configs(global_config_dict):
+            return
+
+        raise NoServerInstancesError(
+            """No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml"""
+        )
 
     def validate_and_populate_defaults(
         self,
@@ -463,7 +511,7 @@ For example, on the command line:
             # absent key still errors clearly.
             node = dict_config._get_node(k) if isinstance(dict_config, DictConfig) else None
             if node is None:
-                raise ValueError(f"Path specified does not exist in config: {path}")
+                raise InheritPathNotFoundError(f"Path specified does not exist in config: {path}")
 
             # The referenced value (or an ancestor of it) is unset. Return the _MISSING_REF sentinel
             # so the caller makes the swap/copy/inherit target '???' too (instead of calling .pop()/
@@ -503,7 +551,14 @@ For example, on the command line:
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
-        config_paths = ta.validate_python(config_paths)
+        try:
+            config_paths = ta.validate_python(config_paths)
+        except ValidationError as e:
+            raise MalformedConfigPathsError(
+                f"""'{CONFIG_PATHS_KEY_NAME}' must be a list of paths. Got: {config_paths!r}.
+Pass each config with --config (it builds the list for you), e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml"""
+            ) from e
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
@@ -568,7 +623,7 @@ For example, on the command line:
 Found global config dict yaml:
 {config_to_log_yaml}"""
 
-                raise ValueError(error_msg)
+                raise AlmostServerError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
@@ -724,6 +779,7 @@ def get_global_config_dict(
 
         _GLOBAL_CONFIG_DICT = global_config_dict
 
+        _apply_verbosity(global_config_dict)
         return global_config_dict
 
     set_global_config_dict(
@@ -731,7 +787,16 @@ def get_global_config_dict(
         global_config_dict_parser_cls=global_config_dict_parser_cls,
     )
 
+    _apply_verbosity(_GLOBAL_CONFIG_DICT)
     return _GLOBAL_CONFIG_DICT
+
+
+def _apply_verbosity(global_config_dict: DictConfig) -> None:
+    """Set logging to DEBUG when `verbose` is in the config. Runs in the CLI process and, because the
+    config dict is forwarded to every spun-up server, in each server process too."""
+    if global_config_dict.get(VERBOSE_KEY_NAME):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
 
 
 def set_global_config_dict(

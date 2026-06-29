@@ -19,8 +19,8 @@ policy_model_name: Qwen/Qwen3-VL-8B-Instruct
 
 ```bash
 vllm serve Qwen/Qwen3-VL-8B-Instruct -tp 8 --enable-auto-tool-choice --tool-call-parser hermes &
-ng_run "+config_paths=[environments/circle_count/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
-ng_collect_rollouts +agent_name=circle_count_simple_agent +input_jsonl_fpath=environments/circle_count/data/example.jsonl +output_jsonl_fpath=environments/circle_count/data/example_rollouts.jsonl +limit=1
+gym env start --environment circle_count --model-type vllm_model &
+gym eval run --no-serve --agent circle_count_simple_agent --input environments/circle_count/data/example.jsonl --output environments/circle_count/data/example_rollouts.jsonl --limit 1
 ```
 
 # Generating Data

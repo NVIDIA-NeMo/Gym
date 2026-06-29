@@ -1,0 +1,109 @@
+---
+title: "Browse Environments"
+description: "Browse built-in benchmark and training environments."
+position: 3
+---
+
+NeMo Gym currently includes 90+ environments covering math, coding, reasoning, knowledge, agentic tool use, instruction following, and safety. Each environment is a resources server that defines a dataset, verification logic, and optional tools.
+
+## Math
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [math_with_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) | OpenMathReasoning, DAPO, and MathStackOverflow datasets | math-verify + LLM judge | ✓ |
+| [math_with_code](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | Competitive math with calculator tools | Boxed answer + numeric match | |
+| [math_formal_lean](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_formal_lean) | Lean4 formal proof verification | Lean4 compiler | |
+| [math_with_autograder](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_autograder) | Hard math benchmarks (e.g. IMO AnswerBench) | math-verify + LLM autograder | ✓ |
+| [polymath](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/polymath) | Multilingual math across 18 languages and 4 difficulty tiers | LLM judge (weighted) | ✓ |
+| [imo_gradingbench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/imo_gradingbench) | Four-class IMO proof grading | Last-word extraction | ✓ |
+| [imo_proofbench_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/imo_proofbench_judge) | IMO ProofBench with 0–7 rubric | LLM judge | ✓ |
+| [proof_verification](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Proof scoring against ground truth | LLM judge + meta-verifier | |
+| [physics_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/physics_judge) | Open-ended physics QA | LLM judge + math-verify | ✓ |
+| [ugphysics_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ugphysics_judge) | Undergraduate physics benchmarks | LLM judge (TRUE/FALSE) + math-verify | ✓ |
+| [newton_bench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/newton_bench) | Scientific law discovery across 12 physics domains | Execution | |
+
+## Coding
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [bigcodebench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bigcodebench) | BigCodeBench Python solutions against unittest suite | Code execution | ✓ |
+| [evalplus](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus) | HumanEval+ and MBPP+ function completion | Code execution | ✓ |
+| [code_gen](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen) | Competitive coding problem solving | Code execution | ✓ |
+| [competitive_coding_challenges](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) | Contest-style programming problems | Code execution | ✓ |
+| [code_fim](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_fim) | Code fill-in-the-middle (HumanEval-Infilling) | Code execution | ✓ |
+| [bird_sql](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) | Text-to-SQL on BIRD dev (1,534 SQLite tasks) | SQL result-set equality | ✓ |
+| [spider2_lite](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) | Text-to-SQL on Spider 2.0-Lite (135 enterprise tasks) | SQL result-set equality | ✓ |
+| [text_to_sql](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/text_to_sql) | Text-to-SQL across multiple SQL dialects | LLM judge (SQL equivalence) | ✓ |
+| [swerl_gen](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swerl_gen) | SWE patch and test generation in a sandboxed environment | Code execution (pytest) | ✓ |
+| [scicode](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scicode) | Multi-step scientific code generation | Code execution | ✓ |
+| [cvdp](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp) | RTL hardware design code generation | Code execution (simulation) | ✓ |
+
+## Knowledge & Reasoning
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [gpqa_diamond](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) | Graduate-level science multiple choice (GPQA Diamond) | Exact match | ✓ |
+| [mcqa](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) | Multiple-choice QA covering MMLU, GPQA, HLE | Exact match | ✓ |
+| [reasoning_gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) | 100+ tasks: algebra, logic, geometry, graph theory, games | Exact match | |
+| [hotpotqa_qa](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/hotpotqa_qa) | Closed-book multi-hop QA (HotPotQA) | SQuAD-style substring match | ✓ |
+| [simpleqa](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/simpleqa) | Short-form factual QA with abstention scoring | LLM judge (3-tier) | ✓ |
+| [omniscience](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/omniscience) | Factual recall and calibration QA | LLM judge | ✓ |
+| [labbench2_vlm](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/labbench2_vlm) | Scientific VLM QA: figures, tables, lab protocols | LLM judge | ✓ |
+| [arc_agi](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi) | Abstract reasoning puzzles (ARC-AGI) | Exact match (grid) | ✓ |
+| [nvarc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/nvarc) | ARC-AGI in inductive (Python) and transductive (grid) modes | Code execution / exact match | ✓ |
+| [multichallenge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) | Multi-turn inference memory and instruction retention | LLM judge (rubric) | |
+| [mrcr](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mrcr) | Multi-round coreference resolution | F1 (SequenceMatcher) | ✓ |
+
+## Agentic / Tool Use
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 26 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
+| [aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | Multi-hop QA with Wikipedia search + GSM8k with calculator | LLM judge + execution | ✓ |
+| [tavily_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Web search tool use (Tavily API) | Execution + optional LLM judge | ✓ |
+| [calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Multi-turn calendar scheduling with constraint satisfaction | Rule-based (constraints) | ✓ |
+| [finance_sec_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | SEC EDGAR filing search for financial analysis | LLM judge + execution | ✓ |
+| [google_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search) | MCQA with integrated Google search tool | Exact match | |
+| [xlam_fc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | Function calling from Salesforce xlam-60k | Exact match | ✓ |
+| [single_step_tool_use_with_argument_comparison](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison) | Pivot RL for tool use across conversational, SWE, and search domains | Argument comparison | ✓ |
+| [math_with_code](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | Math with calculator tool use | Boxed answer match | |
+| [rdkit_chemistry](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/rdkit_chemistry) | Molecular chemistry with RDKit tool use | Execution (RDKit) | |
+
+## Instruction Following & Safety
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [instruction_following](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) | IFEval and IFBench-style instruction following | LLM judge | |
+| [ifbench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | IFBench with 57 instruction types (AllenAI library) | LLM judge | ✓ |
+| [format_verification](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/format_verification) | Citation format and freeform text formatting | Regex / rule-based | |
+| [structeval](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structeval) | StructEval: JSON, YAML, CSV, TOML, XML schema adherence | Rule-based (schema parsing) | |
+| [structured_outputs](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | Schema adherence across structured output formats | Rule-based (schema validation) | ✓ |
+| [indirect_prompt_injection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/indirect_prompt_injection) | Resistance to injected instructions in tool-use trajectories | Rule-based (attack detection) | ✓ |
+| [jailbreak_detection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/jailbreak_detection) | Jailbreak resistance with Nemotron judge | LLM judge | ✓ |
+| [xstest](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xstest) | Over-refusal calibration (XSTest) | Rule-based | ✓ |
+| [over_refusal_detection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/over_refusal_detection) | Train models to avoid refusing safe prompts | LLM judge | |
+
+## Other
+
+| Environment | Description | Verification | Benchmark |
+|---|---|---|---|
+| [asr_with_pc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/asr_with_pc) | ASR with WER (standard, case-sensitive, punctuation) | Execution (WER metrics) | ✓ |
+| [wmt_translation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/wmt_translation) | Machine translation with BLEU and xCOMET-XXL | Execution (COMET metrics) | ✓ |
+| [longmt_eval](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/longmt_eval) | Document-level translation (SEGALE pipeline + COMETKiwi) | Execution (neural QE) | ✓ |
+| [vlm_eval_kit](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/vlm_eval_kit) | VLM benchmarks: MMBench, OCRBench, and others | Execution (VLMEvalKit) | ✓ |
+| [graphwalks](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/graphwalks) | Long-context graph BFS/DFS reasoning | F1 over node sets | ✓ |
+| [blackjack](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) | Gymnasium-style Blackjack (multi-step) | Win/draw/loss | |
+| [grl_sokoban](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/grl_sokoban) | Single-box Sokoban puzzle | Execution (puzzle solved) | |
+| [speed_bench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/speed_bench) | Speculative-decoding throughput measurement | vLLM Prometheus metrics | ✓ |
+
+<Cards>
+
+<Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
+Use the contribution checklist to add a new benchmark.
+</Card>
+
+<Card title="Build Verifiers" href="/build-verifiers">
+Learn how environments verify agent behavior and compute rewards.
+</Card>
+
+</Cards>

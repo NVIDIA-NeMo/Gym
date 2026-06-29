@@ -1,8 +1,8 @@
 # Description
 ```bash
-config_paths="benchmarks/tau2/configs/tau2.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config benchmarks/tau2/configs/tau2.yaml \
+    --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2 \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.openai_api_key=${openai_api_key}' \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.extra_body._delete_key=max_output_tokens'
@@ -14,17 +14,17 @@ The banking_knowledge configs use the Tau2 bridge with Tau3 data and retrieval
 configuration in the prepared rows:
 
 ```bash
-config_paths="benchmarks/tau2/configs/banking_terminal_use.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config benchmarks/tau2/configs/banking_terminal_use.yaml \
+    --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2_banking_terminal_use \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.openai_api_key=${openai_api_key}'
 ```
 
 ```bash
-config_paths="benchmarks/tau2/configs/banking_alltools.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config benchmarks/tau2/configs/banking_alltools.yaml \
+    --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2_banking_alltools \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.openai_api_key=${openai_api_key}'
 ```

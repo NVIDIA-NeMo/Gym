@@ -82,6 +82,7 @@ class TestApp:
                         "prompt_ids": [1],
                         "completion_ids": [2],
                         "completion_logprobs": [0.0],
+                        "routed_experts": [[[0, 1]], [[2, 3]]],
                     },
                 },
                 {
@@ -102,6 +103,7 @@ class TestApp:
         assert output[0]["name"] == "python"
         assert output[0]["arguments"] == json.dumps({"expr": "2+2"})
         assert output[0]["prompt_token_ids"] == [1]
+        assert output[0]["routed_experts"] == [[[0, 1]], [[2, 3]]]
         assert output[1]["call_id"] == "call_1"
         assert output[1]["output"] == "4"
         assert output[2]["content"][0]["text"] == "answer"
