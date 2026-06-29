@@ -281,30 +281,6 @@ gym dataset migrate \
     --revision 0.0.1
 ```
 
-### `gym dataset render`
-
-Generate a dataset preview by materializing prompts from a raw input file and a prompt template.
-
-| Option | Description |
-| --- | --- |
-| `--input`, `-i` | Raw input JSONL file. |
-| `--prompt-config` | Prompt template YAML to apply. |
-| `--output`, `-o` | Output JSONL file. |
-
-```bash
-gym dataset render \
-    --input raw.jsonl \
-    --prompt-config prompt.yaml \
-    --output preview.jsonl
-```
-
-<Note>
-**Which data-preparation command should I use?**
-
-- **`gym dataset render`** — a focused, standalone step that applies a prompt template to raw rows to populate `responses_create_params.input`. No servers are started. Use it when you have raw data and just need prompt-ready rows. Maps to legacy `ng_materialize_prompts`.
-- **`gym dataset collate`** — the full preparation pipeline for training: it can download missing datasets, validate data, and compute dataset metrics, writing train/validation splits and metrics artifacts. Use it to prepare and validate datasets for training or PR submission. Maps to legacy `ng_prepare_data`.
-</Note>
-
 ### `gym dataset collate`
 
 Validate and collate a dataset, generating metrics and statistics.
@@ -324,6 +300,32 @@ gym dataset collate \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```
+
+### `gym dataset render`
+
+Generate a dataset preview by materializing prompts from a raw input file and a prompt template, producing JSONL with populated `responses_create_params.input` for RL training.
+
+Each input row must **not** already have a populated `responses_create_params.input`; the command applies the prompt template from `--prompt-config` to each row, fills in the input, and preserves the row's other fields.
+
+| Option | Description |
+| --- | --- |
+| `--input`, `-i` | Raw input JSONL file (rows without `responses_create_params.input`). |
+| `--prompt-config` | Prompt template YAML to apply. |
+| `--output`, `-o` | Output JSONL file. |
+
+```bash
+gym dataset render \
+    --input raw.jsonl \
+    --prompt-config prompt.yaml \
+    --output preview.jsonl
+```
+
+<Note>
+**Which data-preparation command should I use?**
+
+- **`gym dataset render`** — a focused, standalone step that applies a prompt template to raw rows to populate `responses_create_params.input`. No servers are started. Use it when you have raw data and just need to turn it into prompt-ready rows.
+- **`gym dataset collate`** — the full preparation pipeline for training: it can download missing datasets, validate data, and compute dataset metrics, writing train/validation splits and metrics artifacts. Use it to prepare and validate datasets for training or PR submission.
+</Note>
 
 ---
 
