@@ -15,17 +15,17 @@ Migrates NeMo Skills' `mmlu-redux` benchmark to Gym on top of the shared
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/mmlu-redux/config.yaml]"
+gym eval prepare --benchmark mmlu-redux
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/mmlu-redux/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark mmlu-redux
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=mmlu-redux_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/mmlu-redux/data/mmlu-redux_benchmark.jsonl \
-    +output_jsonl_fpath=results/mmlu-redux/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/general-boxed.yaml
+gym eval run --no-serve \
+    --agent mmlu-redux_mcqa_simple_agent \
+    --input benchmarks/mmlu-redux/data/mmlu-redux_benchmark.jsonl \
+    --output results/mmlu-redux/rollouts.jsonl \
+    --prompt-config benchmarks/prompts/generic/general-boxed.yaml
 ```

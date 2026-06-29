@@ -1,505 +1,451 @@
 ---
 title: "CLI Commands"
-description: ""
+description: "Reference for the unified gym CLI: command groups, flags, and migration from the legacy ng_* commands."
 position: 3
 ---
-This page documents all available NeMo Gym CLI commands.
+This page documents the NeMo Gym command-line interface.
+
+All functionality is exposed through a single `gym` entry point, organized into command groups (`gym <group> <command>`). `ng` is a drop-in alias for `gym`. Every group and command supports `-h`/`--help`.
 
 <Note>
-Each command has both a short form (such as `ng_run`) and a full form (such as `nemo_gym_run`). They are functionally identical.
-
+The legacy `ng_*` / `nemo_gym_*` commands (such as `ng_run` or `nemo_gym_collect_rollouts`) still work but are deprecated. Each one prints a notice pointing at its `gym` replacement and then runs it. See [Migrating from the legacy commands](#migrating-from-the-legacy-commands) at the bottom of this page.
 </Note>
 
 ## Quick Reference
 
 ```bash
-# Display help
-ng_help
+# General
+gym --help                   # list all command groups
+gym --version [--json]        # print version and system info
+ng ...                        # 'ng' is an alias for 'gym'
 
-# Get detailed help for any command
-ng_run +help=true
-ng_test +h=true
+# Discover
+gym list benchmarks [--json]    # list available benchmarks
+gym list environments [--json]  # list available environments by name
+gym list agents [--json]        # list agent harnesses and how each composes
+gym search <query> [--json]     # filter the benchmark list by name
+
+# Datasets
+gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
+gym dataset download          # download a dataset from HF (default) or GitLab
+gym dataset rm                # delete a dataset from GitLab
+gym dataset migrate           # move a dataset from GitLab to HF
+gym dataset render            # generate a dataset preview (materialize prompts)
+gym dataset collate           # validate and collate a dataset
+
+# Environments
+gym env init                  # scaffold a new resources server
+gym env resolve               # resolve and print the final merged config
+gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
+gym env packages              # list packages in a server's virtual environment
+gym env test                  # test resources server(s); all of them if none is given
+gym env start                 # start the servers
+gym env status                # show running servers
+
+# Evaluation
+gym eval prepare              # prepare benchmark data and dump it to disk
+gym eval run                  # collate data, start servers, and collect rollouts
+gym eval aggregate            # merge sharded rollout results
+gym eval profile              # compute a reward profile from rollouts
+
+# Contributor helpers
+gym dev test                  # run NeMo Gym's unit tests
 ```
 
----
+## Common Options
 
-## Server Management
+These options are shared across many commands.
 
-Commands for running, testing, and managing NeMo Gym servers.
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Load a Gym config YAML. Repeatable. Maps to `+config_paths=[...]`. |
+| `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
+| `--resources-server NAME` | Select a registered resources server by name. |
+| `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. Lets you register your own benchmarks, resources servers, and models. |
+| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
+| `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
+| `-h`, `--help` | Show help for any group or command. |
 
-### `ng_run` / `nemo_gym_run`
+<Tip>
+The `--benchmark`, `--resources-server`, and `--model-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
+</Tip>
 
-Start NeMo Gym servers for agents, models, and resources.
 
-This command reads configuration from YAML files specified via `+config_paths` and starts all configured servers. The configuration files should define server instances with their entrypoints and settings.
+### Selecting the model server
 
-**Configuration Parameter**
+Commands that need a model (`gym env start`, `gym eval run`) configure it through four flags:
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `config_paths` | List[str] | Paths to YAML configuration files. Specify using Hydra: `+config_paths="[file1.yaml,file2.yaml]"` |
+| Flag | Description |
+| --- | --- |
+| `--model-type NAME` | The model server type to load (such as `openai_model`, `vllm_model`, or `local_vllm_model`). |
+| `--model`, `-m` | The served model identifier: an API model name, an HF id, or a local checkpoint path. Interpreted per `--model-type`. Maps to `policy_model_name`. |
+| `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
+| `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
 
-**Example**
 
-```bash
-# Start servers with specific configs
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
-```
+### Hydra overrides (escape hatch)
 
----
+The `gym` CLI is a thin wrapper over Gym's Hydra config system. Standard flags (`--flag value`) cover the common inputs. Anything not covered by a flag can still be passed as a raw Hydra override using `+key=value` (add a new key) or `++key=value` (add or override an existing key). Unknown overrides are forwarded to Hydra untouched, so advanced config composition is fully functional.
 
-### `ng_test` / `nemo_gym_test`
-
-Test a specific server module by running its pytest suite and optionally validating example data.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `entrypoint` | str | Entrypoint for this command. Must be a relative path with two parts (such as `responses_api_agents/simple_agent`). |
-| `should_validate_data` | bool | Whether to validate the example data (examples, metrics, rollouts, and so on) for this server. Default: `False`. |
-
-**Example**
+When a command needs overrides for keys that have no dedicated flag, you can keep the whole command in Hydra form (config paths included) or mix `--flag` and `+key=value` styles in one invocation:
 
 ```bash
-ng_test +entrypoint=resources_servers/example_single_tool_call
-```
-
----
-
-### `ng_test_all` / `nemo_gym_test_all`
-
-Run tests for all server modules in the project.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `fail_on_total_and_test_mismatch` | bool | Fail if the number of server modules does not match the number with tests. Default: `False`. |
-
-**Example**
-
-```bash
-ng_test_all
-```
-
----
-
-### `ng_dev_test` / `nemo_gym_dev_test`
-
-Run core NeMo Gym tests with coverage reporting. Runs pytest with the `--cov` flag.
-
-**Example**
-
-```bash
-ng_dev_test
-```
-
----
-
-### `ng_init_resources_server` / `nemo_gym_init_resources_server`
-
-Initialize a new resources server with template files and directory structure.
-
-**Example**
-
-```bash
-ng_init_resources_server +entrypoint=resources_servers/my_server
-```
-
----
-
-## Data Collection
-
-Commands for collecting verified rollouts for RL training.
-
-### `ng_collect_rollouts` / `nemo_gym_collect_rollouts`
-
-Perform a batch of rollout collection.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `agent_name` | str | The agent to collect rollouts from. |
-| `input_jsonl_fpath` | str | The input data source to use to collect rollouts, in the form of a file path to a JSONL file. |
-| `output_jsonl_fpath` | str | The output data JSONL file path. |
-| `limit` | Optional[int] | Maximum number of examples to load and take from the input dataset. |
-| `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16. |
-| `num_repeats_add_seed` | bool | When num_repeats &gt;1, add a "seed" parameter on the Responses create params. |
-| `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
-
-**Example**
-
-```bash
-ng_collect_rollouts \
-    +agent_name=example_single_tool_call_simple_agent \
-    +input_jsonl_fpath=weather_query.jsonl \
-    +output_jsonl_fpath=weather_rollouts.jsonl \
-    +limit=100 \
-    +num_repeats=4 \
-    +num_samples_in_parallel=10
-```
-
-### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
-
-Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `output_jsonl_fpath` | str | The output data JSONL file path. |
-| `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
-
-**Examples**
-
-```bash
-ng_e2e_collect_rollouts \
-    +output_jsonl_fpath=weather_rollouts.jsonl \
-    +num_samples_in_parallel=10
-```
-
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
-    ++wandb_project= \
-    ++wandb_name= \
-    ++wandb_dir= \
-    ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl \
-    ++split=validation
-```
-
-Example using GPT-OSS 120B remote vLLM endpoint
-```bash
-experiment_name=rollouts/test_001
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
-    +skip_venv_if_present=true \
-    +wandb_project=gym-dev \
-    +wandb_name=$(date +%Y%m%d)/$experiment_name \
-    ++output_jsonl_fpath=results/$experiment_name.jsonl \
-    ++overwrite_metrics_conflicts=true \
-    ++split=validation \
-    ++policy_model_name=openai/gpt-oss-120b \
-    ++policy_api_key=dummy_key \
-    ++policy_base_url=http://0.0.0.0:10240/v1 \
+gym eval run \
+    --benchmark aime24 \
+    --model-type openai_model \
     ++responses_create_params.reasoning.effort=low \
-    ++responses_create_params.temperature=1.0 \
-    ++responses_create_params.top_p=1.0 &> eval_gptoss120b.log &
+    +wandb_project=gym-dev
 ```
 
 ---
 
-### `ng_reward_profile` / `nemo_gym_reward_profile`
+## General
 
-Computes statistics on rewards and task difficulty for rollouts collected with `ng_collect_rollouts` with `num_repeats` &gt;1. This outputs a new "reward profiled" dataset, where each task in the dataset has metrics like the average reward, standard deviation, min/max, and pass rate. This is useful in filtering tasks before training for difficulty, variance, or creating a curriculum. 
+### `gym --help`
 
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `input_jsonl_fpath` | str | Path to the original task dataset JSONL file. |
-| `rollouts_jsonl_fpath` | str | Path to the rollouts file from `ng_collect_rollouts` (must have been run with `num_repeats` &gt;1). |
-| `output_jsonl_fpath` | str | Output file path for the reward profiled dataset. |
-| `pass_threshold` | Optional[float] | Reward threshold for computing pass rate. If not specified, pass rate metrics are not included. |
-
-**Output Fields**
-
-Each output row contains all original task fields plus:
-- `avg_reward`: Average reward across all rollouts
-- `std_reward`: Standard deviation of rewards
-- `min_reward`: Minimum reward observed
-- `max_reward`: Maximum reward observed
-- `total_samples`: Number of rollout samples
-- `pass_rate`, `pass_rate_total`, `pass_rate_passed`, `pass_threshold`: (Only if `pass_threshold` is specified)
-
-**Example**
+List all command groups and their descriptions.
 
 ```bash
-ng_reward_profile \
-    +input_jsonl_fpath=tasks.jsonl \
-    +rollouts_jsonl_fpath=rollouts.jsonl \
-    +output_jsonl_fpath=profiled_tasks.jsonl \
-    +pass_threshold=1.0
+gym --help
 ```
 
----
+### `gym --version`
 
-## Data Management
+Print the NeMo Gym version along with Python, key dependency, and system information.
 
-Commands for preparing and viewing training data.
-
-### `ng_prepare_data` / `nemo_gym_prepare_data`
-
-Prepare and validate training data, generating metrics and statistics for datasets.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `output_dirpath` | str | Directory path where processed datasets and metrics will be saved. |
-| `mode` | Literal["train_preparation", "example_validation"] | Processing mode. Use `train_preparation` to prepare train and validation datasets for training, or `example_validation` to validate example data for PR submission. |
-| `should_download` | bool | Whether to automatically download missing datasets from remote registries. Default: `False`. |
-| `overwrite_metrics_conflicts` | bool | Whether or not to overwrite metrics conflicts. Default: `False`. |
-
-**Example**
+| Option | Description |
+| --- | --- |
+| `--json` | Output version information as JSON. |
 
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/example_multi_step \
-    +mode=example_validation
-```
-
----
-
-## Dataset Registry - GitLab
-
-Commands for uploading, downloading, and managing datasets in GitLab Model Registry.
-
-### `ng_upload_dataset_to_gitlab` / `nemo_gym_upload_dataset_to_gitlab`
-
-Upload a local JSONL dataset artifact to GitLab.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `dataset_name` | str | The dataset name. |
-| `version` | str | The version of this dataset. Must be in the format `x.x.x`. |
-| `input_jsonl_fpath` | str | Path to the JSONL file to upload. |
-
-**Example**
-
-```bash
-ng_upload_dataset_to_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +input_jsonl_fpath=data/train.jsonl
-```
-
----
-
-### `ng_download_dataset_from_gitlab` / `nemo_gym_download_dataset_from_gitlab`
-
-Download a JSONL dataset from GitLab Model Registry.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `dataset_name` | str | The dataset name. |
-| `version` | str | The version of this dataset. Must be in the format `x.x.x`. |
-| `artifact_fpath` | str | The filepath to the artifact to download. |
-| `output_fpath` | str | Path where the downloaded dataset will be saved. |
-
-**Example**
-
-```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=example_multi_step \
-    +version=0.0.1 \
-    +artifact_fpath=train.jsonl \
-    +output_fpath=data/train.jsonl
-```
-
----
-
-### `ng_delete_dataset_from_gitlab` / `nemo_gym_delete_dataset_from_gitlab`
-
-Delete a dataset from GitLab Model Registry. Prompts for confirmation.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `dataset_name` | str | Name of the dataset to delete from GitLab. |
-
-**Example**
-
-```bash
-ng_delete_dataset_from_gitlab +dataset_name=old_dataset
-```
-
----
-
-## Dataset Registry - HuggingFace
-
-Commands for uploading and downloading datasets to/from HuggingFace Hub.
-
-### `ng_upload_dataset_to_hf` / `nemo_gym_upload_dataset_to_hf`
-
-Upload a JSONL dataset to HuggingFace Hub with optional GitLab deletion after successful upload.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `hf_token` | str | HuggingFace API token for authentication. |
-| `hf_organization` | str | HuggingFace organization name where the dataset will be uploaded. |
-| `hf_collection_name` | str | HuggingFace collection name for organizing datasets. |
-| `hf_collection_slug` | str | Alphanumeric collection slug found at the end of the collection URI. |
-| `dataset_name` | str | Name of the dataset. Will be combined with domain and resources server name. |
-| `input_jsonl_fpath` | str | Path to the local JSONL file to upload. |
-| `resource_config_path` | str | Path to resources server config file. Used to extract domain for naming convention. |
-| `hf_dataset_prefix` | str | Prefix prepended to dataset name. Default: `NeMo-Gym`. |
-| `delete_from_gitlab` | Optional[bool] | Delete the dataset from GitLab after successful upload to HuggingFace. Default: `False`. |
-
-**Example**
-
-```bash
-resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_upload_dataset_to_hf \
-    +dataset_name=my_dataset \
-    +input_jsonl_fpath=data/train.jsonl \
-    +resource_config_path=${resource_config_path} \
-    +delete_from_gitlab=true
-```
-
----
-
-### `ng_download_dataset_from_hf` / `nemo_gym_download_dataset_from_hf`
-
-Download a JSONL dataset from HuggingFace Hub to local filesystem.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `output_fpath` | str | Local file path where the downloaded dataset will be saved. |
-| `hf_token` | str | HuggingFace API token for authentication. |
-| `artifact_fpath` | str | Name of the artifact file to download from the repository. |
-| `repo_id` | str | HuggingFace repository ID in format `organization/dataset-name`. |
-
-**Example**
-
-```bash
-ng_download_dataset_from_hf \
-    +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
-    +artifact_fpath=train.jsonl \
-    +output_fpath=data/train.jsonl
-```
-
----
-
-### `ng_gitlab_to_hf_dataset` / `nemo_gym_gitlab_to_hf_dataset`
-
-Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
-
-This command always deletes the dataset from GitLab after uploading to HuggingFace. Use `ng_upload_dataset_to_hf` if you want optional deletion control.
-
-**Parameters**
-
-Same as `ng_upload_dataset_to_hf` but `delete_from_gitlab` is not available. This command always deletes.
-
-**Example**
-
-```bash
-resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-ng_gitlab_to_hf_dataset \
-    +dataset_name=my_dataset \
-    +input_jsonl_fpath=data/train.jsonl \
-    +resource_config_path=${resource_config_path}
-```
-
----
-
-## Configuration & Help
-
-Commands for debugging configuration and getting help.
-
-### `ng_dump_config` / `nemo_gym_dump_config`
-
-Display the resolved Hydra configuration for debugging purposes.
-
-**Example**
-
-```bash
-ng_dump_config "+config_paths=[<config1>,<config2>]"
-```
-
----
-
-### `ng_help` / `nemo_gym_help`
-
-Display a list of available NeMo Gym CLI commands.
-
-**Example**
-
-```bash
-ng_help
-```
-
----
-
-### `ng_version` / `nemo_gym_version`
-
-Display NeMo Gym version and system information.
-
-**Parameters**
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `json_format` | bool | Output in JSON format for programmatic use. Default: `False`. Can be specified with `+json=true`. |
-
-**Example**
-
-```bash
-# Display version information
-ng_version
+gym --version
 
 # Output as JSON
-ng_version +json=true
+gym --version --json
 ```
 
 ---
 
-### `ng_pip_list` / `nemo_gym_pip_list`
+## Discovery
 
-Each server has its own isolated virtual environment. To inspect the packages:
+Commands for discovering what you can evaluate against.
 
-**Parameters**
+### `gym list benchmarks`
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `entrypoint` | str | The relative entrypoint path to the server directory |
-| `format` | Optional[str] | Output format for pip list. Options: 'columns' (default), 'freeze', 'json'. Default: `None`. |
-| `outdated` | bool | List outdated packages. Default: `False`. |
+List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
 
-**Examples**
+| Option | Description |
+| --- | --- |
+| `--json` | Output the benchmark list as JSON. |
 
 ```bash
-# List all packages
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call
+gym list benchmarks
 
-# Output as JSON
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call +format=json
+# Machine-readable output for scripting
+gym list benchmarks --json | jq '.[].name'
+```
+
+### `gym list environments`
+
+List the environments available under `environments/`, by short name (with their domain and description). The names map to `environments/<name>/config.yaml` and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output the environment list as JSON. |
+
+```bash
+gym list environments
+gym list environments --json | jq '.[].name'
+```
+
+### `gym list agents`
+
+List the agent harnesses under `responses_api_agents/`, with each one's composition pattern — **composable** (Pattern A: references a separate resources server, so it can be wired into a matching environment) vs **self-contained** (Pattern B: ships its own framework/environment) — plus its config variants.
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output the agent list as JSON (includes the `self_contained` flag). |
+
+```bash
+gym list agents
+gym list agents --json | jq '.[] | {name, self_contained}'
+```
+
+### `gym search`
+
+List benchmarks whose name, agent, resources server, dataset, or domain matches a query.
+
+| Argument / Option | Description |
+| --- | --- |
+| `QUERY` | Query to match against component names (positional, required). |
+| `--json` | Output matches as JSON. |
+
+```bash
+gym search math
+gym search aime --json
+```
+
+---
+
+## Datasets
+
+Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
+
+### `gym dataset upload`
+
+Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab.
+
+| Option | Description |
+| --- | --- |
+| `--storage {hf,gitlab}` | Storage backend. Default: `hf`. |
+| `--input`, `-i` | Local JSONL file to upload. |
+| `--name` | Dataset name. |
+| `--revision` | Dataset revision (version). |
+| `--split` | Dataset split (HF only). |
+| `--create-pr` | Open a pull request with your changes (HF only). |
+
+```bash
+# Upload to HuggingFace
+gym dataset upload \
+    --name my_dataset \
+    --input data/train.jsonl \
+    --revision 0.0.1
+
+# Upload to GitLab
+gym dataset upload \
+    --storage gitlab \
+    --name my_dataset \
+    --input data/train.jsonl \
+    --revision 0.0.1
+```
+
+### `gym dataset download`
+
+Download a dataset from HuggingFace (default) or GitLab.
+
+| Option | Description |
+| --- | --- |
+| `--storage {hf,gitlab}` | Storage backend. Default: `hf`. |
+| `--repo-id` | HF repo id, such as `org/dataset` (HF only). |
+| `--name` | Dataset name (GitLab only). |
+| `--revision` | Dataset version (GitLab only). |
+| `--artifact` | Remote file to fetch (GitLab: required; HF: optional raw file). |
+| `--output`, `-o` | Local destination file. |
+| `--output-dir` | Local destination directory; needed when downloading all splits (HF only). |
+| `--split` | Dataset split (HF only). |
+
+```bash
+# Download a single file from HuggingFace
+gym dataset download --repo-id NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
+    --artifact train.jsonl \
+    --output data/train.jsonl
+
+# Download from GitLab
+gym dataset download \
+    --storage gitlab \
+    --name example_multi_step \
+    --revision 0.0.1 \
+    --artifact train.jsonl \
+    --output data/train.jsonl
+```
+
+### `gym dataset rm`
+
+Delete a dataset from the GitLab Registry. Prompts for confirmation.
+
+| Option | Description |
+| --- | --- |
+| `--name` | Name of the dataset to delete. |
+
+```bash
+gym dataset rm --name old_dataset
+```
+
+### `gym dataset migrate`
+
+Migrate a JSONL dataset to HuggingFace from GitLab. Use `gym dataset upload` if you do not want automatic GitLab deletion.
+
+| Option | Description |
+| --- | --- |
+| `--input`, `-i` | Local JSONL file to upload to HF. |
+| `--name` | Dataset name. |
+| `--revision` | Dataset revision (HF). |
+| `--split` | Dataset split. |
+| `--create-pr` | Open a pull request to HF dataset with your changes. |
+
+```bash
+gym dataset migrate \
+    --name my_dataset \
+    --input data/train.jsonl \
+    --revision 0.0.1
+```
+
+### `gym dataset render`
+
+Generate a dataset preview by materializing prompts from a raw input file and a prompt template.
+
+| Option | Description |
+| --- | --- |
+| `--input`, `-i` | Raw input JSONL file. |
+| `--prompt-config` | Prompt template YAML to apply. |
+| `--output`, `-o` | Output JSONL file. |
+
+```bash
+gym dataset render \
+    --input raw.jsonl \
+    --prompt-config prompt.yaml \
+    --output preview.jsonl
+```
+
+### `gym dataset collate`
+
+Validate and collate a dataset, generating metrics and statistics.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--resources-server NAME` | Load the named resources server config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data. |
+| `--output-dir` | Output directory for the prepared data. |
+| `--download` | Download source datasets before collating. |
+
+```bash
+gym dataset collate \
+    --resources-server example_multi_step \
+    --output-dir data/example_multi_step \
+    --mode example_validation
+```
+
+---
+
+## Environments
+
+Commands for developing, running, and inspecting environments (a dataset + agent harness + resources server + model server).
+
+### `gym env init`
+
+Scaffold a new resources server with template files (config, app, tests, README, data directory).
+
+| Option | Description |
+| --- | --- |
+| `--resources-server NAME` | Name of the resources server to create. |
+
+```bash
+gym env init --resources-server my_server
+```
+
+### `gym env resolve`
+
+Resolve the configs, flags, and overrides into a final merged config and print it. Useful for debugging configuration. Secrets are hidden.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+
+```bash
+# Merge a resources-server config with a model config, apply an override, and print the result
+gym env resolve \
+    --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    ++responses_create_params.temperature=0.6
+```
+
+### `gym env validate`
+
+Validate a config without starting Ray or any server subprocess — a fast pre-flight check that catches config mistakes (missing/malformed `config_paths`, unknown server cross-references, unset mandatory `???` values, schema errors) in well under a second instead of after a Ray bootstrap. Exits `0` when valid, or `1` with a clean message (no traceback) when not. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
+| `--resources-server NAME` | Validate a named resources server config. |
+| `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
+
+```bash
+gym env validate --environment workplace_assistant
+gym env validate --benchmark gsm8k
+
+# or explicit config path(s)
+gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+```
+
+### `gym env packages`
+
+Each server has its own isolated virtual environment. List the packages installed in a server's environment.
+
+| Option | Description |
+| --- | --- |
+| `--resources-server NAME` | Name of the resources server. |
+| `--outdated` | List only outdated packages. |
+| `--json` | Output the package list as JSON. |
+
+```bash
+gym env packages --resources-server example_single_tool_call
 
 # Check for outdated packages
-ng_pip_list +entrypoint=resources_servers/example_single_tool_call +outdated=true
+gym env packages \
+    --resources-server example_single_tool_call \
+    --outdated
 ```
 
----
+### `gym env test`
 
-### `ng_status` / `nemo_gym_status`
+Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested.
 
-View all currently running NeMo Gym servers and their health status.
-
-**Example**
+| Option | Description |
+| --- | --- |
+| `--resources-server NAME` | Resources server to test. Omit to test all servers. |
 
 ```bash
-ng_status
+# Test a single server
+gym env test --resources-server example_single_tool_call
 
+# Test all servers
+gym env test
+```
+
+### `gym env start`
+
+Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config (start its servers). |
+| `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model server type config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
+| `--model-url` | Model server base URL. |
+| `--model-api-key` | Model server API key. |
+
+```bash
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type openai_model
+
+# Start a benchmark's servers
+gym env start \
+    --benchmark gpqa \
+    --model-type vllm_model
+```
+
+### `gym env status`
+
+Show all currently running NeMo Gym servers and their health.
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output the server list as JSON. |
+
+```bash
+gym env status
+```
+
+```
 NeMo Gym Server Status:
 
 [1] ✓ example_single_tool_call (resources_servers/example_single_tool_call)
@@ -510,45 +456,244 @@ NeMo Gym Server Status:
     'pid': 89904,
     'uptime_seconds': '0d 0h 0m 41.5s',
 }
-[2] ✓ example_single_tool_call_simple_agent (responses_api_agents/simple_agent)
-{
-    'server_type': 'responses_api_agents',
-    'name': 'simple_agent',
-    'port': 58118,
-    'pid': 89905,
-    'uptime_seconds': '0d 0h 0m 41.5s',
-}
-[3] ✓ policy_model (responses_api_models/openai_model)
-{
-    'server_type': 'responses_api_models',
-    'name': 'openai_model',
-    'port': 58119,
-    'pid': 89907,
-    'uptime_seconds': '0d 0h 0m 41.5s',
-}
+...
 
 3 servers found (3 healthy, 0 unhealthy)
-
 ```
 
 ---
 
-## Getting Help
+## Evaluation
 
-For detailed help on any command, run it with `+help=true` or `+h=true`:
+Commands for running evaluations end to end: prepare data, collect rollouts, aggregate for sharded runs, and profile.
+
+### `gym eval prepare`
+
+Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
-ng_run +help=true
-ng_collect_rollouts +h=true
+gym eval prepare --benchmark aime24
 ```
 
-This will display all available configuration parameters and their descriptions.
+### `gym eval run`
+
+Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model server type config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--no-serve` | Collect against already-running servers instead of starting them. |
+| `--resume` | Resume from cached rollouts instead of recollecting. |
+| `--agent`, `-a` | Agent to collect rollouts with. |
+| `--input`, `-i` | Input tasks JSONL file. |
+| `--output`, `-o` | Output rollouts JSONL file. |
+| `--limit` | Maximum number of tasks to run. |
+| `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
+| `--prompt-config` | Prompt template YAML to apply. |
+| `--concurrency` | Maximum number of concurrent samples. |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
+| `--model`, `-m` | Served model identifier. |
+| `--model-url` | Model server base URL. |
+| `--model-api-key` | Model server API key. |
+| `--temperature` | Sampling temperature. |
+| `--top-p` | Nucleus sampling top-p. |
+| `--max-output-tokens` | Maximum output tokens. |
+
+```bash
+# End-to-end: spin up servers, then collect rollouts for a benchmark
+gym eval run --benchmark aime24 \
+    --model-type openai_model \
+    --output results/aime24.jsonl \
+    --split validation \
+    --concurrency 10
+
+# Against an already-running server, with a remote vLLM endpoint
+gym eval run --no-serve \
+    --model-type openai_model \
+    --resources-server math_with_judge \
+    --output results/test_001.jsonl \
+    --split validation \
+    --model openai/gpt-oss-120b \
+    --model-url http://0.0.0.0:10240/v1 \
+    --model-api-key dummy_key \
+    --temperature 1.0 \
+    --top-p 1.0
+
+# Per-agent repeats: one input file pins different agents per row via agent_ref.name
+gym eval run --no-serve \
+    --model-type openai_model \
+    --input mixed_agents.jsonl \
+    --output results/mixed_rollouts.jsonl \
+    --num-repeats '{agent_alpha: 4, agent_beta: 1, _default: 1}'
+```
+
+### `gym eval aggregate`
+
+Merge sharded rollout results into a single rollouts file with aggregate metrics.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
+
+```bash
+gym eval aggregate --output results/merged.jsonl
+```
+
+### `gym eval profile`
+
+Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Requires rollouts collected with `--num-repeats` greater than 1.
+
+| Option | Description |
+| --- | --- |
+| `--inputs` | Materialized inputs JSONL fed to rollout collection. |
+| `--rollouts` | Rollouts JSONL produced by collection. |
+
+```bash
+gym eval profile \
+    --inputs materialized_inputs.jsonl \
+    --rollouts rollouts.jsonl
+```
 
 ---
 
-## Re-install Gym and dependencies
+## Contributor Helpers
+
+### `gym dev test`
+
+Run NeMo Gym's core unit tests with coverage reporting.
+
 ```bash
-ng_reinstall
+gym dev test
 ```
 
-This will re-install Gym and its dependencies into the currently activated Python virtual environment.
+---
+
+## Migrating from the legacy commands
+
+The legacy `ng_*` and `nemo_gym_*` are deprecated and will be removed in the future release.
+Use the tables below to find their `gym` replacement and update your scripts and workflows.
+
+### Command mapping
+
+| Legacy command | New command |
+| --- | --- |
+| `ng_help` | `gym --help` |
+| `ng_version` | `gym --version` |
+| `ng_list_benchmarks` | `gym list benchmarks` |
+| `ng_run` | `gym env start` |
+| `ng_status` | `gym env status` |
+| `ng_dump_config` | `gym env resolve` |
+| `ng_pip_list` | `gym env packages` |
+| `ng_init_resources_server` | `gym env init` |
+| `ng_test` | `gym env test` |
+| `ng_test_all` | `gym env test` (no `--resources-server`) |
+| `ng_prepare_benchmark` | `gym eval prepare` |
+| `ng_e2e_collect_rollouts` | `gym eval run` |
+| `ng_collect_rollouts` | `gym eval run --no-serve` |
+| `ng_aggregate_rollouts` | `gym eval aggregate` |
+| `ng_reward_profile` | `gym eval profile` |
+| `ng_prepare_data` | `gym dataset collate` |
+| `ng_materialize_prompts` | `gym dataset render` |
+| `ng_upload_dataset_to_hf` | `gym dataset upload` |
+| `ng_upload_dataset_to_gitlab` | `gym dataset upload --storage gitlab` |
+| `ng_download_dataset_from_hf` | `gym dataset download` |
+| `ng_download_dataset_from_gitlab` | `gym dataset download --storage gitlab` |
+| `ng_gitlab_to_hf_dataset` | `gym dataset migrate` |
+| `ng_delete_dataset_from_gitlab` | `gym dataset rm` |
+| `ng_dev_test` | `gym dev test` |
+| `ng_reinstall` | `uv sync --extra dev --group docs` |
+
+### Replacing Hydra overrides with flags
+
+The most common Hydra overrides now have dedicated flags:
+
+| Legacy Hydra override | New flag |
+| --- | --- |
+| `"+config_paths=[a.yaml,b.yaml]"` | `--config a.yaml --config b.yaml` |
+| `+agent_name=...` | `--agent`, `-a` |
+| `+input_jsonl_fpath=...` | `--input`, `-i` |
+| `+output_jsonl_fpath=...` | `--output`, `-o` |
+| `+limit=...` | `--limit` |
+| `+num_repeats=...` | `--num-repeats` |
+| `+num_samples_in_parallel=...` | `--concurrency` |
+| `++split=...` | `--split` |
+| `++policy_model_name=...` | `--model`, `-m` |
+| `++policy_base_url=...` | `--model-url` |
+| `++policy_api_key=...` | `--model-api-key` |
+| `++responses_create_params.temperature=...` | `--temperature` |
+| `++responses_create_params.top_p=...` | `--top-p` |
+| `++responses_create_params.max_output_tokens=...` | `--max-output-tokens` |
+| `+mode=...` | `--mode` |
+| `+output_dirpath=...` | `--output-dir` |
+| `+should_download=true` | `--download` |
+| `+prompt_config=...` | `--prompt-config` |
+| `+resume_from_cache=true` | `--resume` |
+| `+dataset_name=...` | `--name` |
+| `+repo_id=...` | `--repo-id` |
+| `+revision=...` / `+version=...` | `--revision` |
+| `+artifact_fpath=...` | `--artifact` |
+| `+output_fpath=...` | `--output`, `-o` |
+| `+create_pr=true` | `--create-pr` |
+| `+outdated=true` | `--outdated` |
+
+### Common workflows, before and after
+
+```bash
+# Start servers
+# Before:
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+# After:
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type openai_model
+
+# End-to-end rollout collection
+# Before:
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/math_with_judge/configs/math_with_judge.yaml"
+ng_e2e_collect_rollouts "+config_paths=[${config_paths}]" \
+    ++output_jsonl_fpath=results/aime24.jsonl \
+    ++split=validation
+# After:
+gym eval run \
+    --model-type openai_model \
+    --resources-server math_with_judge \
+    --output results/aime24.jsonl \
+    --split validation
+
+# Collect against already-running servers
+# Before:
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=weather_query.jsonl \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    +num_repeats=4 +num_samples_in_parallel=10
+# After:
+gym eval run --no-serve \
+    --agent example_single_tool_call_simple_agent \
+    --input weather_query.jsonl \
+    --output weather_rollouts.jsonl \
+    --num-repeats 4 \
+    --concurrency 10
+
+# Reward profiling
+# Before:
+ng_reward_profile +input_jsonl_fpath=materialized_inputs.jsonl +rollouts_jsonl_fpath=rollouts.jsonl
+# After:
+gym eval profile \
+    --inputs materialized_inputs.jsonl \
+    --rollouts rollouts.jsonl
+```
+
+<Tip>
+Run any command with `--help` to see its full set of flags, and `gym --help` to list every group.
+</Tip>

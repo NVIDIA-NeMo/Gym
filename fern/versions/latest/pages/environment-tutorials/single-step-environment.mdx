@@ -53,7 +53,7 @@ In most cases, the **Resources Server** is where your changes go: define your to
 Resource servers live in the `resources_servers/` directory. Scaffold a weather server that provides weather information to models:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_weather_tool
+gym env init --resources-server my_weather_tool
 ```
 
 This generates the following structure along with a paired simple agent configuration:
@@ -294,8 +294,8 @@ my_weather_tool_simple_agent:
         type: example
         jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
       # The scaffold also generates train/validation dataset entries
-      # with gitlab_identifier blocks. Those are omitted here since
-      # we only have example data at this stage.
+      # (which can declare a `source:` block — the unified dataset source).
+      # Those are omitted here since we only have example data at this stage.
 ```
 
 The `domain` field categorizes your resource server and is **required**. Common values: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`.
@@ -393,7 +393,7 @@ async def test_verify_without_tool_call(server):
 Run the tests:
 
 ```bash
-ng_test +entrypoint=resources_servers/my_weather_tool
+gym env test --resources-server my_weather_tool
 ```
 
 For detailed test output:
@@ -413,13 +413,12 @@ pytest -v
 Start the servers:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/my_weather_tool/configs/my_weather_tool.yaml"
-
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server my_weather_tool
 ```
 
-`ng_run` reads the config files and starts all three components from the architecture diagram:
+`gym env start` reads the config files and starts all three components from the architecture diagram:
 
 1. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
 2. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
@@ -475,12 +474,13 @@ Before training, you collect rollouts to validate that your environment works en
 With your servers still running, collect rollouts against your example inputs:
 
 ```bash
-ng_collect_rollouts +agent_name=my_weather_tool_simple_agent \
-    +input_jsonl_fpath=resources_servers/my_weather_tool/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/my_weather_tool/data/example_rollouts.jsonl \
-    +limit=null \
-    +num_repeats=null \
-    +num_samples_in_parallel=null
+gym eval run --no-serve \
+    --agent my_weather_tool_simple_agent \
+    --input resources_servers/my_weather_tool/data/example.jsonl \
+    --output resources_servers/my_weather_tool/data/example_rollouts.jsonl \
+    --limit null \
+    --num-repeats null \
+    --concurrency null
 ```
 
 <Note>
@@ -545,7 +545,7 @@ We'd love to see your contributions! Please make sure your PR includes accurate 
 
 You've learned how to:
 
-- Initialize a resource server with `ng_init_resources_server`
+- Initialize a resources server with `gym env init`
 - Prepare task data in JSONL format
 - Implement tool endpoints and verification logic
 - Configure the required `domain` field and wire components together
@@ -654,7 +654,7 @@ Check server status and logs:
 
 ```bash
 # View running servers
-ng_status
+gym env status
 
 # For detailed logs, run the server directly:
 cd resources_servers/my_weather_tool
@@ -662,4 +662,4 @@ source .venv/bin/activate
 python app.py
 ```
 
-Server logs appear in the terminal where `ng_run` was executed.
+Server logs appear in the terminal where `gym env start` was executed.

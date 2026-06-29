@@ -53,7 +53,7 @@ redirects:
     destination: "/nemo/gym/main"
   # Legacy Sphinx page paths → current Fern slugs
   - source: "/nemo/gym/about/concepts/configuration-system.html"
-    destination: "/nemo/gym/about/concepts/configuration"
+    destination: "/nemo/gym/main/reference/configuration"
   - source: "/nemo/gym/about/concepts/core-abstractions.html"
     destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/get-started/setup-installation.html"
@@ -113,7 +113,7 @@ redirects:
   - source: "/nemo/gym/latest/about/concepts/architecture"
     destination: "/nemo/gym/main/infrastructure/engineering-notes/system-design"
   - source: "/nemo/gym/latest/about/concepts/task-verification"
-    destination: "/nemo/gym/main/resources-server"
+    destination: "/nemo/gym/main/build-verifiers"
   - source: "/nemo/gym/latest/about/concepts/configuration"
     destination: "/nemo/gym/main/reference/configuration"
   - source: "/nemo/gym/latest/about/concepts/training-approaches"
@@ -135,11 +135,13 @@ redirects:
   - source: "/nemo/gym/latest/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
   # Pages that only existed under v0.2.1's structure (no /main/ equivalent at the same path)
-  # - `benchmarks/` was folded into `environment-tutorials/` on main
+  # - `benchmarks/` was folded into `evaluation/` on main
   # - `documentation/home` no longer exists; send to the main root
   # - `pypi-install` was consolidated into `installation` on main
   - source: "/nemo/gym/latest/benchmarks/adding-a-benchmark"
-    destination: "/nemo/gym/main/environment-tutorials/adding-a-benchmark"
+    destination: "/nemo/gym/main/contribute/environments/adding-a-benchmark"
+  - source: "/nemo/gym/main/evaluation/adding-a-benchmark"
+    destination: "/nemo/gym/main/contribute/environments/adding-a-benchmark"
   - source: "/nemo/gym/latest/benchmarks/designing-customer-evaluation"
     destination: "/nemo/gym/main/environment-tutorials"
   - source: "/nemo/gym/latest/benchmarks/run-benchmark-suite"
@@ -194,11 +196,35 @@ redirects:
   # to fire on the no-extension form before the slug-only catch-all takes over.
   - source: "/nemo/gym/:path*.html"
     destination: "/nemo/gym/:path*"
-  # LLM-as-Judge moved into verification-patterns subsection
+  # LLM-as-Judge and Verification Patterns moved from Environment Tutorials to Build Verifiers
   - source: "/nemo/gym/environment-tutorials/llm-as-judge-verification"
-    destination: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns/llm-as-judge"
   - source: "/nemo/gym/main/environment-tutorials/llm-as-judge-verification"
-    destination: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns/llm-as-judge"
+  - source: "/nemo/gym/environment-tutorials/verification-patterns"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns"
+  - source: "/nemo/gym/main/environment-tutorials/verification-patterns"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns"
+  - source: "/nemo/gym/environment-tutorials/verification-patterns/llm-as-judge"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns/llm-as-judge"
+  - source: "/nemo/gym/main/environment-tutorials/verification-patterns/llm-as-judge"
+    destination: "/nemo/gym/main/build-verifiers/verification-patterns/llm-as-judge"
+  # Resources Server page was folded into the Build Verifiers index
+  - source: "/nemo/gym/resources-server"
+    destination: "/nemo/gym/main/build-verifiers"
+  - source: "/nemo/gym/main/resources-server"
+    destination: "/nemo/gym/main/build-verifiers"
+  - source: "/nemo/gym/main/build-verifiers/resources-server"
+    destination: "/nemo/gym/main/build-verifiers"
+  - source: "/nemo/gym/resources-server/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
+  - source: "/nemo/gym/main/resources-server/example-resources-servers"
+    destination: "/nemo/gym/main/build-verifiers/example-resources-servers"
+  # Benchmark Analysis page renamed to Diagnose Results (skills → diagnose-results)
+  - source: "/nemo/gym/evaluation/skills"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
+  - source: "/nemo/gym/main/evaluation/skills"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"

@@ -1,0 +1,92 @@
+---
+title: "Inference Providers"
+description: "Use hosted inference providers like Fireworks, Together.ai, OpenRouter, and more for eval workloads"
+position: 4
+---
+
+The `inference_provider` server connects NeMo Gym to any hosted inference provider. The server manages the conversion to and from the Responses API: it translates incoming Responses requests to Chat Completions for the provider and converts the reply back into a Responses object — so your agent code stays the same across backends.
+
+<Info>
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted providers do not expose the token-level information needed for RL training.
+
+</Info>
+
+## Supported APIs
+
+- **OpenAI Responses** — `/v1/responses`
+- **OpenAI Chat Completions** — `/v1/chat/completions`
+
+## Supported Providers
+
+All provider configs live in [`responses_api_models/inference_provider/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/inference_provider/configs).
+
+| Provider | Config | Base URL |
+|----------|--------|----------|
+| Baseten | `baseten.yaml` | `https://inference.baseten.co/v1` |
+| DeepInfra | `deepinfra.yaml` | `https://api.deepinfra.com/v1/openai` |
+| Fireworks | `fireworks.yaml` | `https://api.fireworks.ai/inference/v1` |
+| Friendli | `friendli.yaml` | `https://api.friendli.ai/serverless/v1` |
+| Gemini | `gemini.yaml` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| HF Inference | `hf_inference.yaml` | `https://router.huggingface.co/v1` |
+| Nebius | `nebius.yaml` | `https://api.tokenfactory.nebius.com/v1/` |
+| OpenRouter | `openrouter.yaml` | `https://openrouter.ai/api/v1` |
+| Together.ai | `together.yaml` | `https://api.together.xyz/v1` |
+
+## Set Your Credentials
+
+You need an API key and a model name from your provider; store values in `env.yaml` in the project root (gitignored):
+
+```yaml
+policy_api_key: your-api-key
+policy_model_name: nvidia/Nemotron-3-Nano-30B-A3B
+```
+
+If your provider is not in the table above, also set the base URL:
+
+```yaml
+# env.yaml
+policy_base_url: https://your-provider.com/v1
+```
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_url` | `str` | — | **Required.** Provider's OpenAI-compatible API base URL. |
+| `api_key` | `str` | — | **Required.** Provider API key. |
+| `model` | `str` | — | **Required.** Model identifier (provider-specific format). |
+| `uses_reasoning_parser` | `bool` | `false` | Parse `<think>` tags and `reasoning_content` fields from thinking models. |
+| `num_concurrent_requests` | `int` | `1000` | Maximum concurrent requests to the provider. Reduce if your provider has a lower rate limit. |
+| `extra_body` | `dict` | `{}` | Additional parameters merged into every request body. |
+
+<Note>
+**The model is fixed by configuration.** This server always sends the configured `model` (from `policy_model_name`) to the provider. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.
+
+</Note>
+
+## Usage Example
+
+### 1. Set model and environment config
+
+In this example, we use Together.ai:
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/inference_provider/configs/together.yaml"
+```
+
+For unlisted providers, use the generic config: `responses_api_models/inference_provider/configs/inference_provider.yaml`
+
+### 2. Start servers
+
+```bash
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+### 3. Evaluate your agent
+
+```bash
+ng_collect_rollouts +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+```

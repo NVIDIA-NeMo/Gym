@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from asyncio import Future
+from collections import Counter
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -282,6 +283,88 @@ class TestRolloutCollection:
             },
         ]
 
+    def test_preprocess_rows_stamps_skills_ref(self, tmp_path: Path) -> None:
+        """skills.path is a run-level knob: each row is stamped with skills_ref (path + hash +
+        metadata) without the source dataset carrying any skills field."""
+        skills_dir = tmp_path / "variant_a"
+        skill = skills_dir / "cot_enhanced"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: cot_enhanced\ndescription: Think step by step.\n---\n# Body\n")
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            skills={"path": str(skills_dir)},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 2
+        for row in rows:
+            skills_ref = row["skills_ref"]
+            assert skills_ref["path"] == str(skills_dir)
+            assert len(skills_ref["hash"]) == 12
+            assert [s["name"] for s in skills_ref["skills"]] == ["cot_enhanced"]
+            assert skills_ref["skills"][0]["description"] == "Think step by step."
+
+    def test_preprocess_rows_no_skills_leaves_rows_clean(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert "skills_ref" not in rows[0]
+
+    def test_skills_ref_survives_resume_from_cache(self, tmp_path: Path) -> None:
+        """skills_ref is stamped once at preprocess, persisted to materialized inputs, and
+        re-read onto already-done rows on resume -- even after the source skill dir is gone.
+        Identity is byte-for-byte from the materialized cache, not recomputed at resume."""
+        import shutil
+
+        skills_dir = tmp_path / "variant_a"
+        skill = skills_dir / "cot_enhanced"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: cot_enhanced\ndescription: Think step by step.\n---\n# Body\n")
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            skills={"path": str(skills_dir)},
+            resume_from_cache=True,
+        )
+
+        # Preprocess stamps skills_ref, then we persist exactly what a prior run would have written.
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        stamped_skills_ref = rows[0]["skills_ref"]
+        config.materialized_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+
+        # Only the first task's rollout is "done" in the main output jsonl.
+        done = {k: rows[0][k] for k in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME)} | {"reward": 1.0}
+        Path(config.output_jsonl_fpath).write_bytes(orjson.dumps(done) + b"\n")
+
+        # The source skill dir disappears before resume (e.g. an optimizer overwrote /tmp).
+        shutil.rmtree(skills_dir)
+
+        input_rows, resumed_rows, _results, _result_strs = RolloutCollectionHelper()._load_from_cache(config)
+
+        # The already-done row carries the original skills_ref read back from the cache.
+        assert resumed_rows[0]["skills_ref"] == stamped_skills_ref
+        # And the still-to-run rows do too, so the second pass stamps results identically.
+        assert all(r["skills_ref"] == stamped_skills_ref for r in input_rows)
+
     def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
         """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
         NeMoGymResponseCreateParamsNonStreaming schema (extra='forbid'). Seed is passed via
@@ -312,6 +395,108 @@ class TestRolloutCollection:
             NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
+
+    def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
+        """Dict-form num_repeats applies the per-agent value to each row."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "beta": 4},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 2, "beta": 4})
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "alpha"] == [0, 1]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "beta"] == [0, 1, 2, 3]
+
+    def test_preprocess_rows_num_repeats_dict_with_default(self, tmp_path: Path) -> None:
+        """`_default` key acts as the fallback for agents not explicitly listed."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 3, "_default": 1},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 3, "beta": 1})
+
+    def test_preprocess_rows_num_repeats_dict_raises_on_missing_agent_no_default(self, tmp_path: Path) -> None:
+        """Dict form without `_default` raises if a row's agent is unlisted, and reports ALL
+        missing agents in one error so the user can fix them in one pass."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "gamma"}, "x": 2}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 3}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2},
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        msg = str(exc_info.value)
+        # All missing agents reported in one shot, deduped:
+        assert "'beta'" in msg
+        assert "'gamma'" in msg
+
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_preprocess_rows_num_repeats_rejects_zero_or_negative(self, tmp_path: Path, bad_value: int) -> None:
+        # int form
+        with pytest.raises(ValueError, match="num_repeats"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats=bad_value,
+            )
+        # dict form
+        with pytest.raises(ValueError, match="num_repeats dict"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats={"alpha": bad_value},
+            )
+
+    def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
+        """An agent listed in the dict that never appears in input rows warns (likely typo)."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0})]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "alpah_typo": 3},
+        )
+
+        with pytest.warns(UserWarning, match="alpah_typo"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
 
     async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
