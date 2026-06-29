@@ -36,6 +36,7 @@ gym dataset collate           # validate and collate a dataset
 # Environments
 gym env init                  # scaffold a new resources server
 gym env resolve               # resolve and print the final merged config
+gym env compose               # swap a benchmark's agent/dataset params and dump the merged config
 gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # test resources server(s); all of them if none is given
@@ -350,6 +351,29 @@ gym env resolve \
     --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
     ++responses_create_params.temperature=0.6
+```
+
+### `gym env compose`
+
+Rewrite a merged benchmark config along the **agent** and **dataset** axes, then dump the result as YAML. No servers are started and no secrets are read. The agent axis swaps the composable harness, carrying over the environment's `resources_server` / `model_server` / `datasets` wiring; the dataset axis edits the benchmark dataset's run params. Model selection stays with the `--model*` flags (applied before composition).
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Compose the named benchmark config. |
+| `--agent NAME` | Agent harness to compose in (`name` or `name/variant`). Must be composable (Pattern A); a self-contained Pattern B agent is rejected. |
+| `--num-repeats N` | Override `num_repeats` on the benchmark dataset. |
+| `--prompt-config PATH` | Prompt-config YAML to set on the benchmark dataset. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+
+```bash
+# Swap in a different agent harness and bump rollouts per task
+gym env compose --benchmark aime24 --agent simple_agent --num-repeats 4
+
+# Compose an explicit config with an agent variant
+gym env compose \
+    --config benchmarks/aime24/config.yaml \
+    --agent langgraph_agent/rewoo_agent
 ```
 
 ### `gym env validate`
