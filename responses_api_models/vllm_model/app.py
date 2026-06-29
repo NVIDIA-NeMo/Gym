@@ -632,7 +632,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
 
             # Clean the duplicated information
-            choice_dict.pop("logprobs")
+            choice_dict.pop("logprobs", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

@@ -3340,7 +3340,7 @@ def _make_chat_request() -> MagicMock:
 
 
 class TestTokenIDInformation:
-    async def test_uses_native_engine_data_without_tokenize(self) -> None:
+    async def test_uses_native_engine_data_without_choice_logprobs_or_tokenize(self) -> None:
         model = _make_token_information_model()
         body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
         chat_completion = {
@@ -3353,12 +3353,6 @@ class TestTokenIDInformation:
                     "index": 0,
                     "finish_reason": "stop",
                     "message": {"role": "assistant", "content": "hi"},
-                    "logprobs": {
-                        "content": [
-                            {"token": "token_id:11", "logprob": -9.1},
-                            {"token": "token_id:12", "logprob": -9.2},
-                        ]
-                    },
                 }
             ],
             "nvext": {
@@ -3381,6 +3375,7 @@ class TestTokenIDInformation:
         assert message.prompt_token_ids == [1, 2, 3]
         assert message.generation_token_ids == [11, 12]
         assert message.generation_log_probs == [-0.1, -0.2]
+        assert response.choices[0].logprobs is None
         mock_client.create_tokenize.assert_not_awaited()
 
     async def test_native_engine_data_ignores_postprocessed_choice_logprobs(self) -> None:
