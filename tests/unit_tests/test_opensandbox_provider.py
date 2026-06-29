@@ -23,15 +23,18 @@ from typing import Any
 
 import pytest
 
+# tenacity ships in the `sandbox` optional-dependency extra and is genuinely exercised by
+# these tests. Import it at module load (instead of importorskip) so a CI env that forgets
+# `--extra sandbox` fails loudly here rather than silently skipping these tests and quietly
+# dropping coverage below the fail_under threshold. The `sandbox` marker selects/deselects
+# them; it is not a substitute for the dependency actually being installed.
+import tenacity  # noqa: F401
+
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 
 
 pytestmark = pytest.mark.sandbox
-
-
-pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
-
-from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 
 
 @dataclass(frozen=True)
