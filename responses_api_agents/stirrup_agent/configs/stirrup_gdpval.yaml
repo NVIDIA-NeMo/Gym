@@ -1,7 +1,7 @@
 # Stand-alone stirrup_agent config. The canonical entry point for GDPVal is
 # ``benchmarks/gdpval/config.yaml`` which composes this agent with the GDPVal
-# resources server and supports ``ng_prepare_benchmark`` +
-# ``ng_e2e_collect_rollouts``.
+# resources server and supports ``gym eval prepare`` +
+# ``gym eval run``.
 #
 # To add a new task (e.g. "my_bench"), create a TaskStrategy subclass in
 # responses_api_agents/stirrup_agent/tasks/my_bench.py, register it in

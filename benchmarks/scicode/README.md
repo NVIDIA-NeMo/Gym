@@ -47,7 +47,7 @@ If the file is missing, the resources server fails fast with a clear error rathe
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/scicode/config.yaml]"
+gym eval prepare --benchmark scicode
 ```
 
 Downloads `SciCode1/SciCode` and writes `benchmarks/scicode/data/scicode_benchmark.jsonl`
@@ -66,7 +66,7 @@ some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/scicode/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start "+config_paths=[$config_paths]"
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in `env.yaml` (or passed as CLI
@@ -77,7 +77,7 @@ overrides).
 With the servers up, run the full benchmark:
 
 ```bash
-ng_collect_rollouts \
+gym eval run --no-serve \
     +agent_name=scicode_benchmark_agent \
     +input_jsonl_fpath=benchmarks/scicode/data/scicode_benchmark.jsonl \
     +output_jsonl_fpath=results/scicode_rollouts.jsonl \
@@ -98,7 +98,7 @@ full-benchmark run that produces the headline `subtask_accuracy`. Requires `test
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/scicode/config.yaml"
 
-ng_e2e_collect_rollouts \
+gym eval run \
     "+config_paths=[${config_paths}]" \
     ++split=benchmark \
     ++output_jsonl_fpath=results/benchmarks/scicode.jsonl \

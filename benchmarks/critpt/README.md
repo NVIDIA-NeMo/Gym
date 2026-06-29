@@ -30,7 +30,7 @@ in any committed file.
 `CritPt-Benchmark/CritPt` is a public HuggingFace dataset (no auth required).
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/critpt/config.yaml]"
+gym eval prepare --benchmark critpt
 ```
 
 This invokes `benchmarks/critpt/prepare.py` (declared as `prepare_script` in `config.yaml`),
@@ -40,20 +40,20 @@ which downloads the dataset and writes the full 70-problem flat-field JSONL to
 ## Run servers
 
 ```bash
-ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start --benchmark critpt --model-type vllm_model
 ```
 
-While `ng_run` is up, the CritPt resources server exposes a `GET /status` endpoint
+While `gym env start` is up, the CritPt resources server exposes a `GET /status` endpoint
 that reports live batch-fill progress (e.g. `{"pending_batches":[47],"batch_size":70}`).
 
 ## Collect rollouts
 
-With `ng_run` already up, point `ng_collect_rollouts` at the flat-field JSONL and pass the
+With `gym env start` already up, point `gym eval run --no-serve` at the flat-field JSONL and pass the
 Turn 1 prompt config so the framework materializes `responses_create_params.input` at
 rollout time.
 
 ```bash
-ng_collect_rollouts \
+gym eval run --no-serve \
     +agent_name=critpt_benchmark_agent \
     +input_jsonl_fpath=benchmarks/critpt/data/critpt_benchmark.jsonl \
     +output_jsonl_fpath=results/critpt_rollouts.jsonl \
@@ -72,7 +72,7 @@ Runs prepare + servers + rollout collection and tears the servers down afterward
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/critpt/config.yaml"
 
-ng_e2e_collect_rollouts \
+gym eval run \
     "+config_paths=[${config_paths}]" \
     ++output_jsonl_fpath=results/benchmarks/critpt.jsonl \
     ++overwrite_metrics_conflicts=true \

@@ -5,7 +5,7 @@ VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself.
 ```bash
 config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
 responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start "+config_paths=[${config_paths}]" \
     ++policy_base_url=http://0.0.0.0:10240/v1 \
     ++policy_model_name=<your-model> \
     ++policy_api_key=dummy_key &> temp.log &
