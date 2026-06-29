@@ -58,6 +58,14 @@ Tau config, task, system prompt, and Responses-style tool schemas. Internally it
 uses Tau's build layer directly instead of patching `run_single_task`, which
 keeps the branch smaller while preserving the generated row contract.
 
+## Evaluation Semantics
+
+Prepared Gym rows remove `NL_ASSERTION` from each task's `reward_basis`, so Gym
+does not call the external LLM judge. In the current `banking_knowledge` task
+set, this changes only `task_102`; the other 96 banking tasks do not use an NL
+assertion reward. Banking scores produced through this Gym integration are
+therefore no-judge scores and are not strictly leaderboard-identical.
+
 ## Runtime Checks
 
 `terminal_use` and `alltools` need sandbox tooling at rollout time. `alltools`
