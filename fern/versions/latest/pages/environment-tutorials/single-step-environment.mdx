@@ -294,8 +294,8 @@ my_weather_tool_simple_agent:
         type: example
         jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
       # The scaffold also generates train/validation dataset entries
-      # with gitlab_identifier blocks. Those are omitted here since
-      # we only have example data at this stage.
+      # (which can declare a `source:` block — the unified dataset source).
+      # Those are omitted here since we only have example data at this stage.
 ```
 
 The `domain` field categorizes your resource server and is **required**. Common values: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`.
