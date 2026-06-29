@@ -53,7 +53,7 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
     async def verify(self, body: ReasoningGymVerifyRequest) -> ReasoningGymVerifyResponse:
         """Uses reasoning gym verifier"""
         model_answer = self._extract_answer_from_response(body.response)
-
+        print('test')
         task_name = body.metadata.get("source_dataset")
 
         if not task_name:
