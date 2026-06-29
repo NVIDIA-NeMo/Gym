@@ -557,6 +557,24 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
+def _last_assistant_text(response) -> str:
+    """Text of the LAST assistant message item in response.output (the model's final answer).
+    Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
+    the model emits text alongside tool calls mid-trajectory (~49% of BrowseComp samples). Also
+    aligns with bc_frankie, which grades only the final message."""
+    text = ""
+    for item in response.output:
+        if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
+            t = "".join(
+                getattr(p, "text", "")
+                for p in (getattr(item, "content", None) or [])
+                if getattr(p, "type", None) == "output_text"
+            )
+            if t:
+                text = t
+    return text
+
+
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 5
@@ -978,7 +996,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
-        last_assistant_response = body.response.output_text
+        last_assistant_response = _last_assistant_text(body.response)
 
         if self.config.use_judge:
             judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
