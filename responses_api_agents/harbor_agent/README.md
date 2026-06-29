@@ -229,7 +229,7 @@ gym eval run --no-serve \
 ### 8) View trajectories
 
 ```bash
-ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
+jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 ```
 
 ## Daytona execution path
@@ -317,7 +317,7 @@ gym eval run --no-serve \
 Inspect the rollout and Harbor job directory:
 
 ```bash
-ng_viewer +jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+jq -C . /tmp/harbor_daytona_terminal_bench_output.jsonl | less -R
 find responses_api_agents/harbor_agent/jobs -name result.json | tail
 ```
 

@@ -41,7 +41,7 @@ batch, so `pass@1` across the 70 problems equals the AA aggregate.
 that doesn't already contain its `problem_id`, opening a new batch if every pending batch
 already has it. With `num_repeats=N` and 70 problems, this produces N independent batches of
 70 unique `problem_id`s — N AA API calls total, each scored as a separate run. Assumes
-uniform `num_repeats` across problems (which `ng_collect_rollouts` enforces).
+uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces).
 
 ## Dataset Format
 
@@ -91,7 +91,7 @@ On HPC: bind is `127.0.0.1` on the compute node — curl from the same host, or
 ## Running servers
 
 ```bash
-ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start --benchmark critpt --model-type openai_model
 ```
 
 ## Smoke test (5 example problems)
@@ -106,19 +106,19 @@ has one opt-in config knob:
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
 
 ```bash
-ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+gym env start --benchmark critpt --model-type openai_model \
     '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=critpt_benchmark_agent \
-    +input_jsonl_fpath=resources_servers/critpt/data/example.jsonl \
-    +output_jsonl_fpath=results/critpt_smoke.jsonl \
-    +num_repeats=1 \
-    "++responses_create_params={temperature: 0.0}"
+gym eval run --no-serve \
+    --agent critpt_benchmark_agent \
+    --input resources_servers/critpt/data/example.jsonl \
+    --output results/critpt_smoke.jsonl \
+    --num-repeats 1 \
+    --temperature 0.0
 ```
 
 What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
@@ -128,7 +128,7 @@ call -> aggregate distributed to the 5 real rollouts.
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/critpt
+gym env test +entrypoint=resources_servers/critpt
 ```
 
 Covers code extraction edge cases, partial/full/multi-batch buffering, the `/status`

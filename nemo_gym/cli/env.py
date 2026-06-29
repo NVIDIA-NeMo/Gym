@@ -765,7 +765,7 @@ def init_resources_server():  # pragma: no cover
     Examples:
 
     ```bash
-    gym env init +entrypoint=resources_servers/my_server
+    gym env init --resources-server my_server
     ```
     """
     config_dict = get_global_config_dict()
