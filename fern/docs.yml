@@ -1,6 +1,7 @@
 instances:
   - url: nvidia-gym.docs.buildwithfern.com/nemo/gym
     custom-domain: docs.nvidia.com/nemo/gym
+    multi-source: true
 
 title: NeMo Gym
 
@@ -28,7 +29,6 @@ libraries:
 experimental:
   mdx-components:
     - ./components
-  basepath-aware: true
 
 versions:
   - display-name: Main
@@ -225,6 +225,11 @@ redirects:
     destination: "/nemo/gym/main/build-verifiers"
   - source: "/nemo/gym/main/resources-server/example-resources-servers"
     destination: "/nemo/gym/main/build-verifiers"
+  # Benchmark Analysis page renamed to Diagnose Results (skills → diagnose-results)
+  - source: "/nemo/gym/evaluation/skills"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
+  - source: "/nemo/gym/main/evaluation/skills"
+    destination: "/nemo/gym/main/evaluation/diagnose-results"
   # Version alias: latest → main (the `Latest` slug was retired; trunk lives at `main`)
   # Intentionally last so .html stripping and specific reorg rules win first.
   - source: "/nemo/gym/latest"
