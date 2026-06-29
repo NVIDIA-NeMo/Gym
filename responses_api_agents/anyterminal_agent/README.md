@@ -47,23 +47,25 @@ Requires the `harbor` CLI on PATH. Tasks are downloaded automatically and cached
 **2. Start the environment** with Hermes and a model server:
 
 ```bash
-ng_run "+config_paths=[responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml \
+  --model-type vllm_model
 ```
 
 If you pre-built SIFs into a custom directory, override `tb_sif_dir`:
 
 ```bash
-ng_run "+config_paths=[...]" \
+gym env start --config ... \
   ++anyterminal_hermes.responses_api_agents.anyterminal_agent.tb_sif_dir=/shared/sifs
 ```
 
 **3. Collect rollouts:**
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=anyterminal_hermes \
-  +input_jsonl_fpath=responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl \
-  +output_jsonl_fpath=results/anyterminal_rollouts.jsonl
+gym eval run --no-serve \
+  --agent anyterminal_hermes \
+  --input responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl \
+  --output results/anyterminal_rollouts.jsonl
 ```
 
 Each rollout row contains `reward` (0.0 or 1.0), the full agent trajectory, and

@@ -281,7 +281,7 @@ Duplicate config paths:
     def raise_on_no_server_instances(self, global_config_dict: DictConfig) -> None:
         """Fail fast if a run has no server instances to start.
 
-        Without this, `ng_run` with an empty/omitted `config_paths` starts the head server and Ray
+        Without this, `gym env start` with an empty/omitted `config_paths` starts the head server and Ray
         and then hangs with nothing to run. We catch it before Ray initialises with an actionable
         message instead.
         """
