@@ -48,6 +48,21 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 > [!IMPORTANT]
 > NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
 
+## 📣 News
+
+* [06/04/2026] [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0) — 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
+* [06/04/2026] NeMo Gym v0.3.0 is available on [PyPI](https://pypi.org/project/nemo-gym/).
+* [04/15/2026] [Release v0.2.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.1) — bug fixes and documentation improvements.
+
+<details>
+<summary>Previous News</summary>
+
+* [03/11/2026] [Release v0.2.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.0) — expanded environment hub, rollout collection improvements, and Fern docs migration.
+* [12/15/2025] [Release v0.1.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.1)
+* [11/15/2025] [Release v0.1.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.0) — initial public release.
+
+</details>
+
 ## 📋 Requirements
 
 NeMo Gym is designed to run on standard development machines:

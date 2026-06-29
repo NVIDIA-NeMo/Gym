@@ -281,23 +281,6 @@ gym dataset migrate \
     --revision 0.0.1
 ```
 
-### `gym dataset render`
-
-Generate a dataset preview by materializing prompts from a raw input file and a prompt template.
-
-| Option | Description |
-| --- | --- |
-| `--input`, `-i` | Raw input JSONL file. |
-| `--prompt-config` | Prompt template YAML to apply. |
-| `--output`, `-o` | Output JSONL file. |
-
-```bash
-gym dataset render \
-    --input raw.jsonl \
-    --prompt-config prompt.yaml \
-    --output preview.jsonl
-```
-
 ### `gym dataset collate`
 
 Validate and collate a dataset, generating metrics and statistics.
@@ -317,6 +300,32 @@ gym dataset collate \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```
+
+### `gym dataset render`
+
+Generate a dataset preview by materializing prompts from a raw input file and a prompt template, producing JSONL with populated `responses_create_params.input` for RL training.
+
+Each input row must **not** already have a populated `responses_create_params.input`; the command applies the prompt template from `--prompt-config` to each row, fills in the input, and preserves the row's other fields.
+
+| Option | Description |
+| --- | --- |
+| `--input`, `-i` | Raw input JSONL file (rows without `responses_create_params.input`). |
+| `--prompt-config` | Prompt template YAML to apply. |
+| `--output`, `-o` | Output JSONL file. |
+
+```bash
+gym dataset render \
+    --input raw.jsonl \
+    --prompt-config prompt.yaml \
+    --output preview.jsonl
+```
+
+<Note>
+**Which data-preparation command should I use?**
+
+- **`gym dataset render`** — a focused, standalone step that applies a prompt template to raw rows to populate `responses_create_params.input`. No servers are started. Use it when you have raw data and just need to turn it into prompt-ready rows.
+- **`gym dataset collate`** — the full preparation pipeline for training: it can download missing datasets, validate data, and compute dataset metrics, writing train/validation splits and metrics artifacts. Use it to prepare and validate datasets for training or PR submission.
+</Note>
 
 ---
 
@@ -493,7 +502,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--model-type NAME` | Load the named model server type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
-| `--resume` | Resume from cached rollouts instead of recollecting. |
+| `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
 | `--agent`, `-a` | Agent to collect rollouts with. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
@@ -536,6 +545,42 @@ gym eval run --no-serve \
     --output results/mixed_rollouts.jsonl \
     --num-repeats '{agent_alpha: 4, agent_beta: 1, _default: 1}'
 ```
+
+#### Generation parameters
+
+The most common sampling parameters have dedicated flags on `gym eval run`: `--temperature`, `--top-p`, and `--max-output-tokens`. These map onto `responses_create_params.temperature`, `responses_create_params.top_p`, and `responses_create_params.max_output_tokens`.
+
+Any other `responses_create_params` field that has no dedicated flag can be set with a raw Hydra override using the `++responses_create_params.<field>` syntax. Overrides are merged into each input row's existing `responses_create_params` with a **shallow** merge (top-level keys only):
+
+```bash
+gym eval run --no-serve \
+    --agent example_single_tool_call_simple_agent \
+    --input weather_query.jsonl \
+    --output weather_rollouts.jsonl \
+    --temperature 1.0 \
+    --top-p 1.0 \
+    --max-output-tokens 4096 \
+    ++responses_create_params.reasoning.effort=low
+```
+
+<Tip>
+Because the merge is shallow, setting a field inside a nested object, such as `++responses_create_params.reasoning.effort=low`, replaces the row's entire nested dictionary at that key. Other fields under the same nested object are not preserved.
+</Tip>
+
+#### Resume interrupted runs
+
+Pass `--resume` to restart the **same command** after a crash or interruption and pick up only the rows that have not finished yet.
+
+How it works:
+
+- **Materialized inputs.** On the first run, the fully expanded input rows (after `--num-repeats`, `--limit`, `--prompt-config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `--output` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
+- **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
+- **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
+- **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, existing output is cleared before the run.
+
+<Warning>
+If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
+</Warning>
 
 ### `gym eval aggregate`
 
