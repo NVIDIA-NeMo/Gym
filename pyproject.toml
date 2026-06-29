@@ -498,6 +498,7 @@ markers = [
     "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
+    "sandbox: marks sandbox unit tests (deselect with '-m \"not sandbox\"')",
     "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
