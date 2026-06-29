@@ -167,6 +167,15 @@ class ServerRefNotFoundError(ConfigError, ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
+class InheritPathNotFoundError(ConfigError, ValueError):
+    """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
+
+
+class AlmostServerError(ConfigError, ValueError):
+    """One or more server blocks are almost-servers (right shape, failed validation) and
+    `error_on_almost_servers` is set, so the run is aborted."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
