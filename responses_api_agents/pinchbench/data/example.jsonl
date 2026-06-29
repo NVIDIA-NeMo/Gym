@@ -1,0 +1,5 @@
+{"responses_create_params":{"input":[{"role":"user","content":"<placeholder; real prompt loaded from the task .md at run time>"}]},"verifier_metadata":{"task_id":"task_sanity"}}
+{"responses_create_params":{"input":[{"role":"user","content":"<placeholder; real prompt loaded from the task .md at run time>"}]},"verifier_metadata":{"task_id":"task_calendar"}}
+{"responses_create_params":{"input":[{"role":"user","content":"<placeholder; real prompt loaded from the task .md at run time>"}]},"verifier_metadata":{"task_id":"task_todo_list_cleanup"}}
+{"responses_create_params":{"input":[{"role":"user","content":"<placeholder; real prompt loaded from the task .md at run time>"}]},"verifier_metadata":{"task_id":"task_daily_summary"}}
+{"responses_create_params":{"input":[{"role":"user","content":"<placeholder; real prompt loaded from the task .md at run time>"}]},"verifier_metadata":{"task_id":"task_email"}}
