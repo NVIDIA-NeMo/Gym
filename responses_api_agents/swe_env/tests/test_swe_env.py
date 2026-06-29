@@ -51,7 +51,9 @@ class _FakeProvider:
 
     name = "fake-swe"
 
-    def __init__(self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, sink=None, cmd_timeouts=None, **_):
+    def __init__(
+        self, *, test_output="", test_rc=0, apply_rc=0, create_error=False, sink=None, cmd_timeouts=None, **_
+    ):
         """Configure the scripted provider's responses.
 
         Args:
