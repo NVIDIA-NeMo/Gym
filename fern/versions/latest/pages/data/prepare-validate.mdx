@@ -243,6 +243,14 @@ gym dataset collate \
     --mode example_validation
 ```
 
+<Info>
+**Resources server example-data contract (PR submission).** A `resources_servers/<name>/` passes data validation when its `data/` directory contains `example.jsonl`, the `example_metrics.json` produced by `example_validation`, and `example_rollouts.jsonl`. Commit all three.
+</Info>
+
+<Warning>
+`example.jsonl` must already be in materialized Responses format (each row containing `responses_create_params`). Example-type datasets are not templated via `prompt_config`, so raw rows won't validate.
+</Warning>
+
 ### Training Preparation
 
 ```bash
@@ -383,6 +391,10 @@ datasets:
 | `example` | Small sample (~5 rows) for format checks | PR submission |
 | `train` | Training data | RL training |
 | `validation` | Evaluation during training | RL training |
+
+### License values
+
+`license` is required for `train` and `validation` datasets. It is validated against an allowed set defined in code — see the `license` enum in [`nemo_gym/config_types.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/config_types.py).
 
 ---
 
