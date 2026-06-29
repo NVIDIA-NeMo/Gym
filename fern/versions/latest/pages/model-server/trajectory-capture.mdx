@@ -13,7 +13,7 @@ It is a model-server middleware (no standalone proxy) and is harness-agnostic: i
 | Term | Meaning |
 |------|---------|
 | **Trial** | A single attempt at completing a task. |
-| **Turn** | One boundary where the agent hands control back to its caller (e.g. after a tool result is consumed) within a trial. `turn_index` is currently reserved — see below. |
+| **Turn** | A boundary where the agent hands control back to the user within a trial. `turn_index` is derived from user-message boundaries in the captured requests (see below). |
 | **Step** | One micro-cycle inside the agent's loop (model generates → tool runs → observation). Capture records the **model-call portion** of each step. |
 | **Trajectory** | The ordered sequence of step records produced during a trial. |
 
@@ -43,7 +43,7 @@ One record per model call, typed as `StepRecord` (Pydantic; JSONSchema via `Step
 
 | Field | Description |
 |-------|-------------|
-| `trial_index`, `turn_index`, `step_index` | Position of the call. `step_index` is server-derived and authoritative. `trial_index` / `turn_index` are read from optional request headers and are `None` unless a Gym-orchestrated caller sets them (today's path leaves them `None`); `num_turns` then reports `None` rather than guessing from the step count. |
+| `step_index`, `turn_index` | Position of the call. `step_index` is the server-derived per-call ordinal. `turn_index` is derived from user-message boundaries (a turn = control handed back to the user); it is `None` when the sequence isn't decidable here — sub-agent / tree structure is owned by the trajectory builder, which supersedes this naive linear derivation. |
 | `tokens_in`, `tokens_out`, `tokens_reasoning`, `tokens_total` | Token accounting, aggregable to per-turn and per-trial totals. |
 | `request`, `response` | The full model-call request and response payloads. |
 | `tool_calls` | Structured tool calls (`name`, `arguments`, `call_id`). |
@@ -61,12 +61,12 @@ The middleware is pure-ASGI: it forwards response chunks downstream unchanged, s
 
 A caller attributes its model calls to a rollout in one of two OpenAI-compatible ways:
 
-1. **Header** — set `x-nemo-gym-rollout-id` (and optionally `x-nemo-gym-trial-index` / `x-nemo-gym-turn-index`). Use this when your client can set request headers.
+1. **Header** — set `x-nemo-gym-rollout-id`. Use this when your client can set request headers.
 2. **URL prefix** — point the base URL at `/ng-rollout/<rollout_id>/v1` instead of `/v1`. The server strips the prefix before routing, so the standard `/v1/...` endpoints behave identically. Use this for clients that accept only a base URL (for example the Claude Code CLI, or an agent's embedded OpenAI client), where a header cannot be injected.
 
 Gym agents do not write correlation code by hand. The base agent resolves the model base URL with the prefix applied via `SimpleResponsesAPIAgent.resolve_model_base_url(name, request)`, and forwards the rollout id to its own `/v1/responses` via `rollout_call_kwargs(body)`. The rollout id is derived from the run-request's task and rollout indices.
 
-If no rollout id is supplied, calls are grouped under a default key and `trial_index` / `turn_index` are `None`.
+If no rollout id is supplied, calls are grouped under a default key.
 
 ## Reading a captured trajectory
 
@@ -83,7 +83,7 @@ store = CaptureStore("/data/trajectories")
 # Ordered per-step records (the per-trial trajectory).
 steps = assemble_step_records(store, rollout_id)
 
-# Per-rollout totals for the rollout record (tokens, latency, turns).
+# Per-rollout totals for the rollout record (tokens, latency, turns, steps).
 totals = aggregate_rollout_metrics(store, rollout_id)
 
 # Eval-only NeMoGym output items (messages, tool calls, tool outputs).
