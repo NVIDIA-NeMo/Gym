@@ -76,7 +76,7 @@ class ResponsesConverterState(BaseModel):
         if self.return_token_id_information and self.token_information:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
-                **self.token_information.model_dump(),
+                **self.token_information.model_dump(exclude_none=True),
             )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
@@ -154,6 +154,7 @@ class ResponsesConverter(BaseModel):
                     prompt_token_ids=m["prompt_token_ids"],
                     generation_token_ids=m["generation_token_ids"],
                     generation_log_probs=m["generation_log_probs"],
+                    routed_experts=m.get("routed_experts"),
                 )
 
         state.flush_assistant()
@@ -304,7 +305,7 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump())
+        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
 
     def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         response_output = []
@@ -361,11 +362,15 @@ class ResponsesConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            extra_training_fields = {}
+            if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
+                extra_training_fields["routed_experts"] = message_dict["routed_experts"]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 prompt_token_ids=message_dict["prompt_token_ids"],
                 generation_token_ids=message_dict["generation_token_ids"],
                 generation_log_probs=message_dict["generation_log_probs"],
+                **extra_training_fields,
             )
 
         return response_output

@@ -12,11 +12,13 @@ pi must be on PATH (auto-installed on first start, or `npm install -g @earendil-
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_pi_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+  --resources-server math_with_judge/math_with_judge_pi_agent \
+  --model-type openai_model
 
-ng_collect_rollouts +agent_name=math_with_judge_pi_agent \
-  +input_jsonl_fpath=responses_api_agents/pi_agent/data/example.jsonl \
-  +output_jsonl_fpath=pi_rollout.jsonl +limit=5
+gym eval run --no-serve --agent math_with_judge_pi_agent \
+  --input responses_api_agents/pi_agent/data/example.jsonl \
+  --output pi_rollout.jsonl --limit 5
 ```
 
 Per request the agent writes `models.json` into an isolated `HOME`, runs one `pi` invocation with
