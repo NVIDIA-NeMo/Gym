@@ -172,16 +172,20 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
+def run_command(
+    command: str, working_dir_path: Path, server_name: str = "", project_root: Path | None = None
+) -> Popen:
     global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
-    # The server dir on PYTHONPATH lets `import app` work; the project root (the dir containing
-    # resources_servers/, responses_api_agents/, ...) lets generated `resources_servers.<name>.app`
-    # style imports resolve, which otherwise fail when running from outside a repo checkout.
-    project_root = f"{working_dir_path.absolute().parent.parent}"
     custom_env = environ.copy()
-    py_path_entries = [work_dir, project_root]
+    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
+    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
+    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
+    # this generic helper doesn't bake a layout assumption in for its other callers.
+    py_path_entries = [work_dir]
+    if project_root is not None:
+        py_path_entries.append(f"{project_root.absolute()}")
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)

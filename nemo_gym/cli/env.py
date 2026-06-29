@@ -213,11 +213,8 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Check cwd first for a local server, fall back to the install location for built-ins.
-            _server_rel_path = Path(first_key, second_key)
-            _cwd_path = Path.cwd() / _server_rel_path
-            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
-            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / _server_rel_path
+            # Resolve cwd-first (a local server), else the install location for built-ins.
+            dir_path = _resolve_server_dir(Path(first_key, second_key))
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -556,8 +553,11 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
-    command = f"""{setup_env_command(test_config.resolved_dir_path, global_config_dict, prefix)} && pytest"""
-    return run_command(command, test_config.resolved_dir_path)
+    resolved_dir = test_config.resolved_dir_path
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
+    # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
 def test():  # pragma: no cover
