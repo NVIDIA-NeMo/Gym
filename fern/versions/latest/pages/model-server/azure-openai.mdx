@@ -59,14 +59,14 @@ model_config="responses_api_models/azure_openai_model/configs/azure_openai_model
 Pass your Azure API version on the command line:
 
 ```bash
-ng_run "+config_paths=[${environment_config},${model_config}]" \
+gym env start --config ${environment_config} --config ${model_config} \
     +policy_model.responses_api_models.azure_openai_model.default_query.api-version=2024-10-21
 ```
 
 ### 3. Evaluate your agent
 
 ```bash
-ng_collect_rollouts +agent_name=mcqa_simple_agent \
-    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
-    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+gym eval run --no-serve --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl
 ```
