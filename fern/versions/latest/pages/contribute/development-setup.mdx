@@ -177,7 +177,7 @@ ssh-add -l
 **Problem**: IDE not signing commits
 - Restart your IDE after configuring Git
 - Check IDE Git settings match the command line configuration
-- Try committing through the command line first to verify setup
+- Try committing through the command line first to validate setup
 
 **Problem**: "DCO sign-off missing"
 
@@ -192,7 +192,7 @@ git rebase --signoff HEAD~3  # Adjust number as needed
 
 **If you already pushed to your PR branch:**
 
-Force-pushing is disallowed on branches in the upstream `NVIDIA-NeMo/Gym` repo. If you are working from a fork, you may be able to force-push to your own branch after re-signing commits locally (for example with `git rebase --signoff` followed by `git push --force-with-lease`).
+Force-pushing is disallowed on branches in the upstream `NVIDIA-NeMo/Gym` repo. If your PR branch is in a fork and your fork allows force pushes, you can re-sign commits locally and push with `--force-with-lease`; otherwise, push the signed history to a new branch and update the PR.
 
 ```bash
 # Option 1: Re-sign commits locally, then push to a new branch and update your PR

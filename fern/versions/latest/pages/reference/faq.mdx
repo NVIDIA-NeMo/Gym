@@ -308,12 +308,7 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-After `gym eval run` finishes, ctrl+c to quit your servers. You should see profiling shutdown output in the terminal like the following:
-```text
-🛑 Stopping profiler for math_with_judge. Check results/profiling/math_with_judge/LibraryJudgeMathResourcesServer___math_with_judge for the metrics!
-🛑 Stopping profiler for math_with_judge_simple_agent. Check results/profiling/math_with_judge/SimpleAgent___math_with_judge_simple_agent for the metrics!
-🛑 Stopping profiler for policy_model. Check results/profiling/math_with_judge/SimpleModelServer___policy_model for the metrics!
-```
+After `gym eval run` finishes, ctrl+c to quit your servers. The profiling results are written under `results/profiling/math_with_judge`.
 
 The log file content for a server will look something like the following:
 ```
