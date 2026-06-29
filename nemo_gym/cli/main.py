@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nemo_gym import WORKING_DIR
+from nemo_gym import PARENT_DIR, WORKING_DIR
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
@@ -160,7 +160,10 @@ _ASSETS = {
 def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ()) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches WORKING_DIR (built-ins) first, then any user-registered --search-dir roots.
+    Searches the Gym install root (`PARENT_DIR` — where the built-in asset trees live in both
+    editable and wheel installs), then the current working directory (the user's project), then
+    any user-registered --search-dir roots. Searching `PARENT_DIR` is what lets built-ins resolve
+    by name from an arbitrary cwd (e.g. a wheel install), not just from inside the repo checkout.
     """
     parent, subdir, default_flavor = _ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
@@ -168,14 +171,23 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
     config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
     path = f"{config_dir}/{config_flavor}.yaml"
 
-    # Match in WORKING_DIR (built-ins) and every --search-dir root; dedupe roots that resolve to the same file.
-    roots = [WORKING_DIR, *(Path(d) for d in search_dirs)]
+    # Search the install root (built-ins) and the user's cwd / --search-dir roots; dedupe roots that
+    # resolve to the same directory so an editable install run from the repo root isn't searched twice.
+    seen_roots: set[Path] = set()
+    roots: list[Path] = []
+    for root in (PARENT_DIR, WORKING_DIR, Path.cwd(), *(Path(d) for d in search_dirs)):
+        resolved_root = root.resolve()
+        if resolved_root not in seen_roots:
+            seen_roots.add(resolved_root)
+            roots.append(root)
     matches: list[Path] = []
 
     for root in roots:
         candidate = root / path
         if candidate.exists():
-            matches.append(candidate.resolve())
+            resolved = candidate.resolve()
+            if resolved not in matches:
+                matches.append(resolved)
 
     if len(matches) > 1:
         matches_str = ", ".join(f"`{m}`" for m in matches)
