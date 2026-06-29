@@ -626,15 +626,15 @@ The most common Hydra overrides now have dedicated flags:
 | Legacy Hydra override | New flag |
 | --- | --- |
 | `"+config_paths=[a.yaml,b.yaml]"` | `--config a.yaml --config b.yaml` |
-| `+agent_name=...` | `--agent`, `-a` |
-| `+input_jsonl_fpath=...` | `--input`, `-i` |
-| `+input_glob=...` | `--input-glob`, `-i` |
-| `+output_jsonl_fpath=...` | `--output`, `-o` |
+| `+agent_name=...` | `--agent` |
+| `+input_jsonl_fpath=...` | `--input` |
+| `+input_glob=...` | `--input-glob` |
+| `+output_jsonl_fpath=...` | `--output` |
 | `+limit=...` | `--limit` |
 | `+num_repeats=...` | `--num-repeats` |
 | `+num_samples_in_parallel=...` | `--concurrency` |
 | `++split=...` | `--split` |
-| `++policy_model_name=...` | `--model`, `-m` |
+| `++policy_model_name=...` | `--model` |
 | `++policy_base_url=...` | `--model-url` |
 | `++policy_api_key=...` | `--model-api-key` |
 | `++responses_create_params.temperature=...` | `--temperature` |
@@ -649,7 +649,7 @@ The most common Hydra overrides now have dedicated flags:
 | `+repo_id=...` | `--repo-id` |
 | `+revision=...` / `+version=...` | `--revision` |
 | `+artifact_fpath=...` | `--artifact` |
-| `+output_fpath=...` | `--output`, `-o` |
+| `+output_fpath=...` | `--output` |
 | `+create_pr=true` | `--create-pr` |
 | `+outdated=true` | `--outdated` |
 
