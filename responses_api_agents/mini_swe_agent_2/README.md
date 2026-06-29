@@ -46,7 +46,7 @@ evaluation report includes test status.
 
 `MiniSWEAgent.setup_webserver()` also registers `/v1/responses`, but
 `MiniSWEAgent.responses()` is intentionally not implemented in this agent. The
-supported eval path is `/run`, typically via `ng_collect_rollouts`.
+supported eval path is `/run`, typically via `gym eval run --no-serve`.
 
 ## Dataset Information
 
@@ -216,9 +216,9 @@ Start the mini-swe-agent 2 server with the OpenSandbox provider and a policy
 model server. The values below show a representative SWE-bench eval setup:
 
 ```bash
-CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_opensandbox.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-ng_run "+config_paths=[$CONFIG_PATHS]" \
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_opensandbox.yaml \
+    --model-type vllm_model \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.concurrency=64 \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_timeout=600 \
     +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.eval_timeout=1800 \
@@ -237,25 +237,28 @@ example above uses `vllm_model`, which is the common path for hosted vLLM
 Collect eval rollouts from a SWE-bench-style JSONL file:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=mini_swe_agent_2 \
-    +input_jsonl_fpath=data/mini_swe_verified_smoke8.jsonl \
-    +output_jsonl_fpath=results/mini_swe_agent_2_pass8.jsonl \
-    +limit=8 \
-    +num_repeats=8 \
-    +num_samples_in_parallel=64 \
-    '+responses_create_params={max_output_tokens: 32768, temperature: 0.6, top_p: 0.95, metadata: {chat_template_kwargs: "{\"enable_thinking\": true}"}}'
+gym eval run --no-serve \
+    --agent mini_swe_agent_2 \
+    --input data/mini_swe_verified_smoke8.jsonl \
+    --output results/mini_swe_agent_2_pass8.jsonl \
+    --limit 8 \
+    --num-repeats 8 \
+    --concurrency 64 \
+    --max-output-tokens 32768 \
+    --temperature 0.6 \
+    --top-p 0.95 \
+    "++responses_create_params.metadata.chat_template_kwargs='{\"enable_thinking\": true}'"
 ```
 
-`ng_collect_rollouts` also writes
+`gym eval run --no-serve` also writes
 `results/mini_swe_agent_2_pass8_aggregate_metrics.json`
 with per-task eval status, pass@k, resolved task counts, and eval error rates.
-After collecting repeated rollouts, run `ng_reward_profile` on the collected
+After collecting repeated rollouts, run `gym eval profile` on the collected
 output when you want the standalone profiler JSONL as well:
 
 ```bash
-ng_reward_profile \
-    +input_jsonl_fpath=data/mini_swe_verified_smoke8.jsonl \
+gym eval profile \
+    --input data/mini_swe_verified_smoke8.jsonl \
     +materialized_inputs_jsonl_fpath=results/mini_swe_agent_2_pass8_materialized_inputs.jsonl \
     +rollouts_jsonl_fpath=results/mini_swe_agent_2_pass8.jsonl \
     +pass_threshold=1.0

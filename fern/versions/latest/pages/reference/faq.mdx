@@ -168,27 +168,20 @@ example_multi_step_simple_agent:
         license: Apache 2.0
         jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
         num_repeats: 1
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: example_multi_step/train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-instruction_following
-          artifact_fpath: instruction_following.jsonl
-        license: Apache 2.0
       - name: validation
         type: validation
         license: Apache 2.0
         jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
         num_repeats: 1
-        gitlab_identifier:
-          dataset_name: example_multi_step
-          version: 0.0.1
-          artifact_fpath: example_multi_step/validation.jsonl
-        huggingface_identifier:
+        source:
+          type: huggingface
           repo_id: nvidia/Nemotron-RL-instruction_following
           artifact_fpath: if_validation.jsonl
-        license: Apache 2.0
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_multi_step/data/example.jsonl
@@ -200,21 +193,22 @@ A dataset object consists of:
 - Type: train, validation, or example. Train and validation are as used in NeMo RL or other train frameworks. More information about the example type is in the next section.
 - Jsonl fpath: the local file path to your jsonl file for this dataset.
 - Num repeats: optionally repeat each row when preparing or collating data. Defaults to 1 if unspecified.
-- GitLab identifier: The remote path to the dataset as held in the GitLab dataset registry. This field is required for train and validation datasets. Not required for example datasets since those are required to be committed to Git.
-- Hugging Face identifier: The remote path to the dataset on Hugging Face. Contains `repo_id` (required) and optionally `artifact_fpath` for raw file repos. If `artifact_fpath` is omitted, the datasets library will infer the `split` from the dataset `type`.
+- Source: the unified `source:` block declaring where the dataset is fetched from when it's missing locally. `type` selects the backend:
+  - `gitlab` — the GitLab dataset registry: `dataset_name`, `version`, `artifact_fpath`.
+  - `huggingface` — the Hugging Face Hub: `repo_id` (required) and optionally `artifact_fpath` for raw-file repos (if omitted, the split is inferred from the dataset `type`).
+
+  Required for train and validation datasets; not for example datasets (those are committed to Git). The legacy `gitlab_identifier:` / `huggingface_identifier:` fields still work (with a deprecation warning) and may be set together as a gitlab-primary / huggingface-fallback pair, but `source:` is preferred for new configs.
 - License: The license of that dataset. Required for train and validation datasets; not required for example datasets.
 - Start idx, end idx: used for slicing your dataset.
 ```yaml
 - name: train
   type: train
   jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
-  gitlab_identifier:
+  source:
+    type: gitlab
     dataset_name: example_multi_step
     version: 0.0.1
-    artifact_fpath: example_multi_step/validation.jsonl
-  huggingface_identifier:
-    repo_id: nvidia/example_multi_step
-    artifact_fpath: example_validation.jsonl
+    artifact_fpath: example_multi_step/train.jsonl
   license: Apache 2.0
 ```
 
@@ -293,7 +287,7 @@ In one terminal, start your agent, model, and resources servers, with profiling 
 ```bash
 gym env start \
     --model-type openai_model \
-    --config resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml \
+    --resources-server math_with_judge \
     +profiling_enabled=true \
     +profiling_results_dirpath=results/profiling/math_with_judge
 ```
@@ -302,15 +296,13 @@ In another terminal, run some large number of rollouts against your servers. Use
 ```bash
 gym eval run --no-serve \
     --agent math_with_judge_simple_agent \
-    --input resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
+    --input resources_servers/math_with_judge/data/example.jsonl \
     --output temp/math_with_judge_rollouts.jsonl \
-    --limit 1024 \
+    --limit 5 \
     --num-repeats 1
 ```
 
-After `gym eval run` finishes, ctrl+c to quit your servers. You should see some output in the terminal like the following:
-```bash
-```
+After `gym eval run` finishes, ctrl+c to quit your servers. The profiling results are written under `results/profiling/math_with_judge`.
 
 The log file content for a server will look something like the following:
 ```
