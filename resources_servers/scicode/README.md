@@ -66,7 +66,7 @@ rollouts.
 ## Running servers
 
 ```bash
-ng_run "+config_paths=[benchmarks/scicode/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start --benchmark scicode --model-type openai_model
 ```
 
 ## Smoke test (5 example problems)
@@ -75,7 +75,7 @@ Requires `test_data.h5` staged. Use the benchmark config (so `test_data_fpath` i
 benchmark agent:
 
 ```bash
-ng_collect_rollouts \
+gym eval run --no-serve \
     +agent_name=scicode_benchmark_agent \
     +input_jsonl_fpath=resources_servers/scicode/data/example.jsonl \
     +output_jsonl_fpath=results/scicode_smoke.jsonl \
@@ -86,7 +86,7 @@ ng_collect_rollouts \
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/scicode
+gym env test +entrypoint=resources_servers/scicode
 ```
 
 Covers test sanitization, the program builder, subprocess pass/fail/timeout, and the `verify()`
