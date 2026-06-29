@@ -286,7 +286,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=61", "setuptools-scm"]
+requires = ["setuptools>=64", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
@@ -330,6 +330,14 @@ exclude-dependencies = [
 
 [tool.setuptools.package-data]
 nemo_gym = ["resources/*.py"]
+# Ship built-in assets so a wheel install can list/run components by name from any cwd:
+# every config, README, and prepare script, plus small example data — but NOT the bulk
+# train/validation JSONL (those are fetched on demand via a dataset `source:` / `--download`).
+resources_servers = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
+responses_api_agents = ["**/*.yaml", "**/*.yml", "**/README.md"]
+responses_api_models = ["**/*.yaml", "**/*.yml", "**/README.md"]
+environments = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
+benchmarks = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
@@ -445,6 +453,8 @@ include = [
     "responses_api_agents.*",
     "responses_api_models",
     "responses_api_models.*",
+    "environments",
+    "environments.*",
     "nemo_gym",
     "nemo_gym.*",
 ]
