@@ -199,6 +199,37 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_include_dev_extra_installs_nemo_gym_dev_when_not_editable(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # `gym env test` passes include_dev_extra=True so the index-installed nemo-gym carries the
+        # `[dev]` extra (pytest); otherwise the per-server test venv would lack pytest.
+        server_dir = (tmp_path / "first_level" / "second_level").absolute()
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("-e nemo-gym[dev] @ ../../\n")
+        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
+        monkeypatch.delenv("UV_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
+
+        with patch("importlib.metadata.version", return_value="0.3.0"):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+                include_dev_extra=True,
+            )
+        assert "echo 'nemo-gym[dev]==0.3.0'" in actual_command
+        # The default (include_dev_extra=False) must NOT pull the dev extra.
+        with patch("importlib.metadata.version", return_value="0.3.0"):
+            default_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+        assert "echo 'nemo-gym==0.3.0'" in default_command
+        assert "[dev]" not in default_command
+
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
     def test_installs_from_pypi_when_not_editable_pyproject(
         self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch

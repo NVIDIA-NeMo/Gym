@@ -1120,6 +1120,26 @@ class TestCollateSamples:
             Path("example.jsonl"),
         ]
 
+    def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
+        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
+        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        missing_dir = tmp_path / "does" / "not" / "exist"
+        assert not missing_dir.exists()
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(missing_dir / "data.jsonl")}]
+        )
+        processor = TrainDataProcessor()
+        # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
+        monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
+
+        paths = processor._collate_samples_single_type("example", [cfg])
+
+        prepare_path = missing_dir / "data_prepare.jsonl"
+        assert paths == [prepare_path]
+        assert prepare_path.exists()  # parent dir auto-created; write did not crash
+        assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
+
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
 

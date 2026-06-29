@@ -664,6 +664,9 @@ class TrainDataProcessor(BaseModel):
                     else:
                         continue
 
+                # Ensure the artifact dir exists: the metrics file is written next to the dataset's
+                # (cwd-relative) jsonl_fpath, which may not exist yet when collating from a fresh cwd.
+                metrics_fpath.parent.mkdir(parents=True, exist_ok=True)
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
 
@@ -709,6 +712,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
+                # Create the artifact dir if needed (the prepared file is written next to the
+                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                prepare_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
