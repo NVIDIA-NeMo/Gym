@@ -1,9 +1,9 @@
 instances:
   - url: nvidia-gym.docs.buildwithfern.com/nemo/gym
     custom-domain: docs.nvidia.com/nemo/gym
+    multi-source: true
 
 title: NeMo Gym
-multi-source: true
 
 global-theme: nvidia
 
