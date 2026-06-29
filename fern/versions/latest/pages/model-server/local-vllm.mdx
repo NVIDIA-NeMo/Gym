@@ -17,20 +17,22 @@ If you want to connect NeMo Gym to a vLLM server you start and manage yourself, 
 
 ## Use LocalVLLMModel
 
-Unlike VLLMModel, LocalVLLMModel does not require a separate vLLM install or a manual model download. vLLM is a transitive dependency of `responses_api_models/local_vllm_model`, and model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `ng_run` brings up both vLLM and NeMo Gym.
+Unlike VLLMModel, LocalVLLMModel does not require a separate vLLM install or a manual model download. vLLM is a transitive dependency of `responses_api_models/local_vllm_model`, and model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `gym env start` brings up both vLLM and NeMo Gym.
 
 Several model configs ship with the server under `responses_api_models/local_vllm_model/configs/` — see the `Qwen/`, `openai/`, and `nvidia/` subdirectories for ready-to-use examples. To launch a single-node 8-GPU run with `Qwen3-30B-A3B-Instruct-2507`:
 
 ```bash
-config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\
-responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507
 ```
 
 Override the parallelism dimensions on the command line to match your node:
 
 ```bash
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507 \
     ++Qwen3-30B-A3B-Instruct-2507.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
     ++Qwen3-30B-A3B-Instruct-2507.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size=2
 ```
@@ -116,15 +118,15 @@ LocalVLLMModel uses Ray to place vLLM workers across nodes. The `VLLM_RAY_DP_PAC
 **1 node, 1 instance (TP=8).** The default for the shipped configs:
 
 ```bash
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --model-type local_vllm_model/openai/gpt-oss-20b-reasoning-high
 ```
 
 **1 node, 1 instance (DP=2, TP=4).** Split one node into two data-parallel replicas:
 
 ```bash
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --model-type local_vllm_model/openai/gpt-oss-20b-reasoning-high \
     ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size=2 \
     ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4
 ```
@@ -132,9 +134,9 @@ ng_run "+config_paths=[${config_paths}]" \
 **1 node, 2 instances (TP=4 each).** Chain two model configs into one run; each gets half the node:
 
 ```bash
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml,\
-responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml \
     ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
     ++gpt-oss-120b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4
 ```
@@ -142,9 +144,9 @@ ng_run "+config_paths=[${config_paths}]" \
 **2 nodes, 2 instances (TP=8 each).** With `strict` packing, each replica stays on its own node:
 
 ```bash
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml,\
-responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml
 ```
 
 ## Inherited features

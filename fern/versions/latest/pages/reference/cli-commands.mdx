@@ -539,15 +539,20 @@ gym eval run --no-serve \
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--input-glob`, `-i` | Glob (or comma-separated globs) matching the rollout shards to aggregate. |
 | `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
 
 ```bash
-gym eval aggregate --output results/merged.jsonl
+gym eval aggregate \
+    --config benchmarks/aime24/config.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
+    --output results/rollouts.jsonl
 ```
 
 ### `gym eval profile`
@@ -621,14 +626,15 @@ The most common Hydra overrides now have dedicated flags:
 | Legacy Hydra override | New flag |
 | --- | --- |
 | `"+config_paths=[a.yaml,b.yaml]"` | `--config a.yaml --config b.yaml` |
-| `+agent_name=...` | `--agent`, `-a` |
-| `+input_jsonl_fpath=...` | `--input`, `-i` |
-| `+output_jsonl_fpath=...` | `--output`, `-o` |
+| `+agent_name=...` | `--agent` |
+| `+input_jsonl_fpath=...` | `--input` |
+| `+input_glob=...` | `--input-glob` |
+| `+output_jsonl_fpath=...` | `--output` |
 | `+limit=...` | `--limit` |
 | `+num_repeats=...` | `--num-repeats` |
 | `+num_samples_in_parallel=...` | `--concurrency` |
 | `++split=...` | `--split` |
-| `++policy_model_name=...` | `--model`, `-m` |
+| `++policy_model_name=...` | `--model` |
 | `++policy_base_url=...` | `--model-url` |
 | `++policy_api_key=...` | `--model-api-key` |
 | `++responses_create_params.temperature=...` | `--temperature` |
@@ -643,7 +649,7 @@ The most common Hydra overrides now have dedicated flags:
 | `+repo_id=...` | `--repo-id` |
 | `+revision=...` / `+version=...` | `--revision` |
 | `+artifact_fpath=...` | `--artifact` |
-| `+output_fpath=...` | `--output`, `-o` |
+| `+output_fpath=...` | `--output` |
 | `+create_pr=true` | `--create-pr` |
 | `+outdated=true` | `--outdated` |
 
