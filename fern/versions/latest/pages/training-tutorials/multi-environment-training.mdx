@@ -8,6 +8,18 @@ NeMo Gym supports training on multiple environments simultaneously. Multi-verifi
 ## Why Train on Multiple Environments?
 This technique often results in more stable gains across multiple benchmarks. Single-environment training may cause unrecoverable degradation of other benchmarks.
 
+## Batch Size Considerations
+
+When training on multiple environments simultaneously, use a large enough batch size so each environment contributes enough samples per training step. If the batch is too small, some environments may receive few or zero samples per step, which leads to unstable or skewed gradient updates.
+
+**Global batch size** = prompts per step × responses per prompt, assuming no off-policy steps, gradient accumulation, or similar adjustments.
+
+As a starting point:
+
+- **Prompts per step** — aim for enough tasks per step that each environment appears multiple times. With two environments and 64 prompts per step, each environment might only see ~32 prompts per step; smaller counts can starve one environment entirely.
+- **Responses per prompt** — increasing rollouts per task (for example via `num_repeats` during collection) improves reward estimates but multiplies inference cost. Balance sample quality against throughput.
+- **Rule of thumb** — if you add environments, scale prompts per step proportionally rather than keeping a single-environment batch size fixed.
+
 ## How to Configure
 Suppose you want to use both the example_single_tool_call and example_multi_step training environments. To start each server individually:
 

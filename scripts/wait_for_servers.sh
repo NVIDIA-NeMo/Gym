@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Wait for ng_run head server and all child servers to become ready.
+# Wait for gym env start head server and all child servers to become ready.
 #
-# Usage: ./scripts/wait_for_servers.sh <ng_run_pid> [head_server_port] [max_wait_seconds]
+# Usage: ./scripts/wait_for_servers.sh <gym_env_start_pid> [head_server_port] [max_wait_seconds]
 #
 # Arguments:
-#   ng_run_pid          PID of the background ng_run process
+#   gym_env_start_pid   PID of the background gym env start process
 #   head_server_port    Port of the head server (default: 11000)
 #   max_wait_seconds    Max seconds to wait for child servers (default: 180)
 
 set -euo pipefail
 
-NG_RUN_PID="${1:?Usage: wait_for_servers.sh <ng_run_pid> [head_server_port] [max_wait_seconds]}"
+NG_RUN_PID="${1:?Usage: wait_for_servers.sh <gym_env_start_pid> [head_server_port] [max_wait_seconds]}"
 HEAD_PORT="${2:-11000}"
 MAX_WAIT="${3:-180}"
 
@@ -19,7 +19,7 @@ POLL_INTERVAL=2
 
 check_pid() {
   if ! kill -0 "$NG_RUN_PID" 2>/dev/null; then
-    echo "ng_run process (PID $NG_RUN_PID) exited unexpectedly"
+    echo "gym env start process (PID $NG_RUN_PID) exited unexpectedly"
     exit 1
   fi
 }

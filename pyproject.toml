@@ -156,9 +156,9 @@ dependencies = [
     "mlflow>=3.14.0",
 
     # aiohttp: async http backend
-    # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
+    # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
-    "aiohttp>=3.13.3",
+    "aiohttp>=3.14.1",
 
     # yappi: profiling tool
     # Updated Mon Sep 22, 2025 with yappi==1.6.10
@@ -329,6 +329,12 @@ exclude-dependencies = [
 ]
 
 [tool.setuptools.package-data]
+# The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
+# benchmarks, environments — all under [tool.setuptools.packages.find]) ship their configs, READMEs,
+# and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
+# files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
+# train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
+# Only nemo_gym's own non-package resource scripts need an explicit entry here.
 nemo_gym = ["resources/*.py"]
 
 [tool.setuptools.dynamic]
@@ -445,6 +451,8 @@ include = [
     "responses_api_agents.*",
     "responses_api_models",
     "responses_api_models.*",
+    "environments",
+    "environments.*",
     "nemo_gym",
     "nemo_gym.*",
 ]
