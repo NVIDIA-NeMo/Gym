@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import resolve_under_cwd_or_install
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
 
@@ -39,19 +39,21 @@ class PromptConfig(BaseModel):
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a path relative to the Gym root (PARENT_DIR), consistent with config_paths resolution."""
-    p = Path(path)
-    if not p.is_absolute():
-        p = PARENT_DIR / p
-    return p
+    """Resolve a prompt-config path: cwd first (the user's project), then the Gym install root.
+
+    Consistent with ``config_paths`` resolution. Resolving cwd first lets a user pass a relative
+    ``--prompt-config`` from their own project, while built-in prompt YAMLs still resolve by their
+    repo-relative path from any cwd (e.g. a wheel install).
+    """
+    return resolve_under_cwd_or_install(path)
 
 
 @lru_cache(maxsize=64)
 def load_prompt_config(path: str) -> PromptConfig:
     """Load and validate a YAML prompt config file.
 
-    Relative paths are resolved against the Gym root directory (``PARENT_DIR``),
-    consistent with how ``config_paths`` and other Gym paths are resolved.
+    Relative paths are resolved against the current working directory first, then the Gym install
+    root, consistent with how ``config_paths`` and other Gym paths are resolved.
 
     Returns a ``PromptConfig`` with required ``user`` and optional ``system`` fields.
     Each value is a string template with ``{placeholder}`` syntax.
