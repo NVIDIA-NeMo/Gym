@@ -135,8 +135,8 @@ gym env start \
 
 ```bash
 gym env start \
-    --model-type local_vllm_model/openai/gpt-oss-20b-reasoning-high \
-    --model-type local_vllm_model/openai/gpt-oss-120b-reasoning-high \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml \
     ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
     ++gpt-oss-120b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4
 ```
@@ -145,8 +145,8 @@ gym env start \
 
 ```bash
 gym env start \
-    --model-type local_vllm_model/openai/gpt-oss-20b-reasoning-high \
-    --model-type local_vllm_model/openai/gpt-oss-120b-reasoning-high
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml
 ```
 
 ## Inherited features

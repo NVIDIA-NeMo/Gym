@@ -44,8 +44,8 @@ Run it alongside the backing LocalVLLMModel by chaining both configs in `config_
 
 ```bash
 gym env start \
-    --model-type local_vllm_model/openai/gpt-oss-20b-reasoning-high \
-    --model-type local_vllm_model_proxy \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model_proxy/configs/local_vllm_model_proxy.yaml \
     ++policy_model_proxy.responses_api_models.local_vllm_model_proxy.model_server.name=gpt-oss-20b-reasoning-high
 ```
 
