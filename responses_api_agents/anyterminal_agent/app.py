@@ -759,14 +759,16 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
 
         response_path = params.persistent_dir / "response.json"
+        output_items, tools = [], []
         if response_path.exists():
-            data = json.loads(response_path.read_text())
-            data["model"] = params.model_name
-            saved = NeMoGymResponse.model_validate(data)
-            output_items = saved.output
-            tools = saved.tools or []
-        else:
-            output_items, tools = [], []
+            try:
+                data = json.loads(response_path.read_text())
+                data["model"] = params.model_name
+                saved = NeMoGymResponse.model_validate(data)
+                output_items = saved.output
+                tools = saved.tools or []
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
 
         return NeMoGymResponse(
             id=f"anyterminal-{params.instance_id}",
