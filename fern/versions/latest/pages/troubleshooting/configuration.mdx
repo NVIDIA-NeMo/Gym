@@ -3,7 +3,7 @@ title: "Configuration Errors"
 description: ""
 position: 1
 ---
-These errors appear when running `ng_run` or `ng_collect_rollouts`. NeMo Gym validates configuration at startup before launching servers.
+These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers.
 
 <Note>
 See the [Configuration reference](/reference/configuration) for complete configuration syntax and options.
@@ -16,13 +16,19 @@ See the [Configuration reference](/reference/configuration) for complete configu
 
 Errors that prevent servers from starting.
 
-### Missing Mandatory Value
+### Unset Required Config Value(s)
 
 ```
-omegaconf.errors.MissingMandatoryValue: Missing mandatory value: policy_api_key
+nemo_gym.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
+  - policy_api_key
+
+Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++policy_api_key=<value>
 ```
 
-**When**: A required variable (usually in `env.yaml`) is not defined.
+**When**: One or more required variables (usually in `env.yaml`) are left unset (`???`) after all
+config sources are merged. Every unset value is listed together in this single error.
 
 **Fix**: Add the missing value to `env.yaml`:
 
@@ -33,30 +39,89 @@ policy_api_key: sk-your-api-key
 Or pass via command line:
 
 ```bash
-ng_run "+config_paths=[config.yaml]" +policy_api_key=sk-your-api-key
+gym env start \
+    --config config.yaml \
+    --model-api-key sk-your-api-key
 ```
 
 ### Server Reference Not Found
 
 ```
-AssertionError: Could not find ResourcesServerRef(type='resources_servers', name='typo_weather') 
-in the list of available servers: [ResourcesServerRef(...), ...]
+nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
+Did you mean: 'weather'?
 ```
 
-**When**: A server config references another server that doesn't exist or isn't loaded.
+**When**: A server config references another server that doesn't exist or isn't loaded. The error
+names the referencing instance/field and then either suggests a similarly named server
+(`Did you mean: …`) or, when nothing is close, lists the available servers of that type
+(`Available resources_servers: …`).
 
 **Common causes**:
 - Typo in the server name
-- Referenced server's config file not included in `+config_paths`
+- Referenced server's config file not included in the `--config` flags
 - Server defined in a different config file that wasn't loaded
 
 **Fix**: 
 1. Check server name spelling in your config
-2. Ensure all required config files are in `+config_paths`:
+2. Ensure all required config files are passed with `--config`:
 
 ```bash
-ng_run "+config_paths=[model.yaml,resource.yaml,agent.yaml]"
+gym env start \
+    --config model.yaml \
+    --config resource.yaml \
+    --config agent.yaml
 ```
+
+### Config Path Not Found
+
+```
+nemo_gym.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
+  - /path/to/cwd/resources_servers/weather/config.yaml
+  - /path/to/gym/resources_servers/weather/config.yaml
+Check the path is spelled correctly and is relative to your working directory or the Gym install root.
+```
+
+**When**: A `config_paths` entry (in a config file or a `--config` flag) points at a file that doesn't
+exist under any search root. The error lists every location that was searched.
+
+**Fix**: Correct the path. A relative entry is resolved against your working directory and then the
+Gym install root, so running from the repository root usually fixes it; an absolute path also works.
+
+### Malformed `config_paths`
+
+```
+nemo_gym.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
+Pass each config with --config (it builds the list for you), e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml
+```
+
+**When**: `config_paths` is set to a scalar or mapping instead of a list of path strings.
+
+**Fix**: Make it a YAML list, or pass each config with `--config`:
+
+```yaml
+config_paths:
+  - resources_servers/weather/config.yaml
+```
+
+### No Server Instances Configured
+
+```
+nemo_gym.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml
+```
+
+**When**: The merged config defines no server instances — usually a wrong/empty `--config` or a
+`config_paths` list that resolved to nothing.
+
+**Fix**: Pass the configs that define your servers, or check the `config_paths` entries actually load.
+
+<Tip>
+Catch all of the above before launch with [`gym env validate`](/reference/cli-commands#gym-env-validate) — it
+merges and validates the same config `gym env start` uses, then exits with a clean message (no traceback)
+and a non-zero status on failure, so it fits in CI pre-flight checks.
+
+</Tip>
 
 ---
 
@@ -74,7 +139,7 @@ Configuration Warnings: Almost-Servers Detected
 
 - ResourcesServerInstanceConfig -> resources_servers -> example_server -> domain: 
   Input should be 'math', 'coding', 'agent', 'knowledge', 'instruction_following', 
-  'long_context', 'safety', 'games', 'e2e' or 'other'
+  'long_context', 'safety', 'games', 'translation', 'e2e', 'rlhf' or 'other'
 ```
 
 **When**: Config has the right structure (server type, entrypoint) but contains invalid field values.
@@ -97,7 +162,9 @@ error_on_almost_servers: false
 
 ```bash
 # Or via command line
-ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
+gym env start \
+    --config config.yaml \
+    +error_on_almost_servers=false
 ```
 
 <Warning>

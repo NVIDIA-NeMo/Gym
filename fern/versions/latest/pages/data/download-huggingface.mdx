@@ -14,10 +14,10 @@ Download JSONL datasets from Hugging Face Hub for NeMo Gym training.
 ## Quick Start
 
 ```bash
-ng_download_dataset_from_hf \
-    +repo_id=nvidia/Nemotron-RL-math-OpenMathReasoning \
-    +split=train \
-    +output_fpath=./data/train.jsonl
+gym dataset download \
+    --repo-id nvidia/Nemotron-RL-math-OpenMathReasoning \
+    --split train \
+    --output ./data/train.jsonl
 ```
 
 ```text
@@ -55,9 +55,9 @@ Downloads using the `datasets` library and converts to JSONL.
 **All splits**:
 
 ```bash
-ng_download_dataset_from_hf \
-    +repo_id=nvidia/Nemotron-RL-knowledge-mcqa \
-    +output_dirpath=./data/
+gym dataset download \
+    --repo-id nvidia/Nemotron-RL-knowledge-mcqa \
+    --output-dir ./data/
 ```
 
 ```text
@@ -68,10 +68,10 @@ ng_download_dataset_from_hf \
 **Single split**:
 
 ```bash
-ng_download_dataset_from_hf \
-    +repo_id=SWE-Gym/SWE-Gym \
-    +split=train \
-    +output_fpath=./data/train.jsonl
+gym dataset download \
+    --repo-id SWE-Gym/SWE-Gym \
+    --split train \
+    --output ./data/train.jsonl
 ```
 
 </Tab>
@@ -82,10 +82,10 @@ Downloads a specific file directly without conversion.
 **Use when**: Repository contains pre-formatted JSONL files.
 
 ```bash
-ng_download_dataset_from_hf \
-    +repo_id=nvidia/nemotron-RL-coding-competitive_coding \
-    +artifact_fpath=opencodereasoning_filtered_25k_train.jsonl \
-    +output_fpath=./data/train.jsonl
+gym dataset download \
+    --repo-id nvidia/nemotron-RL-coding-competitive_coding \
+    --artifact opencodereasoning_filtered_25k_train.jsonl \
+    --output ./data/train.jsonl
 ```
 
 ```text
@@ -208,9 +208,9 @@ Avoid passing tokens on the command line—they appear in shell history.
 
 ```bash
 export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
-ng_download_dataset_from_hf \
-    +repo_id=my-org/private-dataset \
-    +output_dirpath=./data/
+gym dataset download \
+    --repo-id my-org/private-dataset \
+    --output-dir ./data/
 ```
 
 Get your token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). Use a **read-only** token.
@@ -220,23 +220,24 @@ Get your token at [huggingface.co/settings/tokens](https://huggingface.co/settin
 Not recommended for shared systems:
 
 ```bash
-ng_download_dataset_from_hf \
-    +repo_id=my-org/private-dataset \
-    +hf_token=hf_xxxxxxxxxxxxxxxxxxxxxxxxx \
-    +output_dirpath=./data/
+gym dataset download \
+    --repo-id my-org/private-dataset \
+    --output-dir ./data/ \
+    +hf_token=hf_xxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 </Accordion>
 
 <Accordion title="Automatic Downloads During Data Preparation">
 
-NeMo Gym can automatically download missing datasets during data preparation. Configure `huggingface_identifier` in your resources server config:
+NeMo Gym can automatically download missing datasets during data preparation. Declare a `source:` block (`type: huggingface`) in your resources server config:
 
 ```yaml
 datasets:
   - name: train
     type: train
     jsonl_fpath: resources_servers/code_gen/data/train.jsonl
-    huggingface_identifier:
+    source:
+      type: huggingface
       repo_id: nvidia/nemotron-RL-coding-competitive_coding
       artifact_fpath: opencodereasoning_filtered_25k_train.jsonl
     license: Apache 2.0
@@ -245,15 +246,15 @@ datasets:
 Run with download enabled:
 
 ```bash
-config_paths="resources_servers/code_gen/configs/code_gen.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=./data/prepared \
-    +mode=train_preparation \
-    +should_download=true \
+gym dataset collate \
+    --resources-server code_gen \
+    --output-dir ./data/prepared \
+    --mode train_preparation \
+    --download \
     +data_source=huggingface
 ```
 
-If `jsonl_fpath` doesn't exist locally, NeMo Gym downloads from `huggingface_identifier` before processing.
+If `jsonl_fpath` doesn't exist locally, NeMo Gym downloads from the dataset's `source:` (here, the Hugging Face `repo_id`) before processing. The legacy `huggingface_identifier:` block still works but is deprecated in favor of `source:`.
 </Accordion>
 
 <Accordion title="Caching Behavior">
@@ -286,7 +287,7 @@ rm -rf ~/.cache/huggingface/hub/datasets--<org>--<dataset>
 
 <Card title="Prepare and Validate" href="/data/prepare-validate">
 
-Preprocess raw data, run `ng_prepare_data`, and add `agent_ref` routing.
+Preprocess raw data, run `gym dataset collate`, and add `agent_ref` routing.
 </Card>
 
 <Card title="Training Tutorials" href="/training-tutorials">

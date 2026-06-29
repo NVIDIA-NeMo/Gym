@@ -1,0 +1,77 @@
+---
+title: "Diagnose Results"
+description: "Use BLADE and other analysis skills to diagnose evaluation results — why scores changed, which tasks failed, and what intervention to prioritize."
+position: 5
+---
+
+NeMo Gym equips agents to diagnose evaluation results: an agent reads the raw artifacts from an evaluation run and produces a structured, evidence-backed report explaining what changed, which tasks failed, and what to fix next. It does this with **analysis skills** — reusable instructions an agent follows to interpret evaluation artifacts consistently.
+
+## BLADE
+
+BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is one of NeMo Gym's built-in analysis skills. It answers the questions a headline score can't: **which tasks failed, why, and what to fix.** Given a run's artifacts, it identifies which tasks failed, the dominant failure modes, and the intervention most likely to close the gap — harness work, training, verifier repair, or prompt change.
+
+To diagnose a run, ask a skill-capable coding agent (such as Claude Code or Codex CLI) to analyze your run's artifacts. It works with any evaluation that produces standard Gym artifacts (rollout JSONL, aggregate metrics, configs), whether from a built-in benchmark or your own custom tasks.
+
+<Note>
+BLADE ships as an Agent Skill inside the NeMo Gym repo (`.claude/skills/`, `.codex/skills/`), so your agent discovers it when you work inside a clone of the repo.
+</Note>
+
+## Outputs
+
+A BLADE report connects metrics to task-level evidence: what changed, which examples support each conclusion, and the intervention most likely to improve the next run. Typical outputs:
+
+- Score-change explanations
+- Task-level failure taxonomies
+- Health reports for an eval
+- Model comparison summaries
+- Recommended data, verifier, prompt, harness, or training interventions
+
+## Try It
+
+Run an evaluation, then point a skill-aware coding agent at its artifacts. This uses [`workplace_assistant`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant), a multi-step tool-using environment whose agentic trajectories give BLADE rich evidence to diagnose. It assumes you've already configured your model credentials.
+
+1. Collect rollouts. Repeats surface "sometimes-pass" tasks, BLADE's highest-signal slice:
+
+   ```bash
+   gym env start \
+       --resources-server workplace_assistant \
+       --model-type openai_model
+
+   # in a new terminal
+   gym eval run --no-serve \
+       --agent workplace_assistant_simple_agent \
+       --input resources_servers/workplace_assistant/data/example.jsonl \
+       --output results/workplace_assistant_rollouts.jsonl \
+       --num-repeats 4
+   ```
+
+   This writes the rollouts, materialized inputs, and aggregate metrics to `results/`. Add per-task pass rates with `gym eval profile`.
+
+2. Open a coding agent (e.g. Claude Code or Codex CLI) in your clone of the NeMo Gym repo so it can discover the bundled BLADE skill.
+
+3. Ask it to analyze the run:
+
+   > Use the BLADE analysis skill to analyze the rollouts in `results/` — which tasks failed, why, and what should I fix?
+
+The agent reads the artifacts and writes a structured report. In our run (`gpt-4.1-2025-04-14`, 4 repeats over the example tasks), BLADE flagged two issues worth acting on — your results will vary by model and run:
+
+- A **never-pass** task where the agent reassigned the wrong CRM records because it never resolved one person's name to an email — a fixable agent-behavior bug, not a knowledge gap.
+- A **sometimes-pass** task (3 of 4 repeats passed) where the agent dropped a borderline record when it filtered dates in its own reasoning instead of in the query — the kind of reliability gap only repeats reveal.
+
+Each finding came with task-level evidence and a recommended fix.
+
+## Reusable Analysis
+
+If you analyze the same eval repeatedly, you can author a tailored analysis skill so results stay consistent and calibrated across runs — this applies to your own custom-task evals, not just shared benchmarks. The BLADE skill itself helps you build and validate the package; see the [BLADE Analysis Skill tutorial](/evaluation-tutorials/blade-analysis-skill) for a walkthrough.
+
+<Cards>
+
+<Card title="Evaluation" href="/evaluation">
+Review the full evaluation workflow.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the scorecard analysis starts from.
+</Card>
+
+</Cards>

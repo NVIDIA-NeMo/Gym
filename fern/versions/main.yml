@@ -15,23 +15,31 @@ navigation:
       - folder: ./latest/pages/get-started
         title: "Get Started"
         title-source: frontmatter
+      - folder: ./latest/pages/data
+        title: "Prepare Data"
+        title-source: frontmatter
       - folder: ./latest/pages/agent-server
-        title: "Agent Server"
+        title: "Configure Agents"
         title-source: frontmatter
       - folder: ./latest/pages/model-server
-        title: "Model Server"
+        title: "Configure Models"
         title-source: frontmatter
-      - folder: ./latest/pages/resources-server
-        title: "Resources Server"
+      - folder: ./latest/pages/build-verifiers
+        title: "Build Verifiers"
         title-source: frontmatter
-      - folder: ./latest/pages/data
-        title: "Data"
+      - folder: ./latest/pages/evaluation
+        title: "Evaluation"
         title-source: frontmatter
+      - section: Tutorials
+        contents:
+          - folder: ./latest/pages/training-tutorials
+            title: "Training Tutorials"
+            title-source: frontmatter
+          - folder: ./latest/pages/evaluation-tutorials
+            title: "Evaluation Tutorials"
+            title-source: frontmatter
       - folder: ./latest/pages/environment-tutorials
-        title: "Environment Tutorials"
-        title-source: frontmatter
-      - folder: ./latest/pages/training-tutorials
-        title: "Training Tutorials"
+        title: "Build Environments"
         title-source: frontmatter
       - folder: ./latest/pages/model-recipes
         title: "Model Recipes"

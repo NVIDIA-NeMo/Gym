@@ -186,9 +186,14 @@ async def test_direct_create_passes_platform_to_sdk_create(
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
+    with pytest.raises(TypeError, match="extensions"):
+        opensandbox_provider._spec_extensions(
+            SandboxSpec(image="image:tag", provider_options={"extensions": ["not", "a", "mapping"]})
+        )
     with pytest.raises(TypeError, match="must be a bool"):
         opensandbox_provider._provider_option_bool({"skip_health_check": "true"}, "skip_health_check")
 
+    assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
     assert opensandbox_provider._to_sandbox_status("terminated") == SandboxStatus.STOPPED
     assert opensandbox_provider._to_sandbox_status("failed") == SandboxStatus.ERROR
@@ -665,6 +670,35 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
             sandbox_id="sandbox-1",
             timeout_s=None,
         )
+
+
+async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptyAsyncRetrying:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __aiter__(self) -> "EmptyAsyncRetrying":
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_tenacity",
+        lambda: (EmptyAsyncRetrying, lambda predicate: predicate, lambda attempts: attempts, lambda **kwargs: kwargs),
+    )
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(RuntimeError, match="SDK operation retry loop did not run"):
+        await provider._await_sdk_operation(
+            lambda: _return_value("ok"),
+            operation="noop",
+            sandbox_id="sandbox-1",
+            timeout_s=None,
+        )
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError, match="create retry loop did not run"):
+        await provider._create_with_retries(SandboxSpec(image="image:tag"))
 
 
 async def _return_value(value: Any) -> Any:

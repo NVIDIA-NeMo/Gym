@@ -57,7 +57,7 @@ my_resource:                                  # Server ID (your choice — agent
       value: "What this improves"             # Training value provided
 ```
 
-**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other` (see `Domain`)
+**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, `other` (see `Domain`)
 
 ### Agent Server Fields
 
@@ -100,6 +100,7 @@ datasets:
 | `type` | Yes | `example`, `train`, or `validation` |
 | `jsonl_fpath` | Yes | Path to data file |
 | `license` | For train/validation | License identifier (see values below) |
+| `source` | No | Where to fetch the data from when it's missing locally. A `source:` block with `type: gitlab` (`dataset_name`, `version`, `artifact_fpath`) or `type: huggingface` (`repo_id`, optional `artifact_fpath`). Replaces the deprecated `gitlab_identifier:` / `huggingface_identifier:` blocks. |
 | `num_repeats` | No | Repeat dataset n times (default: `1`) |
 
 **Dataset types:**
@@ -146,31 +147,36 @@ error_on_almost_servers: true   # Exit on invalid configs (default: true)
 
 ## Command Line Usage
 
-To run servers, use `ng_run`. NeMo Gym uses [Hydra](https://hydra.cc/) for configuration management.
+To run servers, use `gym env start`. NeMo Gym uses [Hydra](https://hydra.cc/) for configuration management.
 
 ### Loading Configs
 
 ```bash
 # Load one or more config files
-ng_run "+config_paths=[config1.yaml,config2.yaml]"
+gym env start \
+    --config config1.yaml \
+    --config config2.yaml
 
 # Use paths stored in env.yaml
-ng_run "+config_paths=${my_config_paths}"
+gym env start "+config_paths=${my_config_paths}"
 ```
 
 ### Overriding Values
 
 ```bash
 # Override nested values (use dot notation after server ID)
-ng_run "+config_paths=[config.yaml]" \
+gym env start \
+    --config config.yaml \
     +my_server.resources_servers.my_impl.domain=coding
 
 # Override policy model
-ng_run "+config_paths=[config.yaml]" \
-    +policy_model_name=gpt-4o-mini
+gym env start --config config.yaml \
+    --model gpt-4o-mini
 
 # Disable strict validation
-ng_run "+config_paths=[config.yaml]" +error_on_almost_servers=false
+gym env start \
+    --config config.yaml \
+    +error_on_almost_servers=false
 ```
 
 ---

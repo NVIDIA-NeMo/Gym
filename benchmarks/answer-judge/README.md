@@ -13,17 +13,17 @@ here is the same deterministic `Judgement: Yes/No` parsing used by Skills'
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/answer-judge/config.yaml]"
+gym eval prepare --benchmark answer-judge
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/answer-judge/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark answer-judge
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=answer_judge_math_proof_judgement_simple_agent \
-    +input_jsonl_fpath=benchmarks/answer-judge/data/answer-judge_benchmark.jsonl \
-    +output_jsonl_fpath=results/answer-judge/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/judge/math.yaml
+gym eval run --no-serve \
+    --agent answer_judge_math_proof_judgement_simple_agent \
+    --input benchmarks/answer-judge/data/answer-judge_benchmark.jsonl \
+    --output results/answer-judge/rollouts.jsonl \
+    --prompt-config benchmarks/prompts/judge/math.yaml
 ```
