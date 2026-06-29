@@ -44,7 +44,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
     peek_global_config_dict,
 )
-from nemo_gym.observability import capture_dirs_from_config, merge_capture_into_record
+from nemo_gym.observability import capture_dirs_from_config, clear_captures_for_rollouts, merge_capture_into_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -520,6 +520,11 @@ class RolloutCollectionHelper(BaseModel):
             capture_dirs = capture_dirs_from_config(peek_global_config_dict() or {})
         except Exception:
             capture_dirs = []
+
+        # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
+        # same rollout ids, so clear the capture files this run is about to (re)write.
+        if capture_dirs and not config.resume_from_cache:
+            clear_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)

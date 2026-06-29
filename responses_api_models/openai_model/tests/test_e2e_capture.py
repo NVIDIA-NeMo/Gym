@@ -118,12 +118,12 @@ def test_e2e_full_contract_through_real_model_server(tmp_path):
         ]
     )
 
-    h = {"x-nemo-gym-rollout-id": "r1", "x-nemo-gym-trial-index": "0"}
-    r1 = client.post("/v1/responses", json={"input": "solve"}, headers={**h, "x-nemo-gym-turn-index": "0"})
+    h = {"x-nemo-gym-rollout-id": "r1"}
+    r1 = client.post("/v1/responses", json={"input": "solve"}, headers=h)
     r2 = client.post(
         "/v1/responses",
         json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-        headers={**h, "x-nemo-gym-turn-index": "1"},
+        headers=h,
     )
     assert r1.status_code == 200 and r2.status_code == 200
 
@@ -132,8 +132,8 @@ def test_e2e_full_contract_through_real_model_server(tmp_path):
 
     # indices + attribution survive the round trip
     assert [s.step_index for s in steps] == [0, 1]
-    assert [s.turn_index for s in steps] == [0, 1]
-    assert all(s.trial_index == 0 and s.model_server == "srv-e2e" and s.dialect == "responses" for s in steps)
+    assert all(s.model_server == "srv-e2e" and s.dialect == "responses" for s in steps)
+    assert [s.turn_index for s in steps] == [0, 0]  # one user turn (the tool-result call stays in turn 0)
 
     # token stats survive NeMoGymResponse validation + serialization (the real point of this test)
     assert (steps[0].tokens_in, steps[0].tokens_out, steps[0].tokens_total) == (12, 7, 19)
@@ -147,7 +147,7 @@ def test_e2e_full_contract_through_real_model_server(tmp_path):
     # per-rollout aggregates
     agg = aggregate_rollout_metrics(store, "r1")
     assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
-    assert agg["num_turns"] == 2 and agg["num_steps"] == 2
+    assert agg["num_steps"] == 2 and agg["num_turns"] == 1
 
     # eval-only ordered trajectory (no token-ids surfaced)
     items = assemble_rollout(store, "r1")
