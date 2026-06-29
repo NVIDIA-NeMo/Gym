@@ -795,6 +795,183 @@ class TestMultiReference:
         # into a float Score — a string value fails parsing and fails the run).
         assert all(isinstance(v, (int, float)) for v in m.values())
 
+    def test_single_stage_matches_unstaged_full_run(self) -> None:
+        """A one-stage run is a special case of the full run: tagging the same
+        rollouts with a single ``stage_index`` must yield the same headline
+        eval_elo as the untagged (legacy full-220-vs-all-refs) aggregation."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+        per_reference = {
+            "low": {"wins": 7, "losses": 3, "ties": 0, "reference_elo": 1000.0},
+            "high": {"wins": 3, "losses": 7, "ties": 0, "reference_elo": 1400.0},
+        }
+        base_row = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "task_id": "t0",
+            "reward": 0.5,
+            "total_wins": 10,
+            "total_losses": 10,
+            "total_ties": 0,
+            "per_reference": per_reference,
+            "response": {},
+        }
+        import asyncio as _asyncio
+
+        unstaged = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[dict(base_row)]))
+        ).agent_metrics
+        staged = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[{**base_row, "stage_index": 0}]))
+        ).agent_metrics
+
+        # Headline ELO identical; the staged run just adds stage_* extras.
+        assert staged["comparison/eval_elo"] == unstaged["comparison/eval_elo"]
+        assert staged["comparison/num_references"] == unstaged["comparison/num_references"]
+        assert staged["comparison/num_stages"] == 1
+        assert staged["comparison/stage_0/eval_elo"] == unstaged["comparison/eval_elo"]
+        # Untagged run carries no stage_* keys at all.
+        assert not any(k.startswith("comparison/stage_") for k in unstaged)
+
+    def test_aggregate_metrics_stage_aware_headline_is_last_stage(self) -> None:
+        """When rollouts are tagged with ``stage_index`` the headline eval_elo is
+        the LAST stage's fit, and every stage's estimate is emitted as an extra."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+
+        # Stage 0: broad — vs both refs, 50/50 ⇒ stage ELO ≈ 1200 (midpoint).
+        # Stage 1: refined — vs the nearby "low" ref only, strong 8/2 win ⇒
+        # stage ELO well above 1000. Headline must equal the stage-1 fit, NOT
+        # the pooled fit over all rollouts.
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "task_id": "t0",
+                "reward": 0.5,
+                "total_wins": 5,
+                "total_losses": 5,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                    "high": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1400.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "task_id": "t1",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+        import asyncio as _asyncio
+
+        body = AggregateMetricsRequest(verify_responses=responses)
+        m = _asyncio.run(server.aggregate_metrics(body)).agent_metrics
+
+        assert m["comparison/num_stages"] == 2
+        # Per-stage estimates emitted.
+        assert abs(m["comparison/stage_0/eval_elo"] - 1200.0) < 1.0
+        assert m["comparison/stage_0/num_references"] == 2
+        assert m["comparison/stage_0/num_tasks"] == 1
+        assert m["comparison/stage_1/num_references"] == 1
+        assert m["comparison/stage_1/num_tasks"] == 1
+        # Stage 1 (0.8 win rate vs a 1000 anchor) must be above 1000.
+        assert m["comparison/stage_1/eval_elo"] > 1000.0
+        # Headline == last stage's fit, not the pooled midpoint.
+        assert m["comparison/eval_elo"] == m["comparison/stage_1/eval_elo"]
+        assert m["comparison/num_references"] == 1
+        # Pooled descriptive win stats still cover every stage.
+        assert m["comparison/wins"] == 13
+        assert m["comparison/judged"] == 20
+        assert all(isinstance(v, (int, float)) for v in m.values())
+
+    def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
+        """The same ``(task_index, rollout_index)`` may recur across stages (one
+        rollout judged against a different reference subset per stage). The
+        stage-aware aggregation must NOT trip RewardProfiler's duplicate-key
+        guard — stages are distinguished by ``stage_index`` alone, with no
+        per-stage index offset."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+
+        # Identical (task_index=0, rollout_index=0) in both stages; only the
+        # references judged and the stage_index differ.
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "task_id": "t0",
+                "reward": 0.5,
+                "total_wins": 5,
+                "total_losses": 5,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                    "high": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1400.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "task_id": "t0",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+        import asyncio as _asyncio
+
+        # Must not raise "Duplicate result row for rollout key".
+        m = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        ).agent_metrics
+
+        assert m["comparison/num_stages"] == 2
+        # Headline tracks the last stage; pooled descriptive stats span both.
+        assert m["comparison/eval_elo"] == m["comparison/stage_1/eval_elo"]
+        assert m["comparison/wins"] == 13
+        assert m["comparison/judged"] == 20
+
 
 class TestComparisonPayloadHardening:
     """Three protections against multi-hour /verify stalls observed on the

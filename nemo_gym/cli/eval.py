@@ -383,15 +383,28 @@ def e2e_rollout_collection():  # pragma: no cover
 
     rch = RolloutCollectionHelper()
 
+    # Multi-stage adaptive ELO (GDPVal comparison mode): when enabled, run the
+    # adaptive staged procedure through the same rollout-collection machinery so
+    # it emits the standard rollouts + aggregate-metrics artifacts. See
+    # ``resources_servers/gdpval/multistage_orchestrator.py``.
+    multistage_enabled = bool((global_config_dict.get("multistage") or {}).get("enabled"))
+
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
+{"4. Multi-stage adaptive ELO is ENABLED" if multistage_enabled else ""}
 """
     )
     try:
-        asyncio.run(rch.run_from_config(rollout_collection_config))
+        if multistage_enabled:
+            from resources_servers.gdpval.multistage_orchestrator import run_e2e_multistage
+
+            resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
+            asyncio.run(run_e2e_multistage(rollout_collection_config, resolved_config))
+        else:
+            asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         pass
     finally:

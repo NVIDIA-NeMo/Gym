@@ -11,16 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import random
+from pathlib import Path
 
 import pytest
 
 from resources_servers.gdpval.multistage_elo import (
-    MultiStageEloConfig,
-    MultiStageEloRunner,
     StageSpec,
+    ensure_distribution,
     fit_stage_elo,
+    load_distribution,
     plan_stage_task_ids,
+    pool_per_reference,
     select_references,
 )
 
@@ -133,74 +136,55 @@ class TestFitStageElo:
         assert 1000.0 < elo < 1400.0
 
 
-class TestMultiStageEloRunner:
-    def _config(self, **overrides):
-        base = dict(
-            distribution_path="unused.json",
-            stages=[StageSpec(num_tasks=3, num_models=None), StageSpec(num_tasks=6, num_models=2)],
-            reference_elos={"a": 1000.0, "b": 1200.0, "c": 1300.0, "d": 1500.0},
+class TestPoolPerReference:
+    def test_sums_counts_across_responses(self) -> None:
+        responses = [
+            {"per_reference": {"a": {"wins": 1, "losses": 2, "ties": 0, "reference_elo": 1000.0}}},
+            {"per_reference": {"a": {"wins": 3, "losses": 0, "ties": 1}, "b": {"wins": 2, "losses": 2, "ties": 0}}},
+        ]
+        pooled = pool_per_reference(responses)
+        assert pooled["a"] == {"wins": 4, "losses": 2, "ties": 1, "reference_elo": 1000.0}
+        assert pooled["b"]["wins"] == 2 and pooled["b"]["losses"] == 2
+
+    def test_handles_missing_per_reference(self) -> None:
+        assert pool_per_reference([{}, {"per_reference": None}]) == {}
+
+
+class TestEnsureDistribution:
+    def test_loads_existing_distribution_file(self, tmp_path: Path) -> None:
+        dist = _dist({"x": ["t0", "t1"]})
+        path = tmp_path / "d.json"
+        path.write_text(json.dumps(dist))
+        loaded, returned_path = ensure_distribution(str(path))
+        assert loaded == dist
+        assert returned_path == path
+
+    def test_load_distribution_rejects_non_object(self, tmp_path: Path) -> None:
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps([1, 2, 3]))
+        with pytest.raises(ValueError):
+            load_distribution(path)
+
+    def test_builds_and_caches_when_missing(self, tmp_path: Path, monkeypatch) -> None:
+        dataset = tmp_path / "data.jsonl"
+        dataset.write_text("")  # contents irrelevant; build is monkeypatched
+        built = _dist({"occupation=x": ["t0", "t1"]})
+
+        import responses_api_agents.stirrup_agent.task_distribution as td
+
+        monkeypatch.setattr(td, "build_distribution_from_dataset", lambda path, cols: built)
+
+        out = tmp_path / "cache" / "occupation_distribution.json"
+        loaded, path = ensure_distribution(
+            None, dataset_path=str(dataset), columns=["occupation"], cache_dir=str(tmp_path / "cache")
         )
-        base.update(overrides)
-        return MultiStageEloConfig(**base)
+        assert loaded == built
+        assert path == out
+        assert json.loads(out.read_text()) == built
 
-    def test_requires_stages(self) -> None:
-        with pytest.raises(ValueError):
-            MultiStageEloConfig(distribution_path="x", stages=[], reference_elos={})
+    def test_raises_when_no_distribution_and_no_dataset(self, monkeypatch) -> None:
+        import responses_api_agents.stirrup_agent.task_distribution as td
 
-    def test_unknown_selection_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            MultiStageEloConfig(distribution_path="x", stages=[StageSpec(1)], reference_elos={}, selection="zzz")
-
-    def test_two_stage_flow_threads_elo_and_shrinks_refs(self) -> None:
-        dist = _dist({"x": [f"x{i}" for i in range(20)]})
-        seen_stage_refs = []
-
-        def judge_stage(task_ids, reference_ids):
-            seen_stage_refs.append(list(reference_ids))
-            # Eval beats everyone 7-3 -> high elo estimate.
-            return {rid: {"wins": 7, "losses": 3, "ties": 0} for rid in reference_ids}
-
-        runner = MultiStageEloRunner(self._config(nested_tasks=True), dist, judge_stage, rng=random.Random(0))
-        results = runner.run()
-
-        assert len(results) == 2
-        # Stage 1 uses all references.
-        assert seen_stage_refs[0] == ["a", "b", "c", "d"]
-        # Stage 2 narrows to 2 references (closest to the stage-1 estimate).
-        assert len(seen_stage_refs[1]) == 2
-        assert set(seen_stage_refs[1]).issubset({"a", "b", "c", "d"})
-        # Nested task sets (nested_tasks=True): stage 2 superset of stage 1.
-        assert set(results[0].task_ids).issubset(set(results[1].task_ids))
-        assert results[1].eval_elo is not None
-
-    def test_stage_with_no_games_leaves_elo_unset(self) -> None:
-        dist = _dist({"x": [f"x{i}" for i in range(10)]})
-
-        def judge_stage(task_ids, reference_ids):
-            return {}
-
-        cfg = self._config(stages=[StageSpec(num_tasks=2, num_models=None)])
-        results = MultiStageEloRunner(cfg, dist, judge_stage, rng=random.Random(0)).run()
-        assert results[0].eval_elo is None
-        assert results[0].num_references == 0
-
-    def test_on_event_emits_lifecycle_events(self) -> None:
-        dist = _dist({"x": [f"x{i}" for i in range(10)]})
-
-        def judge_stage(task_ids, reference_ids):
-            return {rid: {"wins": 6, "losses": 4, "ties": 0} for rid in reference_ids}
-
-        events = []
-        cfg = self._config(stages=[StageSpec(num_tasks=2, num_models=None), StageSpec(num_tasks=3, num_models=2)])
-        MultiStageEloRunner(
-            cfg, dist, judge_stage, rng=random.Random(0), on_event=lambda name, data: events.append((name, data))
-        ).run()
-
-        names = [n for n, _ in events]
-        assert names[0] == "planned"
-        assert names.count("stage_start") == 2
-        assert names.count("stage_end") == 2
-        # stage_start carries the selected references and task count.
-        first_start = next(d for n, d in events if n == "stage_start")
-        assert first_start["num_tasks"] == 2
-        assert first_start["reference_ids"] == ["a", "b", "c", "d"]
+        monkeypatch.setattr(td, "resolve_default_dataset", lambda: None)
+        with pytest.raises(FileNotFoundError):
+            ensure_distribution(None)

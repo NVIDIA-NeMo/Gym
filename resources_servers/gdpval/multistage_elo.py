@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multi-stage adaptive ELO estimation for GDPVal pairwise comparison.
+"""Pure building blocks for multi-stage adaptive ELO estimation on GDPVal.
 
 Instead of comparing the evaluated model against every reference model on all
-tasks, this runs a sequence of *stages*. Each stage:
+tasks, multi-stage ELO runs a sequence of *stages*. Each stage:
 
 1. fixes a set of ``T`` tasks sampled from a task-distribution JSON file (see
    ``responses_api_agents.stirrup_agent.task_distribution``),
 2. judges the evaluated model against a set of ``M`` reference models on those
-   tasks (delegated to an injected ``judge_stage`` callable),
+   tasks,
 3. fits an anchored Bradley-Terry MLE ELO from that stage's win/loss/tie
    battles (reusing ``comparison.calculate_mle_elo``), and
 4. uses that estimate to choose the ``M`` references for the next stage.
@@ -28,18 +28,20 @@ Across stages, ``M`` typically shrinks (zooming in on references whose known
 ELO is closest to the evaluated model's current estimate) while ``T`` grows
 (spending the saved judge budget on a tighter final estimate).
 
-This module is intentionally **pure / server-agnostic**: the actual judging
-(running rollouts, calling ``/verify``, reading cached deliverables) is supplied
-by the caller as a ``judge_stage`` callable, so the staging/selection/ELO logic
-is unit-testable without any servers. The orchestration that wires this to the
-GDPVal servers lives in the driver (see the module docstring there).
+This module is intentionally **pure / server-agnostic** — reference selection,
+task planning, ELO fitting, vote pooling, and distribution loading, with no
+server or rollout I/O. The orchestration that wires these into Gym's standard
+rollout-collection flow (the single supported entry point) lives in
+``multistage_orchestrator`` and is enabled with ``++multistage.enabled=true``.
 """
 
 from __future__ import annotations
 
+import json
 import random
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Mapping, Optional, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from resources_servers.gdpval.comparison import calculate_mle_elo
 
@@ -48,11 +50,6 @@ from resources_servers.gdpval.comparison import calculate_mle_elo
 # "reference_elo": float}`` as produced (per task, then pooled) by the GDPVal
 # comparison verifier. This is the unit the ELO MLE is fit over.
 PerReferenceTotals = Dict[str, Dict[str, float]]
-
-# Signature of the injected judging step. Given the stage's fixed task ids and
-# the selected reference ids, return pooled per-reference win/loss/tie totals
-# for the evaluated model across those tasks.
-JudgeStageFn = Callable[[Sequence[str], Sequence[str]], PerReferenceTotals]
 
 
 @dataclass
@@ -68,60 +65,6 @@ class StageSpec:
     num_tasks: int
     num_models: Optional[int] = None
     seed: Optional[int] = None
-
-
-@dataclass
-class StageResult:
-    """Outcome of one stage."""
-
-    stage_index: int
-    task_ids: List[str]
-    reference_ids: List[str]
-    per_reference: PerReferenceTotals
-    eval_elo: Optional[float]
-    normalized_elo: Optional[float]
-    # Number of reference models included in this stage's ELO fit.
-    num_references: int
-
-
-@dataclass
-class MultiStageEloConfig:
-    """End-to-end configuration for a multi-stage ELO run."""
-
-    stages: List[StageSpec]
-    # ref_id -> known/anchor ELO. Both the MLE (anchors) and reference selection
-    # ("closest to the eval estimate") require these.
-    reference_elos: Dict[str, float]
-
-    # Task distribution source. When ``distribution_path`` is unset (or missing),
-    # the driver builds a distribution from ``dataset_path`` (or the default
-    # GDPVal dataset) grouped by ``column`` and caches it. See
-    # ``multistage_elo_driver.ensure_distribution``.
-    distribution_path: Optional[str] = None
-    dataset_path: Optional[str] = None
-
-    # Eval deliverables source. When set, pre-existing cached deliverables under
-    # this directory (``task_<id>/repeat_<n>/``) are reused instead of producing
-    # fresh rollouts. ``produce_missing`` controls whether tasks absent from the
-    # cache are produced on demand (True) or dropped from the stage (False).
-    eval_deliverables_dir: Optional[str] = None
-    produce_missing: bool = True
-
-    # Sampling behaviour across stages. ``nested=True`` makes each stage's task set
-    # a superset of the previous stage's, which is cheaper (reuses produced
-    # deliverables and judgments) but couples the stages' samples. The default
-    # (False) samples each stage independently: later stages draw fresh tasks, so
-    # the stages contribute more independent information to the ELO estimate.
-    nested_tasks: bool = False
-
-    selection: str = "closest"
-    column: List[str] = field(default_factory=lambda: ["occupation"])
-
-    def __post_init__(self) -> None:
-        if not self.stages:
-            raise ValueError("At least one stage is required.")
-        if self.selection != "closest":
-            raise ValueError(f"Unknown selection strategy: {self.selection!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -243,91 +186,91 @@ def fit_stage_elo(
 
 
 # ---------------------------------------------------------------------------
-# Runner
+# Vote pooling
 # ---------------------------------------------------------------------------
 
 
-class MultiStageEloRunner:
-    """Drive the multi-stage ELO procedure.
+def pool_per_reference(verify_responses: Sequence[Mapping[str, Any]]) -> PerReferenceTotals:
+    """Sum ``per_reference`` win/loss/tie counts across many verify responses."""
+    totals: PerReferenceTotals = {}
+    for vr in verify_responses:
+        per_ref = vr.get("per_reference") or {}
+        for ref_id, counts in per_ref.items():
+            entry = totals.setdefault(ref_id, {"wins": 0, "losses": 0, "ties": 0, "reference_elo": None})
+            entry["wins"] += int(counts.get("wins", 0) or 0)
+            entry["losses"] += int(counts.get("losses", 0) or 0)
+            entry["ties"] += int(counts.get("ties", 0) or 0)
+            if entry["reference_elo"] is None:
+                entry["reference_elo"] = counts.get("reference_elo")
 
-    ``run`` first plans every stage's task set up front (task selection does not
-    depend on any ELO estimate), then walks the stages sequentially: for each
-    stage it selects the references (closest known ELO to the running estimate),
-    judges the stage, fits the stage ELO, and threads that estimate into the next
-    stage's reference selection. Matchup judging is not the runner's concern; it
-    is supplied as ``judge_stage(task_ids, reference_ids) -> per_reference_totals``.
+    return totals
 
-    ``run`` returns one ``StageResult`` per stage; the last stage's ``eval_elo``
-    is the headline estimate.
+
+# ---------------------------------------------------------------------------
+# Distribution loading
+# ---------------------------------------------------------------------------
+
+
+# Default location for distributions built on demand. Lives under the resources
+# server's data dir so it is easy to inspect/reuse across runs.
+DEFAULT_DISTRIBUTION_CACHE_DIR = Path(__file__).resolve().parent / "data" / "distributions"
+
+
+def load_distribution(path: str | Path) -> Dict[str, Dict[str, Any]]:
+    """Load a task-distribution JSON file produced by ``task_distribution.py``."""
+    with Path(path).open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(f"Distribution file {path} must be a JSON object.")
+    return data
+
+
+def ensure_distribution(
+    distribution_path: Optional[str | Path] = None,
+    *,
+    dataset_path: Optional[str | Path] = None,
+    columns: Optional[Sequence[str]] = None,
+    cache_dir: Optional[str | Path] = None,
+) -> tuple[Dict[str, Dict[str, Any]], Path]:
+    """Return ``(distribution, path)``, building the distribution if needed.
+
+    If ``distribution_path`` exists it is loaded as-is. Otherwise a distribution
+    is built from ``dataset_path`` (or the default GDPVal dataset) grouped by
+    ``columns`` (default ``["occupation"]``) via ``task_distribution``, then saved
+    so subsequent runs reuse it. It is written to ``distribution_path`` when
+    given, else to ``<cache_dir>/<columns>_distribution.json`` (cache_dir
+    defaults to ``DEFAULT_DISTRIBUTION_CACHE_DIR``).
     """
+    column_list = list(columns) if columns else ["occupation"]
 
-    def __init__(
-        self,
-        config: MultiStageEloConfig,
-        distribution: Mapping[str, Mapping[str, object]],
-        judge_stage: JudgeStageFn,
-        *,
-        rng: Optional[random.Random] = None,
-        on_event: Optional[Callable[[str, dict], None]] = None,
-    ) -> None:
-        self.config = config
-        self.distribution = distribution
-        self.judge_stage = judge_stage
-        self.rng = rng or random.Random()
-        # Optional progress hook. Called as ``on_event(name, data)`` for the
-        # events "planned", "stage_start", and "stage_end". Kept as a callback so
-        # this module performs no I/O itself; the driver/CLI does the printing.
-        self.on_event = on_event
+    if distribution_path is not None and Path(distribution_path).is_file():
+        return load_distribution(distribution_path), Path(distribution_path)
 
-    def _emit(self, name: str, **data: object) -> None:
-        if self.on_event is not None:
-            self.on_event(name, data)
+    from responses_api_agents.stirrup_agent.task_distribution import (
+        build_distribution_from_dataset,
+        resolve_default_dataset,
+    )
 
-    def run(self) -> List[StageResult]:
-        stage_task_sets = plan_stage_task_ids(
-            self.distribution,
-            self.config.stages,
-            rng=self.rng,
-            nested=self.config.nested_tasks,
+    resolved_dataset = Path(dataset_path) if dataset_path is not None else resolve_default_dataset()
+    if resolved_dataset is None:
+        raise FileNotFoundError(
+            "No distribution file was provided and no default GDPVal dataset could be found to "
+            "build one from. Provide distribution_path, pass dataset_path, or prepare the GDPVal "
+            "dataset (gym eval prepare --benchmark gdpval)."
         )
-        total_stages = len(self.config.stages)
-        self._emit("planned", stage_task_counts=[len(s) for s in stage_task_sets], total_stages=total_stages)
 
-        results: List[StageResult] = []
-        eval_elo: Optional[float] = None
-        for index, stage in enumerate(self.config.stages):
-            reference_ids = select_references(self.config.reference_elos, eval_elo, stage.num_models)
-            task_ids = stage_task_sets[index]
-            self._emit(
-                "stage_start",
-                index=index,
-                total_stages=total_stages,
-                reference_ids=list(reference_ids),
-                num_tasks=len(task_ids),
-                prior_elo=eval_elo,
-            )
-            per_reference = self.judge_stage(task_ids, reference_ids)
-            stage_elo, normalized, num_references = fit_stage_elo(per_reference, self.config.reference_elos)
-            if stage_elo is not None:
-                eval_elo = stage_elo
-            self._emit(
-                "stage_end",
-                index=index,
-                total_stages=total_stages,
-                eval_elo=stage_elo,
-                normalized_elo=normalized,
-                num_references=num_references,
-                per_reference=dict(per_reference),
-            )
-            results.append(
-                StageResult(
-                    stage_index=index,
-                    task_ids=list(task_ids),
-                    reference_ids=list(reference_ids),
-                    per_reference=dict(per_reference),
-                    eval_elo=stage_elo,
-                    normalized_elo=normalized,
-                    num_references=num_references,
-                )
-            )
-        return results
+    distribution = build_distribution_from_dataset(resolved_dataset, column_list)
+
+    if distribution_path is not None:
+        out_path = Path(distribution_path)
+    else:
+        base = Path(cache_dir) if cache_dir is not None else DEFAULT_DISTRIBUTION_CACHE_DIR
+        out_path = base / f"{'_'.join(column_list)}_distribution.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(distribution, handle, indent=2, ensure_ascii=False)
+    print(
+        f"[multistage-elo] built task distribution over {column_list} from {resolved_dataset} -> {out_path}",
+        flush=True,
+    )
+    return distribution, out_path
