@@ -286,10 +286,7 @@ dev = [
 ]
 
 [build-system]
-# setuptools >= 62.3 is required for recursive `**` globs in [tool.setuptools.package-data] (used to
-# ship the built-in configs / example data); pinned to 64 for a safe margin. Build-time only — this
-# does not constrain the installed/runtime setuptools.
-requires = ["setuptools>=64", "setuptools-scm"]
+requires = ["setuptools>=61", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
@@ -332,14 +329,13 @@ exclude-dependencies = [
 ]
 
 [tool.setuptools.package-data]
+# The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
+# benchmarks, environments — all under [tool.setuptools.packages.find]) ship their configs, READMEs,
+# and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
+# files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
+# train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
+# Only nemo_gym's own non-package resource scripts need an explicit entry here.
 nemo_gym = ["resources/*.py"]
-# Ship built-in assets so a wheel install can list/run components by name from any cwd: every config,
-# README, and prepare script, plus small example data — but NOT the bulk train/validation JSONL
-# (fetched on demand via a dataset `source:` / `--download`). The "*" key applies these globs to every
-# discovered package (the asset trees: resources_servers, responses_api_agents, responses_api_models,
-# benchmarks, environments), so the patterns live in one place instead of being repeated per tree.
-# The recursive `**` patterns require setuptools >= 62.3 (see [build-system].requires).
-"*" = ["**/*.yaml", "**/*.yml", "**/README.md", "**/prepare.py", "**/data/example*.jsonl"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
