@@ -40,10 +40,6 @@ from nemo_gym.trajectory_capture import CaptureStore, aggregate_step_records, as
 
 logger = logging.getLogger(__name__)
 
-# Grouping headers. ROLLOUT_HEADER is the shared protocol (server_utils); trial/turn are local.
-TRIAL_HEADER = "x-nemo-gym-trial-index"
-TURN_HEADER = "x-nemo-gym-turn-index"
-
 _OBSERVED_PATHS = {
     "/v1/responses": "responses",
     "/v1/chat/completions": "chat",
@@ -58,14 +54,6 @@ def _scope_header(scope: dict[str, Any], name: str) -> Optional[str]:
         if key.lower() == target:
             return value.decode("latin-1")
     return None
-
-
-def _scope_header_int(scope: dict[str, Any], name: str) -> Optional[int]:
-    value = _scope_header(scope, name)
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _headers_content_type(headers: list) -> bytes:
@@ -282,7 +270,6 @@ def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[st
 
 def _record(
     store: CaptureStore,
-    scope: dict[str, Any],
     dialect: str,
     config: Any,
     request_bytes: bytes,
@@ -301,8 +288,6 @@ def _record(
             {
                 "dialect": dialect,
                 "model_server": getattr(config, "name", None),
-                "trial_index": _scope_header_int(scope, TRIAL_HEADER),
-                "turn_index": _scope_header_int(scope, TURN_HEADER),
                 "latency_ms": round(latency_ms, 2),
                 "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
                 "status_code": status_code,
@@ -386,7 +371,6 @@ class _CaptureMiddleware:
             await asyncio.to_thread(
                 _record,
                 self._store,
-                scope,
                 dialect,
                 self._config,
                 bytes(request_body),
@@ -414,7 +398,6 @@ class _CaptureMiddleware:
         await asyncio.to_thread(
             _record,
             self._store,
-            scope,
             dialect,
             self._config,
             bytes(request_body),
@@ -523,6 +506,26 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
         if store.path_for(rollout_id).exists():
             return store
     return None
+
+
+def clear_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
+    """Remove stale per-rollout capture files for these records before a fresh (non-resume) run.
+
+    Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
+    re-run would append onto the previous run's capture for the same id. Best-effort; run-scopes the
+    capture so each run's trajectory stays isolated.
+    """
+    if not capture_dirs:
+        return
+    for directory in capture_dirs:
+        try:
+            store = CaptureStore(directory)
+        except Exception:
+            continue
+        for record in records:
+            rollout_id = rollout_id_from_run_body(record)
+            if rollout_id:
+                store.path_for(rollout_id).unlink(missing_ok=True)
 
 
 def merge_capture_into_record(

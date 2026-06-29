@@ -389,11 +389,10 @@ class StepRecord(BaseModel):
     """Per-step model-call record; field names align with OpenAI shapes."""
 
     run_id: Optional[str] = None
-    # step_index is always server-derived and authoritative. trial_index is set from a run's rollout
-    # index (header, for Gym-orchestrated callers); turn_index is reserved for a future agent-loop
-    # boundary and is currently always None. Both are None for base_url-only clients that correlate
-    # via the URL prefix.
-    trial_index: Optional[int] = None
+    # step_index is the server-derived per-call ordinal. turn_index is derived from user-message
+    # boundaries (a turn = control handed back to the user, per the Gym glossary); it is None when
+    # the sequence is not decidable here -- sub-agent / tree structure is owned by the trajectory
+    # builder, which supersedes this naive linear derivation.
     turn_index: Optional[int] = None
     step_index: int
     model_server: Optional[str] = None
@@ -420,9 +419,8 @@ class StepRecord(BaseModel):
     cached_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
 
-    # Retry / error classification.
+    # Error classification.
     error_category: Optional[str] = None
-    retry_count: Optional[int] = None
 
     # Latency.
     latency_total_ms: Optional[float] = None
@@ -437,8 +435,6 @@ def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Opti
     tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
     return StepRecord(
         run_id=run_id or exchange.get("run_id"),
-        trial_index=exchange.get("trial_index"),
-        turn_index=exchange.get("turn_index"),
         step_index=step_index,
         model_server=exchange.get("model_server"),
         dialect=exchange.get("dialect"),
@@ -450,16 +446,67 @@ def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Opti
         cache_hit=cache_hit,
         cached_tokens=cached_tokens,
         error_category=exchange.get("error_category"),
-        retry_count=exchange.get("retry_count"),
         latency_total_ms=exchange.get("latency_ms"),
         latency_ttft_ms=exchange.get("latency_ttft_ms"),
         **tokens,
     )
 
 
+def _user_message_texts(request: Any, dialect: Optional[str]) -> Optional[list[str]]:
+    """User-message contents in a captured request, or None when the shape is unparseable."""
+    if not isinstance(request, dict):
+        return None
+    if dialect == "responses":
+        items = request.get("input")
+        if isinstance(items, str):
+            return [items]
+        if isinstance(items, list):
+            return [
+                _content_text(it.get("content")) for it in items if isinstance(it, dict) and it.get("role") == "user"
+            ]
+        return None
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        return [_content_text(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+    return None
+
+
+def _assign_turn_indices(steps: list[StepRecord]) -> None:
+    """Assign turn_index by user-message boundary (a turn = control handed back to the user).
+
+    Linear derivation over a single monotonic thread: each call's user messages must be a
+    prefix-extension of the running thread; a newly-appended user message opens a new turn, while
+    calls with no new user message (tool results, retries, internal calls) stay in the current turn.
+    If a call's user messages are not a prefix-extension -- sub-agent interleaving, history rewriting
+    / compaction, or a delta wire's later user turn -- the capture isn't a single linear thread, so
+    every turn_index is left None for the (tree-aware) trajectory builder to own. Also None when a
+    request is unparseable or no user message ever appears.
+    """
+    thread: list[str] = []
+    turn = -1
+    ok = True
+    for step in steps:
+        users = _user_message_texts(step.request, step.dialect)
+        if users is None:
+            ok = False
+            break
+        if users:
+            if users[: len(thread)] != thread:  # not a prefix-extension -> not a single linear thread
+                ok = False
+                break
+            turn += len(users) - len(thread)
+            thread = users
+        step.turn_index = max(turn, 0)
+    if not ok or turn < 0:
+        for s in steps:
+            s.turn_index = None
+
+
 def assemble_step_records(store: CaptureStore, rollout_id: str, run_id: Optional[str] = None) -> list[StepRecord]:
     """Read a rollout's captured exchanges into ordered StepRecords (the per-trial trajectory)."""
-    return [build_step_record(ex, step_index=i, run_id=run_id) for i, ex in enumerate(store.read(rollout_id))]
+    steps = [build_step_record(ex, step_index=i, run_id=run_id) for i, ex in enumerate(store.read(rollout_id))]
+    _assign_turn_indices(steps)
+    return steps
 
 
 def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
@@ -472,8 +519,8 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
         values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
         return sum(values) if values else None
 
-    # num_turns is None (not num_steps) when no caller set turn_index: a turn (control returned to
-    # the caller) is not a model step, so num_steps stays the authoritative count.
+    # num_turns counts distinct derived turns (None when turn derivation did not apply); num_steps
+    # is the authoritative per-rollout count of model calls.
     turns = {s.turn_index for s in steps if s.turn_index is not None}
     return {
         "tokens_in": _sum("tokens_in"),

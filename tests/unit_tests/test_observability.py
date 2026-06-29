@@ -38,8 +38,6 @@ def test_build_step_record_from_exchange():
     exchange = {
         "dialect": "responses",
         "model_server": "srv",
-        "trial_index": 2,
-        "turn_index": 1,
         "latency_ms": 18.4,
         "request": {"input": "hi"},
         "response": {
@@ -59,7 +57,7 @@ def test_build_step_record_from_exchange():
         },
     }
     rec = build_step_record(exchange, step_index=3, run_id="run-1")
-    assert (rec.step_index, rec.trial_index, rec.turn_index) == (3, 2, 1)
+    assert rec.step_index == 3  # turn_index is assigned by assemble_step_records, not build
     assert rec.run_id == "run-1" and rec.model_server == "srv" and rec.dialect == "responses"
     assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
     assert rec.cache_hit is True and rec.cached_tokens == 4
@@ -72,7 +70,6 @@ def test_step_record_json_schema_has_contract_fields():
     props = StepRecord.model_json_schema()["properties"]
     for field in (
         "step_index",
-        "trial_index",
         "turn_index",
         "tokens_in",
         "tokens_out",
@@ -142,15 +139,13 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
     install_trajectory_capture(app, config)
     client = TestClient(app)
-    base_headers = {"x-nemo-gym-rollout-id": "rollout-x", "x-nemo-gym-trial-index": "2"}
+    headers = {"x-nemo-gym-rollout-id": "rollout-x"}
 
-    r1 = client.post(
-        "/v1/responses", json={"input": "solve it"}, headers={**base_headers, "x-nemo-gym-turn-index": "0"}
-    )
+    r1 = client.post("/v1/responses", json={"input": "solve it"}, headers=headers)
     r2 = client.post(
         "/v1/responses",
         json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-        headers={**base_headers, "x-nemo-gym-turn-index": "1"},
+        headers=headers,
     )
 
     assert r1.status_code == 200 and r2.status_code == 200
@@ -170,8 +165,8 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     # Typed StepRecords.
     steps = assemble_step_records(CaptureStore(tmp_path), "rollout-x", run_id="run-1")
     assert [s.step_index for s in steps] == [0, 1]
-    assert [s.turn_index for s in steps] == [0, 1]
-    assert all(s.trial_index == 2 and s.run_id == "run-1" and s.model_server == "srv" for s in steps)
+    assert all(s.run_id == "run-1" and s.model_server == "srv" for s in steps)
+    assert [s.turn_index for s in steps] == [0, 0]  # one user turn; the tool-result call stays in turn 0
     assert (steps[0].tokens_in, steps[0].tokens_out, steps[0].tokens_total) == (12, 7, 19)
     assert steps[0].cache_hit is True and steps[0].cached_tokens == 4
     assert steps[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
@@ -181,7 +176,7 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     # Per-rollout aggregates for the rollout record.
     agg = aggregate_rollout_metrics(CaptureStore(tmp_path), "rollout-x")
     assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
-    assert agg["num_turns"] == 2 and agg["num_steps"] == 2
+    assert agg["num_steps"] == 2 and agg["num_turns"] == 1
 
 
 def test_failed_call_is_captured_with_error_category(tmp_path):
@@ -350,14 +345,11 @@ def test_classify_exception_branches():
 
 
 def test_scope_header_parsing():
-    from nemo_gym.observability import _scope_header, _scope_header_int
+    from nemo_gym.observability import _scope_header
 
-    scope = {"headers": [(b"good", b"3"), (b"bad", b"nope")]}
+    scope = {"headers": [(b"good", b"3"), (b"other", b"x")]}
     assert _scope_header(scope, "good") == "3"
     assert _scope_header(scope, "missing") is None
-    assert _scope_header_int(scope, "good") == 3
-    assert _scope_header_int(scope, "bad") is None  # not an int
-    assert _scope_header_int(scope, "missing") is None  # absent
 
 
 # --- capture-store dir resolution + init failure ---
@@ -391,7 +383,6 @@ def test_record_swallows_store_failure():
     # Best-effort: a failing store must not raise out of _record.
     _record(
         _BadStore(),
-        SimpleNamespace(headers={}),
         "chat",
         SimpleNamespace(name="srv"),
         b"{}",
@@ -798,8 +789,6 @@ def _capture_exchange(dialect, model_server, usage, response):
     return {
         "dialect": dialect,
         "model_server": model_server,
-        "trial_index": 0,
-        "turn_index": 0,
         "latency_ms": 1.0,
         "status_code": 200,
         "error_category": None,
@@ -858,6 +847,89 @@ def test_merge_capture_noop_without_capture(tmp_path):
     assert "ng_trajectory_capture" not in rec
 
 
+def test_clear_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
+    import nemo_gym.observability as obs
+    from nemo_gym.observability import clear_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
+    store.record("1-0", {"dialect": "chat", "request": {}, "response": {}})
+    assert store.read("0-0") and store.read("1-0")
+
+    # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
+    clear_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
+    assert store.read("0-0") == [] and store.read("1-0")
+    clear_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
+    assert store.read("1-0")
+
+    # Best-effort: a dir whose store can't be opened is skipped, not raised.
+    def _boom(_directory):
+        raise OSError("cannot open")
+
+    monkeypatch.setattr(obs, "CaptureStore", _boom)
+    clear_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
+
+
+def test_assign_turn_indices_user_message_boundary():
+    from nemo_gym.trajectory_capture import StepRecord, _assign_turn_indices
+
+    # Cumulative chat: a new user message starts a new turn; tool-result calls stay in the turn.
+    steps = [
+        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "user", "content": "q1"}]}),
+        StepRecord(
+            step_index=1,
+            dialect="chat",
+            request={"messages": [{"role": "user", "content": "q1"}, {"role": "tool", "content": "obs"}]},
+        ),
+        StepRecord(
+            step_index=2,
+            dialect="chat",
+            request={"messages": [{"role": "user", "content": "q1"}, {"role": "user", "content": "q2"}]},
+        ),
+    ]
+    _assign_turn_indices(steps)
+    assert [s.turn_index for s in steps] == [0, 0, 1]
+
+    # Unparseable request -> all None (deferred to the trajectory builder).
+    bad = [StepRecord(step_index=0, dialect="chat", request=None)]
+    _assign_turn_indices(bad)
+    assert bad[0].turn_index is None
+
+    # Responses input that is neither str nor list -> unparseable -> None.
+    no_input = [StepRecord(step_index=0, dialect="responses", request={"input": None})]
+    _assign_turn_indices(no_input)
+    assert no_input[0].turn_index is None
+
+    # Parseable but no user message anywhere -> not derivable -> None.
+    only_system = [
+        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "system", "content": "x"}]})
+    ]
+    _assign_turn_indices(only_system)
+    assert only_system[0].turn_index is None
+
+    # Interleaved threads (e.g. a sub-agent's fresh conversation) are not a single linear thread -> None.
+    interleaved = [
+        StepRecord(step_index=0, dialect="messages", request={"messages": [{"role": "user", "content": "main task"}]}),
+        StepRecord(
+            step_index=1, dialect="messages", request={"messages": [{"role": "user", "content": "sub prompt"}]}
+        ),
+    ]
+    _assign_turn_indices(interleaved)
+    assert all(s.turn_index is None for s in interleaved)
+
+    # Repeated user content across turns is counted by position, not deduped (no undercount).
+    repeated = [
+        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "user", "content": "go"}]}),
+        StepRecord(
+            step_index=1,
+            dialect="chat",
+            request={"messages": [{"role": "user", "content": "go"}, {"role": "user", "content": "go"}]},
+        ),
+    ]
+    _assign_turn_indices(repeated)
+    assert [s.turn_index for s in repeated] == [0, 1]
+
+
 def test_aggregate_step_records_sums_and_counts():
     from nemo_gym.trajectory_capture import StepRecord, aggregate_step_records
 
@@ -867,7 +939,7 @@ def test_aggregate_step_records_sums_and_counts():
     ]
     agg = aggregate_step_records(steps)
     assert (agg["tokens_in"], agg["tokens_out"], agg["tokens_total"]) == (30, 8, 38)
-    assert agg["latency_total_ms"] == 3.0 and agg["num_turns"] == 2 and agg["num_steps"] == 2
+    assert agg["latency_total_ms"] == 3.0 and agg["num_steps"] == 2 and agg["num_turns"] == 2
     # empty -> all-None totals but a well-formed shape (num_steps 0)
     assert aggregate_step_records([]) == {
         "tokens_in": None,
@@ -878,15 +950,6 @@ def test_aggregate_step_records_sums_and_counts():
         "num_turns": None,
         "num_steps": 0,
     }
-
-
-def test_aggregate_num_turns_is_none_without_turn_markers():
-    from nemo_gym.trajectory_capture import StepRecord, aggregate_step_records
-
-    # No caller set turn_index -> num_turns is None (a turn != a model step), num_steps stays exact.
-    steps = [StepRecord(step_index=0, tokens_in=1), StepRecord(step_index=1, tokens_in=2)]
-    agg = aggregate_step_records(steps)
-    assert agg["num_steps"] == 2 and agg["num_turns"] is None
 
 
 # --- P0 review regressions: prefix routing + capture-dir resolution ---
