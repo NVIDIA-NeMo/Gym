@@ -53,7 +53,11 @@ from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PRO
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    tavily_api_key: str | List[str]
+    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
+    # key must be present (validated below). exclude_domains are honored by both.
+    search_provider: str = "tavily"
+    tavily_api_key: str | List[str] | None = None
+    exa_api_key: str | List[str] | None = None
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -68,6 +72,16 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
+
+    @model_validator(mode="after")
+    def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
+        if self.search_provider == "tavily" and not self.tavily_api_key:
+            raise ValueError("tavily_api_key is required when search_provider='tavily'")
+        if self.search_provider == "exa" and not self.exa_api_key:
+            raise ValueError("exa_api_key is required when search_provider='exa'")
+        if self.search_provider not in ("tavily", "exa"):
+            raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        return self
 
 
 class TavilySearchRequest(BaseModel):
@@ -164,7 +178,8 @@ class JudgeEvaluation(BaseModel):
 
 
 class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
-    function: str
+    function: str  # "search" | "browse"
+    provider: str = "tavily"  # "tavily" | "exa"
     status: str
     start_time: float
     end_time: float
@@ -256,6 +271,73 @@ class TavilySearchAIOHTTPClient(BaseModel):
         )
 
 
+class ExaAIOHTTPClient(BaseModel):
+    """Async Exa REST client over NeMo Gym's global aiohttp client (no exa-py / httpx dep).
+
+    Mirrors TavilySearchAIOHTTPClient's retry + rate-limit-tagging loop. Exposes high-level
+    ``search``/``get_contents`` that return the parsed Exa JSON, so the harness (and tests)
+    call them like the AsyncTavilyClient's ``search``/``extract``.
+    """
+
+    headers: Dict[str, str]
+    base_url: str = "https://api.exa.ai"
+    debug: bool = False
+
+    async def _post(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": json.dumps(body),
+        }
+
+        MAX_NUM_TRIES = 3  # mirror the Tavily client
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in RETRY_ERROR_CODES:
+                rate_limited = response.status in RATE_LIMIT_ERROR_CODES
+                if rate_limited:
+                    # don't let rate limits burn the retry budget
+                    max_num_tries += 1
+                content = (await response.content.read()).decode()
+                tag = "exa_rate_limit" if rate_limited else "exa_retry"
+                print(
+                    f"[browsecomp][tool_fail][{tag}] endpoint={endpoint} status={response.status} "
+                    f"try={tries} body={content[:300]}",
+                    flush=True,
+                )
+                await sleep(0.5)
+                continue
+
+            data = await response.json()
+            if self.debug:
+                print(f"Received the following Exa response: status={response.status}")
+            return data
+
+        await raise_for_status(response)
+
+    async def search(
+        self, query: str, num_results: int, exclude_domains: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "query": query,
+            "numResults": num_results,
+            "type": "auto",
+            "contents": {"highlights": True},
+        }
+        if exclude_domains:
+            body["excludeDomains"] = list(exclude_domains)
+        return await self._post("/search", body)
+
+    async def get_contents(self, urls: List[str], max_characters: int) -> Dict[str, Any]:
+        body = {"urls": list(urls), "text": {"maxCharacters": max_characters}}
+        return await self._post("/contents", body)
+
+
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
 # read-only bash tool. Ported from the bc_frankie harness.
@@ -301,27 +383,108 @@ def _bash_truncate(s: str) -> str:
 # interpreter commands + command/process substitution + find -exec / sed -i. ---
 _BASH_DENY_COMMANDS = {
     # destructive file ops / writes
-    "rm", "rmdir", "unlink", "shred", "srm", "wipe",
-    "mv", "cp", "dd", "truncate", "install", "ln", "tee",
-    "mkfs", "mke2fs", "mkswap", "fsck",
+    "rm",
+    "rmdir",
+    "unlink",
+    "shred",
+    "srm",
+    "wipe",
+    "mv",
+    "cp",
+    "dd",
+    "truncate",
+    "install",
+    "ln",
+    "tee",
+    "mkfs",
+    "mke2fs",
+    "mkswap",
+    "fsck",
     # permissions / metadata
-    "chmod", "chown", "chgrp", "chattr", "touch",
+    "chmod",
+    "chown",
+    "chgrp",
+    "chattr",
+    "touch",
     # privilege / escape / process / system control
-    "sudo", "su", "doas", "pkexec", "chroot", "unshare", "nsenter",
-    "mount", "umount", "kill", "pkill", "killall",
-    "reboot", "shutdown", "halt", "poweroff", "init",
-    "systemctl", "service", "crontab", "at", "batch",
+    "sudo",
+    "su",
+    "doas",
+    "pkexec",
+    "chroot",
+    "unshare",
+    "nsenter",
+    "mount",
+    "umount",
+    "kill",
+    "pkill",
+    "killall",
+    "reboot",
+    "shutdown",
+    "halt",
+    "poweroff",
+    "init",
+    "systemctl",
+    "service",
+    "crontab",
+    "at",
+    "batch",
     # network / exfiltration
-    "curl", "wget", "nc", "ncat", "netcat", "telnet",
-    "ssh", "scp", "sftp", "rsync", "ftp", "tftp", "socat",
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "telnet",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "ftp",
+    "tftp",
+    "socat",
     # interpreters / shells / arbitrary-code engines & wrappers
-    "bash", "sh", "zsh", "ksh", "dash", "csh", "tcsh", "fish",
-    "python", "python2", "python3", "perl", "ruby", "node", "nodejs",
-    "php", "lua", "rscript", "awk", "gawk", "mawk",
-    "eval", "exec", "command", "builtin", "source", "xargs",
-    "nohup", "setsid", "timeout", "nice", "watch", "stdbuf", "ionice",
+    "bash",
+    "sh",
+    "zsh",
+    "ksh",
+    "dash",
+    "csh",
+    "tcsh",
+    "fish",
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "nodejs",
+    "php",
+    "lua",
+    "rscript",
+    "awk",
+    "gawk",
+    "mawk",
+    "eval",
+    "exec",
+    "command",
+    "builtin",
+    "source",
+    "xargs",
+    "nohup",
+    "setsid",
+    "timeout",
+    "nice",
+    "watch",
+    "stdbuf",
+    "ionice",
     # environment / secret disclosure
-    "env", "printenv", "export", "set", "declare", "typeset",
+    "env",
+    "printenv",
+    "export",
+    "set",
+    "declare",
+    "typeset",
 }
 
 # Patterns blocked anywhere (evaluated on the quote-stripped command).
@@ -377,13 +540,29 @@ def _bash_denylisted(keystrokes):
 # Default-deny companion: a command passes only if EVERY command-position program
 # is in this read-only set. Closes the denylist's gap for unenumerated binaries.
 _BASH_ALLOW_COMMANDS = {
-    "grep", "cat", "head", "tail", "sed", "ls", "wc", "sort", "uniq", "cut",
-    "tr", "nl", "strings", "file", "find", "diff", "echo", "printf", "cd",
+    "grep",
+    "cat",
+    "head",
+    "tail",
+    "sed",
+    "ls",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "nl",
+    "strings",
+    "file",
+    "find",
+    "diff",
+    "echo",
+    "printf",
+    "cd",
 }
 
 # Shell keywords permitted as structural glue (pipelines, for-loops, conditionals).
-_BASH_KEYWORD_SKIP = {"if", "elif", "then", "else", "while", "until", "do",
-                      "!", "time", "{", "(", "[["}
+_BASH_KEYWORD_SKIP = {"if", "elif", "then", "else", "while", "until", "do", "!", "time", "{", "(", "[["}
 _BASH_KEYWORD_STANDALONE = {"done", "fi", "esac", "}", ")"}
 _BASH_KEYWORD_HEADER = {"for", "case", "select", "function"}
 
@@ -480,6 +659,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     MAX_RESULTS: int = 5
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
+    _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
@@ -490,6 +670,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     JUDGE_MAX_ATTEMPTS: int = 10
 
     def model_post_init(self, __context) -> None:
+        # Tavily clients (built only when a Tavily key is configured).
         tavily_api_keys = self.config.tavily_api_key
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
@@ -498,13 +679,29 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
         # not hardcoded. Empty/unset => header not sent.
         client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
-        self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
-        for async_tavily_client in self._async_tavily_clients:
-            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-                async_tavily_client._client, self.config.debug
-            )
-            if client_source:
-                async_tavily_client._client.headers["x-client-source"] = client_source
+        if tavily_api_keys:
+            self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+            for async_tavily_client in self._async_tavily_clients:
+                async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
+                    async_tavily_client._client, self.config.debug
+                )
+                if client_source:
+                    async_tavily_client._client.headers["x-client-source"] = client_source
+
+        # Exa clients (built only when an Exa key is configured). One client per
+        # key; round-robined like Tavily. Native aiohttp REST (no exa-py dep).
+        exa_api_keys = self.config.exa_api_key
+        if isinstance(exa_api_keys, str):
+            exa_api_keys = [exa_api_keys]
+        if exa_api_keys:
+            self._exa_clients = [
+                ExaAIOHTTPClient(
+                    headers={"x-api-key": k, "Content-Type": "application/json"},
+                    debug=self.config.debug,
+                )
+                for k in exa_api_keys
+            ]
+            print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -514,9 +711,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # Terminal/disk mode setup
         self._bash_semaphore = asyncio.Semaphore(self.config.bash_max_concurrency)
-        self._workspace_root = self.config.workspace_root or os.environ.get(
-            "BROWSECOMP_WS_ROOT", "/tmp/browsecomp_ws"
-        )
+        self._workspace_root = self.config.workspace_root or os.environ.get("BROWSECOMP_WS_ROOT", "/tmp/browsecomp_ws")
         if self.config.workspace == "per_session":
             Path(self._workspace_root).mkdir(parents=True, exist_ok=True)
             print(f"Terminal mode ON; per-session workspaces under {self._workspace_root}")
@@ -634,7 +829,53 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def _search_one(self, query: str, max_length: int) -> str:
+    def _select_exa_client(self) -> ExaAIOHTTPClient:
+        client = self._exa_clients[self._num_requests % len(self._exa_clients)]
+        self._num_requests += 1
+        return client
+
+    def _record_call(
+        self, metrics: "TavilySearchMetrics", function: str, provider: str, status: str, start: float
+    ) -> None:
+        """Append one per-API-call metering record (provider, function, latency).
+        One record per provider HTTP request: per query for search, per call for browse."""
+        metrics.async_tavily_calls.append(
+            TavilySearchSingleAsyncTavilyMetrics(
+                function=function, provider=provider, status=status, start_time=start, end_time=time()
+            )
+        )
+
+    async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
+        """Exa search: highlight snippets returned INLINE (never written to pages/, even in
+        terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
+        if len(query) > 400:
+            return "Query is too long"
+
+        client = self._select_exa_client()
+        call_start = time()
+        try:
+            results = await client.search(query, num_results=self.MAX_RESULTS, exclude_domains=self._exclude_domains)
+        except Exception as e:
+            self._record_call(metrics, "search", "exa", "error", call_start)
+            print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        self._record_call(metrics, "search", "exa", "success", call_start)
+
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        for result in results.get("results", []):
+            title = result.get("title", "") or ""
+            url = result.get("url", "") or ""
+            highlights = result.get("highlights") or []
+            snippet = " ... ".join(h for h in highlights if h)
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            if running_len + len(entry) > max_length:
+                break
+            blocks.append(entry)
+            running_len += len(entry)
+        return "\n".join(blocks)
+
+    async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
 
@@ -650,15 +891,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 include_raw_content=True,
             )
         except BadRequestError as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
         except Exception as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
             print(
                 f"[tavily_call function=search status=error duration_s={time() - call_start:.2f} query={query[:80]!r} error_type={type(e).__name__} error={str(e)[:200]}]",
                 flush=True,
             )
             raise
 
+        self._record_call(metrics, "search", "tavily", "success", call_start)
         print(
             f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
             flush=True,
@@ -666,11 +910,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
-    async def _search_one_to_disk(self, query: str, page_writer: "_PageWriter", max_per_query: int) -> str:
+    async def _search_one_to_disk(
+        self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "TavilySearchMetrics"
+    ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
         title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
         (disk mode) formatting exactly."""
         client = self._select_tavily_client()
+        call_start = time()
         try:
             results = await client.search(
                 query,
@@ -680,8 +927,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 include_raw_content=True,
             )
         except BadRequestError as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        self._record_call(metrics, "search", "tavily", "success", call_start)
 
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
@@ -714,22 +963,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return TavilySearchResponse(results_string="Query is none or empty")
 
-        page_writer = self._get_page_writer(sid)
         max_per_query_length = body.max_total_length // len(body.queries)
-        start_time = time()
-        if page_writer is not None:
-            # terminal mode: write each result to disk, return metadata + paths
+        if self.config.search_provider == "exa":
+            # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
             results = await asyncio.gather(
-                *[self._search_one_to_disk(q, page_writer, max_per_query_length) for q in body.queries]
+                *[self._exa_search_one(q, max_per_query_length, metrics) for q in body.queries]
             )
         else:
-            # inline mode: return content directly
-            results = await asyncio.gather(*[self._search_one(q, max_per_query_length) for q in body.queries])
-        metrics.async_tavily_calls.append(
-            TavilySearchSingleAsyncTavilyMetrics(
-                function="search", status="success", start_time=start_time, end_time=time()
-            )
-        )
+            page_writer = self._get_page_writer(sid)
+            if page_writer is not None:
+                # terminal mode: write each result to disk, return metadata + paths
+                results = await asyncio.gather(
+                    *[self._search_one_to_disk(q, page_writer, max_per_query_length, metrics) for q in body.queries]
+                )
+            else:
+                # inline mode: return content directly
+                results = await asyncio.gather(
+                    *[self._search_one(q, max_per_query_length, metrics) for q in body.queries]
+                )
 
         return TavilySearchResponse(results_string="\n\n".join(results))
 
@@ -748,40 +999,46 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # set max length per url
         max_per_url_length = body.max_total_length // len(urls)
 
-        # search for urls
-        async_tavily_client = self._select_tavily_client()
-        print(
-            f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
-            flush=True,
-        )
+        # fetch full page content (provider-specific); normalize to a list of
+        # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        try:
-            # NOTE: do NOT pass query/goal — the harness extracts the full page content.
-            # Passing a query triggers relevance-focused extraction that returns far less
-            # (e.g. ~2k vs ~15k bytes for the same URL). `goal` stays a tool-schema field
-            # for the model to state intent, but is not sent to Tavily (matches the harness).
-            results = await async_tavily_client.extract(urls=urls)
-            metrics.async_tavily_calls.append(
-                TavilySearchSingleAsyncTavilyMetrics(
-                    function="extract", status="success", start_time=start_time, end_time=time()
-                )
+        if self.config.search_provider == "exa":
+            exa_client = self._select_exa_client()
+            print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
+            try:
+                raw = await exa_client.get_contents(urls=urls, max_characters=max_per_url_length)
+            except Exception as e:
+                self._record_call(metrics, "browse", "exa", "error", start_time)
+                print(f"[browsecomp][tool_fail][exa_extract] urls={urls} error={e}", flush=True)
+                return BrowseResponse(results_string=f"Failed to extract content: {e}")
+            self._record_call(metrics, "browse", "exa", "success", start_time)
+            result_list = [
+                {"url": r.get("url", "") or "", "raw_content": r.get("text", "") or ""} for r in raw.get("results", [])
+            ]
+        else:
+            async_tavily_client = self._select_tavily_client()
+            print(
+                f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
+                flush=True,
             )
+            try:
+                # NOTE: do NOT pass query/goal — the harness extracts the full page content.
+                # Passing a query triggers relevance-focused extraction that returns far less
+                # (e.g. ~2k vs ~15k bytes for the same URL). `goal` stays a tool-schema field
+                # for the model to state intent, but is not sent to Tavily (matches the harness).
+                results = await async_tavily_client.extract(urls=urls)
+            except Exception as e:
+                self._record_call(metrics, "browse", "tavily", "error", start_time)
+                print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}", flush=True)
+                return BrowseResponse(results_string=f"Failed to extract content: {e}")
+            self._record_call(metrics, "browse", "tavily", "success", start_time)
             print(
                 f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(urls)} n_results={len(results.get('results', []))}]",
                 flush=True,
             )
-        except Exception as e:
-            # return if failed to call api
-            metrics.async_tavily_calls.append(
-                TavilySearchSingleAsyncTavilyMetrics(
-                    function="extract", status="error", start_time=start_time, end_time=time()
-                )
-            )
-            print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}", flush=True)
-            return BrowseResponse(results_string=f"Failed to extract content: {e}")
+            result_list = results.get("results", [])
 
         # return if no results
-        result_list = results.get("results", [])
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
@@ -798,9 +1055,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         content = content[: self.config.max_page_bytes]
                     saved = page_writer.write_browse_page(url, "", content)
                     preview = content[:500].replace("\n", " ")
-                    blocks.append(
-                        f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n"
-                    )
+                    blocks.append(f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n")
                 else:
                     blocks.append(f"[URL]: {url}\n[Empty content]\n")
             return BrowseResponse(results_string="\n\n".join(blocks))
