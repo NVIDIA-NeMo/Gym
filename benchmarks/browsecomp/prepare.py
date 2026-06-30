@@ -20,6 +20,7 @@ Downloads Browsecomp problems from OpenAI and converts them to the Gym benchmark
 import base64
 import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -169,6 +170,19 @@ TOOLS = [
 
 BROWSECOMP_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
 
+# By default prepare() writes a reproducible 400-sample subset; set BROWSECOMP_RUN_FULL=1 for the full 1266.
+BROWSECOMP_SUBSET_N = 400
+BROWSECOMP_SUBSET_SEED = 42
+
+
+def _select_samples(df, run_full: bool):
+    """1266-row df in -> the full df if run_full, else a deterministic 400-row subset (seed 42).
+    Pure + network-free so it is unit-testable. numpy's legacy RandomState(42) is version-stable and
+    the downloaded CSV row order is fixed, so the subset is reproducible across NEL + adhoc + fresh clones."""
+    if run_full:
+        return df
+    return df.sample(n=BROWSECOMP_SUBSET_N, random_state=BROWSECOMP_SUBSET_SEED).reset_index(drop=True)
+
 
 def derive_key(password: str, length: int) -> bytes:
     """Derive a fixed-length key from the password using SHA256."""
@@ -211,6 +225,11 @@ def prepare() -> Path:
     print(f"Downloading BrowseComp dataset from {BROWSECOMP_CSV_URL} ...")
     df = pandas.read_csv(BROWSECOMP_CSV_URL)
     assert len(df) == 1266, f"Expected 1266 samples, got {len(df)}"
+
+    run_full = os.environ.get("BROWSECOMP_RUN_FULL", "").lower() in ("1", "true", "yes")
+    df = _select_samples(df, run_full)
+    mode = "FULL 1266" if run_full else f"{BROWSECOMP_SUBSET_N}-sample subset (seed {BROWSECOMP_SUBSET_SEED})"
+    print(f"BrowseComp: writing {mode} ({len(df)} rows)")
 
     count = 0
     with open(OUTPUT_FPATH, "w") as f:
