@@ -387,26 +387,29 @@ def e2e_rollout_collection():  # pragma: no cover
 
     rch = RolloutCollectionHelper()
 
-    # Multi-stage adaptive ELO (GDPVal comparison mode): when enabled, run the
-    # adaptive staged procedure through the same rollout-collection machinery so
-    # it emits the standard rollouts + aggregate-metrics artifacts. See
-    # ``resources_servers/gdpval/multistage_orchestrator.py``.
-    multistage_enabled = bool((global_config_dict.get("multistage") or {}).get("enabled"))
+    # A benchmark can plug in a custom rollout-collection procedure via the
+    # ``rollout_collection_driver`` config field (a ``module.path:function``).
+    # The default path runs the built-in single-pass helper.
+    driver_path = e2e_rollout_collection_config.rollout_collection_driver
 
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
-{"4. Multi-stage adaptive ELO is ENABLED" if multistage_enabled else ""}
+{f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
     try:
-        if multistage_enabled:
-            from resources_servers.gdpval.multistage_orchestrator import run_e2e_multistage
-
+        if driver_path:
+            module_name, _, fn_name = driver_path.partition(":")
+            if not module_name or not fn_name:
+                raise ConfigError(
+                    f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r})."
+                )
+            driver_fn = getattr(importlib.import_module(module_name), fn_name)
             resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
-            asyncio.run(run_e2e_multistage(rollout_collection_config, resolved_config))
+            asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:

@@ -19,6 +19,18 @@
 #   ++gdpval_resources_server.resources_servers.gdpval.reference_models.claude_opus_4_8.elo=1599 \
 #   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.deliverables_dir=/gdpval/refs/kimi_k2_6 \
 #   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.elo=1193
+#
+# Multi-stage adaptive ELO (comparison mode): the driver below runs the staged
+# procedure when enabled and otherwise delegates to the standard collection, so
+# all that's needed to opt in is:
+#   ++multistage.enabled=true \
+#   ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
+# See benchmarks/gdpval/README.md for the full recipe.
+
+# Rollout-collection driver: routes `gym eval run` through the GDPVal
+# orchestrator, which runs multi-stage ELO when ++multistage.enabled=true and
+# otherwise behaves exactly like the standard single-pass collection.
+rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
 # Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
 gdpval_judge_model:

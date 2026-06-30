@@ -133,6 +133,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    rollout_collection_driver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dotted ``module.path:function`` to run rollout collection instead of the "
+            "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "When unset, the standard single-pass collection runs."
+        ),
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):

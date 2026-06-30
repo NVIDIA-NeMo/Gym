@@ -390,6 +390,24 @@ def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str |
 # ---------------------------------------------------------------------------
 
 
+async def run_rollout_collection(
+    rollout_collection_config, global_config_dict: Mapping[str, Any]
+) -> Optional[Path]:  # pragma: no cover
+    """Rollout-collection driver entrypoint (wired via ``rollout_collection_driver``).
+
+    Runs the multi-stage adaptive ELO procedure when ``multistage.enabled=true``;
+    otherwise delegates to the standard single-pass collection so rubric and
+    non-staged comparison runs behave exactly as they would without a driver.
+    """
+    if (global_config_dict.get("multistage") or {}).get("enabled"):
+        return await run_e2e_multistage(rollout_collection_config, global_config_dict)
+
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    await RolloutCollectionHelper().run_from_config(rollout_collection_config)
+    return None
+
+
 async def run_e2e_multistage(
     rollout_collection_config, global_config_dict: Mapping[str, Any]
 ) -> Optional[Path]:  # pragma: no cover
