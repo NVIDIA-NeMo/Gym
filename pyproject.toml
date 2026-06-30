@@ -298,14 +298,24 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# moviepy (and other libs) cap pillow conservatively at <12, but #1370 set a
+# pillow==12.2.0 CVE security floor; 12.2.0 runs fine against those libs. Force
+# it here so server venvs that pin it resolve instead of erroring. See PR __PRNUM__.
+override-dependencies = [
+    "pillow==12.2.0",
+]
+# WARNING: every responses_api_agents/* and resources_servers/* venv installs
+# nemo-gym editably (`-e nemo-gym[dev] @ ../../`) and so inherits this [tool.uv]
+# config. Anything listed below is silently dropped (uv >=0.11.24, exit 0, no
+# error) from those server venvs too -- not just the main env. Do NOT add a
+# package here that any server requirements.txt/pyproject.toml needs, directly
+# or transitively, or that server breaks at import/runtime. Full root-cause
+# analysis (GDPVal stirrup_agent missing PIL): see PR __PRNUM__.
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cffi",
-    "contourpy",
     "cryptography",
-    "cycler",
     "flask",
     "flask-cors",
     "graphene",
@@ -313,16 +323,9 @@ exclude-dependencies = [
     "graphql-relay",
     "gunicorn",
     "huey",
-    "joblib",
-    "kiwisolver",
-    "matplotlib",
-    "pillow",
     "prettytable",
-    "scikit-learn",
-    "scipy",
     "skops",
     "sqlalchemy",
-    "threadpoolctl",
     "wcwidth",
     "werkzeug",
     "waitress",
