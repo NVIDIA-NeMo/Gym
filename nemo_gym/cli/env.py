@@ -905,6 +905,66 @@ def dump_config():  # pragma: no cover
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
 
 
+def compose_config():  # pragma: no cover
+    """Compose a benchmark config: swap the agent harness and/or edit benchmark dataset params, then dump.
+
+    The agent axis swaps the composable harness (carrying the environment's resources_server /
+    model_server / datasets wiring); the dataset axis edits the benchmark dataset's run params. Model
+    selection stays with the `--model*` flags. The result is dumped as YAML (no servers are started).
+
+    Examples:
+
+    ```bash
+    gym env compose --benchmark aime24-x --agent simple_agent --num-repeats 4
+    gym env compose --config <benchmark.yaml> --agent langgraph_agent/rewoo_agent
+    ```
+    """
+    from nemo_gym.agent_registry import discover_agents
+    from nemo_gym.cli.main import _asset_config_path
+    from nemo_gym.config_composer import AgentNotComposableError, ComposeRequest, ConfigComposerError, compose
+
+    # NO_MODEL injects a dummy `policy_model` so a benchmark's model cross-refs resolve without real
+    # model creds — composition is about structure; model selection stays with the `--model*` flags.
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        ),
+    )
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+
+    # Pull the compose directives out so they don't leak into the dumped config (MISSING `???` preserved).
+    raw = OmegaConf.to_container(global_config_dict, resolve=False, throw_on_missing=False)
+    agent = raw.pop("compose_agent", None)
+    num_repeats = raw.pop("compose_num_repeats", None)
+    prompt_config = raw.pop("compose_prompt_config", None)
+    merged = OmegaConf.create(raw)
+
+    def _resolve_agent_config_path(name, require_composable=False):
+        # Reuse the unified CLI's asset resolver for name->path; add only the composability guard.
+        agent_dir = name.split("/", 1)[0]
+        if require_composable:
+            entry = discover_agents().get(agent_dir)
+            if entry is not None and entry.self_contained:
+                raise AgentNotComposableError(
+                    f"Agent '{agent_dir}' is self-contained (Pattern B) and cannot be composed into an "
+                    "environment; run it with its own config instead (see `gym list agents`)."
+                )
+        return _asset_config_path("agent", name)
+
+    request = ComposeRequest(
+        agent=agent,
+        num_repeats=int(num_repeats) if num_repeats is not None else None,
+        prompt_config=prompt_config,
+    )
+    try:
+        composed = compose(merged, request, resolve_agent_config_path=_resolve_agent_config_path)
+    except (ConfigComposerError, ValueError) as e:
+        rich.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise SystemExit(1)
+
+    print(OmegaConf.to_yaml(composed, resolve=False))
+
+
 @exit_cleanly_on_config_error
 def validate():
     """Validate a config without starting Ray or any server subprocess.

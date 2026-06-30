@@ -130,6 +130,18 @@ MODEL = _value_flag(
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
 
+# Compose flags for `gym env compose`: rewrite a merged benchmark config along the agent/dataset axes.
+# Namespaced (`compose_*`) so they don't collide with server-config keys or `eval run`'s --agent/agent_name.
+COMPOSE_AGENT = _value_flag(
+    "agent", "compose_agent", "Agent harness to compose into the environment (name or name/variant)."
+)
+COMPOSE_NUM_REPEATS = _value_flag(
+    "num-repeats", "compose_num_repeats", "Override num_repeats on the benchmark dataset."
+)
+COMPOSE_PROMPT_CONFIG = _value_flag(
+    "prompt-config", "compose_prompt_config", "Prompt-config path to set on the benchmark dataset."
+)
+
 # Shared flag: select a single resources server by name. Reused by `env test`, `env init`, and `env packages`.
 RESOURCES_SERVER = Flag(
     register=lambda p: p.add_argument("--resources-server", metavar="NAME", help="Name of the resources server."),
@@ -157,6 +169,7 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
+    "agent": ("responses_api_agents", "configs", None),
 }
 
 
@@ -411,6 +424,11 @@ COMMANDS = {
         target="nemo_gym.cli.env:dump_config",
         summary="Resolve the final config from configs, flags, and overrides.",
         flags=(CONFIG,),
+    ),
+    "env compose": Command(
+        target="nemo_gym.cli.env:compose_config",
+        summary="Compose a benchmark config with a swapped agent and/or dataset params; dump the result.",
+        flags=(CONFIG, BENCHMARK, SEARCH_DIR, COMPOSE_AGENT, COMPOSE_NUM_REPEATS, COMPOSE_PROMPT_CONFIG),
     ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
