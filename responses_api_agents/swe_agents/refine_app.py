@@ -226,6 +226,17 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
         patch = (metrics.model_patch or "").strip()
         verify_feedback = (last.get("verify_feedback") or "").strip()
 
+        # Bound the carried-over context to carry_over_token_budget. Without this,
+        # a large prior diff (common on hard problems) makes the next attempt's
+        # first-turn prompt exceed the model context window; vLLM then rejects the
+        # request, the attempt produces NO generation, the rollout is dropped, and
+        # the async replay buffer dead-locks waiting for the missing group. We keep
+        # the (small, already-tail-bounded) verify_feedback intact and truncate the
+        # diff in the middle to fit. ~4 chars/token (conservative) since no tokenizer here.
+        budget_chars = max(2000, self.config.carry_over_token_budget * 4)
+        verify_feedback = verify_feedback[: budget_chars // 2]
+        patch = self._truncate_middle(patch, max(1000, budget_chars - len(verify_feedback) - 500))
+
         parts = [
             "Your previous attempt did not resolve the issue.",
             "Here is the diff you produced so far:",
@@ -239,6 +250,16 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             parts.append(f"```\n{verify_feedback}\n```")
         parts.append("Continue refining the patch so the failing tests pass.")
         return "\n\n".join(parts) + "\n"
+
+    @staticmethod
+    def _truncate_middle(text: str, max_chars: int) -> str:
+        """Truncate the middle of text to <= max_chars, keeping head + tail (diff
+        head shows the changed files/hunks, tail shows the latest edits)."""
+        if len(text) <= max_chars:
+            return text
+        keep = max(0, (max_chars - 60) // 2)
+        omitted = len(text) - 2 * keep
+        return f"{text[:keep]}\n... [diff truncated: {omitted} chars omitted to fit context budget] ...\n{text[-keep:]}"
 
     def _dump_attempt(self, group_hash: str, attempt_idx: int, attempt: dict) -> None:
         """Best-effort debug dump of one attempt's prompt/output to disk.
