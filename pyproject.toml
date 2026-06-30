@@ -319,7 +319,6 @@ exclude-dependencies = [
     "pillow",
     "prettytable",
     "scikit-learn",
-    "scipy",
     "skops",
     "sqlalchemy",
     "threadpoolctl",
