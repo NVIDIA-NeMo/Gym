@@ -88,18 +88,36 @@ ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, A
 
 ## Interpreting Results
 
-A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config.
+A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.
 
-Use `gym eval profile` to compute pass@1, pass@k, and per-task variance from repeated rollouts. Use BLADE to diagnose why a score changed and which tasks drove the shift.
+Use `gym eval profile` to compute pass@1, pass@k, and per-task variance from repeated rollouts. Use `gym eval aggregate` to merge shard outputs and compute summary statistics grouped by agent. Use BLADE to diagnose why a score changed and which tasks drove the shift.
+
+<Cards>
+
+<Card title="Build Verifiers" href="/build-verifiers">
+Understand the reward function backing each benchmark — SimpleResourcesServer, GymnasiumServer, and verification patterns.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Merge shard outputs, customize per-environment key metrics, and compute summary statistics across runs.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use BLADE to identify failure modes, sometimes-pass tasks, and what intervention to prioritize next.
+</Card>
+
+<Card title="Reward Profiling" href="/reference/cli-commands#eval-profile">
+Compute pass@1, pass@k, and per-task variance with <code>gym eval profile</code>.
+</Card>
+
+</Cards>
+
+## Next Steps
 
 <Cards>
 
 <Card title="Browse Environments" href="/evaluation/environment-list">
 Full table of built-in environments and benchmarks by category.
-</Card>
-
-<Card title="Diagnose Results" href="/evaluation/diagnose-results">
-Use BLADE to identify failure modes and prioritize the next intervention.
 </Card>
 
 <Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
