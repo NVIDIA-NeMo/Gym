@@ -80,6 +80,10 @@ Rollouts: results/mcqa_rollouts.jsonl
 Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 ```
 
+<Warning>
+If `gym eval run` fails with a `500 Internal Server Error` on the `/run` endpoint, the most common cause is an invalid or missing API key. Verify that `policy_api_key` and `policy_base_url` in your `env.yaml` are correct.
+</Warning>
+
 For per-task pass rates, see `gym eval profile` in the [CLI Reference](/reference/cli-commands).
 
 ## Explore

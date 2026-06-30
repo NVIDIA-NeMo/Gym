@@ -518,6 +518,14 @@ class SimpleServer(BaseServer):
                     "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
                 )
 
+                if e.status in (401, 403):
+                    auth_hint = (
+                        f"Authentication failed (HTTP {e.status}) calling an inner server. "
+                        "Check that policy_api_key and policy_base_url in env.yaml are correct and that the key is valid."
+                    )
+                    print(f"🔑 {auth_hint}")
+                    return JSONResponse(content=auth_hint, status_code=500)
+
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print(response_content)
