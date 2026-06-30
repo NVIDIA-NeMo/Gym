@@ -52,12 +52,13 @@ jobs:
           curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh
           uv venv --python 3.12
           source .venv/bin/activate
-          uv sync --extra dev
+          uv sync --extra dev --extra sandbox
 
       - name: Test
         run: |
           source .venv/bin/activate
-          ng_dev_test
+          PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
           ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true
 
   test-wheel-install:

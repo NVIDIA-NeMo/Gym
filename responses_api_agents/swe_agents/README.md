@@ -293,7 +293,7 @@ gym eval run --no-serve \
 `gym eval run` defaults to a concurrency of 100; tune to your hardware. View the results with:
 
 ```bash
-ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 ```
 
 ---
