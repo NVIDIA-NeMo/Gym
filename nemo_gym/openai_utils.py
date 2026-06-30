@@ -550,3 +550,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
+
+    async def create_streaming_tool_call(self, action: str, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/streaming_tool_call/{action}",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)

@@ -1586,6 +1586,53 @@ class TestApp:
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == "2"
 
+    def test_streaming_tool_call_uses_sticky_client_and_tokenized_prompt(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_streaming_tool_call = AsyncMock(
+            side_effect=[
+                {"sequence_no": 0, "committed_tokens": 0},
+                {"prefix_matched": True, "committed_tokens": 0},
+            ]
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        chat_completion = {
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        start_response = client.post(
+            "/v1/streaming_tool_call/start",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": chat_completion,
+            },
+        )
+        close_response = client.post(
+            "/v1/streaming_tool_call/close",
+            json={
+                "session_id": "session",
+                "chat_completion": chat_completion,
+            },
+        )
+
+        assert start_response.status_code == 200
+        assert close_response.status_code == 200
+        assert mock_client.create_tokenize.await_count == 2
+        mock_client.create_tokenize.assert_awaited_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        assert mock_client.create_streaming_tool_call.await_args_list[0].args == ("start",)
+        assert mock_client.create_streaming_tool_call.await_args_list[0].kwargs == {
+            "session_id": "session",
+            "sequence_no": 0,
+            "prompt_token_ids": [1, 2, 3],
+        }
+        assert mock_client.create_streaming_tool_call.await_args_list[1].args == ("close",)
+
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True

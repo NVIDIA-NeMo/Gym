@@ -90,6 +90,21 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
+class StreamingToolCallPromptRequest(BaseModel):
+    session_id: str
+    sequence_no: int
+    chat_completion: Dict[str, Any]
+
+
+class StreamingToolCallCloseRequest(BaseModel):
+    session_id: str
+    chat_completion: Dict[str, Any]
+
+
+class StreamingToolCallAbortRequest(BaseModel):
+    session_id: str
+
+
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
@@ -106,6 +121,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._post_init()
         return super().model_post_init(context)
 
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        app.post("/v1/streaming_tool_call/start")(self.start_streaming_tool_call)
+        app.post("/v1/streaming_tool_call/append")(self.append_streaming_tool_call)
+        app.post("/v1/streaming_tool_call/close")(self.close_streaming_tool_call)
+        app.post("/v1/streaming_tool_call/abort")(self.abort_streaming_tool_call)
+        return app
+
     def _post_init(self) -> None:
         self._clients = [
             NeMoGymAsyncOpenAI(
@@ -118,6 +141,67 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+    async def _tokenize_streaming_tool_call_prompt(
+        self,
+        request: Request,
+        chat_completion: Dict[str, Any],
+    ) -> tuple[NeMoGymAsyncOpenAI, list[int]]:
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(chat_completion)
+        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+        tokenize_body = {
+            key: body_dict[key] for key in ("model", "messages", "tools", "chat_template_kwargs") if key in body_dict
+        }
+        client = self._resolve_client(request)
+        tokenize_response = await client.create_tokenize(**tokenize_body)
+        return client, tokenize_response["tokens"]
+
+    async def start_streaming_tool_call(
+        self,
+        request: Request,
+        body: StreamingToolCallPromptRequest = Body(),
+    ) -> Dict[str, Any]:
+        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        return await client.create_streaming_tool_call(
+            "start",
+            session_id=body.session_id,
+            sequence_no=body.sequence_no,
+            prompt_token_ids=prompt_token_ids,
+        )
+
+    async def append_streaming_tool_call(
+        self,
+        request: Request,
+        body: StreamingToolCallPromptRequest = Body(),
+    ) -> Dict[str, Any]:
+        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        return await client.create_streaming_tool_call(
+            "append",
+            session_id=body.session_id,
+            sequence_no=body.sequence_no,
+            prompt_token_ids=prompt_token_ids,
+        )
+
+    async def close_streaming_tool_call(
+        self,
+        request: Request,
+        body: StreamingToolCallCloseRequest = Body(),
+    ) -> Dict[str, Any]:
+        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        return await client.create_streaming_tool_call(
+            "close",
+            session_id=body.session_id,
+            final_prompt_token_ids=prompt_token_ids,
+        )
+
+    async def abort_streaming_tool_call(
+        self,
+        request: Request,
+        body: StreamingToolCallAbortRequest = Body(),
+    ) -> Dict[str, Any]:
+        client = self._resolve_client(request)
+        return await client.create_streaming_tool_call("abort", session_id=body.session_id)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
