@@ -120,7 +120,7 @@ class DeepSWEDataProcessor:
         tasks_dir: Path | str,
         images_dir: Optional[Path | str] = None,
         require_image: bool = True,
-        include_broken_baseline: bool = False,
+        exclude_broken_baseline: bool = False,
         agent_ref_name: str = "swe_agents_val",
         split: str = "test",
         model: str = "model",
@@ -131,7 +131,7 @@ class DeepSWEDataProcessor:
         self.tasks_dir = Path(tasks_dir)
         self.images_dir = Path(images_dir) if images_dir is not None else None
         self.require_image = require_image
-        self.include_broken_baseline = include_broken_baseline
+        self.exclude_broken_baseline = exclude_broken_baseline
         self.agent_ref_name = agent_ref_name
         self.split = split
         self.model = model
@@ -202,7 +202,7 @@ class DeepSWEDataProcessor:
             print(f"[deepswe] SKIP {task_id}: no image at {self.image_path(task_id)}", file=sys.stderr)
             return None
 
-        if not self.include_broken_baseline and task_id in KNOWN_BROKEN_BASELINE:
+        if self.exclude_broken_baseline and task_id in KNOWN_BROKEN_BASELINE:
             print(f"[deepswe] SKIP {task_id}: known broken baseline (unscorable in image)", file=sys.stderr)
             return None
 
@@ -281,9 +281,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Include tasks even if no matching .sif image is present.",
     )
     p.add_argument(
-        "--include-broken-baseline",
+        "--exclude-broken-baseline",
         action="store_true",
-        help="Include tasks whose pre-existing base suite is broken in the image (excluded by default).",
+        help="Drop tasks in KNOWN_BROKEN_BASELINE (e.g. langchain). Off by default — the full set is emitted.",
     )
     p.add_argument("--agent-ref-name", default="swe_agents_val", help="agent_ref.name baked into each row.")
     p.add_argument("--split", default="test")
@@ -301,7 +301,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         tasks_dir=args.tasks_dir,
         images_dir=args.images_dir,
         require_image=not args.no_require_image,
-        include_broken_baseline=args.include_broken_baseline,
+        exclude_broken_baseline=args.exclude_broken_baseline,
         agent_ref_name=args.agent_ref_name,
         split=args.split,
         model=args.model,

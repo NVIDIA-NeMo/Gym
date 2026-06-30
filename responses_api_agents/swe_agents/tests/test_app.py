@@ -361,6 +361,7 @@ class TestSWEBenchVerifyResponse:
         assert "resolved" in fields
         assert "patch_exists" in fields
         assert "instance_config" in fields
+        assert "subagent_trajectories" in fields
 
 
 ########################################
