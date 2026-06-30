@@ -36,6 +36,7 @@ from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
     ClaudeCodeAgentRunRequest,
+    ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
     parse_stream_json,
@@ -633,12 +634,24 @@ class TestRolloutCorrelation:
         return captured["base_url"]
 
     def test_rollout_prefix_applied_to_base_url(self, tmp_path: Path) -> None:
-        base_url = self._run_and_capture_base_url(_make_agent(), tmp_path, rollout_id="task3-roll1")
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
         # CLI appends /v1/messages -> server strips /ng-rollout/<id> and keys capture by it.
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1"
 
     def test_no_rollout_id_leaves_base_url_unprefixed(self, tmp_path: Path) -> None:
-        assert self._run_and_capture_base_url(_make_agent(), tmp_path) == "http://model-server:9000"
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        assert self._run_and_capture_base_url(agent, tmp_path) == "http://model-server:9000"
+
+    def test_resolve_call_base_url_prefixes_only_with_model_server(self) -> None:
+        # Model server configured: the prefix is applied (the server strips it and keys capture by id).
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
+            assert agent._resolve_call_base_url("t3-r1") == "http://model-server:9000/ng-rollout/t3-r1"
+        # Real Anthropic endpoint (no model server): never prefixed -- it has no stripping middleware,
+        # so a prefix would 404 every /v1/messages call.
+        anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
+        assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
 
 
 class TestExtractInstruction:

@@ -10,12 +10,10 @@ It is a model-server middleware (no standalone proxy) and is harness-agnostic: i
 
 ## Terms
 
-| Term | Meaning |
-|------|---------|
-| **Trial** | A single attempt at completing a task. |
-| **Turn** | A boundary where the agent hands control back to the user within a trial. `turn_index` is derived from user-message boundaries in the captured requests (see below). |
-| **Step** | One micro-cycle inside the agent's loop (model generates → tool runs → observation). Capture records the **model-call portion** of each step. |
-| **Trajectory** | The ordered sequence of step records produced during a trial. |
+This page uses Gym's standard vocabulary — see [Key Terminology](/about/concepts/key-terminology) for **rollout / trajectory**, **task**, and related terms. Two notes specific to capture:
+
+- **Step** — capture records the **model-call portion** of each step in the agent's loop (model generates → tool runs → observation); each captured record is one model call.
+- **Turn** — a boundary where the agent hands control back to the user. `turn_index` is **derived** from user-message boundaries in the captured requests (see [What is captured](#what-is-captured)), and is `null` when the calls don't form a single linear thread.
 
 ## Enabling it
 
@@ -64,7 +62,7 @@ A caller attributes its model calls to a rollout in one of two OpenAI-compatible
 1. **Header** — set `x-nemo-gym-rollout-id`. Use this when your client can set request headers.
 2. **URL prefix** — point the base URL at `/ng-rollout/<rollout_id>/v1` instead of `/v1`. The server strips the prefix before routing, so the standard `/v1/...` endpoints behave identically. Use this for clients that accept only a base URL (for example the Claude Code CLI, or an agent's embedded OpenAI client), where a header cannot be injected.
 
-Gym agents do not write correlation code by hand. The base agent resolves the model base URL with the prefix applied via `SimpleResponsesAPIAgent.resolve_model_base_url(name, request)`, and forwards the rollout id to its own `/v1/responses` via `rollout_call_kwargs(body)`. The rollout id is derived from the run-request's task and rollout indices.
+Most Gym agents get correlation for free: the base agent resolves the model base URL with the prefix applied via `SimpleResponsesAPIAgent.resolve_model_base_url(name, request)` and forwards the rollout id via `rollout_call_kwargs(body)`. Agents that call the model server directly instead — through `ServerClient.post` or a hand-built base URL (for example `mini_swe_agent_2` and `gymnasium_agent`) — forward the rollout id explicitly with a single line (the header or the `/ng-rollout` prefix). The rollout id is derived from the run-request's task and rollout indices.
 
 If no rollout id is supplied, calls are grouped under a default key.
 
