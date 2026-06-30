@@ -169,7 +169,7 @@ def get_ruler_data(
         # preparing the datasets based on user options, in parallel
         def prepare_task(task):
             subprocess.run(
-                f"source .venv/bin/activate && python prepare.py --save_dir {tmpdirname}/ruler_data --benchmark synthetic "
+                f". .venv/bin/activate && python prepare.py --save_dir {tmpdirname}/ruler_data --benchmark synthetic "
                 f"    --subset test --task {task} --tokenizer_type hf --model_template_type base --prepare_for_ns "
                 f"    --num_samples 100 --max_seq_length {max_seq_length} {ruler_prepare_args}",
                 shell=True,
