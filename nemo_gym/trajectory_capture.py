@@ -350,7 +350,7 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
         return tool_calls, ("\n".join(reasoning) or None)
 
     choices = response.get("choices")
-    if choices is not None:  # Chat Completions
+    if isinstance(choices, list):  # Chat Completions
         for choice in choices:
             message = choice.get("message") if isinstance(choice, dict) else None
             if not message:
