@@ -73,6 +73,13 @@ gdpval_stirrup_agent:
       # deliverables already cached in persist_deliverables_dir via /verify.
       # Mutually exclusive with execute_only.
       judge_only: ${oc.env:JUDGE_ONLY,false}
+      # Task re-run mode. When true, tasks whose cached deliverable under
+      # persist_deliverables_dir is already valid skip the rollout (re-scored
+      # from cache in full mode, returned as-is in execute_only); tasks without
+      # a valid cached deliverable are rolled out again. Combine with `--resume`
+      # to re-run only the tasks that did not finish with a valid output.
+      # Requires persist_deliverables_dir; mutually exclusive with judge_only.
+      rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
       resources_server:
         type: resources_servers
         name: gdpval_resources_server
