@@ -330,7 +330,7 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
     reasoning: list[str] = []
 
     output = response.get("output")
-    if output is not None:  # Responses
+    if isinstance(output, list):  # Responses
         for item in output:
             if not isinstance(item, dict):
                 continue

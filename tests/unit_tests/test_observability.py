@@ -417,6 +417,8 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     assert r.status_code == 200 and r.text == "not json"  # response passed through unaltered
     records = CaptureStore(tmp_path).read("rnj")
     assert len(records) == 1 and records[0]["response"] is None  # non-JSON body -> None
+    # a 2xx whose body we couldn't parse is flagged, not silently counted as a clean success
+    assert records[0]["error_category"] == "capture_parse_error"
 
 
 # --- trajectory_capture helpers ---
@@ -970,18 +972,30 @@ def test_rollout_prefix_stripped_when_capture_disabled():
 
 def test_capture_dirs_resolves_default_by_config_key(tmp_path, monkeypatch):
     # Bare opt-in (no trajectory_capture_dir / NEMO_GYM_TRAJECTORY_DIR): the consumer must resolve the
-    # same default dir the producer used, which is keyed off the asset config key (== config.name),
-    # not the "model_server" fallback.
+    # SAME default dir the producer writes to. The producer keys it off config.name (the top-level
+    # server-instance key, == server_name), not the leaf impl key -- so exercise BOTH sides and assert
+    # they agree (the prior version only checked the consumer against a hand-built dir).
     import nemo_gym.observability as obs
 
     monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
     monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))
-    producer_dir = tmp_path / "nemo_gym_trajectories" / "openai_model"
-    producer_dir.mkdir(parents=True)
-    # Inner server node has no "name"; instance key (policy_model) differs from the asset key.
+
+    class _ProducerCfg:
+        observability_enabled = True
+        trajectory_capture_dir = None
+        name = "policy_model"  # top-level instance key, not the leaf impl key
+
+    store = obs.make_capture_store(_ProducerCfg())
+    assert store is not None
+    producer_dir = store.root  # CaptureStore created it under the instance key
+
+    # The observability node sits under the leaf impl key (openai_model), but the consumer must
+    # resolve the producer's dir (keyed off policy_model), not the leaf or the "model_server" fallback.
     gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
     dirs = obs.capture_dirs_from_config(gc, env={})
+    assert producer_dir == tmp_path / "nemo_gym_trajectories" / "policy_model"
     assert producer_dir in dirs
+    assert (tmp_path / "nemo_gym_trajectories" / "openai_model") not in dirs
     assert (tmp_path / "nemo_gym_trajectories" / "model_server") not in dirs
 
 
@@ -1071,3 +1085,27 @@ def test_capture_store_concurrent_append_no_loss(tmp_path):
     rows = store.read("0-0")
     assert len(rows) == 20  # flock + in-process lock: no lost or corrupted appends
     assert sorted(r["request"]["i"] for r in rows) == list(range(20))
+
+
+def _cross_process_writer(root: str, base: int) -> None:
+    # Module-level so it is picklable under the "spawn" start method too.
+    store = CaptureStore(root)
+    for i in range(base, base + 100):
+        store.record("0-0", {"dialect": "chat", "request": {"i": i}, "response": {}})
+
+
+def test_capture_store_cross_process_append_no_loss(tmp_path):
+    # The threads-only test above exercises the in-process lock; this exercises fcntl.flock across
+    # *processes* -- the num_workers>1 case the in-process lock cannot coordinate.
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")
+    procs = [ctx.Process(target=_cross_process_writer, args=(str(tmp_path), b * 100)) for b in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join()
+        assert p.exitcode == 0
+    rows = CaptureStore(tmp_path).read("0-0")
+    assert len(rows) == 400
+    assert sorted(r["request"]["i"] for r in rows) == list(range(400))

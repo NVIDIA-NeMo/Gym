@@ -305,10 +305,11 @@ class _CaptureMiddleware:
 
     Always strips an optional ``/ng-rollout/<id>`` path prefix before routing (used as the capture
     key; an explicit header wins) so the prefix is a stable routing feature independent of capture.
-    When ``store`` is set it also buffers the request body and a copy of the response while forwarding
-    both downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or
-    rewraps the stream (streamed bodies are forwarded but not buffered). When ``store`` is None
-    (capture disabled) it strips the prefix and forwards only.
+    When ``store`` is set it buffers the request body and a copy of the response while forwarding both
+    downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
+    the stream. Each SSE chunk is forwarded immediately and also appended to an in-memory buffer for
+    post-hoc reassembly, so a very long stream is held in memory until it completes. When ``store`` is
+    None (capture disabled) it strips the prefix and forwards only.
     """
 
     def __init__(self, app: Any, *, store: Optional[CaptureStore], config: Any) -> None:
@@ -384,30 +385,45 @@ class _CaptureMiddleware:
             raise
 
         latency_ms = (time.perf_counter() - start) * 1000.0
-        response_body = None
-        if state["body"]:
-            if state["streaming"]:
-                response_body = _reconstruct_streamed_response(bytes(state["body"]), dialect)
-            else:
+        status = state["status"]
+        body_bytes = bytes(state["body"])
+        streaming = state["streaming"]
+        ttft_ms = state["ttft_ms"]
+        request_bytes = bytes(request_body)
+        store, config = self._store, self._config
+
+        def _parse_and_record() -> None:
+            # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
+            # malformed body can never surface as an ASGI error after the response was already sent.
+            response_body = None
+            if body_bytes:
                 try:
-                    response_body = json.loads(bytes(state["body"]))
+                    response_body = (
+                        _reconstruct_streamed_response(body_bytes, dialect)
+                        if streaming
+                        else json.loads(body_bytes)
+                    )
                 except Exception:
                     response_body = None
-        status = state["status"]
-        # Offload the blocking write+fsync so it never stalls the event loop.
-        await asyncio.to_thread(
-            _record,
-            self._store,
-            dialect,
-            self._config,
-            bytes(request_body),
-            rollout_id=rollout_id,
-            response_body=response_body,
-            status_code=status,
-            error_category=_classify_status(status) if status is not None else None,
-            latency_ms=latency_ms,
-            ttft_ms=state["ttft_ms"],
-        )
+            error_category = _classify_status(status) if status is not None else None
+            # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
+            # doesn't silently count as a success with null tokens in reliability/cost sums.
+            if error_category is None and body_bytes and response_body is None:
+                error_category = "capture_parse_error"
+            _record(
+                store,
+                dialect,
+                config,
+                request_bytes,
+                rollout_id=rollout_id,
+                response_body=response_body,
+                status_code=status,
+                error_category=error_category,
+                latency_ms=latency_ms,
+                ttft_ms=ttft_ms,
+            )
+
+        await asyncio.to_thread(_parse_and_record)
 
 
 def install_trajectory_capture(app: Any, config: Any) -> None:
@@ -464,25 +480,25 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
 
     saw_enabled = False
 
-    def _walk(node: Any, key: Optional[str] = None) -> None:
+    def _walk(node: Any, key: Optional[str] = None, instance_key: Optional[str] = None) -> None:
         nonlocal saw_enabled
         if isinstance(node, dict):
             if node.get("observability_enabled"):
                 saw_enabled = True
-                # The producer keys its default dir off the server config's ``name``, which equals the
-                # config key the node sits under -- fall back to that key (not "model_server") so the
-                # consumer resolves the same directory the producer wrote to.
+                # The producer (make_capture_store) keys its default dir off ``config.name`` -- the
+                # top-level server-instance key (== server_name), not the leaf impl key the node sits
+                # under. Resolve off that instance key so the consumer reads the producer's directory.
                 resolved = (
                     node.get("trajectory_capture_dir")
                     or shared
-                    or _default_capture_dir(node.get("name") or key or "model_server")
+                    or _default_capture_dir(instance_key or node.get("name") or key or "model_server")
                 )
                 dirs.append(Path(resolved))
             for child_key, value in node.items():
-                _walk(value, child_key)
+                _walk(value, child_key, instance_key if instance_key is not None else child_key)
         elif isinstance(node, (list, tuple)):
             for value in node:
-                _walk(value, key)
+                _walk(value, key, instance_key)
 
     try:
         _walk(global_config_dict)
