@@ -103,51 +103,12 @@ class TestStorageFlag:
     @pytest.mark.parametrize(
         "argv, expected_target",
         [
-            (["dataset", "upload", "--input", "d.jsonl"], "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli"),
-            (
-                ["dataset", "upload", "--storage", "hf", "--input", "d.jsonl"],
-                "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli",
-            ),
-            (
-                [
-                    "dataset",
-                    "upload",
-                    "--storage",
-                    "gitlab",
-                    "--input",
-                    "d.jsonl",
-                    "--name",
-                    "ds",
-                    "--revision",
-                    "0.0.1",
-                ],
-                "nemo_gym.cli.dataset:upload_jsonl_dataset_cli",
-            ),
-            (
-                ["dataset", "download", "--repo-id", "org/ds"],
-                "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
-            ),
-            (
-                ["dataset", "download", "--storage", "hf", "--repo-id", "org/ds"],
-                "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
-            ),
-            (
-                [
-                    "dataset",
-                    "download",
-                    "--storage",
-                    "gitlab",
-                    "--name",
-                    "ds",
-                    "--revision",
-                    "0.0.1",
-                    "--artifact",
-                    "train.jsonl",
-                    "--output",
-                    "out.jsonl",
-                ],
-                "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
-            ),
+            (["dataset", "upload"], "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli"),
+            (["dataset", "upload", "--storage", "hf"], "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli"),
+            (["dataset", "upload", "--storage", "gitlab"], "nemo_gym.cli.dataset:upload_jsonl_dataset_cli"),
+            (["dataset", "download"], "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli"),
+            (["dataset", "download", "--storage", "hf"], "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli"),
+            (["dataset", "download", "--storage", "gitlab"], "nemo_gym.cli.dataset:download_jsonl_dataset_cli"),
         ],
     )
     def test_storage_selects_backend(self, monkeypatch: MonkeyPatch, argv, expected_target) -> None:
@@ -156,47 +117,8 @@ class TestStorageFlag:
 
     def test_storage_does_not_leak_into_overrides(self, monkeypatch: MonkeyPatch) -> None:
         # --storage only selects the target; it must not appear in the Hydra overrides.
-        _, overrides = _dispatch_for(
-            monkeypatch,
-            [
-                "dataset",
-                "upload",
-                "--storage",
-                "gitlab",
-                "--input",
-                "d.jsonl",
-                "--name",
-                "ds",
-                "--revision",
-                "0.0.1",
-                "+foo=bar",
-            ],
-        )
-        assert "+foo=bar" in overrides
-        assert not any("storage" in override for override in overrides)
-
-    @pytest.mark.parametrize(
-        "argv, expected_storage, expected_missing",
-        [
-            (["dataset", "upload"], "hf", "--input"),
-            (["dataset", "upload", "--storage", "gitlab", "--input", "d.jsonl"], "gitlab", "--name, --revision"),
-            (["dataset", "download"], "hf", "--repo-id"),
-            (
-                ["dataset", "download", "--storage", "gitlab", "--name", "ds"],
-                "gitlab",
-                "--revision, --artifact, --output",
-            ),
-        ],
-    )
-    def test_missing_backend_flags_reports_clearly(
-        self, monkeypatch: MonkeyPatch, capsys, argv, expected_storage, expected_missing
-    ) -> None:
-        monkeypatch.setattr(sys, "argv", ["gym", *argv])
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 2
-        err = capsys.readouterr().err
-        assert f"--storage {expected_storage} requires {expected_missing} to be specified" in err
+        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--storage", "gitlab", "+foo=bar"])
+        assert overrides == ["+foo=bar"]
 
     def test_invalid_storage_value_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "upload", "--storage", "s3"])
@@ -503,102 +425,43 @@ class TestEvalAggregateFlags:
         assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
 
 
-class TestRequiredFlags:
-    """Flags that map to a config field with no default are marked required in argparse, so a missing
-    one fails fast with a clear 'the following arguments are required' message + exit 2.
-    `dataset upload`/`download` are excluded here as their required set is backend-dependent and checked
-    separately"""
-
-    # command tokens -> (the flags argparse must enforce as required, a satisfying invocation, its target)
-    CASES = [
-        (["dataset", "rm"], ["--name"], ["--name", "ds"], "nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli"),
-        (
-            ["dataset", "migrate"],
-            ["--input"],
-            ["--input", "d.jsonl"],
-            "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli",
-        ),
-        (
-            ["dataset", "render"],
-            ["--input", "--prompt-config", "--output"],
-            ["--input", "d.jsonl", "--prompt-config", "p.yaml", "--output", "o.jsonl"],
-            "nemo_gym.cli.dataset:materialize_prompts_cli",
-        ),
-        (
-            ["eval", "profile"],
-            ["--inputs", "--rollouts"],
-            ["--inputs", "i.jsonl", "--rollouts", "r.jsonl"],
-            "nemo_gym.cli.eval:reward_profile",
-        ),
-        (
-            ["env", "init"],
-            ["--resources-server"],
-            ["--resources-server", "my_server"],
-            "nemo_gym.cli.env:init_resources_server",
-        ),
-        (
-            ["env", "packages"],
-            ["--resources-server"],
-            ["--resources-server", "my_server"],
-            "nemo_gym.cli.env:pip_list",
-        ),
-    ]
-
-    @pytest.mark.parametrize("command, required_flags", [(c[0], c[1]) for c in CASES])
-    def test_missing_required_flags_exit_2(self, monkeypatch: MonkeyPatch, capsys, command, required_flags) -> None:
-        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(sys, "argv", ["gym", *command])
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 2
-        error_line = capsys.readouterr().err.split("error:")[-1]
-        assert "the following arguments are required" in error_line
-        for flag in required_flags:
-            assert flag in error_line
-
-    @pytest.mark.parametrize("argv, expected_target", [(c[0] + c[2], c[3]) for c in CASES])
-    def test_required_flags_satisfied_dispatches(self, monkeypatch: MonkeyPatch, argv, expected_target) -> None:
-        target, _ = _dispatch_for(monkeypatch, argv)
-        assert target == expected_target
-
-    def test_partial_required_flags_reports_only_the_remaining(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # `dataset render` needs three flags; supplying one must still flag the other two (and not the one given).
-        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(sys, "argv", ["gym", "dataset", "render", "--input", "d.jsonl"])
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 2
-        error_line = capsys.readouterr().err.split("error:")[-1]
-        assert "--prompt-config" in error_line
-        assert "--output" in error_line
-        assert "--input" not in error_line  # already provided, so not reported as missing
-
-
 class TestFriendlyValidationError:
-    """The router turns the pydantic ValidationError raised by a command's model_validate into a
-    concise message + exit 2, instead of letting a raw traceback reach the user."""
+    """No flag is argparse-required (every value can also be supplied as a Hydra `+key=value` override).
+    A missing required value therefore surfaces from the command's own model_validate as a pydantic
+    ValidationError, which the router renders as a concise message + exit 2 instead of a raw traceback."""
 
     def test_format_lists_missing_and_invalid_fields(self) -> None:
-        from pydantic import BaseModel, ValidationError
+        from pydantic import ValidationError
 
-        from nemo_gym.cli.main import _format_validation_error
+        from nemo_gym.cli.main import _handle_pydantic_validation_error
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
-        class _Model(BaseModel):
+        # A CLI config (so it passes the scoping check) with one missing and one invalid field.
+        class _Model(BaseNeMoGymCLIConfig):
             required_path: str
             count: int
 
-        with pytest.raises(ValidationError) as exc_info:
-            _Model.model_validate({"count": "not-an-int"})
+        class _FakeParser:
+            message: str = ""
 
-        message = _format_validation_error(exc_info.value)
-        assert "missing required configuration: required_path" in message
-        assert "+required_path=<value>" in message
-        assert "invalid configuration: count" in message
+            def error(self, message: str) -> None:
+                self.message = message
+
+        recorder = _FakeParser()
+        try:
+            _Model.model_validate({"count": "not-an-int"})
+        except ValidationError as exc:
+            _handle_pydantic_validation_error(exc, recorder)
+
+        assert "missing required configuration: required_path" in recorder.message
+        assert "+required_path=<value>" in recorder.message
+        assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from pydantic import BaseModel
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
-        class _Config(BaseModel):
+        # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
+        class _Config(BaseNeMoGymCLIConfig):
             materialized_inputs_jsonl_fpath: str
 
         def _raise_validation_error(target: str, overrides: list[str]) -> None:
@@ -614,6 +477,24 @@ class TestFriendlyValidationError:
         err = capsys.readouterr().err
         assert "gym eval aggregate: error:" in err
         assert "missing required configuration: materialized_inputs_jsonl_fpath" in err
+
+    def test_non_config_validation_error_is_reraised(self, monkeypatch: MonkeyPatch) -> None:
+        # A ValidationError from a non-CLI-config model (e.g. a server response validated deep inside a
+        # command) is a real error, not a user-config mistake: it must propagate, not be rendered as a
+        # misleading "invalid configuration".
+        from pydantic import BaseModel, ValidationError
+
+        class _ServerResponse(BaseModel):  # NOT a BaseNeMoGymCLIConfig subclass
+            count: int
+
+        def _raise_validation_error(target: str, overrides: list[str]) -> None:
+            _ServerResponse.model_validate({"count": "not-an-int"})
+
+        monkeypatch.setattr(cli_main, "dispatch", _raise_validation_error)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "run"])
+
+        with pytest.raises(ValidationError):
+            main()
 
 
 class TestDispatch:
