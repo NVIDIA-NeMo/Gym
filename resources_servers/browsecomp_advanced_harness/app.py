@@ -100,7 +100,7 @@ class BrowseRequest(BaseModel):
     def coerce_urls(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        urls = data.get("urls")
+        urls = data.get("querurlsies")
         if urls is None:
             return data
 
@@ -159,6 +159,7 @@ class TavilySearchMetrics(BaseModel):
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+    num_tool_calls: int
     metrics: TavilySearchMetrics
 
 
@@ -293,8 +294,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return "Query is too long"
 
         client = self._select_tavily_client()
-        print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
-        call_start = time()
         try:
             results = await client.search(
                 query,
@@ -304,22 +303,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 include_raw_content=True,
             )
         except BadRequestError as e:
-            print(
-                f"[tavily_call function=search status=bad_request duration_s={time() - call_start:.2f} query={query[:80]!r} error={e}]",
-                flush=True,
-            )
             return f"Search failed: {e}"
-        except Exception as e:
-            print(
-                f"[tavily_call function=search status=error duration_s={time() - call_start:.2f} query={query[:80]!r} error_type={type(e).__name__} error={str(e)[:200]}]",
-                flush=True,
-            )
-            raise
 
-        print(
-            f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
-            flush=True,
-        )
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
@@ -365,10 +350,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # search for urls
         async_tavily_client = self._select_tavily_client()
-        print(
-            f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
-            flush=True,
-        )
         start_time = time()
         try:
             results = await async_tavily_client.extract(
@@ -380,20 +361,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     function="extract", status="success", start_time=start_time, end_time=time()
                 )
             )
-            print(
-                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(urls)} n_results={len(results.get('results', []))}]",
-                flush=True,
-            )
         except Exception as e:
             # return if failed to call api
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="error", start_time=start_time, end_time=time()
                 )
-            )
-            print(
-                f"[tavily_call function=extract status=error duration_s={time() - start_time:.2f} n_urls={len(urls)} error_type={type(e).__name__} error={str(e)[:200]}]",
-                flush=True,
             )
             return BrowseResponse(results_string=f"Failed to extract content: {e}")
 
@@ -427,6 +400,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
+            num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
 
@@ -484,15 +458,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_response = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
-            judge_call_start = time()
             try:
                 temp = 0.0 if attempt == 0 else min(0.3 + 0.1 * attempt, 1.0)
                 judge_create_params.temperature = temp
 
-                print(
-                    f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp={temp}]",
-                    flush=True,
-                )
                 http_response = await self.server_client.post(
                     server_name=self.config.judge_model_server.name,
                     url_path="/v1/responses",
@@ -503,10 +472,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
                 is_correct, extracted, parsed_ok = self._parse_judge(text)
                 if parsed_ok:
-                    print(
-                        f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
-                        flush=True,
-                    )
                     return JudgeEvaluation(
                         judge_response_create_params=judge_create_params,
                         reasoning=text,
@@ -514,23 +479,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         reward=1.0 if is_correct else 0.0,
                         judge_response=judge_response,
                     )
-                print(
-                    f"[judge_call attempt={attempt + 1} status=parse_error duration_s={time() - judge_call_start:.2f} raw_output={text[:200]!r}]",
-                    flush=True,
-                )
 
-            except Exception as e:
-                sleep_s = min(2**attempt, 30)
-                print(
-                    f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error_type={type(e).__name__} error={str(e)[:200]} backoff_s={sleep_s}]",
-                    flush=True,
-                )
-                await sleep(sleep_s)
+            except Exception:
+                await sleep(min(2**attempt, 30))
 
-        print(
-            f"[judge_exhausted max_attempts={self.JUDGE_MAX_ATTEMPTS} had_response={judge_response is not None}]",
-            flush=True,
-        )
         return JudgeEvaluation(
             judge_response_create_params=judge_create_params,
             reasoning="",
