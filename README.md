@@ -6,7 +6,7 @@
 [![CI](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml)
 [![Docs](https://img.shields.io/badge/docs-NVIDIA-brightgreen)](https://docs.nvidia.com/nemo/gym/main/about/)
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Getting Help](#-getting-help)** • **[Community & Support](#-community--support)** • **[License](#-license)** • **[Citations](#-citations)**
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
@@ -340,14 +340,37 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 - **[Environment Tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** - Build custom environments
 - **[Training Tutorials](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** - Train with NeMo Gym environments
 - **[API Reference](https://docs.nvidia.com/nemo/gym/main/api/reference/api-reference)** - Complete class and function reference
- 
+- **[Roadmap](https://github.com/NVIDIA-NeMo/Gym/issues/1526)** - Plans for the next NeMo Gym release
+
+## 💬 Getting Help
+
+Need help, have a question, or want to share what you're building?
+
+- **Questions and discussion** — [GitHub Discussions](https://github.com/NVIDIA-NeMo/Gym/discussions) for usage questions, ideas, and show-and-tell.
+- **Bug reports and feature requests** — [GitHub Issues](https://github.com/NVIDIA-NeMo/Gym/issues). Include reproduction steps and your environment (OS, Python version, install method).
+- **Security disclosures** — Refer to [SECURITY.md](SECURITY.md). Please do **not** file public issues for security vulnerabilities.
+- **Community standards** — All interactions are governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+**Response expectations:** NeMo Gym is maintained by NVIDIA engineers alongside their day-to-day work. Maintainers triage new issues and discussions on a best-effort basis, typically within a few business days. Pull requests usually receive an initial review within one week. Please be patient — and feel free to leave a polite ping on an issue or PR if you haven't heard back after a week.
+
+> [!NOTE]
+> **Placeholder content** — the response time targets above are proposed defaults pending confirmation by NeMo Gym product management.
 
 ## 🤝 Community & Support
 
 We'd love your contributions! Here's how to get involved:
 
+- **[Contributing Guide](CONTRIBUTING.md)** - Beginner-friendly workflow for code, docs, and new environments
+- **[Detailed Contribution Docs](https://docs.nvidia.com/nemo/gym/main/contribute)** - Environment Contribution Guide, RL Framework Integration Guide, and more
+- **[Code of Conduct](CODE_OF_CONDUCT.md)** - Community standards we expect everyone to follow
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/main/contribute)** - How to contribute code, docs, new environments, or training framework integrations
+- **[Good first issues](https://github.com/NVIDIA-NeMo/Gym/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** - Beginner-friendly tasks to get started
+
+## 📜 License
+
+NeMo Gym is released under the [Apache License 2.0](LICENSE). By contributing, you agree that your contributions will be licensed under the same terms.
+
+Individual environments under `resources_servers/` may use third-party datasets or tools with their own licenses; refer to each environment's README and the dataset's `license` field in its YAML config for details. Third-party attributions are tracked in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 ## 📚 Citations
 
