@@ -11,7 +11,6 @@ healthcare, and engineering.
 - [Dataset](#dataset)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Full GDPVal Evaluation](#full-gdpval-evaluation)
 - [Configuration](#configuration)
 - [Advanced Features](#advanced-features)
   - [Apptainer Sandboxing](#apptainer-sandboxing)
