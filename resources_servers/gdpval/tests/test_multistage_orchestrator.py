@@ -61,9 +61,7 @@ class TestParseConfig:
         assert cfg.reuse_cached_deliverables is True
 
     def test_reuse_cached_deliverables_can_be_disabled(self) -> None:
-        cfg = parse_multistage_config(
-            {"enabled": True, "stages": ["5"], "reuse_cached_deliverables": False}
-        )
+        cfg = parse_multistage_config({"enabled": True, "stages": ["5"], "reuse_cached_deliverables": False})
         assert cfg.reuse_cached_deliverables is False
 
     def test_parses_string_stages(self) -> None:

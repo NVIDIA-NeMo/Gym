@@ -962,9 +962,7 @@ class TestMultiReference:
         import asyncio as _asyncio
 
         # Must not raise "Duplicate result row for rollout key".
-        m = _asyncio.run(
-            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
-        ).agent_metrics
+        m = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))).agent_metrics
 
         assert m["comparison/num_stages"] == 2
         # Headline tracks the last stage; pooled descriptive stats span both.
