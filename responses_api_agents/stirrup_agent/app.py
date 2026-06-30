@@ -1077,6 +1077,16 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
 
+            # Per-request opt-in to judge an already-cached deliverable instead of
+            # re-running the policy. Unlike server-wide judge_only, it falls back
+            # to a normal rollout when no deliverable is cached yet.
+            reuse_requested = bool(body_dict.get("reuse_cached_deliverable"))
+            deliverable_cached = (
+                deliverables_dir is not None
+                and Path(deliverables_dir).is_dir()
+                and any(Path(deliverables_dir).iterdir())
+            )
+
             if self.config.judge_only:
                 # Judge-only mode: do NOT run the agent. Score the pre-existing
                 # cached deliverables at ``deliverables_dir``. A task whose
@@ -1099,6 +1109,17 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         skipped=True,
                         error_class="skipped",
                     )
+                response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
+                response_metadata = {}
+            elif reuse_requested and deliverable_cached:
+                # Reuse a deliverable cached by an earlier stage: skip the policy
+                # rollout and judge the existing deliverable against THIS request's
+                # references (which may differ from the producing stage's set).
+                print(
+                    f"[stirrup-reuse] task_{task_id} repeat_{rollout_index}: "
+                    f"judging cached deliverable at {deliverables_dir}",
+                    flush=True,
+                )
                 response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
                 response_metadata = {}
             else:

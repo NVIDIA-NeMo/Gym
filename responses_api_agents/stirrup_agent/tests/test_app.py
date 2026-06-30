@@ -258,6 +258,111 @@ class TestJudgeOnlyMode:
         assert result["reward"] == 0.0
 
 
+class TestReuseCachedDeliverable:
+    """Per-request ``reuse_cached_deliverable`` (used by multi-stage ELO): reuse a
+    deliverable produced by an earlier stage instead of re-running the policy."""
+
+    @pytest.mark.asyncio
+    async def test_reuse_skips_policy_when_cached(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "answer.txt").write_text("cached deliverable")
+
+        # NOT judge_only: this is a normal (produce) server that opts into reuse
+        # per request.
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.7}),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        # Cached deliverable ⇒ policy is NOT run, but /verify still scores it.
+        responses_mock.assert_not_awaited()
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["deliverables_dir"].endswith(str(Path("task_task-1") / "repeat_0"))
+        assert result == {"reward": 0.7}
+
+    @pytest.mark.asyncio
+    async def test_reuse_falls_back_to_policy_when_cold(self, tmp_path) -> None:
+        # No cached deliverable on disk ⇒ reuse request must run the policy.
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        fake_response = NeMoGymResponse(
+            id="gdpval-task-1",
+            created_at=0,
+            model="policy",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg-1",
+                    content=[NeMoGymResponseOutputText(type="output_text", text="done", annotations=[])],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            metadata={"elapsed_seconds": "1.0"},
+        )
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock(return_value=fake_response)
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.5}),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        # Cold cache ⇒ the policy runs to produce the deliverable.
+        responses_mock.assert_awaited_once()
+        assert result == {"reward": 0.5}
+
+
 class TestExampleDataset:
     def test_example_jsonl_is_valid(self) -> None:
         """The shipped example dataset should parse and contain the GDPVal schema."""
