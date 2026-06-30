@@ -937,6 +937,75 @@ class TestSearchDir:
         assert "Did you mean `mybench`?" in capsys.readouterr().err
 
 
+class TestInstallRootResolution:
+    """Built-in assets resolve from the Gym install root regardless of cwd (REQ C2/C5).
+
+    In a wheel install PARENT_DIR is site-packages (where the asset trees are installed) while the
+    user runs from an unrelated project dir, so WORKING_DIR/cwd is not the install root. The selector
+    must still find built-ins under PARENT_DIR. Editable-from-repo keeps working because PARENT_DIR,
+    WORKING_DIR, and cwd all coincide and dedupe to a single root.
+    """
+
+    def _make_resources_server(self, root, name: str = "foo") -> None:
+        config_dir = root / "resources_servers" / name / "configs"
+        config_dir.mkdir(parents=True)
+        (config_dir / f"{name}.yaml").write_text("{}\n")
+
+    def test_builtin_resolves_from_install_root_when_cwd_differs(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(install_root)  # built-in only under the install root
+        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
+        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(install_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
+
+    def test_user_cwd_asset_resolves_when_not_builtin(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(user_cwd, name="myenv")  # exists only in the user's project
+        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
+        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        resolved = cli_main._asset_config_path("resources-server", "myenv")
+        assert resolved == str(user_cwd / "resources_servers" / "myenv" / "configs" / "myenv.yaml")
+
+    def test_same_name_in_install_root_and_cwd_is_ambiguous(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A user asset shadowing a built-in of the same name is ambiguous; they must disambiguate with --config.
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(install_root)
+        self._make_resources_server(user_cwd)
+        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
+        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        with pytest.raises(ValueError, match="ambiguous"):
+            cli_main._asset_config_path("resources-server", "foo")
+
+    def test_editable_layout_single_root_not_self_ambiguous(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Editable install: PARENT_DIR == WORKING_DIR == cwd. The same file found via all three roots
+        # must dedupe to one match, not raise a spurious ambiguity error.
+        repo_root = tmp_path / "Gym"
+        repo_root.mkdir()
+        self._make_resources_server(repo_root)
+        monkeypatch.setattr(cli_main, "PARENT_DIR", repo_root)
+        monkeypatch.setattr(cli_main, "WORKING_DIR", repo_root)
+        monkeypatch.chdir(repo_root)
+
+        resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(repo_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
+
+
 class TestListEnvironmentsRouting:
     def test_list_environments_dispatches(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments"])

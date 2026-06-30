@@ -287,7 +287,7 @@ In one terminal, start your agent, model, and resources servers, with profiling 
 ```bash
 gym env start \
     --model-type openai_model \
-    --config resources_servers/math_with_judge/configs/bytedtsinghua_dapo17k.yaml \
+    --resources-server math_with_judge \
     +profiling_enabled=true \
     +profiling_results_dirpath=results/profiling/math_with_judge
 ```
@@ -296,15 +296,13 @@ In another terminal, run some large number of rollouts against your servers. Use
 ```bash
 gym eval run --no-serve \
     --agent math_with_judge_simple_agent \
-    --input resources_servers/math_with_judge/data/dapo17k_bytedtsinghua_train.jsonl \
+    --input resources_servers/math_with_judge/data/example.jsonl \
     --output temp/math_with_judge_rollouts.jsonl \
-    --limit 1024 \
+    --limit 5 \
     --num-repeats 1
 ```
 
-After `gym eval run` finishes, ctrl+c to quit your servers. You should see some output in the terminal like the following:
-```bash
-```
+After `gym eval run` finishes, ctrl+c to quit your servers. The profiling results are written under `results/profiling/math_with_judge`.
 
 The log file content for a server will look something like the following:
 ```

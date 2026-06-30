@@ -2,7 +2,7 @@
 # Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay
 # the PyTorch/transformers install cost.
-stirrup>=0.1.7
+stirrup>=0.1.11
 transformers>=5.8.1
 # Deliverable-processing deps for file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see

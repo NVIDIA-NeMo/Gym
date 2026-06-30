@@ -89,6 +89,19 @@ def exit_cleanly_on_config_error(fn):
     return wrapper
 
 
+def _resolve_server_dir(rel_path: Path) -> Path:
+    """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
+
+    Checks the current working directory first (a user's local server), then falls back to the Gym
+    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs.
+    This lets ``gym env test`` find and run built-in servers from any cwd, not just a repo checkout.
+    """
+    cwd_path = Path.cwd() / rel_path
+    if (cwd_path / "requirements.txt").exists() or (cwd_path / "pyproject.toml").exists():
+        return cwd_path
+    return PARENT_DIR / rel_path
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -134,6 +147,15 @@ class TestConfig(RunConfig):
     @property
     def dir_path(self) -> Path:
         return self._dir_path
+
+    @property
+    def resolved_dir_path(self) -> Path:
+        """Absolute server dir resolved against the cwd, then the Gym install root.
+
+        Use this for filesystem access (reading data, running the suite); use ``dir_path`` (the
+        relative entrypoint) for display and example commands shown to the user.
+        """
+        return _resolve_server_dir(self._dir_path)
 
 
 class RunHelper:  # pragma: no cover
@@ -191,11 +213,8 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Check cwd first for a local server, fall back to the install location for built-ins.
-            _server_rel_path = Path(first_key, second_key)
-            _cwd_path = Path.cwd() / _server_rel_path
-            _cwd_is_server = (_cwd_path / "requirements.txt").exists() or (_cwd_path / "pyproject.toml").exists()
-            dir_path = _cwd_path if _cwd_is_server else PARENT_DIR / _server_rel_path
+            # Resolve cwd-first (a local server), else the install location for built-ins.
+            dir_path = _resolve_server_dir(Path(first_key, second_key))
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
@@ -459,8 +478,9 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
-    # Check that the required examples and example metrics are present.
-    example_fpath = test_config.dir_path / "data/example.jsonl"
+    # Check that the required examples and example metrics are present. Read from the resolved dir
+    # (built-ins live under the install root) while messages reference the relative entrypoint.
+    example_fpath = test_config.resolved_dir_path / "data/example.jsonl"
     assert example_fpath.exists(), (
         f"A jsonl file containing 5 examples is required for the {test_config.dir_path} resources server. The file must be found at {example_fpath}. Usually this example data is just the first 5 examples of your train dataset."
     )
@@ -469,7 +489,7 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     assert count == 5, f"Expected 5 examples at {example_fpath} but got {count}."
 
     server_type_name = test_config.dir_path.parts[-1]
-    example_metrics_fpath = test_config.dir_path / "data/example_metrics.json"
+    example_metrics_fpath = test_config.resolved_dir_path / "data/example_metrics.json"
     assert (
         example_metrics_fpath.exists()
     ), f"""You must run the example data validation for the example data found at {example_fpath}.
@@ -499,11 +519,11 @@ See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a
         f"Expected 5 examples in the metrics at {example_metrics_fpath}, but got {example_metrics['Number of examples']}"
     )
 
-    conflict_paths = glob(str(test_config.dir_path / "data/*conflict*"))
+    conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
     conflict_paths_str = "\n- ".join([""] + conflict_paths)
     assert not conflict_paths, f"Found {len(conflict_paths)} conflicting paths: {conflict_paths_str}"
 
-    example_rollouts_fpath = test_config.dir_path / "data/example_rollouts.jsonl"
+    example_rollouts_fpath = test_config.resolved_dir_path / "data/example_rollouts.jsonl"
     assert example_rollouts_fpath.exists(), f"""You must run the example data through your agent and provide the example rollouts at `{example_rollouts_fpath}`.
 
 Your commands should look something like:
@@ -533,8 +553,11 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
-    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix)} && pytest"""
-    return run_command(command, test_config.dir_path)
+    resolved_dir = test_config.resolved_dir_path
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
+    # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
 def test():  # pragma: no cover
@@ -616,15 +639,26 @@ def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
 
-    candidate_dir_paths = [
-        *glob("resources_servers/*"),
-        *glob("responses_api_agents/*"),
-        *glob("responses_api_models/*"),
-    ]
-    candidate_dir_paths = [p for p in candidate_dir_paths if "pycache" not in p]
+    # Discover server modules under both the cwd (a user's project) and the Gym install root
+    # (built-ins, which live under PARENT_DIR in editable and wheel installs). Entrypoints are kept
+    # relative; the cwd shadows the install root for same-named modules. This lets `gym env test`
+    # discover and run built-in servers from any cwd, not only a repo checkout.
+    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
+    seen_rel_paths: set[str] = set()
+    candidate_dir_paths: List[str] = []
+    for root in (Path.cwd(), PARENT_DIR):
+        for server_type_dir in server_type_dirs:
+            for module_path in sorted((root / server_type_dir).glob("*")):
+                if "pycache" in module_path.name or not module_path.is_dir():
+                    continue
+                rel_path = f"{server_type_dir}/{module_path.name}"
+                if rel_path in seen_rel_paths:
+                    continue
+                seen_rel_paths.add(rel_path)
+                candidate_dir_paths.append(rel_path)
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
-    dir_paths = [p for p in dir_paths if (p / "README.md").exists()]
+    dir_paths = [p for p in dir_paths if (_resolve_server_dir(p) / "README.md").exists()]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
 
     # Keep the full list for the total-vs-tested mismatch check below, then narrow to this shard.
@@ -668,7 +702,7 @@ def test_all():  # pragma: no cover
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
-            venv_path = dir_path / ".venv"
+            venv_path = _resolve_server_dir(dir_path) / ".venv"
             print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
             rmtree(venv_path, ignore_errors=True)
 
@@ -731,7 +765,7 @@ def init_resources_server():  # pragma: no cover
     Examples:
 
     ```bash
-    gym env init +entrypoint=resources_servers/my_server
+    gym env init --resources-server my_server
     ```
     """
     config_dict = get_global_config_dict()
@@ -978,7 +1012,7 @@ def pip_list():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     config = PipListConfig.model_validate(global_config_dict)
 
-    dir_path = Path(config.entrypoint)
+    dir_path = _resolve_server_dir(Path(config.entrypoint))
     venv_path = dir_path / ".venv"
 
     if not venv_path.exists():
