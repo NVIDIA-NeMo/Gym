@@ -1220,6 +1220,260 @@ printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$V
         report_path.write_text(json.dumps(report, indent=2))
 
 
+class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
+    """Eval harness for AweAI-Team/DeNovoSWE (doc-to-repo) tasks.
+
+    DeNovoSWE images ship the original package source at ``parent_commit`` plus
+    a "spec" (README/document). The reference workflow (AweAgent's
+    ``DeNovoSWEEvaluator``) is:
+
+      1. ``git checkout -f parent_commit`` in ``workdir``.
+      2. (Agent path only) Run ``clean.sh`` to scrub the source, then apply the
+         model patch. Skipped here for the golden path — the image already has
+         the original source, so ``patch == ""`` is the legitimate no-op.
+      3. Delete every existing test file (will be recreated by ``test_patch``).
+      4. Apply ``test_patch`` from the dataset.
+      5. Re-install the package (``pip install -e .``).
+      6. Per-file ``pytest`` over ``passed_ptp`` IDs; reward = 1 iff every
+         test passes.
+
+    Verifier artifacts travel in ``instance_dict``:
+      - ``test_patch``      : unified diff that lays the canonical test suite.
+      - ``passed_ptp``      : test ids that must pass on the golden code.
+      - ``test_binary_archive_b64`` (optional) : base64 tar.gz of binary fixtures.
+      - ``pypi_name``       : package name for pre-install uninstall.
+      - ``workspace_path``  : per-instance workdir inside the SIF.
+
+    The in-container per-file pytest runner is bind-mounted at
+    ``/root/_denovoswe_eval.py`` (see ``_denovoswe_eval.py`` next to this file).
+    It writes a JSON report + a 0/1 ``reward.txt`` we read back on the host.
+    """
+
+    def _get_instance_dict(self) -> dict:
+        raw = self.config.problem_info.get("instance_dict", "{}")
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        inst = self._get_instance_dict()
+        workdir = inst.get("workspace_path", "")
+        base_commit = inst.get("base_commit", "")
+        test_patch = inst.get("test_patch", "") or ""
+        passed_ptp = inst.get("passed_ptp", []) or []
+        failed_ptp = inst.get("failed_ptp", []) or []
+        pypi_name = inst.get("pypi_name", "") or ""
+        test_binary_b64 = inst.get("test_binary_archive_b64", "") or ""
+        expected_coverage = inst.get("expected_coverage_percent", 0.0)
+        # Whether THIS run is golden-patch validation (grade the image's
+        # pre-existing source, no clean.sh, no agent patch) or an agent run
+        # (clean.sh + apply agent patch). We KEY ON THE FLAG, not the patch's
+        # emptiness — an agent that crashed/timed out produces an empty patch,
+        # and falling through to "grade the original" would falsely report
+        # reward=1 for instances where the agent did nothing.
+        is_golden = bool(getattr(self.config, "verify_golden_patch", False))
+
+        # Materialise artefacts on the host; _build_apptainer_command binds
+        # them into the eval container at fixed absolute paths.
+        test_patch_path = self.config.persistent_dir / "denovoswe_test_patch.diff"
+        test_patch_path.write_text(test_patch)
+        meta_path = self.config.persistent_dir / "denovoswe_meta.json"
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "instance_id": inst.get("instance_id", ""),
+                    "workdir": workdir,
+                    "passed_ptp": passed_ptp,
+                    "failed_ptp": failed_ptp,
+                    "pypi_name": pypi_name,
+                    "expected_coverage_percent": expected_coverage,
+                }
+            )
+        )
+        binary_path = self.config.persistent_dir / "denovoswe_test_binary.b64"
+        binary_path.write_text(test_binary_b64)
+        # The document/spec doubles as the agent's README.md inside the
+        # container. We write it next to the other artefacts so both the agent
+        # and eval containers can bind-mount it from one host location.
+        document = inst.get("document", "") or ""
+        document_path = self.config.persistent_dir / "denovoswe_document.md"
+        document_path.write_text(document)
+
+        # No `set -e`: every step is independently tolerant so report.json
+        # is always written. The in-container evaluator script handles the
+        # final exit-status semantics.
+        cmd = f"""#!/bin/bash
+set -o pipefail
+
+date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
+
+{self._get_command_sleep_until_predictions_file()}
+
+mkdir -p /trajectories_mount/eval_results
+
+WORKDIR={shlex.quote(workdir)}
+cd "$WORKDIR" || {{ echo "workdir missing: $WORKDIR" > /trajectories_mount/eval_results/eval_stdout.log; \
+    echo '{{"_test_completed": true, "reward": "0", "error": "workdir_missing"}}' > /trajectories_mount/eval_results/report.json; \
+    echo 0 > /trajectories_mount/eval_results/reward.txt; exit 0; }}
+git config --global --add safe.directory "$WORKDIR" 2>/dev/null || true
+
+# 1. Hard-reset to parent_commit so the image baseline is deterministic.
+BASE_COMMIT={shlex.quote(base_commit)}
+if [ -n "$BASE_COMMIT" ]; then
+    git checkout -f "$BASE_COMMIT" 2>/dev/null || git reset --hard HEAD 2>/dev/null || true
+fi
+
+# 1b. AGENT-RUN ONLY: wipe the source the same way prepare_session did so the
+#     agent's patch is applied to a clean slate (not on top of the original
+#     code that's still in the image). Skipped on the golden path
+#     (``IS_GOLDEN=1``) where we want to grade the image's pre-existing source.
+#     CRITICAL: gating on patch.diff non-empty would silently produce false
+#     PASSES when an agent times out (empty model_patch → fall through to
+#     grading the original source → reward=1 despite zero agent work).
+IS_GOLDEN={"1" if is_golden else "0"}
+if [ "$IS_GOLDEN" != "1" ]; then
+    bash /root/_denovoswe_clean.sh "$WORKDIR" \\
+        > /trajectories_mount/eval_results/clean.log 2>&1 \\
+        || echo "WARN: clean.sh exited non-zero (continuing)" >> /trajectories_mount/eval_results/clean.log
+    # Re-inject the spec as README.md (clean.sh deletes every *.md). Fold it
+    # into the baseline git commit so the agent's diff is computed against a
+    # README-inclusive base — matches AweAgent's prepare_session amend step.
+    if [ -s /root/denovoswe_document.md ]; then
+        cp /root/denovoswe_document.md "$WORKDIR/README.md"
+        ( cd "$WORKDIR" \\
+            && git add README.md 2>/dev/null \\
+            && git commit --amend --no-edit -q 2>/dev/null ) || true
+    fi
+fi
+
+# 2. Apply the agent's patch. In agent mode, an empty patch means the agent
+#    failed to produce work — the workspace is already wiped by clean.sh above,
+#    so pip install + pytest will correctly score this as 0/N errors. In golden
+#    mode the patch is intentionally empty and we want to grade the original.
+if [ "$IS_GOLDEN" != "1" ] && [ -s /root/patch.diff ]; then
+    git apply --whitespace=nowarn /root/patch.diff \\
+        || git apply -3 --whitespace=nowarn /root/patch.diff \\
+        || git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff \\
+        || true
+fi
+
+# 3. Delete EVERY pre-existing test file so test_patch can lay the canonical
+#    suite from scratch (matches AweAgent's evaluator).
+find "$WORKDIR" -type d \\( -iname tests -o -iname testsuite -o -iname testsuites \\
+    -o -iname testing -o -iname test_suite -o -iname test \\) -exec rm -rf {{}} + 2>/dev/null || true
+find "$WORKDIR" -type f \\( -iname 'test_*.py' -o -iname '*_test.py' \\
+    -o -iname '*_tests.py' -o -iname 'conftest.py' \\) -delete 2>/dev/null || true
+find "$WORKDIR" -type f -name '.coveragerc' -delete 2>/dev/null || true
+
+# 4. Pre-create parent dirs for files test_patch will add, and pre-clean
+#    add-only target paths so the patch's ``--- /dev/null`` hunks don't reject.
+python3 - <<'PY'
+import os, re, sys
+try:
+    p = open('/root/test_patch.diff').read()
+except OSError:
+    sys.exit(0)
+add_only = set()
+all_dirs = set()
+for block in re.split(r'^diff --git ', p, flags=re.MULTILINE)[1:]:
+    m = re.search(r'^\\+\\+\\+ b/(.+)$', block, re.MULTILINE)
+    if not m:
+        continue
+    path = m.group(1).strip()
+    if not path or path == '/dev/null':
+        continue
+    d = os.path.dirname(path)
+    if d:
+        all_dirs.add(d)
+    if '--- /dev/null' in block:
+        add_only.add(path)
+for d in all_dirs:
+    os.makedirs(d, exist_ok=True)
+for path in add_only:
+    try:
+        os.unlink(path)
+    except (FileNotFoundError, IsADirectoryError):
+        pass
+PY
+
+# 5. Apply test_patch.
+git apply --whitespace=nowarn /root/denovoswe_test_patch.diff \\
+    || git apply -3 --whitespace=nowarn /root/denovoswe_test_patch.diff \\
+    || git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/denovoswe_test_patch.diff \\
+    || true
+
+# 6. Extract binary fixtures (base64-encoded tar.gz), if any.
+if [ -s /root/denovoswe_test_binary.b64 ] && [ "$(wc -c </root/denovoswe_test_binary.b64)" -gt 4 ]; then
+    base64 -d /root/denovoswe_test_binary.b64 2>/dev/null \\
+        | tar -xzf - -C "$WORKDIR" 2>> /trajectories_mount/eval_results/binary_extract.log || true
+fi
+
+# 7. Uninstall the package (every interpreter we can find) then re-install in
+#    editable mode so the on-disk source becomes the one that gets imported.
+PYPI_NAME={shlex.quote(pypi_name)}
+if [ -n "$PYPI_NAME" ]; then
+    for pyx in $(command -v python) $(command -v python3) /opt/conda/envs/*/bin/python /opt/conda/bin/python /usr/bin/python /usr/bin/python3 /usr/local/bin/python /usr/local/bin/python3; do
+        [ -x "$pyx" ] || continue
+        "$pyx" -m pip uninstall -y "$PYPI_NAME" >/dev/null 2>&1 || true
+    done
+fi
+pip install -e . > /trajectories_mount/eval_results/pip_install.log 2>&1 || true
+
+# 8. Per-file pytest evaluator -> writes report.json + reward.txt.
+python3 /root/_denovoswe_eval.py > /trajectories_mount/eval_results/eval_stdout.log 2>&1 || true
+
+# 9. Fallback report if the eval script never wrote one.
+if [ ! -s /trajectories_mount/eval_results/report.json ]; then
+    echo '{{"_test_completed": true, "reward": "0", "error": "eval_script_no_report"}}' \\
+        > /trajectories_mount/eval_results/report.json
+    echo 0 > /trajectories_mount/eval_results/reward.txt
+fi
+"""
+
+        search_path = os.path.join(
+            self.config.persistent_dir, "eval_results", "report.json",
+        )
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout,
+        )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        """Resolved iff the in-container evaluator wrote reward == 1."""
+        report_path = Path(report_file)
+        instance_id = self.config.instance_id
+
+        raw: dict[str, Any] = {}
+        try:
+            raw = json.loads(report_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        reward_path = report_path.parent / "reward.txt"
+        if reward_path.exists():
+            reward_txt = reward_path.read_text(errors="replace").strip()
+        else:
+            reward_txt = str(raw.get("reward", "")).strip()
+
+        report = {
+            instance_id: {
+                "resolved": reward_txt == "1",
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "verifier_reward": reward_txt,
+                "pass_rate": raw.get("pass_rate"),
+                "passed": raw.get("passed"),
+                "failed": raw.get("failed"),
+                "errors": raw.get("errors"),
+                "total_expected": raw.get("total_expected"),
+                "expected_coverage_percent": raw.get("expected_coverage_percent"),
+            }
+        }
+        report_path.write_text(json.dumps(report, indent=2))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1537,6 +1791,11 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
         return "/app"
     if dataset_name == "deepswe":
         return "/app"
+    if dataset_name == "denovoswe":
+        # Each DeNovoSWE image carries its own workdir (``/workspace/<pkg>``);
+        # the dataprocessor packs it into instance_dict["workspace_path"].
+        wp = str(instance.get("workspace_path") or "")
+        return wp or "/workspace"
     if dataset_name == "swe-bench-ext":
         return "/workspace/repo"
     if "SWE-rebench-V2" in dataset_name:
@@ -1710,6 +1969,26 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
         baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
 
+        # DeNovoSWE: wipe the original source BEFORE the agent shells in, then
+        # re-inject the spec as README.md and fold it into the baseline commit
+        # (so the agent's final ``git diff`` patch isn't bloated by a redundant
+        # README addition). Mirrors AweAgent's DeNovoSWETask.prepare_session.
+        # Without this, the agent would just peek at /workspace/<pkg>/*.py and
+        # trivially copy the code it is supposed to regenerate.
+        denovoswe_clean_cmd = ""
+        if dataset_name == "denovoswe":
+            wp = _extract_instance_dict(data_point).get("workspace_path", "") or workspace_path
+            denovoswe_clean_cmd = (
+                "{ "
+                f"bash /root/_denovoswe_clean.sh {shlex.quote(wp)} > /tmp/denovoswe_clean.log 2>&1 || true; "
+                "if [ -s /root/denovoswe_document.md ]; then "
+                f"  cp /root/denovoswe_document.md {shlex.quote(wp)}/README.md && "
+                f"  ( cd {shlex.quote(wp)} && git add README.md && git commit --amend --no-edit -q ) "
+                "  >> /tmp/denovoswe_clean.log 2>&1 || true; "
+                "fi; "
+                "} && "
+            )
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -1726,6 +2005,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "echo '{}' >/root/.cache/opencode/models.json && "
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{conda_activate_cmd}"
+            f"{denovoswe_clean_cmd}"
             f"{baseline_fix_cmd}"
             "./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    {self.config.agent_framework_commit} "  # $1: opencode commit
@@ -2149,22 +2429,26 @@ class RunOpenHandsAgent(BaseModel):
         supported = (
             dataset_name == "swe-bench-ext"
             or dataset_name == "deepswe"
+            or dataset_name == "denovoswe"
             or "SWE-bench" in dataset_name
             or "SWE-rebench" in dataset_name
         )
         if not supported:
             raise NotImplementedError(
                 "verify_golden_patch is only supported for dataset_name in "
-                "{'swe-bench-ext', 'deepswe'} or the SWE-bench / SWE-bench_Multilingual "
-                f"/ SWE-rebench families (got {dataset_name!r})."
+                "{'swe-bench-ext', 'deepswe', 'denovoswe'} or the SWE-bench / "
+                f"SWE-bench_Multilingual / SWE-rebench families (got {dataset_name!r})."
             )
 
         raw_instance_dict = self.config.problem_info["instance_dict"]
         instance_dict = json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else raw_instance_dict
         golden_patch = instance_dict.get("patch") or ""
-        if not golden_patch.strip():
+        # DeNovoSWE has no model-style patch — the original source code already
+        # lives in the image at ``parent_commit``. An empty patch is the
+        # legitimate "grade the image's pre-existing code" case there.
+        if not golden_patch.strip() and dataset_name != "denovoswe":
             raise ValueError(f"No golden patch found in instance_dict['patch'] for {instance_id}.")
-        if not golden_patch.endswith("\n"):
+        if golden_patch and not golden_patch.endswith("\n"):
             golden_patch += "\n"
 
         metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
@@ -2705,6 +2989,33 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/tests/test.patch,ro")
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
+        if data_point.get("dataset_name") == "denovoswe":
+            # Both agent and eval containers need the same wipe-then-grade
+            # plumbing: clean.sh + the spec doc (re-injected as README.md).
+            # The per-file pytest runner ships from the source tree.
+            denovoswe_clean_sh = Path(__file__).resolve().parent / "_denovoswe_clean.sh"
+            denovoswe_eval_script = Path(__file__).resolve().parent / "_denovoswe_eval.py"
+            document_path = params.persistent_dir / "denovoswe_document.md"
+            mount_args.append(f"--mount type=bind,src={denovoswe_clean_sh},dst=/root/_denovoswe_clean.sh,ro")
+            mount_args.append(f"--mount type=bind,src={document_path},dst=/root/denovoswe_document.md,ro")
+
+            if command.mode == "eval":
+                # DeNovoSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
+                test_patch_path = params.persistent_dir / "denovoswe_test_patch.diff"
+                meta_path = params.persistent_dir / "denovoswe_meta.json"
+                binary_path = params.persistent_dir / "denovoswe_test_binary.b64"
+                if not params.model_patch_path.exists():
+                    params.model_patch_path.write_text("")
+                mount_args.append(
+                    f"--mount type=bind,src={test_patch_path},dst=/root/denovoswe_test_patch.diff,ro"
+                )
+                mount_args.append(f"--mount type=bind,src={meta_path},dst=/root/denovoswe_meta.json,ro")
+                mount_args.append(
+                    f"--mount type=bind,src={binary_path},dst=/root/denovoswe_test_binary.b64,ro"
+                )
+                mount_args.append(f"--mount type=bind,src={denovoswe_eval_script},dst=/root/_denovoswe_eval.py,ro")
+                mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
+
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
             for root_dir in ["", "/root", "/testbed"]:
@@ -2933,6 +3244,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             dataset_processor = NVInternalDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "deepswe":
             dataset_processor = DeepSWEDatasetProcessor(config=params)
+        elif params.problem_info["dataset_name"] == "denovoswe":
+            dataset_processor = DeNovoSWEDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "swe-bench-ext":
             dataset_processor = SweBenchExtDatasetProcessor(config=params)
         elif "SWE-rebench" in params.problem_info["dataset_name"]:
