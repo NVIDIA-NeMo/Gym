@@ -791,12 +791,13 @@ class TestApp:
         mock_server_client_instance.global_config_dict = {
             "policy_model_name": "test_model",
             "sandbox": {
+                "default_metadata": {"sandbox-api": "opensandbox-sdk"},
                 "opensandbox": {
                     "connection": {
                         "domain": "sandbox.example",
                         "api_key": "fixture-value",  # pragma: allowlist secret
                     }
-                }
+                },
             },
         }
         mock_load_from_global_config.return_value = mock_server_client_instance
@@ -814,6 +815,8 @@ class TestApp:
         provider = generated_config["environment"]["provider"]["opensandbox"]
         assert provider["connection"]["domain"] == "sandbox.example"
         assert "api_key" not in provider["connection"]
+        # Provider default_metadata flows into the sandbox spec metadata.
+        assert generated_config["environment"]["spec"]["metadata"]["sandbox-api"] == "opensandbox-sdk"
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
