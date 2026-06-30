@@ -195,6 +195,8 @@ Path - `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`
 
 ```yaml
 sandbox:                      # name referenced by the agent's sandbox_provider
+  default_metadata:           # optional: merged into sandbox spec metadata (see below)
+    sandbox-api: opensandbox-sdk
   opensandbox:                # provider registry key -> provider class
     connection:
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
@@ -226,6 +228,12 @@ To use a different provider, add a config file under
 `nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml` that defines a
 `sandbox` block (the name the agent references) with that provider's registry key,
 then point `+config_paths` at it instead — no agent edit required.
+
+An optional `default_metadata` key holds provider-contributed defaults that are
+merged into each sandbox's spec metadata (`SandboxSpec.metadata`); the agent's own
+`sandbox_spec.metadata` overrides them on conflict. This keeps provider-identifying
+tags (e.g. `sandbox-api: opensandbox-sdk`) with the provider rather than in the
+agent config.
 
 Optional `sandbox_resource_profiles` can be configured as a list of resource
 maps. When present, the agent hashes `instance_id` and deterministically merges

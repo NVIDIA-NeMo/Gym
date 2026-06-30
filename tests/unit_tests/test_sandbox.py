@@ -37,6 +37,7 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
     resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
@@ -450,11 +451,32 @@ def test_resolve_provider_config_errors() -> None:
     with pytest.raises(TypeError, match="must be a name reference"):
         resolve_provider_config(123)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="single-key mapping"):
+    with pytest.raises(ValueError, match="exactly one provider key"):
         resolve_provider_config({"opensandbox": {}, "extra": {}})
 
-    with pytest.raises(ValueError, match="single-key mapping"):
+    with pytest.raises(ValueError, match="exactly one provider key"):
         resolve_provider_config("sandbox_main", {"sandbox_main": {}})
+
+
+def test_resolve_provider_metadata() -> None:
+    block = {
+        "opensandbox": {"connection": {"domain": "sandbox.example"}},
+        "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+    }
+
+    # default_metadata is excluded from the provider config and read separately.
+    assert resolve_provider_config(block) == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert resolve_provider_metadata(block) == {"sandbox-api": "opensandbox-sdk"}
+
+    # A named reference works the same way.
+    global_config = {"sandbox": block}
+    assert resolve_provider_metadata("sandbox", global_config) == {"sandbox-api": "opensandbox-sdk"}
+
+    # No default_metadata key -> empty dict.
+    assert resolve_provider_metadata({"opensandbox": {}}) == {}
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
