@@ -36,6 +36,7 @@ from nemo_gym.sandbox import (
     get_provider_class,
     list_providers,
     register_provider,
+    resolve_provider_config,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
@@ -408,6 +409,52 @@ def test_create_provider_validation_and_constructor_cleanup() -> None:
     register_provider(failing_provider_name, FailingProvider)
     with pytest.raises(RuntimeError, match="provider constructor failed"):
         Sandbox({failing_provider_name: {}})
+
+
+def test_resolve_provider_config_named_reference() -> None:
+    global_config = {
+        "policy_model_name": "test_model",
+        "sandbox_main": {"opensandbox": {"connection": {"domain": "sandbox.example"}}},
+    }
+
+    resolved = resolve_provider_config("sandbox_main", global_config)
+    assert resolved == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+
+    # An OmegaConf DictConfig block resolves to a plain dict.
+    from omegaconf import OmegaConf
+
+    omega_config = OmegaConf.create(global_config)
+    resolved_from_omega = resolve_provider_config("sandbox_main", omega_config)
+    assert resolved_from_omega == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert isinstance(resolved_from_omega["opensandbox"], dict)
+
+
+def test_resolve_provider_config_inline_mapping() -> None:
+    inline = {"opensandbox": {"connection": {}}}
+    assert resolve_provider_config(inline) == inline
+    # The result is a fresh dict, not the same object.
+    assert resolve_provider_config(inline) is not inline
+
+
+def test_resolve_provider_config_errors() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        resolve_provider_config("", {})
+
+    with pytest.raises(ValueError, match="is not defined in the merged config"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    # Error lists available single-key sandbox blocks as candidates.
+    with pytest.raises(ValueError, match="'sandbox_main'"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    with pytest.raises(TypeError, match="must be a name reference"):
+        resolve_provider_config(123)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="single-key mapping"):
+        resolve_provider_config({"opensandbox": {}, "extra": {}})
+
+    with pytest.raises(ValueError, match="single-key mapping"):
+        resolve_provider_config("sandbox_main", {"sandbox_main": {}})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:

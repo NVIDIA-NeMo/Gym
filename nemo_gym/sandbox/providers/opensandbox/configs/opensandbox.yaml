@@ -1,0 +1,41 @@
+# OpenSandbox sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider:
+# sandbox`; the child key `opensandbox` selects the provider class and its value
+# is passed to the provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping
+# providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, $MODEL]"
+#
+# To run multiple sandboxes at once, give each block a distinct instance name
+# (e.g. `opensandbox_foo`, `opensandbox_baz`) and reference each by name.
+sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
+      protocol: http
+      request_timeout_s: 300
+      use_server_proxy: true
+    create:
+      request_timeout_s: 1200
+      timeout_s: 1200
+      skip_health_check: true
+      retries: 10
+      retry_delay_s: 5.0
+      retry_max_delay_s: 90.0
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+      stable_count: 2
+      stable_delay_s: 1.0
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 30
