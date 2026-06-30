@@ -107,6 +107,16 @@ Selection is driven by `problem_info["dataset_name"]` (set in the input JSONL). 
 | contains `SWE-rebench`                   | `SWERebenchDatasetProcessor`             | `setup_scripts/swe_rebench.sh` (V2)            | In-container `git apply` + `test_cmd`; **host-side** parsing via SWE-rebench's `log_parsers`               |
 | `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`            | none (uses `swe_bench_ext` helper module)      | Run framework-specific test command via `lighthouse`-style flags; host-side parsing via `parse_and_check_tests` |
 | `nv-internal-1`                          | `NVInternalDatasetProcessor`             | none                                            | Synthesizes an env+`run_script.sh`+`parsing_script.py` from the instance's docker `ENV` lines and `before_repo_set_cmd`; tests gated by `f2p ⊆ passed ∧ p2p ⊆ passed` |
+| `deepswe` ⚠️ **WIP**                     | `DeepSWEDatasetProcessor`                | none (uses Harbor task format inline)           | Harbor `tests/test.sh` verifier baked into the SIF; reads `1`/`0` from `/logs/verifier/reward.txt`. Config: [`swebench_deepswe.yaml`](configs/swebench_deepswe.yaml). |
+| `denovoswe` ⚠️ **WIP**                   | `DeNovoSWEDatasetProcessor`              | none (uses bundled `_denovoswe_clean.sh` + in-container `_denovoswe_eval.py`) | Wipes the original source via `clean.sh`, re-injects spec as `README.md`, applies agent patch, lays canonical tests from `test_patch`, runs per-file pytest with `--collect-only` pre-flight; reward = 1 iff every `passed_ptp` test passes. Config: [`swebench_denovoswe.yaml`](configs/swebench_denovoswe.yaml). |
+
+> [!WARNING]
+> **`deepswe` and `denovoswe` are work-in-progress and not fully verified.** Golden-patch validation has been run end-to-end but full agent-driven evaluation hasn't been baselined against a reference model yet:
+>
+> - `deepswe` (Harbor task format) — 110/113 golden-resolved; the three remaining failures are dataset-side broken baselines mitigated via `KNOWN_BASELINE_FIX` in `deepswe_dataprocessor.py`. See [`memory/deepswe-integration.md`](../../docs/memory/deepswe-integration.md) (internal note).
+> - `denovoswe` (AweAI-Team/DeNovoSWE doc-to-repo) — 3034/3668 (82.69%) golden-resolved. ~17% of golden failures are dataset noise (brittle `passed_ptp` tests) and ~2% are catastrophic collection blowups (large test suites where one drifted parametrize-label kills the batch). The two known mitigations from AweAgent's reference (`--collect-only` pre-flight + intersect; `failed_ptp` AST removal) are partially implemented — the parser is still permissive about which IDs it captures, so a marginal v1↔v2 regression rate (~0.4%) exists. See `_denovoswe_eval.py` and `DeNovoSWEDatasetProcessor.get_run_command`. The empty-patch false-pass bug (an agent timeout that produced no patch was previously falsely graded against the image's original source) is **fixed** as of `IS_GOLDEN` gating; agent-mode runs that produce empty patches now correctly score 0.
+>
+> Treat reward signals from `deepswe` / `denovoswe` as directional until a full agent-driven baseline is reproduced and matches published numbers.
 
 All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`_setup_directory_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
 
@@ -472,6 +482,8 @@ Supported datasets:
 | `princeton-nlp/SWE-bench*` (e.g. `_Verified`, `_Lite`) | `SweBenchDatasetProcessor`           |
 | `SWE-bench/SWE-bench_Multilingual` (any name containing `SWE-bench_Multilingual`) | `SweBenchMultilingualDatasetProcessor` |
 | any name containing `SWE-rebench`        | `SWERebenchDatasetProcessor`         |
+| `deepswe` ⚠️ **WIP**                     | `DeepSWEDatasetProcessor` — golden patch is the Harbor `solution.patch`. |
+| `denovoswe` ⚠️ **WIP**                   | `DeNovoSWEDatasetProcessor` — there is no model-style patch; golden = the image's pre-existing source. The harness sets `is_golden=true` (from `verify_golden_patch`) so the eval skips `clean.sh` + patch apply and grades the original source against `passed_ptp`. Empty `instance_dict["patch"]` is accepted only on the golden path. |
 
 For each supported dataset, the wrapper:
 
