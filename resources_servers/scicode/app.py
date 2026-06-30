@@ -23,6 +23,8 @@ Designed to execute each sub-step via a Ray subprocess worker (instead of a Dock
 """
 
 import asyncio
+import logging
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -38,6 +40,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+
+LOG = logging.getLogger(__name__)
 
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
@@ -79,6 +83,10 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
+        # Pin sub-step execution to THIS server's interpreter: its venv has the SciCode
+        # execution deps (h5py, scipy<1.14, sympy). The Ray worker's own python (shared
+        # cluster) does not, so relying on it silently fails every sub-step (FEP-1136).
+        self._interpreter = sys.executable
 
     def _resolve_test_data(self) -> str:
         if not self.config.test_data_fpath:
@@ -124,8 +132,11 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             async with self._semaphore:
-                future = run_substep_remote.remote(program, self.config.timeout_secs)
+                future = run_substep_remote.remote(program, self.config.timeout_secs, self._interpreter)
                 result = await loop.run_in_executor(None, ray.get, future)
+            if not result["passed"] and result.get("error"):
+                # Don't let sub-step failures (esp. environment/import errors) stay silent.
+                LOG.warning("SciCode sub-step %s failed: %s", sub_step["step_number"], result["error"][-500:])
             return bool(result["passed"])
 
         step_results = list(await asyncio.gather(*[_run_substep(i) for i in scored]))

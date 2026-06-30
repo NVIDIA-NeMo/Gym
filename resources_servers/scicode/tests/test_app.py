@@ -12,13 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 import tempfile
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import resources_servers.scicode.app as app
+import resources_servers.scicode.scicode_integration.runner as runner
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.scicode.app import (
@@ -99,18 +102,52 @@ def test_build_test_program_injects_path_and_targets():
 
 
 def test_run_substep_pass():
-    assert run_substep("assert 1 == 1", timeout_secs=10.0)["passed"] is True
+    assert run_substep("assert 1 == 1", timeout_secs=10.0, interpreter=sys.executable)["passed"] is True
 
 
 def test_run_substep_fail_returns_stderr():
-    result = run_substep("raise ValueError('boom')", timeout_secs=10.0)
+    result = run_substep("raise ValueError('boom')", timeout_secs=10.0, interpreter=sys.executable)
     assert result["passed"] is False
     assert "ValueError" in result["error"]
 
 
 def test_run_substep_timeout():
-    result = run_substep("import time\ntime.sleep(5)", timeout_secs=0.5)
+    result = run_substep("import time\ntime.sleep(5)", timeout_secs=0.5, interpreter=sys.executable)
     assert result == {"passed": False, "error": "timeout"}
+
+
+# FEP-1136: sub-steps must run under the resources-server's interpreter (its venv has h5py /
+# scipy<1.14 / sympy), NOT the Ray worker's ambient python. These guard against regressing to
+# the silent uniform-0% failure where the program ran in a venv missing the SciCode deps.
+def test_run_substep_invokes_provided_interpreter(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.os.path, "isfile", lambda p: True)
+    run_substep("pass", timeout_secs=5.0, interpreter="/opt/scicode/.venv/bin/python")
+    # The program is executed by the *given* interpreter, not the worker's sys.executable.
+    assert seen["argv"][:2] == ["/opt/scicode/.venv/bin/python", "-c"]
+
+
+def test_run_substep_missing_interpreter_returns_clear_error():
+    result = run_substep("assert 1 == 1", timeout_secs=5.0, interpreter="/no/such/python")
+    assert result["passed"] is False
+    assert "interpreter not found" in result["error"]
+
+
+def test_run_substep_uses_given_interpreter_not_ambient(tmp_path):
+    # A distinct (symlinked) path proves run_substep honors the supplied interpreter rather than
+    # silently using sys.executable.
+    link = tmp_path / "scicode-python"
+    link.symlink_to(sys.executable)
+    result = run_substep(
+        "import sys; assert sys.executable == %r" % str(link), timeout_secs=10.0, interpreter=str(link)
+    )
+    assert result["passed"] is True
 
 
 # ----------------------------
@@ -189,3 +226,25 @@ class TestApp:
         assert result.step_results == [True, False]
         assert result.num_steps_passed == 1
         assert result.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_verify_dispatches_with_server_interpreter(self):
+        # FEP-1136 regression: verify() must dispatch run_substep with the resources-server's
+        # OWN interpreter (its venv has h5py/scipy<1.14), not the Ray worker's ambient python.
+        captured = {}
+
+        class _Future:
+            pass
+
+        def fake_remote(program, timeout, interpreter):
+            captured["interpreter"] = interpreter
+            return _Future()
+
+        with (
+            tempfile.NamedTemporaryFile(suffix=".h5") as h5,
+            patch.object(app.run_substep_remote, "remote", fake_remote),
+            patch.object(app.ray, "get", lambda f: {"passed": True, "error": ""}),
+        ):
+            server = _server(h5.name)
+            await server.verify(_request(solutions={"1.1": "a"}, n_steps=1))
+        assert captured["interpreter"] == sys.executable

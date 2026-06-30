@@ -25,9 +25,9 @@ H5PY_FILE = "/data/test_data.h5"; here it is injected from config.
 """
 
 import json
+import os
 import re
 import subprocess
-import sys
 
 import ray
 
@@ -218,10 +218,20 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
 
 # Kept as a plain function (then wrapped with ray.remote below) so the executor logic can be
 # unit-tested directly without launching Ray.
-def run_substep(program: str, timeout_secs: float) -> dict:
-    """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
+def run_substep(program: str, timeout_secs: float, interpreter: str) -> dict:
+    """Run one sub-step program in a subprocess under ``interpreter``. Exit code 0 == all passed.
+
+    ``interpreter`` MUST be the resources server's own Python: its venv carries the SciCode
+    execution deps (h5py, scipy<1.14, sympy) declared in requirements.txt. Do NOT fall back to
+    this Ray worker's ``sys.executable`` — under the shared-cluster topology the worker runs a
+    different venv that lacks those deps, so every sub-step dies at ``import h5py`` and the whole
+    benchmark silently scores 0% (FEP-1136).
+    """
+    if not interpreter or not os.path.isfile(interpreter):
+        # Surface a clear error instead of a cryptic ModuleNotFoundError from the wrong env.
+        return {"passed": False, "error": f"scicode: execution interpreter not found on worker: {interpreter!r}"}
     try:
-        proc = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=timeout_secs)
+        proc = subprocess.run([interpreter, "-c", program], capture_output=True, timeout=timeout_secs)
     except subprocess.TimeoutExpired:
         return {"passed": False, "error": "timeout"}
     passed = proc.returncode == 0
