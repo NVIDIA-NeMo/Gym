@@ -817,3 +817,29 @@ class TestStrictBoxedLatexExtraction:
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+    async def test_last_box_wins_over_thinking_box(self) -> None:
+        """Two letter boxes: the LAST \\boxed{} is the final answer, not the first.
+
+        A chain-of-thought rollout may box a discarded candidate before the real
+        answer; strict mode must read the final box (E), not the earlier one (C).
+        """
+        server = self._make_server()
+        text = r"Candidate is \boxed{C}, but on reflection the answer is \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_non_letter_thinking_box_does_not_shadow_answer(self) -> None:
+        """A non-letter intermediate box must not block extraction of a later answer box.
+
+        Regression guard: reading only the first box would parse \\text{some idea},
+        find no letter, and return no_answer despite the real \\boxed{E} that follows.
+        """
+        server = self._make_server()
+        text = r"Thinking: \boxed{\text{some idea}}. Final answer: \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0

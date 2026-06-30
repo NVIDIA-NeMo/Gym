@@ -115,13 +115,16 @@ LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
 
 
 def _extract_boxed_inner(text: str) -> Optional[str]:
-    """Return everything inside the first \\boxed{...}, or None.
+    """Return everything inside the last \\boxed{...}, or None.
 
-    Counts braces so a nested wrapper like \\boxed{\\text{E}} returns the full
-    "\\text{E}" instead of stopping early at the first "}".
+    Uses the LAST \\boxed{ so CoT intermediate boxes are skipped and the
+    final answer wins (matching the convention in other resources servers,
+    e.g. math_with_code, abstention). Counts braces so a nested wrapper like
+    \\boxed{\\text{E}} returns the full "\\text{E}" instead of stopping early at
+    the first "}".
     """
     marker = "\\boxed{"
-    start = text.find(marker)
+    start = text.rfind(marker)
     if start == -1:
         return None
     depth = 1
