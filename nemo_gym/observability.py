@@ -433,7 +433,7 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
     regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
     prefixed model call). When capture is enabled the middleware additionally records each observed
     call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-    unchanged (streaming SSE responses are forwarded but their body is not buffered).
+    unchanged (streamed SSE bodies are forwarded as they arrive and also buffered for reassembly).
     """
     app.add_middleware(_CaptureMiddleware, store=make_capture_store(config), config=config)
 
