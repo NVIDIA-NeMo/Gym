@@ -123,7 +123,7 @@ Use the bundled custom components in `components/`:
 
 Component-scoped CSS lives next to its TSX (e.g. `NavButton.css` next to `NavButton.tsx`) and is loaded via a sibling `import "./NavButton.css"` — keep new component styles co-located the same way.
 
-The footer, logos, favicon, fonts, brand colors, base CSS, and OneTrust JS are all inherited from the `nvidia` global theme published from [NVIDIA/fern-components](https://github.com/NVIDIA/fern-components) via `global-theme: nvidia` in `docs.yml`. Don't re-add `footer:`, `logo: { dark, light, height }`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` here — change them upstream and re-upload the theme. The one exception is the `logo.right-text: NeMo Gym` override (the theme hardcodes "Documentation").
+The footer, logos, favicon, fonts, brand colors, base CSS, and OneTrust JS are all inherited from the `nvidia` global theme published from NVIDIA/fern-components via `global-theme: nvidia` in `docs.yml`. Don't re-add `footer:`, `logo: { dark, light, height }`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` here — change them upstream and re-upload the theme. The one exception is the `logo.right-text: NeMo Gym` override (the theme hardcodes "Documentation").
 
 Standard Fern components are also available — `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Cards>` / `<Card>`, `<Badge>`, etc. Don't use GitHub `> [!NOTE]` syntax — it does not render in MDX.
 

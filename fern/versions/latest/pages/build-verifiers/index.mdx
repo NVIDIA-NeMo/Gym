@@ -17,7 +17,7 @@ New to the concepts? Start with [Environments](/about/concepts/environments) and
 You build a resources server by subclassing one of two base classes. At runtime it runs as a web server that the agent drives over HTTP:
 
 - **`SimpleResourcesServer`** — the agent calls `/seed_session` at the start to initialize per-task state (optional) and `/verify` at the end to score the rollout. Tools are exposed as additional endpoints or over MCP.
-- **`GymnasiumServer`** — scores incrementally via `/step` (with `/reset` at the start) instead of a single `/verify`, for environments that need per-turn observations and rewards.
+- **`GymnasiumServer`** — scores incrementally via `/step` (with `/reset` at the start) instead of a single `/verify`, for environments that need per-turn observations and rewards. `GymnasiumServer` is provided by the bundled `resources_servers/gymnasium/` package, not the core `nemo_gym` library — import it with `from resources_servers.gymnasium import GymnasiumServer`.
 
 <Cards>
 
