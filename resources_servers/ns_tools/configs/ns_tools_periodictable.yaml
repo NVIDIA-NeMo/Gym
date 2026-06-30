@@ -1,0 +1,13 @@
+ns_tools_periodictable:
+  resources_servers:
+    ns_tools_periodictable:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.periodictable_tool.PeriodictableTool
+      domain: agent
+      verified: false
+      description: NeMo Skills periodic table element and isotope lookup tool
+      value: Enable chemistry and isotope lookup through NeMo Skills MCP tools
+

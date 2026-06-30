@@ -1,0 +1,32 @@
+---
+title: "Build Verifiers"
+description: "Build the resources server that scores rollouts — the verifier, state, and verification patterns."
+position: 1
+---
+
+A verifier scores an agent's behavior on a task. In NeMo Gym you implement it in a **resources server** — the component that owns the verifier, per-task state, and any environment-specific tools.
+
+<Info>
+
+New to the concepts? Start with [Environments](/about/concepts/environments) and [Architecture](/about/architecture) to see how the resources server, agent server, and model server fit together.
+
+</Info>
+
+## Resources Server Interfaces
+
+You build a resources server by subclassing one of two base classes. At runtime it runs as a web server that the agent drives over HTTP:
+
+- **`SimpleResourcesServer`** — the agent calls `/seed_session` at the start to initialize per-task state (optional) and `/verify` at the end to score the rollout. Tools are exposed as additional endpoints or over MCP.
+- **`GymnasiumServer`** — scores incrementally via `/step` (with `/reset` at the start) instead of a single `/verify`, for environments that need per-turn observations and rewards.
+
+<Cards>
+
+<Card title="Verification Patterns" href="/build-verifiers/verification-patterns">
+How to score a rollout, from execution and state checks to LLM-as-Judge.
+</Card>
+
+<Card title="Multi-Reward Verification" href="/build-verifiers/multi-reward-verification">
+Score an agent on several objectives at once.
+</Card>
+
+</Cards>

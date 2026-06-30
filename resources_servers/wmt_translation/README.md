@@ -70,17 +70,17 @@ For an end-to-end SLURM run with COMET enabled, see the
 
 ```bash
 # Running servers (BLEU-only locally; flip compute_comet=true on cluster)
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/wmt_translation/configs/wmt_translation.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    "++wmt_translation.resources_servers.wmt_translation.compute_comet=false"
+gym env start \
+    --model-type vllm_model \
+    --resources-server wmt_translation \
+    ++wmt_translation.resources_servers.wmt_translation.compute_comet=false
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=wmt_translation_simple_agent \
-    +input_jsonl_fpath=resources_servers/wmt_translation/data/example.jsonl \
-    +output_jsonl_fpath=results/wmt_translation_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent wmt_translation_simple_agent \
+    --input resources_servers/wmt_translation/data/example.jsonl \
+    --output results/wmt_translation_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 For a fully reproducible end-to-end SLURM run that brings up vLLM with

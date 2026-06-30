@@ -14,17 +14,17 @@ resource server.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/mmlu/config.yaml]"
+gym eval prepare --benchmark mmlu
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/mmlu/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark mmlu
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=mmlu_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/mmlu/data/mmlu_benchmark.jsonl \
-    +output_jsonl_fpath=results/mmlu/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/eval/aai/mcq-4choices-boxed.yaml
+gym eval run --no-serve \
+    --agent mmlu_mcqa_simple_agent \
+    --input benchmarks/mmlu/data/mmlu_benchmark.jsonl \
+    --output results/mmlu/rollouts.jsonl \
+    --prompt-config benchmarks/prompts/eval/aai/mcq-4choices-boxed.yaml
 ```

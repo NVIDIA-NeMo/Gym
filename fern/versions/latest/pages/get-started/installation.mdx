@@ -8,9 +8,25 @@ position: 2
 Python 3.12 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
 </Info>
 
-Clone from git to get the latest features and environments. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
+Install from PyPI for the quickest setup. Clone from git if you need the latest features and environments, or use the NGC container if you intend to use NeMo Gym with NeMo RL.
 
 <Tabs>
+<Tab title="PyPI">
+
+```bash
+python3.12 -m pip install nemo-gym
+```
+
+Or with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install nemo-gym
+```
+
+The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.12 -m pip install nemo-gym==0.3.1`.
+
+</Tab>
 <Tab title="Git">
 
 ```bash
@@ -33,7 +49,7 @@ docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
 ## Verify Installation
 
 ```bash
-ng_version
+gym --version
 ```
 
 You should see output like:

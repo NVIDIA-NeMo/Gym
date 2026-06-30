@@ -13,27 +13,27 @@ the `full` split (~1140 problems) is `bigcode/bigcodebench@v0.1.4`.
 
 ```bash
 # Prepare benchmark data (hard split, ~148 problems)
-ng_prepare_benchmark "+config_paths=[benchmarks/bigcodebench/config.yaml]"
+gym eval prepare --benchmark bigcodebench
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/bigcodebench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark bigcodebench
 
 # Collecting rollouts (5-row smoke test against the baked example set)
-ng_collect_rollouts \
-    +agent_name=bigcodebench_benchmark_simple_agent \
-    +input_jsonl_fpath=resources_servers/bigcodebench/data/example.jsonl \
-    +output_jsonl_fpath=results/bigcodebench_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent bigcodebench_benchmark_simple_agent \
+    --input resources_servers/bigcodebench/data/example.jsonl \
+    --output results/bigcodebench_rollouts.jsonl \
+    --num-repeats 1
 ```
 
-The benchmark JSONL written by ``ng_prepare_benchmark`` is unbaked
+The benchmark JSONL written by ``gym eval prepare`` is unbaked
 (rows have ``question`` + ``verifier_metadata``; the prompt template is
-applied by the agent at ``/run`` time). Standalone ``ng_collect_rollouts``
+applied by the agent at ``/run`` time). Standalone ``gym eval run --no-serve``
 expects pre-baked ``responses_create_params.input``, so for full-dataset
 runs use the production orchestrator (``nemo_gym_rollouts`` from
-NeMo-Skills) rather than ``ng_collect_rollouts`` directly.
+NeMo-Skills) rather than ``gym eval run --no-serve`` directly.
 
 `prepare.py` exposes a `--split` flag (`hard` or `full`); the config
 defaults to `hard` to match the recipe's parity-comparison run.

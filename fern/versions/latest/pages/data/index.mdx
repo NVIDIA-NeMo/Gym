@@ -1,5 +1,5 @@
 ---
-title: "Data"
+title: "Prepare Data"
 description: ""
 position: 1
 ---
@@ -34,7 +34,7 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | Field | Added By | Description |
 |-------|----------|-------------|
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
-| `agent_ref` | `ng_prepare_data` | Routes each row to its agent server. Auto-generated during data preparation. |
+| `agent_ref` | `gym dataset collate` | Routes each row to its agent server. Auto-generated during data preparation. |
 
 ### Optional Fields
 
@@ -60,7 +60,7 @@ The `agent_ref` field maps each row to a specific agent server, which in turn kn
 }
 ```
 
-**You don't create `agent_ref` manually.** The `ng_prepare_data` tool adds it automatically based on your config file. The tool matches the agent type (`responses_api_agents`) with the agent name from the config.
+**You don't create `agent_ref` manually.** The `gym dataset collate` tool adds it automatically based on your config file. The tool matches the agent type (`responses_api_agents`) with the agent name from the config.
 
 ### Example Data
 
@@ -75,12 +75,11 @@ The `agent_ref` field maps each row to a specific agent server, which in turn kn
 Run this command from the repository root:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/example_multi_step/configs/example_multi_step.yaml"
-
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/test \
-    +mode=example_validation
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server example_multi_step \
+    --output-dir data/test \
+    --mode example_validation
 ```
 
 **Success**: `Finished!` message and `data/test/example_metrics.json` created.
@@ -102,7 +101,9 @@ datasets:
   - name: train
     type: train
     jsonl_fpath: resources_servers/workplace_assistant/data/train.jsonl
-    huggingface_identifier:
+    # Unified dataset source. `type` selects the backend; the other fields are backend-specific.
+    source:
+      type: huggingface
       repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
       artifact_fpath: train.jsonl
     license: Apache 2.0
@@ -114,8 +115,32 @@ datasets:
 | `type` | Yes | `example`, `train`, or `validation` |
 | `jsonl_fpath` | Yes | Path to data file |
 | `license` | Train/validation | See valid values below |
-| `huggingface_identifier` | No | Remote download location |
+| `source` | No | Where to fetch the data from when it's missing locally (see below) |
 | `num_repeats` | No | Repeat count (default: `1`) |
+
+### Dataset `source`
+
+`source` is the unified way to declare where a dataset is fetched from. `type` selects the backend; the remaining fields are backend-specific:
+
+```yaml
+# Hugging Face Hub
+source:
+  type: huggingface
+  repo_id: nvidia/Nemotron-RL-agent-workplace_assistant
+  artifact_fpath: train.jsonl
+
+# GitLab dataset registry
+source:
+  type: gitlab
+  dataset_name: example_multi_step
+  version: 0.0.1
+  artifact_fpath: train.jsonl
+```
+
+<Note>
+The legacy `huggingface_identifier:` / `gitlab_identifier:` blocks still work (a deprecation warning is emitted), so existing configs keep running — but new configs should use `source:`.
+
+</Note>
 
 ### Valid Licenses
 
@@ -126,7 +151,7 @@ datasets:
 ```mermaid
 flowchart LR
     A[Create JSONL] --> B[Add to config]
-    B --> C[Run ng_prepare_data]
+    B --> C[Run gym dataset collate]
     C -->|Pass| D[Train with NeMo RL]
     C -->|Fail| E[Fix and retry]
 ```
@@ -141,13 +166,12 @@ flowchart LR
 To prepare training data with auto-download:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/workplace_assistant/configs/workplace_assistant.yaml"
-
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/workplace_assistant \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server workplace_assistant \
+    --output-dir data/workplace_assistant \
+    --mode train_preparation \
+    --download
 ```
 
 <Tip>
@@ -162,7 +186,7 @@ HuggingFace downloads require authentication. Set `hf_token` in `env.yaml` or ex
 | `JSON parse error at line N` | Invalid JSON | Check quotes, commas, brackets at line N |
 | `ValidationError: responses_create_params` | Missing field | Add `responses_create_params.input` |
 | `A license is required` | Missing license | Add `license` to dataset config |
-| `Missing local datasets` | File not found | Check path or add `+should_download=true` |
+| `Missing local datasets` | File not found | Check path or add `--download` |
 
 ## Guides
 
@@ -192,8 +216,8 @@ YAML-based prompt templates applied at rollout time.
 
 | Command | Description |
 |---------|-------------|
-| `ng_prepare_data` | Validate and generate metrics |
-| `ng_download_dataset_from_hf` | Download from HuggingFace |
+| `gym dataset collate` | Validate and generate metrics |
+| `gym dataset download` | Download from HuggingFace |
 
 See [CLI Commands](/reference/cli-commands) for details.
 

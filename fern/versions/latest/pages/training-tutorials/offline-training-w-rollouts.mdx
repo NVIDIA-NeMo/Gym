@@ -267,9 +267,10 @@ Test your improved model by generating new rollouts on held-out evaluation tasks
 
 ```bash
 # Generate rollouts with improved model
-ng_collect_rollouts +agent_name=improved_agent \
-    +input_jsonl_fpath=evaluation_tasks.jsonl \
-    +output_jsonl_fpath=post_training_rollouts.jsonl
+gym eval run --no-serve \
+    --agent improved_agent \
+    --input evaluation_tasks.jsonl \
+    --output post_training_rollouts.jsonl
 ```
 
 Compare key metrics like average reward, success rate, and task-specific performance against your baseline to measure improvement.
