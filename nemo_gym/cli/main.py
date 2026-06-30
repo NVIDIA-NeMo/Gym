@@ -79,20 +79,12 @@ def dispatch(target: str, overrides: list[str]) -> None:
 
 
 def _value_flag(
-    name: str,
-    hydra_key: str,
-    flag_help: str,
-    *,
-    aliases: tuple[str, ...] = (),
-    choices: tuple[str, ...] | None = None,
-    required: bool = False,
+    name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = (), choices: tuple[str, ...] | None = None
 ) -> Flag:
     """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
     dest = name.replace("-", "_")
     return Flag(
-        register=lambda p: p.add_argument(
-            f"--{name}", *aliases, dest=dest, choices=choices, required=required, help=flag_help
-        ),
+        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
             [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
         ),
@@ -140,20 +132,12 @@ MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API
 
 
 # Shared flag: select a single resources server by name. Reused by `env test`, `env init`, and `env packages`.
-# `env test` runs all servers when unset, so it uses the optional variant; `env init`/`env packages` require it.
-def _resources_server_flag(*, required: bool = False) -> Flag:
-    return Flag(
-        register=lambda p: p.add_argument(
-            "--resources-server", metavar="NAME", required=required, help="Name of the resources server."
-        ),
-        translate_to_hydra=lambda args: (
-            [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
-        ),
-    )
-
-
-RESOURCES_SERVER = _resources_server_flag()
-RESOURCES_SERVER_REQUIRED = _resources_server_flag(required=True)
+RESOURCES_SERVER = Flag(
+    register=lambda p: p.add_argument("--resources-server", metavar="NAME", help="Name of the resources server."),
+    translate_to_hydra=lambda args: (
+        [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
+    ),
+)
 
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
@@ -299,21 +283,7 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
 
 
-def _require_storage_flags(args: argparse.Namespace, required_by_storage: dict[str, tuple[str, ...]]) -> None:
-    """Fail cleanly (argparse-style, exit 2) when the flags provided don't satisfy the selected --storage backend.
-
-    The two dataset transfer commands accept a different required set per backend, so requiredness can't be
-    declared statically in argparse. We check it here and report which flags are mandatory for `--storage <x>`.
-    """
-    required = required_by_storage[args.storage]
-    missing = [name for name in required if getattr(args, name.replace("-", "_")) is None]
-    if missing:
-        flags = lambda names: ", ".join(f"--{name}" for name in names)
-        args._parser.error(f"--storage {args.storage} requires {flags(missing)} to be specified")
-
-
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
-    _require_storage_flags(args, {"hf": ("input",), "gitlab": ("input", "name", "revision")})
     targets = {
         "hf": "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli",
         "gitlab": "nemo_gym.cli.dataset:upload_jsonl_dataset_cli",
@@ -322,7 +292,6 @@ def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
-    _require_storage_flags(args, {"hf": ("repo-id",), "gitlab": ("name", "revision", "artifact", "output")})
     targets = {
         "hf": "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
         "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
@@ -339,6 +308,8 @@ GROUPS = {
     "dev": "Contributor helpers.",
 }
 
+
+# NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
@@ -400,15 +371,13 @@ COMMANDS = {
     "dataset rm": Command(
         target="nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli",
         summary="Delete a dataset from GitLab.",
-        flags=(_value_flag("name", "dataset_name", "Name of the dataset to delete.", required=True),),
+        flags=(_value_flag("name", "dataset_name", "Name of the dataset to delete."),),
     ),
     "dataset migrate": Command(
         target="nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli",
         summary="Transfer a dataset from GitLab to HF.",
         flags=(
-            _value_flag(
-                "input", "input_jsonl_fpath", "Local JSONL file to upload to HF.", aliases=("-i",), required=True
-            ),
+            _value_flag("input", "input_jsonl_fpath", "Local JSONL file to upload to HF.", aliases=("-i",)),
             _value_flag("name", "dataset_name", "Dataset name."),
             _value_flag("revision", "revision", "Dataset revision (HF)."),
             _value_flag("split", "split", "Dataset split."),
@@ -419,9 +388,9 @@ COMMANDS = {
         target="nemo_gym.cli.dataset:materialize_prompts_cli",
         summary="Generate a dataset preview.",
         flags=(
-            _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",), required=True),
-            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply.", required=True),
-            _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",), required=True),
+            _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",)),
+            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
         ),
     ),
     "dataset collate": Command(
@@ -439,7 +408,7 @@ COMMANDS = {
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
         summary="Scaffold config for a new server, benchmark, or agent.",
-        flags=(RESOURCES_SERVER_REQUIRED,),
+        flags=(RESOURCES_SERVER,),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
@@ -465,7 +434,7 @@ COMMANDS = {
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resources server.",
         flags=(
-            RESOURCES_SERVER_REQUIRED,
+            RESOURCES_SERVER,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
@@ -562,9 +531,8 @@ COMMANDS = {
                 "inputs",
                 "materialized_inputs_jsonl_fpath",
                 "Materialized inputs JSONL fed to rollout collection.",
-                required=True,
             ),
-            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection.", required=True),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
