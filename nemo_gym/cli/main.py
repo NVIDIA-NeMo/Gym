@@ -79,12 +79,20 @@ def dispatch(target: str, overrides: list[str]) -> None:
 
 
 def _value_flag(
-    name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = (), choices: tuple[str, ...] | None = None
+    name: str,
+    hydra_key: str,
+    flag_help: str,
+    *,
+    aliases: tuple[str, ...] = (),
+    choices: tuple[str, ...] | None = None,
+    required: bool = False,
 ) -> Flag:
     """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
     dest = name.replace("-", "_")
     return Flag(
-        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
+        register=lambda p: p.add_argument(
+            f"--{name}", *aliases, dest=dest, choices=choices, required=required, help=flag_help
+        ),
         translate_to_hydra=lambda args: (
             [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
         ),
@@ -130,13 +138,22 @@ MODEL = _value_flag(
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
 
+
 # Shared flag: select a single resources server by name. Reused by `env test`, `env init`, and `env packages`.
-RESOURCES_SERVER = Flag(
-    register=lambda p: p.add_argument("--resources-server", metavar="NAME", help="Name of the resources server."),
-    translate_to_hydra=lambda args: (
-        [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
-    ),
-)
+# `env test` runs all servers when unset, so it uses the optional variant; `env init`/`env packages` require it.
+def _resources_server_flag(*, required: bool = False) -> Flag:
+    return Flag(
+        register=lambda p: p.add_argument(
+            "--resources-server", metavar="NAME", required=required, help="Name of the resources server."
+        ),
+        translate_to_hydra=lambda args: (
+            [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
+        ),
+    )
+
+
+RESOURCES_SERVER = _resources_server_flag()
+RESOURCES_SERVER_REQUIRED = _resources_server_flag(required=True)
 
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
@@ -282,7 +299,21 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
 
 
+def _require_storage_flags(args: argparse.Namespace, required_by_storage: dict[str, tuple[str, ...]]) -> None:
+    """Fail cleanly (argparse-style, exit 2) when the flags provided don't satisfy the selected --storage backend.
+
+    The two dataset transfer commands accept a different required set per backend, so requiredness can't be
+    declared statically in argparse. We check it here and report which flags are mandatory for `--storage <x>`.
+    """
+    required = required_by_storage[args.storage]
+    missing = [name for name in required if getattr(args, name.replace("-", "_")) is None]
+    if missing:
+        flags = lambda names: ", ".join(f"--{name}" for name in names)
+        args._parser.error(f"--storage {args.storage} requires {flags(missing)} to be specified")
+
+
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
+    _require_storage_flags(args, {"hf": ("input",), "gitlab": ("input", "name", "revision")})
     targets = {
         "hf": "nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_cli",
         "gitlab": "nemo_gym.cli.dataset:upload_jsonl_dataset_cli",
@@ -291,6 +322,7 @@ def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
+    _require_storage_flags(args, {"hf": ("repo-id",), "gitlab": ("name", "revision", "artifact", "output")})
     targets = {
         "hf": "nemo_gym.cli.dataset:download_jsonl_dataset_from_hf_cli",
         "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
@@ -368,13 +400,15 @@ COMMANDS = {
     "dataset rm": Command(
         target="nemo_gym.cli.dataset:delete_jsonl_dataset_from_gitlab_cli",
         summary="Delete a dataset from GitLab.",
-        flags=(_value_flag("name", "dataset_name", "Name of the dataset to delete."),),
+        flags=(_value_flag("name", "dataset_name", "Name of the dataset to delete.", required=True),),
     ),
     "dataset migrate": Command(
         target="nemo_gym.cli.dataset:upload_jsonl_dataset_to_hf_and_delete_gitlab_cli",
         summary="Transfer a dataset from GitLab to HF.",
         flags=(
-            _value_flag("input", "input_jsonl_fpath", "Local JSONL file to upload to HF.", aliases=("-i",)),
+            _value_flag(
+                "input", "input_jsonl_fpath", "Local JSONL file to upload to HF.", aliases=("-i",), required=True
+            ),
             _value_flag("name", "dataset_name", "Dataset name."),
             _value_flag("revision", "revision", "Dataset revision (HF)."),
             _value_flag("split", "split", "Dataset split."),
@@ -385,9 +419,9 @@ COMMANDS = {
         target="nemo_gym.cli.dataset:materialize_prompts_cli",
         summary="Generate a dataset preview.",
         flags=(
-            _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",)),
-            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
-            _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
+            _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",), required=True),
+            _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply.", required=True),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",), required=True),
         ),
     ),
     "dataset collate": Command(
@@ -405,7 +439,7 @@ COMMANDS = {
     "env init": Command(
         target="nemo_gym.cli.env:init_resources_server",
         summary="Scaffold config for a new server, benchmark, or agent.",
-        flags=(RESOURCES_SERVER,),
+        flags=(RESOURCES_SERVER_REQUIRED,),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
@@ -431,7 +465,7 @@ COMMANDS = {
         target="nemo_gym.cli.env:pip_list",
         summary="Print pip packages for the selected resources server.",
         flags=(
-            RESOURCES_SERVER,
+            RESOURCES_SERVER_REQUIRED,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
@@ -525,9 +559,12 @@ COMMANDS = {
         summary="Compute a reward profile from rollouts.",
         flags=(
             _value_flag(
-                "inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL fed to rollout collection."
+                "inputs",
+                "materialized_inputs_jsonl_fpath",
+                "Materialized inputs JSONL fed to rollout collection.",
+                required=True,
             ),
-            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection.", required=True),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
@@ -571,6 +608,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _format_validation_error(exc) -> str:
+    """Render a pydantic ValidationError as a concise CLI message instead of a stack trace.
+
+    A missing required flag/config value is the common case (it surfaces as a `missing` error);
+    other failures (wrong type, bad value) are listed with pydantic's own message. Mirrors the
+    `Error: <msg>` style of `exit_cleanly_on_config_error`, which only covers ConfigError, not the
+    pydantic ValidationError raised by every command's `model_validate`.
+    """
+    missing: list[str] = []
+    invalid: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<config>"
+        if error["type"] == "missing":
+            missing.append(location)
+        else:
+            invalid.append(f"{location} ({error['msg']})")
+
+    parts: list[str] = []
+    if missing:
+        parts.append(
+            f"missing required configuration: {', '.join(missing)}. "
+            f"Provide each via its flag (see --help) or as a +{missing[0]}=<value> override."
+        )
+    if invalid:
+        parts.append(f"invalid configuration: {'; '.join(invalid)}.")
+    return " ".join(parts) if parts else str(exc)
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -595,15 +660,23 @@ def main() -> None:
     try:
         translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
     except ValueError as exc:
-        sys.stderr.write(f"{getattr(args, '_parser', parser).prog}: error: {exc}\n")
-        sys.exit(2)
+        getattr(args, "_parser", parser).error(str(exc))
 
     # --config and the asset selectors all emit +config_paths; coalesce them into one token.
     overrides = _merge_config_paths(translated + overrides)
     # --verbose flows through the config (as +verbose=true) so it reaches spun-up servers, not just this process.
     if getattr(args, "verbose", False):
         overrides = ["+verbose=true", *overrides]
-    if callable(command.target):
-        command.target(args, overrides)
-    else:
-        dispatch(command.target, overrides)
+
+    # Local import keeps `gym --help` (which returns before this point) free of pydantic's import cost;
+    # any real command loads pydantic anyway via its config's model_validate.
+    from pydantic import ValidationError
+
+    try:
+        if callable(command.target):
+            command.target(args, overrides)
+        else:
+            dispatch(command.target, overrides)
+    except ValidationError as exc:
+        # descriptive error message for pydantic validation errors
+        getattr(args, "_parser", parser).error(_format_validation_error(exc))
