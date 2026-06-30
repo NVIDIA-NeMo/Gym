@@ -112,7 +112,7 @@ jobs:
     name: Server suite
     runs-on: ubuntu-latest
     needs: [server-suite]
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Aggregate shard results
         run: |
