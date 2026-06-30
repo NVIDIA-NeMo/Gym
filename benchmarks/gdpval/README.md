@@ -147,7 +147,8 @@ gym eval run \
 ```
 
   The cache must contain a `task_<id>/repeat_<n>/` dir for every repeat the run
-  requests (the benchmark uses `num_repeats: 2`, i.e. `repeat_0` and `repeat_1`).
+  requests (the benchmark defaults to `num_repeats: 1`, i.e. `repeat_0`; raise it
+  with `++...datasets.0.num_repeats=N` and the cache needs `repeat_0`…`repeat_{N-1}`).
 
 ### Full run as a single stage
 
