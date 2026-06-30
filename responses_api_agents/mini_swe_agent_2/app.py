@@ -50,6 +50,7 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
+    apply_rollout_prefix,
     get_first_server_config_dict,
 )
 
@@ -715,6 +716,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            base_url = apply_rollout_prefix(base_url, self.rollout_id_from_run(body))
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
