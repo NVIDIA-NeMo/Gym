@@ -51,7 +51,12 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-$MODEL_API_KEY}"
 # per-task sandbox keeps this gateway isolated to one task.
 : "${OPENCLAW_GATEWAY_TOKEN:?run_task.sh needs OPENCLAW_GATEWAY_TOKEN}"
 echo "[run_task] starting gateway (token auth, loopback)"
-openclaw gateway --auth token --bind loopback --allow-unconfigured >"$OUT/gateway.log" 2>&1 &
+# apptainer shares the host network -> a fixed gateway port collides across concurrent
+# sandboxes. Give each sandbox a unique port; the in-sandbox client reads gateway.port
+# from $HOME/.openclaw (HOME is per-sandbox), so gateway + client agree.
+GWPORT=$(shuf -i 20000-60000 -n1)
+openclaw config set gateway.port "$GWPORT" >/dev/null 2>&1
+openclaw gateway --auth token --bind loopback --allow-unconfigured --port "$GWPORT" >"$OUT/gateway.log" 2>&1 &
 GW_PID=$!
 # Port-agnostic readiness: the gateway binds an ephemeral port, so wait on its log
 # marker ("plugins pre-warmed", ~15s) rather than probing a fixed port.
