@@ -23,7 +23,6 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import orjson
 import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -32,7 +31,7 @@ from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmarks_from_config_paths
 from nemo_gym.cli.env import RunHelper, exit_cleanly_on_config_error
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     POLICY_MODEL_KEY_NAME,
@@ -51,6 +50,7 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    loads_jsonl_line,
 )
 from nemo_gym.train_data_utils import TrainDataProcessor
 
@@ -385,6 +385,7 @@ def e2e_rollout_collection():  # pragma: no cover
         rh.shutdown()
 
 
+@exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
@@ -392,6 +393,7 @@ def collect_rollouts():  # pragma: no cover
     asyncio.run(rch.run_from_config(config))
 
 
+@exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     config = RolloutAggregationConfig.model_validate(get_global_config_dict())
     rah = RolloutAggregationHelper()
@@ -399,14 +401,25 @@ def aggregate_rollouts():  # pragma: no cover
     asyncio.run(rah.run_from_config(config))
 
 
+@exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
+    if not Path(config.materialized_inputs_jsonl_fpath).exists():
+        raise ConfigPathNotFoundError(
+            f"Input file not found: '{config.materialized_inputs_jsonl_fpath}' (--inputs). "
+            "Check the path is spelled correctly."
+        )
+    if not Path(config.rollouts_jsonl_fpath).exists():
+        raise ConfigPathNotFoundError(
+            f"Input file not found: '{config.rollouts_jsonl_fpath}' (--rollouts). Check the path is spelled correctly."
+        )
+
     with open(config.materialized_inputs_jsonl_fpath) as f:
-        rows = list(map(orjson.loads, f))
+        rows = [loads_jsonl_line(line, config.materialized_inputs_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
     with open(config.rollouts_jsonl_fpath) as f:
-        results = list(map(orjson.loads, f))
+        results = [loads_jsonl_line(line, config.rollouts_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
     # Results may be out of order.
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
