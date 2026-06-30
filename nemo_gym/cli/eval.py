@@ -65,18 +65,17 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
         if needle in haystack:
             return True
         tokens = haystack.replace("_", " ").replace("-", " ").split()
-        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.6):
+        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
             return True
     return False
 
 
-def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
-    """Resolve a benchmark's config to its `(domain, extra search terms)`.
+def _benchmark_domain(bench: BenchmarkConfig) -> str:
+    """Resolve a benchmark's config to its resources server `domain` (for the domain column and `gym search`).
 
-    `BenchmarkConfig` flattens away the resources server name, the resources server `domain`, and the
-    dataset names. We re-resolve the config with the same parser `BenchmarkConfig` uses (so chained
-    `config_paths` / `_inherit_from` are applied) and read those fields back out for the domain column
-    and richer `gym search` matching.
+    `BenchmarkConfig` flattens away the resources server `domain`, so we re-resolve the config with the
+    same parser `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read
+    the field back out.
     """
     initial_config_dict = OmegaConf.load(bench.path)
     if POLICY_MODEL_KEY_NAME not in initial_config_dict:
@@ -86,7 +85,6 @@ def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
 
     domain = ""
-    terms: list[str] = []
     for instance_name in resolved:
         instance = resolved[instance_name]
         if not isinstance(instance, (dict, DictConfig)):
@@ -94,23 +92,12 @@ def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
 
         resources_servers = instance.get("resources_servers")
         if resources_servers:
-            terms.append(instance_name)  # e.g. aime24_math_with_judge_resources_server
-            for rs_name, rs_config in resources_servers.items():
-                terms.append(rs_name)  # e.g. math_with_judge
+            for rs_config in resources_servers.values():
                 found_domain = (rs_config or {}).get("domain")
                 if found_domain:
                     domain = str(found_domain)
 
-        agents = instance.get("responses_api_agents")
-        if agents:
-            for agent_config in agents.values():
-                for dataset in (agent_config or {}).get("datasets") or []:
-                    if (dataset or {}).get("name"):
-                        terms.append(dataset["name"])
-
-    if domain:
-        terms.append(domain)
-    return domain, terms
+    return domain
 
 
 def list_benchmarks() -> None:
@@ -130,25 +117,21 @@ def list_benchmarks() -> None:
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
-    # Resolve the domain + richer search terms once per benchmark, for the domain column and `gym search`.
-    extras = {name: _benchmark_extras(bench) for name, bench in benchmarks.items()}
+    # Resolve the domain once per benchmark, for the domain column and `gym search`.
+    domains = {name: _benchmark_domain(bench) for name, bench in benchmarks.items()}
 
-    # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches across the
-    # benchmark name, agent name, resources server name, dataset names, and domain.
+    # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
+    # across the benchmark name and domain.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        benchmarks = {
-            name: bench
-            for name, bench in benchmarks.items()
-            if _fuzzy_matches(query, name, bench.agent_name, *extras[name][1])
-        }
+        benchmarks = {name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, domains[name])}
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
                 "name": name,
                 "agent_name": bench.agent_name,
-                "domain": extras[name][0],
+                "domain": domains[name],
                 "num_repeats": bench.num_repeats,
             }
             for name, bench in benchmarks.items()
@@ -176,7 +159,7 @@ def list_benchmarks() -> None:
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, extras[name][0], bench.agent_name, str(bench.num_repeats))
+        table.add_row(name, domains[name], bench.agent_name, str(bench.num_repeats))
 
     rich.print(table)
 
