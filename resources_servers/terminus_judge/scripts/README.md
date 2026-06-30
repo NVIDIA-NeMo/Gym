@@ -12,7 +12,7 @@ This pipeline uses the public `open-thoughts/OpenThoughts-Agent-v1-SFT` dataset 
    - `datasets`
    - `openapi-schema-validator`
 2. For smoke stage:
-   - `ng_run`, `ng_status`, `ng_collect_rollouts` on `PATH`
+   - `gym env start`, `gym env status`, `gym eval run --no-serve` on `PATH`
    - reachable policy/model endpoint
 3. If HF cache is read-only:
    - `HF_HOME=/tmp/hf_home`

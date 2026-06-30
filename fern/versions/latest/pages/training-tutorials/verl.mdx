@@ -36,14 +36,12 @@ Using NeMo Gym, prepare the training dataset for your environment. Each row need
 cd $NEMO_GYM_ROOT
 source .venv/bin/activate
 
-config_paths="resources_servers/workplace_assistant/configs/workplace_assistant.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
-
-ng_prepare_data \
-    "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/workplace_assistant \
-    +mode=train_preparation \
-    +should_download=true \
+gym dataset collate \
+    --resources-server workplace_assistant \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --output-dir data/workplace_assistant \
+    --mode train_preparation \
+    --download \
     +data_source=huggingface
 ```
 

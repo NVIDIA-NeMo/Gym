@@ -21,7 +21,7 @@ This benchmark reuses `math_with_judge` in symbolic-only mode
 ## Data Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/aime25-x/config.yaml]"
+gym eval prepare --benchmark aime25-x
 ```
 
 That writes `benchmarks/aime25-x/data/aime25-x_benchmark.jsonl`.
@@ -36,17 +36,22 @@ python benchmarks/aime25-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/aime25-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark aime25-x \
+    --model-type vllm_model
 ```
 
 Then in another shell:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=aime25-x_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/aime25-x/data/aime25-x_benchmark.jsonl \
-    +output_jsonl_fpath=results/aime25-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=32 +num_repeats_add_seed=true \
-    "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 65536}"
+gym eval run --no-serve \
+    --agent aime25-x_math_with_judge_simple_agent \
+    --input benchmarks/aime25-x/data/aime25-x_benchmark.jsonl \
+    --output results/aime25-x/rollouts.jsonl \
+    --num-repeats 32 \
+    --prompt-config benchmarks/prompts/generic/default.yaml \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --max-output-tokens 65536 \
+    +num_repeats_add_seed=true
 ```

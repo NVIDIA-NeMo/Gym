@@ -37,6 +37,31 @@ RESULTS_DIR = WORKING_DIR / "results"
 
 sys.path.append(str(PARENT_DIR))
 
+
+def _resolve_under_cwd_or_install(path) -> Path:
+    """Resolve a possibly-relative path for *reading* a built-in or user-supplied file.
+
+    Absolute paths are returned unchanged. A relative path is tried first under the current working
+    directory (the user's project), then under the Gym install root (``PARENT_DIR``) where built-in
+    assets live in both editable and wheel installs. This mirrors ``config_paths`` resolution, so a
+    repo-relative path like ``resources_servers/<env>/data/example.jsonl`` resolves by name from any
+    cwd. If neither exists the cwd candidate is returned so error messages point at the user's cwd.
+
+    Use this for read paths only — never for write targets (e.g. metrics written next to a dataset),
+    which must stay relative to the user's writable cwd rather than the install root.
+    """
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    cwd_candidate = Path.cwd() / p
+    if cwd_candidate.exists():
+        return cwd_candidate
+    install_candidate = PARENT_DIR / p
+    if install_candidate.exists():
+        return install_candidate
+    return cwd_candidate
+
+
 # TODO: Maybe eventually we want an override for OMP_NUM_THREADS ?
 
 # Turn off HF tokenizers paralellism

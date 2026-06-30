@@ -130,7 +130,8 @@ Perform a batch of rollout collection.
 | `num_repeats` | Optional[int] | The number of times to repeat each example to run. Useful if you want to calculate mean@k, such as mean@4 or mean@16. |
 | `num_repeats_add_seed` | bool | When num_repeats &gt;1, add a "seed" parameter on the Responses create params. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. Refer to [Generation Parameters](#generation-parameters). |
+| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. Refer to [Resume Interrupted Runs](#resume-interrupted-runs). |
 
 **Example**
 
@@ -144,6 +145,37 @@ ng_collect_rollouts \
     +num_samples_in_parallel=10
 ```
 
+#### Generation Parameters
+
+Sampling parameters such as `temperature`, `max_output_tokens`, and `top_p` are not standalone CLI flags — they are passed as overrides inside `responses_create_params` using Hydra's nested dot syntax. Overrides are merged into each input row's existing `responses_create_params` with a **shallow** merge (top-level keys only):
+
+```bash
+ng_collect_rollouts \
+    +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=weather_query.jsonl \
+    +output_jsonl_fpath=weather_rollouts.jsonl \
+    ++responses_create_params.temperature=1.0 \
+    ++responses_create_params.top_p=1.0 \
+    ++responses_create_params.max_output_tokens=4096
+```
+
+The same syntax works for `ng_e2e_collect_rollouts`. Top-level fields such as `temperature` and `max_output_tokens` are straightforward. For nested objects (for example, `++responses_create_params.reasoning.effort=low`), the entire nested dict replaces the row's existing value at that key — other fields under the same nested object are not preserved.
+
+#### Resume Interrupted Runs
+
+Setting `+resume_from_cache=true` lets you restart the **same command** after a crash or interruption and pick up only the rows that have not finished yet. It works for both `ng_collect_rollouts` and `ng_e2e_collect_rollouts`, across any environment.
+
+How it works:
+
+- **Materialized inputs.** On the first run, the fully expanded input rows (after `num_repeats`, `limit`, `prompt_config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `output_jsonl_fpath` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
+- **Incremental output.** Results are flushed to `output_jsonl_fpath` after each completed rollout, so partial output survives a crash.
+- **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
+- **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. With the default `resume_from_cache=False`, existing output is cleared before the run.
+
+<Warning>
+If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
+</Warning>
+
 ### `ng_e2e_collect_rollouts` / `nemo_gym_e2e_collect_rollouts`
 
 Spin up all necessary servers and perform a batch of rollout collection using each dataset inside the provided configs.
@@ -154,7 +186,8 @@ Spin up all necessary servers and perform a batch of rollout collection using ea
 | --- | --- | --- |
 | `output_jsonl_fpath` | str | The output data JSONL file path. |
 | `num_samples_in_parallel` | Optional[int] | Limit the number of concurrent samples running at once. |
-| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. |
+| `responses_create_params` | Dict | Overrides for the `responses_create_params`, such as `temperature` and `max_output_tokens`. Refer to [Generation Parameters](#generation-parameters). |
+| `resume_from_cache` | bool | Resume an interrupted run by skipping rows already completed. Default: `False`. Refer to [Resume Interrupted Runs](#resume-interrupted-runs). |
 
 **Examples**
 
@@ -260,6 +293,38 @@ ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/example_multi_step \
     +mode=example_validation
 ```
+
+---
+
+### `ng_materialize_prompts` / `nemo_gym_materialize_prompts`
+
+Apply a prompt template to raw JSONL data, producing materialized JSONL with populated `responses_create_params.input` for RL training.
+
+Each input row must **not** already have a populated `responses_create_params.input`; the command applies the prompt template from `prompt_config` to each row, fills in the input, and preserves the row's other fields.
+
+**Parameters**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `input_jsonl_fpath` | str | Raw JSONL data (rows without `responses_create_params.input`). |
+| `prompt_config` | str | Path to the prompt YAML file to apply. |
+| `output_jsonl_fpath` | str | Output path for the materialized JSONL with populated prompts. |
+
+**Example**
+
+```bash
+ng_materialize_prompts \
+    +input_jsonl_fpath=data/my_dataset.jsonl \
+    +prompt_config=/path/to/my_prompt.yaml \
+    +output_jsonl_fpath=my_dataset_materialized.jsonl
+```
+
+<Note>
+**Which data-preparation command should I use?**
+
+- **`ng_materialize_prompts`** — a focused, standalone step that applies a prompt template to raw rows to populate `responses_create_params.input`. No servers are started. Use it when you have raw data and just need to turn it into prompt-ready rows.
+- **`ng_prepare_data`** — the full preparation pipeline for training: it can download missing datasets, validate data, and compute dataset metrics, writing train/validation splits and metrics artifacts. Use it to prepare and validate datasets for training or PR submission.
+</Note>
 
 ---
 

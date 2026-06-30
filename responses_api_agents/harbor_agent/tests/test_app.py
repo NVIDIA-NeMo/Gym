@@ -55,6 +55,7 @@ def _make_step_agent(
     logprobs: Optional[List[float]] = None,
     prompt_tokens: int = 500,
     completion_tokens: int = 100,
+    metrics_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     step: Dict[str, Any] = {
         "step_id": step_id,
@@ -74,6 +75,8 @@ def _make_step_agent(
         metrics["completion_token_ids"] = completion_token_ids
     if logprobs is not None:
         metrics["logprobs"] = logprobs
+    if metrics_extra is not None:
+        metrics["extra"] = metrics_extra
     step["metrics"] = metrics
     return step
 
@@ -320,6 +323,59 @@ class TestApp:
         assert response.response.id.startswith("resp_")
         assert len(response.responses_create_params.input) == 1
         assert "Fix the bug" in response.responses_create_params.input[0].content
+
+    async def test_run_with_routed_experts_in_metrics_extra(self):
+        routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+            [[4, 5]],
+            [[6, 7]],
+        ]
+        trajectory = _make_trajectory(
+            steps=[
+                _USER_STEP,
+                _make_step_agent(
+                    2,
+                    "Analysis: I will look at foo.py.\nPlan: Read the file.",
+                    prompt_token_ids=[100, 101],
+                    completion_token_ids=[200, 201],
+                    logprobs=[-0.01, -0.02],
+                    metrics_extra={"routed_experts": routed_experts},
+                ),
+            ],
+        )
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=trajectory):
+            response = await server.run(_make_run_request())
+
+        msg0 = response.response.output[0]
+        assert msg0.routed_experts == routed_experts
+
+    async def test_run_preserves_empty_top_level_routed_experts(self):
+        fallback_routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+        ]
+        trajectory = _make_trajectory(
+            steps=[
+                _USER_STEP,
+                _make_step_agent(
+                    2,
+                    "Analysis: I will look at foo.py.\nPlan: Read the file.",
+                    prompt_token_ids=[100],
+                    completion_token_ids=[200],
+                    logprobs=[-0.01],
+                    metrics_extra={"routed_experts": fallback_routed_experts},
+                ),
+            ],
+        )
+        trajectory["steps"][1]["metrics"]["routed_experts"] = []
+        server = _make_server()
+        with _harbor_run_mocks(trajectory=trajectory):
+            response = await server.run(_make_run_request())
+
+        msg0 = response.response.output[0]
+        assert msg0.routed_experts == []
 
     async def test_run_without_token_details(self):
         server = _make_server()
