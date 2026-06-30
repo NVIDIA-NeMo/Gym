@@ -16,8 +16,8 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 
 1. **Discover** — find an environment or benchmark that matches your target capability: `gym list benchmarks`, `gym list environments`, `gym search <query>`.
 2. **Configure** — choose a model and agent harness; pre-flight check your config with `gym env validate`.
-3. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`.
-4. **Scale** — shard across jobs and merge with `gym eval aggregate`; resume interrupted runs.
+3. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`. Resume an interrupted run with `--resume`.
+4. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
 5. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
 6. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
 7. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
