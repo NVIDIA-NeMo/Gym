@@ -54,27 +54,20 @@ Review how model, agent, and resources servers fit together.
 
 ## Benchmarks
 
-A benchmark is an environment configured for repeatable comparison. It needs a dataset, resources server, verifier, expected runtime, documented dependencies, and known metrics.
-
-When choosing or building a benchmark, check:
-
-- **Task fit**: Does the task distribution match the target capability?
-- **Verifier fidelity**: Does reward measure the target behavior, or just a proxy?
-- **Model compatibility**: Can the model endpoint support the required input/output mode, tool calls, images, long context, or structured output?
-- **Harness fit**: Does the harness expose the tools and interaction pattern required by the benchmark?
-- **Variance**: Are repeats stable enough to distinguish real changes from noise?
-- **Reproducibility**: Can another run use the same data, code, config, and model reference?
-
-For integrated external benchmarks, first reproduce the original benchmark's reported numbers outside Gym when possible. Then integrate it into Gym and rerun against the same model set. This separates benchmark reproduction issues from Gym integration issues.
+A benchmark is a fixed evaluation configuration built on top of an environment's resources server — same verifier, frozen dataset split, documented repeat count. All environments can be used for training; a benchmark is the evaluation-configured overlay.
 
 <Cards>
 
+<Card title="Benchmarks" href="/evaluation/benchmarks">
+How to choose a benchmark, what the categories cover, and how to trust the results.
+</Card>
+
 <Card title="Browse Environments" href="/evaluation/environment-list">
-Browse built-in benchmark and training environments.
+Full table of built-in benchmarks and training environments by category.
 </Card>
 
 <Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
-Use the benchmark contribution checklist.
+Contribution checklist for adding a new benchmark to Gym.
 </Card>
 
 </Cards>
@@ -86,6 +79,10 @@ Use the benchmark contribution checklist.
 
 <Card title="Quickstart" href="/get-started/quickstart">
 Run a small evaluation and inspect the generated outputs.
+</Card>
+
+<Card title="Benchmarks" href="/evaluation/benchmarks">
+Choose a benchmark and understand what the score means.
 </Card>
 
 <Card title="Evaluation Tutorials" href="/evaluation-tutorials">
