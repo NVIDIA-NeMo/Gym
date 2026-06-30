@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
 from typing import Any, Dict
+from uuid import uuid4
 
 from fastapi import FastAPI
 
@@ -24,6 +26,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import VLLMConverter
 from nemo_gym.server_utils import request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -32,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 _SENSITIVE_HEADER_RE = re.compile(r"('(?:Authorization|x-litellm-key)': ')[^']*(')", re.IGNORECASE)
 _SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
+_PROXY_CHECK_TIMEOUT_SECONDS = 5.0
+_CHAT_COMPLETION_CONVERTER = VLLMConverter(
+    return_token_id_information=False,
+    uses_reasoning_parser=False,
+)
 
 
 def _sanitize_error(e: Exception) -> str:
@@ -60,52 +68,49 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info("Normalizing chat.completion response to Responses API format")
 
-    # LiteLLM proxies may return a hybrid format: object="chat.completion" but
-    # content in either choices[] (standard) or output[] (Responses API style).
-    text = ""
+    usage = data.get("usage", {}) or {}
+    input_tokens = usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
+    total_tokens = usage.get("total_tokens", 0) or (input_tokens + output_tokens)
 
-    # Try output[] first (LiteLLM hybrid format)
-    for item in data.get("output", []):
-        if isinstance(item, dict):
-            for block in item.get("content", []):
-                if isinstance(block, dict) and block.get("type") == "output_text":
-                    text = block.get("text", "") or ""
-                    if text:
-                        break
-        if text:
-            break
-
-    # Fall back to choices[] (standard chat completion format)
-    if not text:
+    output = data.get("output")
+    if not isinstance(output, list) or not output:
+        output = None
         for choice in data.get("choices", []):
-            msg = choice.get("message", {})
-            text = msg.get("content", "") or ""
-            if text:
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            output = [
+                item.model_dump(exclude_none=True)
+                for item in _CHAT_COMPLETION_CONVERTER.postprocess_assistant_message_dict(message)
+            ]
+            if output:
                 break
 
-    # Build a Responses API shaped dict
-    usage = data.get("usage", {}) or {}
-    return {
-        "id": data.get("id", ""),
-        "created_at": data.get("created", 0),
-        "model": data.get("model", ""),
-        "object": "response",
-        "output": [
+    if output is None:
+        output = [
             {
-                "id": f"msg_{data.get('id', '')[-16:]}",
-                "content": [{"annotations": [], "text": text, "type": "output_text", "logprobs": None}],
+                "id": f"msg_{uuid4().hex}",
+                "content": [{"annotations": [], "text": "", "type": "output_text", "logprobs": None}],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",
             }
-        ],
-        "parallel_tool_calls": False,
-        "tool_choice": "auto",
-        "tools": [],
+        ]
+
+    return {
+        "id": data.get("id", ""),
+        "created_at": data.get("created_at", data.get("created", 0)),
+        "model": data.get("model", ""),
+        "object": "response",
+        "output": output,
+        "parallel_tool_calls": data.get("parallel_tool_calls", False),
+        "tool_choice": data.get("tool_choice", "auto"),
+        "tools": data.get("tools", []),
         "usage": {
-            "input_tokens": usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
             "input_tokens_details": {"cached_tokens": 0},
             "output_tokens_details": {"reasoning_tokens": 0},
         },
@@ -148,13 +153,17 @@ class LiteLLMModelServer(SimpleModelServer):
         auth_header = self.config.openai_api_key
         if not auth_header.lower().startswith("bearer "):
             auth_header = f"Bearer {auth_header}"
+        raw_api_key = auth_header.removeprefix("Bearer ").strip()
 
         try:
-            resp = await request(
-                "GET",
-                health_url,
-                _internal=True,
-                headers={"Authorization": auth_header, "x-litellm-key": auth_header},
+            resp = await asyncio.wait_for(
+                request(
+                    "GET",
+                    health_url,
+                    _internal=True,
+                    headers={"Authorization": auth_header, "x-litellm-key": raw_api_key},
+                ),
+                timeout=_PROXY_CHECK_TIMEOUT_SECONDS,
             )
             if not resp.ok:
                 raise RuntimeError(f"status={resp.status}")
@@ -212,11 +221,12 @@ class LiteLLMModelServer(SimpleModelServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
-        try:
-            openai_response_dict = await self._client.create_response(**body_dict)
-        except Exception as e:
-            logger.error("LiteLLM API call failed: %s", _sanitize_error(e))
-            raise
+        async with self._semaphore:
+            try:
+                openai_response_dict = await self._client.create_response(**body_dict)
+            except Exception as e:
+                logger.error("LiteLLM API call failed: %s", _sanitize_error(e))
+                raise
         openai_response_dict = _normalize_to_response(openai_response_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
 

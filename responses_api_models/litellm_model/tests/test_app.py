@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
@@ -80,14 +81,43 @@ HYBRID_RESPONSE = {
     "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
 }
 
+CHAT_COMPLETION_TOOL_CALL_RESPONSE = {
+    "id": "chatcmpl-tools123",
+    "choices": [
+        {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+                "content": None,
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_weather",
+                            "arguments": '{"city":"San Francisco"}',
+                        },
+                    }
+                ],
+            },
+        }
+    ],
+    "created": 1700000000,
+    "model": "azure/anthropic/claude-opus-4-6",
+    "object": "chat.completion",
+    "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+}
 
-def _make_server() -> LiteLLMModelServer:
+
+def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
     config = LiteLLMModelServerConfig(
         host="0.0.0.0",
         port=8081,
         openai_base_url="https://litellm.example.com/v1",
         openai_api_key="dummy_key",  # pragma: allowlist secret
         openai_model="dummy_model",
+        max_concurrent_requests=max_concurrent_requests,
         entrypoint="",
         name="",
     )
@@ -146,6 +176,17 @@ class TestNormalizeToResponse:
         assert result["object"] == "response"
         assert result["output"][0]["content"][0]["text"] == ""
 
+    def test_chat_completion_tool_calls_preserved(self) -> None:
+        """chat.completion tool calls are converted into Responses API function_call items."""
+        data = deepcopy(CHAT_COMPLETION_TOOL_CALL_RESPONSE)
+        result = _normalize_to_response(data)
+        assert result["object"] == "response"
+        assert result["usage"]["total_tokens"] == 16
+        assert any(item["type"] == "function_call" for item in result["output"])
+        function_call = next(item for item in result["output"] if item["type"] == "function_call")
+        assert function_call["call_id"] == "call_123"
+        assert function_call["name"] == "lookup_weather"
+
 
 # -- Shared fixture: mock version check so existing tests don't make real HTTP calls --
 
@@ -196,7 +237,7 @@ class TestVersionCheck:
         mock_request.assert_awaited_once()
         headers = mock_request.await_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer dummy_key"
-        assert headers["x-litellm-key"] == "Bearer dummy_key"
+        assert headers["x-litellm-key"] == "dummy_key"
 
     async def test_missing_version_blocks_startup(self) -> None:
         """A proxy response without version info fails closed."""
@@ -215,11 +256,16 @@ class TestVersionCheck:
                 await server._check_proxy_version()
 
     async def test_unreachable_proxy_blocks_startup(self) -> None:
-        """Unreachable proxy fails closed because the version cannot be verified."""
+        """Unreachable proxy fails closed within the bounded version-check timeout."""
         server = _make_server()
-        with patch("responses_api_models.litellm_model.app.request", side_effect=Exception("connection refused")):
-            with pytest.raises(RuntimeError, match="Could not verify"):
-                await server._check_proxy_version()
+
+        async def _hang_request(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        with patch("responses_api_models.litellm_model.app._PROXY_CHECK_TIMEOUT_SECONDS", 0.01):
+            with patch("responses_api_models.litellm_model.app.request", new=_hang_request):
+                with pytest.raises(RuntimeError, match="Could not verify"):
+                    await server._check_proxy_version()
 
     async def test_lifespan_runs_version_check(self) -> None:
         """Startup hook blocks the webserver before serving requests."""
@@ -325,3 +371,29 @@ class TestLiteLLMModelServer:
         with TestClient(app) as client:
             client.post("/v1/responses", json={"input": "hello", "model": "wrong_model"})
         assert called_args.get("model") == "dummy_model"
+
+    async def test_responses_respects_semaphore(self) -> None:
+        """responses() retains the parent class concurrency cap."""
+        server = _make_server(max_concurrent_requests=2)
+
+        in_flight = 0
+        peak = 0
+
+        async def mock_create_response(**kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return deepcopy(NATIVE_RESPONSE)
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+
+        await asyncio.gather(
+            *(
+                server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+                for _ in range(8)
+            )
+        )
+        assert peak == 2
