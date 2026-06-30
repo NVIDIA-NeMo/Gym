@@ -166,8 +166,11 @@ jobs:
           # Full suite: core library unit tests run here once; all server tests run in the
           # parallel `server-suite` matrix.
           if [[ "${{ needs.detect.outputs.run_full }}" == "true" ]]; then
-            echo "Running core library unit tests (server suite runs in the sharded matrix)"
-            ng_dev_test
+            echo "Running core library unit tests without sandbox marker (server suite runs in the sharded matrix)"
+            PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+
+            echo "Running sandbox unit tests and appending them to the coverage report"
+            pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
 
           # Server-only: test only the changed servers (typically a small set, no sharding needed)
           elif [[ "${{ needs.detect.outputs.run_servers }}" == "true" ]]; then

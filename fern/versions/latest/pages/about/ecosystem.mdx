@@ -1,11 +1,27 @@
 ---
 title: "Ecosystem"
-description: ""
+description: "How NeMo Gym fits within the NVIDIA NeMo platform and the broader agentic ecosystem."
 position: 3
 ---
-NeMo Gym is integrated with the broader agentic ecosystem. We would love your contribution! Open a PR to add an integration, or [file an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to share what would be valuable for you.
+NeMo Gym is one of several specialized libraries in the NVIDIA NeMo platform. Alongside NeMo RL for
+post-training, NeMo Gym focuses on the *environments* agents act in — pairing a dataset, agent harness, and
+verifier so the same environment can drive both evaluation and training.
 
----
+<Tip>
+For what NeMo Gym does and when to use it, see the [Overview](/about) and [What NeMo Gym Provides](/about#what-nemo-gym-provides). For how environments are implemented as composable servers, see [Architecture](/about/architecture).
+</Tip>
+
+NeMo Gym is also integrated with the broader agentic ecosystem. We would love your contribution! Open a PR to add an integration, or [file an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to share what would be valuable for you.
+
+## NeMo Gym Within NVIDIA NeMo
+
+NVIDIA NeMo is a GPU-accelerated platform for training generative AI models and optimizing AI agents. It includes specialized libraries that span the model lifecycle end to end:
+
+- **NeMo Curator**: Prepares, filters, and deduplicates training data at scale.
+- **NeMo Gym**: Defines the environments — dataset, agent harness, and verifier — that agents are evaluated and trained in *(this library)*.
+- **NeMo RL**: Runs scalable post-training (GRPO, DPO, and SFT) against those environments.
+
+**NeMo Gym's role**: NeMo Gym is where a task becomes an interactive environment. It standardizes how an agent interacts with the world (the agent harness), how task completion is scored (the verifier), and how per-task state is isolated — producing the rollouts and reward signals that training frameworks like NeMo RL consume, and the consistent scoring that evaluation depends on.
 
 ## Environment Libraries
 
@@ -17,8 +33,6 @@ Seamlessly combine environments and benchmarks from other libraries alongside Ne
 - **[Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym)**
 - **[Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)**
 
----
-
 ## Training Framework Libraries
 
 Use environments for SFT and RL training. If you're interested in integrating another training framework, see the [Training Framework Integration Guide](/contribute/rl-framework-integration).
@@ -26,9 +40,6 @@ Use environments for SFT and RL training. If you're interested in integrating an
 - **[NeMo RL](/training-tutorials/nemo-rl-grpo)**
 - **[Unsloth](/training-tutorials/unsloth)**
 - **[VeRL](/training-tutorials/verl)**
-
-
----
 
 ## Agent Harnesses
 
@@ -38,13 +49,9 @@ Agent harnesses are available out of the box for evaluation and training. Some e
 - **[Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent)** - software engineering agent harness
 - **[LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)** - agent patterns built with LangGraph (reflection, orchestration, parallel thinking)
 
----
+## Related Products in the NVIDIA NeMo Ecosystem
 
-## Related NeMo Libraries
-
-NeMo Gym is a component of NVIDIA NeMo, a GPU-accelerated platform for training generative AI models and optimizing AI agents.
-
-Depending on your workflow, you may also find these libraries useful:
+Depending on your workflow, you may also find these NeMo libraries useful across data preparation, evaluation and training, and deployment.
 
 ### Data
 

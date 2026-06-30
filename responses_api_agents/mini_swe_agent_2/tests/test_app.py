@@ -771,6 +771,55 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
     @patch("asyncio.to_thread")
+    async def test_run_resolves_named_sandbox_provider_reference(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.sandbox_provider = "sandbox"
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+
+        mock_server_client_instance = MagicMock()
+        mock_server_client_instance.global_config_dict = {
+            "policy_model_name": "test_model",
+            "sandbox": {
+                "opensandbox": {
+                    "connection": {
+                        "domain": "sandbox.example",
+                        "api_key": "fixture-value",  # pragma: allowlist secret
+                    }
+                }
+            },
+        }
+        mock_load_from_global_config.return_value = mock_server_client_instance
+        mock_get_first_server_config_dict.return_value = {"host": "0.0.0.0", "port": 8080}
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
+
+        await server.run(create_run_request())
+
+        runtime_env = mock_runner_ray_remote.options.call_args.kwargs["runtime_env"]
+        assert runtime_env["env_vars"] == {OPENSANDBOX_API_KEY_ENV: "fixture-value"}  # pragma: allowlist secret
+        call_args = mock_runner_ray_remote.options.return_value.remote.call_args
+        params = call_args.args[1]
+        generated_config = yaml.safe_load(Path(params["config"]).read_text())
+        provider = generated_config["environment"]["provider"]["opensandbox"]
+        assert provider["connection"]["domain"] == "sandbox.example"
+        assert "api_key" not in provider["connection"]
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
     async def test_run_failed_execution(
         self,
         mock_to_thread,

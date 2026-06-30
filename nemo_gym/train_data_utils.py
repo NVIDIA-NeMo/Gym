@@ -25,6 +25,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
@@ -424,7 +425,9 @@ class TrainDataProcessor(BaseModel):
         local_datasets_not_found: Dict[str, List[DatasetConfig]] = defaultdict(list)
         for c in server_instance_configs:
             for d in c.datasets:
-                jsonl_fpath = Path(d.jsonl_fpath)
+                # Read check: a built-in dataset path resolves under the install root too, so a
+                # bundled example dataset counts as "found" (no download) from an external cwd.
+                jsonl_fpath = _resolve_under_cwd_or_install(d.jsonl_fpath)
                 if jsonl_fpath.exists():
                     local_datasets_found[c.name].append(d)
                 else:
@@ -523,7 +526,7 @@ class TrainDataProcessor(BaseModel):
             )
 
         # Don't load everything into memory at once. Throw things away immediately.
-        with open(dataset_config.jsonl_fpath) as f:
+        with open(_resolve_under_cwd_or_install(dataset_config.jsonl_fpath)) as f:
             for line in tqdm(f, desc=f"{dataset_config.jsonl_fpath}"):
                 for _ in range(repeats):
                     yield line
@@ -661,6 +664,9 @@ class TrainDataProcessor(BaseModel):
                     else:
                         continue
 
+                # Ensure the artifact dir exists: the metrics file is written next to the dataset's
+                # (cwd-relative) jsonl_fpath, which may not exist yet when collating from a fresh cwd.
+                metrics_fpath.parent.mkdir(parents=True, exist_ok=True)
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
 
@@ -706,6 +712,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
+                # Create the artifact dir if needed (the prepared file is written next to the
+                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                prepare_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
