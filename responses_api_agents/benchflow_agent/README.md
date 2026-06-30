@@ -1,56 +1,61 @@
 # BenchFlow Agent for NeMo Gym
 
-This agent integrates [BenchFlow](https://github.com/benchflow-ai/benchflow) into NeMo Gym to run
-agentic benchmarks (initially [SkillsBench](https://github.com/benchflow-ai/skillsbench)).
+[BenchFlow](https://github.com/benchflow-ai/benchflow) is a framework for running various agentic benchmarks, most notably [SkillsBench](https://github.com/benchflow-ai/skillsbench). It supports running multiple agent harnesses via the ACP protocol, such as OpenHands and OpenCode. This environment integrates BenchFlow into NeMo-Gym with support for running per-task environments through Singularity/Apptainer.
 
-Unlike a typical NeMo Gym agent, BenchFlow does **not** implement its own agent — it installs an
-existing harness (e.g. [OpenHands](https://github.com/OpenHands/OpenHands)) into a sandbox and lets
-that harness drive the model and execute commands. This server is a thin wrapper around BenchFlow's
-Python `Evaluation` API: each NeMo Gym `/run` request runs **exactly one** benchmark task in a
-**Singularity/Apptainer** sandbox, extracts the scalar reward, and returns a NeMo Gym response.
+## Overview
 
-This integration is **evaluation-only** (scalar reward + a best-effort trajectory; no training
-token-ids/logprobs) and **Singularity-only** (no Docker/Daytona).
+BenchFlow takes care of managing the task environments throughout the whole rollout lifecycle: installing the agent harness inside of the environment, running the harness, verifying the solution and obtaining the reward. This agent server exposes a single `/run` endpoint that accepts a task name, runs the entire process using the BenchFlow Python API, and returns a NeMo-Gym response.
 
-## How it works
+Upstream BenchFlow supports Docker, Daytona and Modal environments. We use a [fork of BenchFlow](https://github.com/ludwig-n/benchflow/tree/gym) that adds support for Singularity/Apptainer environments. The implementation is based on Harbor's [SingularityEnvironment](https://github.com/harbor-framework/harbor/tree/main/src/harbor/environments/singularity) (launches a FastAPI server inside of the container to run commands) but with some modifications to make it work with BenchFlow. Notably, BenchFlow requires a continuous channel of communication with the agent harness process via the ACP protocol, which we implement via [`ncat`](https://nmap.org/ncat/).
 
-1. A `/run` request carries an `instance_id` of the form `<dataset_alias>::<task_name>` (e.g.
-   `skillsbench::3d-scan-calc`). The task name must exist under the configured `tasks_dir`.
-2. The agent resolves the NeMo Gym model server (`model_server`) to an OpenAI-compatible base URL and
-   forwards it to the in-container harness via `BENCHFLOW_PROVIDER_BASE_URL` /
-   `BENCHFLOW_PROVIDER_API_KEY` (OpenHands reads these). The model is passed as `hosted_vllm/<model>`.
-3. If any overrides apply (see `task_config_overrides` / `images_dir` below), the agent copies that one
-   task's folder to a temporary directory and deep-merges the overrides into the copied `task.md`
-   frontmatter — the source `tasks_dir` is never modified, and the temp copy is removed afterward.
-4. The agent builds a single-task `EvaluationConfig` (`environment="singularity"`, `include_tasks={task}`)
-   and `await`s `Evaluation(...).run()`, capturing the task's `RolloutResult` via an `on_result` callback.
-5. The reward is read from `RolloutResult.rewards["reward"]`; the ACP trajectory is converted into NeMo
-   Gym output items; BenchFlow's full artifacts/logs are written under `jobs_dir`.
+## Quickstart: SkillsBench evaluation in Singularity
 
-## Dependencies
+1. Install dependencies. To use Singularity environments, this agent requires Apptainer (recommended version: 1.5.1 or above) and the `ncat` utility. You will also need `git` to clone the SkillsBench repo.
+    ```
+    apt update
+    apt install -y git wget ncat
+    wget https://github.com/apptainer/apptainer/releases/download/v1.5.1/apptainer_1.5.1_amd64.deb
+    apt install -y ./apptainer_1.5.1_amd64.deb
+    ```
 
-`requirements.txt` installs the BenchFlow fork that adds Singularity support (clean upstream + the
-self-contained Singularity backend — no other patches required); pin it to that commit SHA. PyYAML is
-used to edit `task.md` frontmatter on the temporary task copy. Apptainer/Singularity must be installed
-and on `PATH`, and (with prebuilt images) the `.sif` files must be present on the host.
+2. Prepare the SkillsBench dataset:
+    ```
+    gym eval prepare --benchmark skillsbench
+    ```
+    This command will prepare the following:
+    - the SkillsBench tasks folder at `benchmarks/skillsbench/data/skillsbench_repo/tasks`,
+    - an input .jsonl file at `benchmarks/skillsbench/data/skillsbench_benchmark.jsonl`.
 
-## Configuration
+3. Prepare prebuilt per-task containers in .sif format.
 
-See [`configs/benchflow_agent.yaml`](configs/benchflow_agent.yaml). Key fields:
+4. Spin up a local vLLM server. Note that the LLM must have a tool call parser configured in order to run on agentic benchmarks: `--enable-auto-tool-choice --tool-call-parser <PARSER_NAME>`. For more details, see [vLLM docs](https://docs.vllm.ai/en/stable/features/tool_calling/).
 
-- `tasks_dir` — local directory of BenchFlow task definitions (e.g. a cloned SkillsBench `tasks/` dir).
-- `images_dir` — directory of prebuilt `.sif` images. When set, each task's `docker_image` is overridden
-  to `<images_dir>/<task>.sif` (per-task, since each `/run` handles one task). Leave `null` to use the
-  `docker_image` declared in each task's `task.md`.
-- `task_config_overrides` — a mapping deep-merged into each task's `task.md` frontmatter, mirroring its
-  section structure (e.g. `environment.memory_mb`, `agent.timeout_sec`). Extend freely for any field. The
-  edit is applied to a temporary copy of the task — the source `tasks_dir` is never mutated. Only the
-  `task.md` format is supported (`task.toml` datasets must be edited manually).
-- `agent` (default `openhands`), `environment` (default `singularity`), `skill_mode`
-  (`with-skill`/`no-skill`/`self-gen`), `skills_dir` (`auto`), `sandbox_user` (`none` = root),
-  `agent_idle_timeout`, `agent_env`, `max_retries` — mirror the BenchFlow knobs.
+5. Run evaluation with the following command, replacing `<...>` and the `container_formatter` path as needed:
+    ```
+    gym eval run \
+        --model-type vllm_model \
+        --model-url http://127.0.0.1:<VLLM_PORT>/v1 \
+        --model-api-key EMPTY \
+        --model-name <VLLM_SERVED_MODEL_NAME> \
+        --benchmark skillsbench \
+        --input benchmarks/skillsbench/data/skillsbench_benchmark.jsonl \
+        --output results/skillsbench.jsonl \
+        "++skillsbench_benchflow_agent.responses_api_agents.benchflow_agent.container_formatter='/path/to/containers/{task_name}.sif'"
+    ```
+    This will spin up the NeMo-Gym server and start collecting rollouts. Results will appear in the following folders:
+    - `responses_api_agents/benchflow_agent/jobs/`: logs, artifacts and results written by BenchFlow.
+    - `results/`: collected rollouts and rewards in NeMo-Gym format.
 
-This agent is normally driven by a benchmark definition under `benchmarks/` (e.g.
-`benchmarks/skillsbench/`) that supplies `tasks_dir`/`images_dir`/`task_config_overrides` and a JSONL of
-one row per task. See that benchmark's README for the end-to-end `ng_prepare_benchmark` →
-`ng_run` → `ng_collect_rollouts` workflow.
+    Note that the path to the .sif containers is specified with a `{task_name}` placeholder. For each task, NeMo-Gym will replace it with the corresponding task name at runtime.
+
+## Customizing the configuration
+
+Several parameters can be customized, such as the agent harness, skill availability, etc. For a list of all available parameters, see [configs/benchflow_agent.yaml](configs/benchflow_agent.yaml). This config is then inherited and specialized for SkillsBench in [benchmarks/skillsbench/config.yaml](../../benchmarks/skillsbench/config.yaml).
+
+To use your custom parameters, you can either edit [benchmarks/skillsbench/config.yaml](../../benchmarks/skillsbench/config.yaml) adding your overrides, or pass them as CLI arguments to `gym eval run`, like `container_formatter` in the example above.
+
+### Task configuration
+
+In the BenchFlow task format, each task has its own config that lives in `task.md`. You can customize these configs as follows.
+- **Override a parameter for all tasks:** we expose a `task_config_overrides` option that can automatically override a particular parameter to a constant value for all tasks. Internally this is implemented by creating a temporary copy of the task folder and editing its `task.md`.
+- **Override a parameter for only some tasks:** you will need to edit the respective `task.md` files yourself before running `gym eval run`. In particular, if you want to use per-task .sif paths that cannot be expressed using the `container_formatter` option, you can edit `task.md` to set `environment.docker_image` to the raw .sif path directly.
