@@ -17,7 +17,6 @@ constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
 excludes = [
     "alembic",
     "blinker",
-    "cffi",
     "contourpy",
     "cryptography",
     "cycler",
@@ -31,6 +30,7 @@ excludes = [
     "joblib",
     "kiwisolver",
     "matplotlib",
+    "narwhals",
     "pillow",
     "prettytable",
     "scikit-learn",
@@ -1487,6 +1487,19 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "coverage" },
+    { name = "mypy" },
+    { name = "opensandbox" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-xdist" },
+    { name = "requests-mock" },
+    { name = "ruff" },
+    { name = "tenacity" },
+]
 dev = [
     { name = "coverage" },
     { name = "mypy" },
@@ -1534,6 +1547,7 @@ requires-dist = [
     { name = "mlflow", specifier = ">=3.14.0" },
     { name = "mlflow-skinny", specifier = ">=3.14.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
+    { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
@@ -1560,7 +1574,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["sandbox", "dev"]
+provides-extras = ["all", "sandbox", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
