@@ -70,7 +70,7 @@ gdpval_stirrup_agent:
     stirrup_agent:
       entrypoint: app.py
       task: gdpval
-      agent_max_turns: 100
+      agent_max_turns: 250
       concurrency: 32
       temperature: 1.0
       system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}

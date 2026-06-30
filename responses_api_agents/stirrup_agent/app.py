@@ -307,7 +307,7 @@ async def _run_stirrup_agent(
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
-    max_turns: int = 100,
+    max_turns: int = 250,
     temperature: float = 0.6,
     max_tokens: int = 262144,
     reference_files: Optional[list] = None,
@@ -399,6 +399,19 @@ async def _run_stirrup_agent(
         mod = importlib.import_module(module_path)
         provider_cls = getattr(mod, class_name)
         exec_provider = provider_cls(**(exec_provider_kwargs or {}))
+    elif is_gdpval:
+        # GDPval must execute inside the Apptainer sandbox (see
+        # GDPValTask.get_exec_provider). The local backend runs on the
+        # evaluation container, which intentionally does NOT carry the heavy
+        # GDPval sandbox dependencies (TeX Live, the full data/ML/document
+        # stack, CPU torch, ...) — installing them here would bloat the eval
+        # image by many GB. Refuse rather than run tasks in a crippled env.
+        raise RuntimeError(
+            "GDPval requires the Apptainer sandbox but no exec provider was configured; "
+            "set `gdpval_container_path` to a .sif built from containers/gdpval.def. The "
+            "local backend is rejected because the sandbox dependencies are not installed "
+            "in the evaluation container."
+        )
     else:
         exec_provider = _SandboxTolerantExecProvider()
 
@@ -431,6 +444,16 @@ async def _run_stirrup_agent(
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
+    if is_gdpval:
+        # GDPval-AA v2 early-exit: expose a second finish tool the model can call
+        # instead of ``finish`` when it cannot complete the task (no files).
+        # Requires stirrup >= 0.1.9 (multiple finish tools, PR #49).
+        from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+            ABANDON_FINISH_TOOL,
+            COERCING_FINISH_TOOL,
+        )
+
+        agent_kwargs["finish_tool"] = [COERCING_FINISH_TOOL, ABANDON_FINISH_TOOL]
     agent = NeMoAgent(**agent_kwargs)
 
     start_time = time.time()
@@ -691,7 +714,7 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Name of the task strategy to use (e.g. 'gdpval'). Must match a key in the task registry.",
     )
 
-    agent_max_turns: int = Field(default=100, description="Maximum turns for the Stirrup agent")
+    agent_max_turns: int = Field(default=250, description="Maximum turns for the Stirrup agent")
     concurrency: int = Field(default=32, description="Maximum concurrent runs")
     temperature: float = Field(default=0.6, description="Sampling temperature for the agent model")
 
