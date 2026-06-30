@@ -482,6 +482,16 @@ class TestRolloutCollection:
                 num_repeats={"alpha": bad_value},
             )
 
+    def test_num_repeats_null_coerces_to_one(self, tmp_path: Path) -> None:
+        # `--num-repeats null` (None) restores the pre-#1356 default of 1.
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=None,
+        )
+        assert config.num_repeats == 1
+
     def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
         """An agent listed in the dict that never appears in input rows warns (likely typo)."""
         fpath = tmp_path / "input.jsonl"
