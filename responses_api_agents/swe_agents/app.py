@@ -26,6 +26,7 @@ import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
@@ -236,6 +237,8 @@ class SWEBenchMetrics(BaseModel):
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
     openhands_run_time: Optional[float] = None
+    generation_start_timestamp: Optional[str] = None
+    evaluation_start_timestamp: Optional[str] = None
     generation_apptainer_spinup_time: Optional[float] = None
     create_runtime_time: Optional[float] = None
     connect_to_runtime_time: Optional[float] = None
@@ -1432,6 +1435,7 @@ class RunOpenHandsAgent(BaseModel):
         metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
 
         metrics.openhands_run_time = -time.time()
+        metrics.generation_start_timestamp = datetime.now(timezone.utc).isoformat()
         metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
         metrics.final_eval_apptainer_spinup_time = metrics.openhands_run_time
 
@@ -1527,6 +1531,7 @@ class RunOpenHandsAgent(BaseModel):
             f.write(patch)
 
         metrics.final_eval_time = -time.time()
+        metrics.evaluation_start_timestamp = datetime.now(timezone.utc).isoformat()
         try:
             report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
         except Exception as e:

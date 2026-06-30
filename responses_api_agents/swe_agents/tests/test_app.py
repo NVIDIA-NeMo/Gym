@@ -343,11 +343,24 @@ class TestSWEBenchMetrics:
         assert metrics.ray_queue_time is None
         assert metrics.openhands_run_time is None
         assert metrics.final_eval_time is None
+        assert metrics.generation_start_timestamp is None
+        assert metrics.evaluation_start_timestamp is None
 
     def test_with_values(self) -> None:
         metrics = SWEBenchMetrics(resolved=True, patch_exists=True, ray_queue_time=1.5)
         assert metrics.resolved is True
         assert metrics.ray_queue_time == 1.5
+
+    def test_phase_timestamps_serialize_and_round_trip(self) -> None:
+        metrics = SWEBenchMetrics(
+            generation_start_timestamp="2026-06-29T16:00:00+00:00",
+            evaluation_start_timestamp="2026-06-29T16:05:00+00:00",
+        )
+
+        dumped = metrics.model_dump()
+        assert dumped["generation_start_timestamp"] == "2026-06-29T16:00:00+00:00"
+        assert dumped["evaluation_start_timestamp"] == "2026-06-29T16:05:00+00:00"
+        assert SWEBenchMetrics.model_validate(dumped) == metrics
 
 
 class TestSWEBenchVerifyResponse:
