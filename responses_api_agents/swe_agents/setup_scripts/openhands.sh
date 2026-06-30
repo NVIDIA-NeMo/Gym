@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -e
 set -x  # Enable debug output
 
@@ -8,6 +22,8 @@ miniforge_dir=$MINIFORGE_DIR
 openhands_dir=$OPENHANDS_DIR
 agent_framework_repo=$AGENT_FRAMEWORK_REPO
 agent_framework_commit=$AGENT_FRAMEWORK_COMMIT
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+streaming_tool_call_patch="$script_dir/../patches/streaming_tool_call.patch"
 
 cd $setup_dir
 
@@ -81,6 +97,10 @@ fi
 cd $openhands_dir
 echo "Checking out $agent_framework_commit..."
 git checkout $agent_framework_commit
+
+echo "Applying NeMo Gym streaming tool-call integration..."
+git apply --check "$streaming_tool_call_patch"
+git apply "$streaming_tool_call_patch"
 
 # Build OpenHands
 echo "Building OpenHands (this may take 5-10 minutes)..."

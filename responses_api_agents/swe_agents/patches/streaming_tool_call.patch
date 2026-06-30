@@ -1,0 +1,1150 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+index 91b86b891..b52a5ff03 100644
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -9,10 +9,13 @@ import json
+ import os
+ import tempfile
+ import time
++from copy import deepcopy
++from dataclasses import dataclass
+ from typing import TYPE_CHECKING
+ 
++from aiohttp import ClientSession
+ from openhands.core.logger import openhands_logger as logger
+-from nemo_gym.global_config import get_global_config_dict
++from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
+ from nemo_gym.server_utils import ServerClient
+ from nemo_gym.server_utils import get_response_json, raise_for_status
+ 
+@@ -23,6 +26,26 @@ if TYPE_CHECKING:
+     from openhands.llm.llm import LLM, ModelResponse
+ 
+ 
++@dataclass(frozen=True)
++class StreamingToolCallContext:
++    client: "NemoGymClient"
++    response_id: str
++    tool_call_id: str
++    function_name: str
++    chat_completion: dict
++    config: dict
++
++
++_STREAMING_TOOL_CALL_CONTEXTS: dict[str, StreamingToolCallContext] = {}
++
++
++def take_streaming_tool_call_context(
++    response_id: str,
++) -> StreamingToolCallContext | None:
++    """Take the transient streaming context for one model response."""
++    return _STREAMING_TOOL_CALL_CONTEXTS.pop(response_id, None)
++
++
+ class NemoGymClient:
+     """Client that proxies LLM completions through the NeMo Gym server.
+ 
+@@ -121,9 +144,91 @@ class NemoGymClient:
+         self._log_completion(
+             messages, model_response_json, provider_specific_fields, params
+         )
++        self._register_streaming_tool_call_context(
++            response=response,
++            response_message_dict=response_message_dict,
++            params=params,
++        )
+ 
+         return response
+ 
++    def _register_streaming_tool_call_context(
++        self,
++        *,
++        response: "ModelResponse",
++        response_message_dict: dict,
++        params: dict,
++    ) -> None:
++        streaming_config = get_global_config_dict().get("streaming_tool_call")
++        if not streaming_config or not streaming_config.get("enabled"):
++            return
++
++        tool_calls = response_message_dict.get("tool_calls") or []
++        if len(tool_calls) != 1:
++            return
++
++        tool_call = tool_calls[0]
++        chat_completion = deepcopy(params)
++        chat_completion["messages"].append(deepcopy(response_message_dict))
++        _STREAMING_TOOL_CALL_CONTEXTS[response.id] = StreamingToolCallContext(
++            client=self,
++            response_id=response.id,
++            tool_call_id=tool_call["id"],
++            function_name=tool_call["function"]["name"],
++            chat_completion=chat_completion,
++            config=dict(streaming_config),
++        )
++
++    async def streaming_tool_call_request(
++        self,
++        *,
++        action: str,
++        session_id: str,
++        context: StreamingToolCallContext | None = None,
++        sequence_no: int | None = None,
++        tool_output: str | None = None,
++        http_session: ClientSession | None = None,
++    ) -> dict:
++        payload: dict = {"session_id": session_id}
++        if context is not None:
++            if tool_output is None:
++                raise ValueError("tool_output is required when context is provided")
++            chat_completion = deepcopy(context.chat_completion)
++            chat_completion["messages"].append(
++                {
++                    "role": "tool",
++                    "content": tool_output,
++                    "tool_call_id": context.tool_call_id,
++                    "name": context.function_name,
++                }
++            )
++            payload["chat_completion"] = chat_completion
++        if sequence_no is not None:
++            payload["sequence_no"] = sequence_no
++
++        server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
++        url_path = f"/v1/streaming_tool_call/{action}"
++        if http_session is None:
++            response = await self.ng_server_client.post(
++                server_name=server_name,
++                url_path=url_path,
++                json=payload,
++                cookies=self.model_server_cookies,
++            )
++        else:
++            server_config = get_first_server_config_dict(
++                self.ng_server_client.global_config_dict,
++                server_name,
++            )
++            response = await http_session.post(
++                f"http://{server_config.host}:{server_config.port}{url_path}",
++                json=payload,
++                cookies=self.model_server_cookies,
++            )
++        await raise_for_status(response)
++        self.model_server_cookies = response.cookies
++        return await get_response_json(response)
++
+     def _log_completion(
+         self,
+         messages: list["Message"],
+diff --git a/openhands/runtime/action_execution_server.py b/openhands/runtime/action_execution_server.py
+index 7d070bb68..d8f00c9d5 100644
+--- a/openhands/runtime/action_execution_server.py
++++ b/openhands/runtime/action_execution_server.py
+@@ -2537,36 +2537,48 @@ if __name__ == '__main__':
+         idle_time = current_time - client.last_execution_time
+ 
+         response = {
+-            'uptime': uptime,
+-            'idle_time': idle_time,
+-            'resources': get_system_stats(),
++            "uptime": uptime,
++            "idle_time": idle_time,
++            "resources": get_system_stats(),
+         }
+-        logger.info('Server info endpoint response: %s', response)
++        logger.info("Server info endpoint response: %s", response)
+         return response
+ 
+-    @app.post('/execute_action')
++    @app.get("/shell_stream_snapshot")
++    async def get_shell_stream_snapshot():
++        assert client is not None
++        if client.bash_session is None or not isinstance(
++            client.bash_session, BashSession
++        ):
++            raise HTTPException(
++                status_code=409,
++                detail="Shell output streaming is unavailable for this session",
++            )
++        return client.bash_session.get_stream_snapshot()
++
++    @app.post("/execute_action")
+     async def execute_action(action_request: ActionRequest):
+         assert client is not None
+         try:
+             action = event_from_dict(action_request.action)
+             if not isinstance(action, Action):
+-                raise HTTPException(status_code=400, detail='Invalid action type')
++                raise HTTPException(status_code=400, detail="Invalid action type")
+             client.last_execution_time = time.time()
+             observation = await client.run_action(action)
+             return event_to_dict(observation)
+         except Exception as e:
+-            logger.exception(f'Error while running /execute_action: {str(e)}')
++            logger.exception(f"Error while running /execute_action: {str(e)}")
+             raise HTTPException(
+                 status_code=500,
+-                detail=f'Internal server error: {str(e)}',
++                detail=f"Internal server error: {str(e)}",
+             )
+         finally:
+             update_last_execution_time()
+ 
+-    @app.post('/update_mcp_server')
++    @app.post("/update_mcp_server")
+     async def update_mcp_server(request: Request):
+         # Check if we're on Windows
+-        is_windows = sys.platform == 'win32'
++        is_windows = sys.platform == "win32"
+ 
+         # Access the global mcp_proxy_manager variable
+         global mcp_proxy_manager
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 603e417bf..e8ebaa1b4 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -1,17 +1,22 @@
+ """This runtime runs the action_execution_server directly on the local machine without Docker."""
+ 
++import asyncio
++import json
+ import os
+ import shutil
+ import subprocess
+ import sys
+ import tempfile
+ import threading
++import time
+ from dataclasses import dataclass
+ from typing import Callable
+ from urllib.parse import urlparse
+ 
+ import httpx
+ import tenacity
++from aiohttp import ClientSession, ClientTimeout, DummyCookieJar
++from nemo_gym.global_config import get_global_config_dict
+ 
+ import openhands
+ from openhands.core.config import OpenHandsConfig
+@@ -20,11 +25,16 @@ from openhands.core.logger import openhands_logger as logger
+ from openhands.events import EventStream
+ from openhands.events.action import (
+     Action,
++    CmdRunAction,
+ )
+ from openhands.events.observation import (
+     Observation,
+ )
+-from openhands.events.serialization import event_to_dict, observation_from_dict
++from openhands.events.serialization import (
++    event_from_dict,
++    event_to_dict,
++    observation_from_dict,
++)
+ from openhands.integrations.provider import PROVIDER_TOKEN_TYPE
+ from openhands.llm.llm_registry import LLMRegistry
+ from openhands.runtime.impl.action_execution.action_execution_client import (
+@@ -41,7 +51,7 @@ from openhands.runtime.plugins.vscode import VSCodeRequirement
+ from openhands.runtime.runtime_status import RuntimeStatus
+ from openhands.runtime.utils import find_available_tcp_port
+ from openhands.runtime.utils.command import get_action_execution_server_startup_command
+-from openhands.utils.async_utils import call_sync_from_async
++from openhands.utils.async_utils import call_async_from_sync, call_sync_from_async
+ from openhands.utils.http_session import httpx_verify_option
+ from openhands.utils.tenacity_stop import stop_if_should_exit
+ 
+@@ -67,10 +77,25 @@ _RUNNING_SERVERS: dict[str, ActionExecutionServerInfo] = {}
+ _WARM_SERVERS: list[ActionExecutionServerInfo] = []
+ 
+ 
++def _update_streaming_tool_call_metrics(increments: dict[str, int | float]) -> None:
++    metrics_path = os.getenv("NEMO_GYM_METRICS_FPATH")
++    if not metrics_path:
++        return
++    try:
++        with open(metrics_path) as metrics_file:
++            metrics = json.load(metrics_file)
++        for key, increment in increments.items():
++            metrics[key] = metrics.get(key, 0) + increment
++        with open(metrics_path, "w") as metrics_file:
++            json.dump(metrics, metrics_file)
++    except (FileNotFoundError, json.JSONDecodeError, OSError) as error:
++        logger.debug(f"Failed to update streaming tool-call metrics: {error}")
++
++
+ def get_user_info() -> tuple[int, str | None]:
+     """Get user ID and username in a cross-platform way."""
+-    username = os.getenv('USER')
+-    if sys.platform == 'win32':
++    username = os.getenv("USER")
++    if sys.platform == "win32":
+         # On Windows, we don't use user IDs the same way
+         # Return a default value that won't cause issues
+         return 1000, username
+@@ -432,6 +457,36 @@ class LocalRuntime(ActionExecutionClient):
+             self.log('debug', f'Server not ready yet: {e}')
+             raise
+ 
++    def _send_action_server_request(
++        self,
++        method: str,
++        url: str,
++        **kwargs,
++    ) -> httpx.Response:
++        request_json = kwargs.get("json")
++        serialized_action = (
++            request_json.get("action") if isinstance(request_json, dict) else None
++        )
++        if (
++            method != "POST"
++            or not url.endswith("/execute_action")
++            or not isinstance(serialized_action, dict)
++            or serialized_action.get("action") != "run"
++        ):
++            return super()._send_action_server_request(method, url, **kwargs)
++
++        streaming_config = get_global_config_dict().get("streaming_tool_call")
++        if not streaming_config or not streaming_config.get("enabled"):
++            return super()._send_action_server_request(method, url, **kwargs)
++
++        action = event_from_dict(serialized_action)
++        assert isinstance(action, Action)
++        return call_async_from_sync(
++            self._execute_action_request,
++            kwargs.get("timeout"),
++            action,
++        )
++
+     async def execute_action(self, action: Action) -> Observation:
+         """Execute an action by sending it to the server."""
+         if not self.runtime_initialized:
+@@ -443,49 +498,252 @@ class LocalRuntime(ActionExecutionClient):
+             if self.sid in _RUNNING_SERVERS:
+                 self.server_process = _RUNNING_SERVERS[self.sid].process
+             else:
+-                raise AgentRuntimeDisconnectedError('Server process not found')
++                raise AgentRuntimeDisconnectedError("Server process not found")
+ 
+         # Check if the server process is still running
+         if self.server_process.poll() is not None:
+             # If the process died, remove it from the global dictionary
+             if self.sid in _RUNNING_SERVERS:
+                 del _RUNNING_SERVERS[self.sid]
+-            raise AgentRuntimeDisconnectedError('Server process died')
++            raise AgentRuntimeDisconnectedError("Server process died")
+ 
+         with self.action_semaphore:
+             try:
+-                response = await call_sync_from_async(
+-                    lambda: self.session.post(
+-                        f'{self.api_url}/execute_action',
+-                        json={'action': event_to_dict(action)},
+-                    )
+-                )
++                response = await self._execute_action_request(action)
+ 
+                 # After executing the action, check if we need to create more warm servers
+                 desired_num_warm_servers = int(
+-                    os.getenv('DESIRED_NUM_WARM_SERVERS', '0')
++                    os.getenv("DESIRED_NUM_WARM_SERVERS", "0")
+                 )
+                 if (
+                     desired_num_warm_servers > 0
+                     and len(_WARM_SERVERS) < desired_num_warm_servers
+                 ):
+                     self.log(
+-                        'info',
+-                        f'Creating a new warm server to maintain desired count of {desired_num_warm_servers}',
++                        "info",
++                        f"Creating a new warm server to maintain desired count of {desired_num_warm_servers}",
+                     )
+                     _create_warm_server_in_background(self.config, self.plugins)
+ 
+                 return observation_from_dict(response.json())
+             except httpx.NetworkError:
+-                raise AgentRuntimeDisconnectedError('Server connection lost')
++                raise AgentRuntimeDisconnectedError("Server connection lost")
++
++    async def _execute_action_request(self, action: Action) -> httpx.Response:
++        async def post_action() -> httpx.Response:
++            return await call_sync_from_async(
++                lambda: self.session.post(
++                    f"{self.api_url}/execute_action",
++                    json={"action": event_to_dict(action)},
++                )
++            )
++
++        tool_call_metadata = getattr(action, "tool_call_metadata", None)
++        model_response = getattr(tool_call_metadata, "model_response", None)
++        response_id = getattr(model_response, "id", None)
++        if response_id is None:
++            response_id = getattr(action, "response_id", None)
++        if response_id is None:
++            return await post_action()
++
++        from openhands.agenthub.nemo_gym_client import (
++            take_streaming_tool_call_context,
++        )
++
++        context = take_streaming_tool_call_context(response_id)
++        if (
++            context is None
++            or not isinstance(action, CmdRunAction)
++            or action.is_input
++            or action.is_static
++            or action.hidden
++        ):
++            return await post_action()
++
++        post_task = asyncio.create_task(post_action())
++        session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
++        sequence_no = 0
++        session_started = False
++        last_sent_content = ""
++        last_revision = -1
++        last_send_time = time.monotonic()
++        streaming_request_seconds = 0.0
++        prefill_requests = 0
++        prefill_tokens = 0
++        pending_start_content: str | None = None
++        min_chunk_chars = context.config["min_chunk_chars"]
++        flush_interval = context.config["flush_interval_seconds"]
++        poll_interval = min(0.1, flush_interval)
++        streaming_http_session: ClientSession | None = None
++
++        try:
++            while not post_task.done():
++                await asyncio.sleep(poll_interval)
++                if post_task.done():
++                    break
++                snapshot_response = await call_sync_from_async(
++                    lambda: self.session.get(f"{self.api_url}/shell_stream_snapshot")
++                )
++                snapshot_response.raise_for_status()
++                snapshot = snapshot_response.json()
++                if snapshot["revision"] == last_revision:
++                    continue
++                last_revision = snapshot["revision"]
++                content = snapshot["content"]
++                if not content or content == last_sent_content:
++                    continue
++                expected_prefix = last_sent_content or pending_start_content
++                if expected_prefix and not content.startswith(expected_prefix):
++                    raise RuntimeError(
++                        "shell output changed a previously streamed prefix"
++                    )
++
++                if not session_started:
++                    if pending_start_content is None:
++                        # A single candidate cannot prove stable tokens. Keep it local
++                        # until a later snapshot demonstrates that the command is still
++                        # producing append-only output.
++                        pending_start_content = content
++                        continue
++
++                    if len(content) < min_chunk_chars:
++                        continue
++                else:
++                    new_characters = len(content) - len(last_sent_content)
++                    elapsed = time.monotonic() - last_send_time
++                    if (
++                        new_characters < min_chunk_chars
++                        and elapsed < flush_interval
++                    ):
++                        continue
++
++                if post_task.done():
++                    break
++                if streaming_http_session is None:
++                    streaming_http_session = ClientSession(
++                        cookie_jar=DummyCookieJar(),
++                        timeout=ClientTimeout(
++                            total=context.config["request_timeout_seconds"],
++                        ),
++                    )
++
++                if not session_started:
++                    assert pending_start_content is not None
++                    request_start_time = time.monotonic()
++                    prefill_result = await context.client.streaming_tool_call_request(
++                        action="start",
++                        session_id=session_id,
++                        context=context,
++                        sequence_no=sequence_no,
++                        tool_output=pending_start_content,
++                        http_session=streaming_http_session,
++                    )
++                    streaming_request_seconds += (
++                        time.monotonic() - request_start_time
++                    )
++                    prefill_requests += 1
++                    prefill_tokens += prefill_result["chunk_tokens"]
++                    session_started = True
++                    sequence_no += 1
++                    last_sent_content = pending_start_content
++
++                request_start_time = time.monotonic()
++                prefill_result = await context.client.streaming_tool_call_request(
++                    action="append",
++                    session_id=session_id,
++                    context=context,
++                    sequence_no=sequence_no,
++                    tool_output=content,
++                    http_session=streaming_http_session,
++                )
++                streaming_request_seconds += time.monotonic() - request_start_time
++                prefill_requests += 1
++                prefill_tokens += prefill_result["chunk_tokens"]
++                sequence_no += 1
++                last_sent_content = content
++                last_send_time = time.monotonic()
++
++            response = await post_task
++            if not session_started:
++                return response
++
++            observation = observation_from_dict(response.json())
++            final_tool_output = observation.to_agent_observation()
++            if not final_tool_output.startswith(last_sent_content):
++                raise RuntimeError(
++                    "final tool output changed a previously streamed prefix"
++                )
++            assert streaming_http_session is not None
++            request_start_time = time.monotonic()
++            close_result = await context.client.streaming_tool_call_request(
++                action="close",
++                session_id=session_id,
++                context=context,
++                tool_output=final_tool_output,
++                http_session=streaming_http_session,
++            )
++            streaming_request_seconds += time.monotonic() - request_start_time
++            if not close_result["prefix_matched"]:
++                logger.warning(
++                    "Streaming tool-call final token prefix did not match; "
++                    "the normal final request will run without relying on it."
++                )
++            _update_streaming_tool_call_metrics(
++                {
++                    "streaming_tool_call_sessions_started": 1,
++                    "streaming_tool_call_prefill_requests": prefill_requests,
++                    "streaming_tool_call_prefill_tokens": prefill_tokens,
++                    "streaming_tool_call_completed_chunks": close_result[
++                        "completed_chunks"
++                    ],
++                    "streaming_tool_call_dummy_tokens": close_result["dummy_tokens"],
++                    "streaming_tool_call_prefix_matches": int(
++                        close_result["prefix_matched"]
++                    ),
++                    "streaming_tool_call_fallbacks": int(
++                        not close_result["prefix_matched"]
++                    ),
++                    "streaming_tool_call_overhead_seconds": streaming_request_seconds,
++                }
++            )
++            return response
++        except Exception as error:
++            logger.warning(
++                f"Streaming tool-call prefill disabled for this action: {error}"
++            )
++            if session_started:
++                assert streaming_http_session is not None
++                try:
++                    await context.client.streaming_tool_call_request(
++                        action="abort",
++                        session_id=session_id,
++                        http_session=streaming_http_session,
++                    )
++                except Exception as abort_error:
++                    logger.debug(
++                        f"Failed to abort streaming tool-call session: {abort_error}"
++                    )
++            _update_streaming_tool_call_metrics(
++                {
++                    "streaming_tool_call_sessions_started": int(session_started),
++                    "streaming_tool_call_prefill_requests": prefill_requests,
++                    "streaming_tool_call_prefill_tokens": prefill_tokens,
++                    "streaming_tool_call_fallbacks": 1,
++                    "streaming_tool_call_overhead_seconds": streaming_request_seconds,
++                }
++            )
++            return await post_task
++        finally:
++            if streaming_http_session is not None:
++                await streaming_http_session.close()
+ 
+     def close(self) -> None:
+         """Stop the server process if not in attach_to_existing mode."""
+         # If we're in attach_to_existing mode, don't close the server
+         if self.attach_to_existing:
+             self.log(
+-                'info',
+-                f'Not closing server for session {self.sid} (attach_to_existing=True)',
++                "info",
++                f"Not closing server for session {self.sid} (attach_to_existing=True)",
+             )
+             # Just clean up our reference to the process, but leave it running
+             self.server_process = None
+diff --git a/openhands/runtime/utils/bash.py b/openhands/runtime/utils/bash.py
+index 7348bf8aa..7f7a6da33 100644
+--- a/openhands/runtime/utils/bash.py
++++ b/openhands/runtime/utils/bash.py
+@@ -298,6 +298,9 @@ class BashSession:
+         self._initialized = False
+         self.max_memory_mb = max_memory_mb
+         self.memory_monitor = None
++        self._stream_lock = threading.Lock()
++        self._stream_revision = 0
++        self._stream_content = ""
+ 
+     def initialize(self) -> None:
+         self.server = libtmux.Server()
+@@ -382,6 +385,37 @@ class BashSession:
+         )
+         return content
+ 
++    def get_stream_snapshot(self) -> dict[str, int | str]:
++        """Return the latest in-progress command output snapshot."""
++        with self._stream_lock:
++            return {
++                "revision": self._stream_revision,
++                "content": self._stream_content,
++            }
++
++    def _reset_stream_snapshot(self) -> None:
++        with self._stream_lock:
++            self._stream_revision += 1
++            self._stream_content = ""
++
++    def _update_stream_snapshot(
++        self,
++        *,
++        command: str,
++        pane_content: str,
++        ps1_matches: list[re.Match],
++    ) -> None:
++        raw_command_output = self._combine_outputs_between_matches(
++            pane_content, ps1_matches
++        )
++        command_output = _remove_command_prefix(raw_command_output, command).rstrip()
++        command_output = CmdOutputObservation._maybe_truncate(command_output)
++        with self._stream_lock:
++            if command_output == self._stream_content:
++                return
++            self._stream_content = command_output
++            self._stream_revision += 1
++
+     def close(self) -> None:
+         """Clean up the session."""
+         if self.memory_monitor:
+@@ -751,6 +785,7 @@ class BashSession:
+         )
+         initial_ps1_count = len(initial_ps1_matches)
+         logger.debug(f"Initial PS1 count: {initial_ps1_count}")
++        self._reset_stream_snapshot()
+ 
+         start_time = time.time()
+         last_change_time = start_time
+@@ -842,6 +877,11 @@ class BashSession:
+                 logger.debug(f"END OF PANE CONTENT: {cur_pane_lines[-10:]}")
+             ps1_matches = CmdOutputMetadata.matches_ps1_metadata(cur_pane_output)
+             current_ps1_count = len(ps1_matches)
++            self._update_stream_snapshot(
++                command=command,
++                pane_content=cur_pane_output,
++                ps1_matches=ps1_matches,
++            )
+ 
+             if cur_pane_output != last_pane_output:
+                 last_pane_output = cur_pane_output
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index d3f62664b..a5e678218 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1,12 +1,26 @@
+ """Unit tests for LocalRuntime's URL-related methods."""
+ 
+ import os
+-from unittest.mock import MagicMock, patch
++import threading
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
++from litellm import ModelResponse
+ 
+ from openhands.core.config import OpenHandsConfig
++from openhands.agenthub.nemo_gym_client import (
++    StreamingToolCallContext,
++    _STREAMING_TOOL_CALL_CONTEXTS,
++)
+ from openhands.events import EventStream
++from openhands.events.action import CmdRunAction
++from openhands.events.observation import CmdOutputObservation
++from openhands.events.observation.commands import CmdOutputMetadata
++from openhands.events.serialization import event_from_dict, event_to_dict
++from openhands.events.tool import ToolCallMetadata
++from openhands.runtime.impl.action_execution.action_execution_client import (
++    ActionExecutionClient,
++)
+ from openhands.runtime.impl.local.local_runtime import LocalRuntime
+ 
+ 
+@@ -243,3 +257,302 @@ class TestLocalRuntime:
+ 
+         # Verify the result is an empty dictionary
+         assert hosts == {}
++
++    def test_execute_action_uses_direct_request_when_streaming_disabled(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        action = CmdRunAction(command="echo output")
++        request_json = {"action": event_to_dict(action)}
++        expected_response = MagicMock()
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": False}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime.call_async_from_sync"
++            ) as async_bridge,
++            patch.object(
++                ActionExecutionClient,
++                "_send_action_server_request",
++                return_value=expected_response,
++            ) as direct_request,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json=request_json,
++                timeout=5,
++            )
++
++        assert response is expected_response
++        async_bridge.assert_not_called()
++        direct_request.assert_called_once_with(
++            "POST",
++            "http://runtime/execute_action",
++            json=request_json,
++            timeout=5,
++        )
++
++    @pytest.mark.asyncio
++    async def test_execute_action_streams_snapshots_and_closes_with_final_output(
++        self,
++    ):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="partial output final",
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        snapshots = [
++            {"revision": 1, "content": "partial"},
++            {"revision": 2, "content": "partial output"},
++        ]
++        snapshot_index = 0
++
++        def get(*args, **kwargs):
++            nonlocal snapshot_index
++            snapshot = snapshots[min(snapshot_index, len(snapshots) - 1)]
++            snapshot_index += 1
++            response = MagicMock()
++            response.json.return_value = snapshot
++            return response
++
++        session.post.side_effect = post
++        session.get.side_effect = get
++        streaming_client = MagicMock()
++
++        async def streaming_request(**kwargs):
++            if kwargs["action"] == "start":
++                return {"sequence_no": 0, "chunk_tokens": 0}
++            if kwargs["action"] == "append":
++                release_post.set()
++                return {"sequence_no": 1, "chunk_tokens": 3}
++            return {
++                "prefix_matched": True,
++                "completed_chunks": 1,
++                "dummy_tokens": 1,
++            }
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=streaming_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "min_chunk_chars": 10,
++                "flush_interval_seconds": 0.001,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++        serialized_action = event_to_dict(action)
++        action = event_from_dict(serialized_action)
++        assert action.response_id is None
++
++        with patch(
++            "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++            return_value={"streaming_tool_call": {"enabled": True}},
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": serialized_action},
++                timeout=5,
++            )
++
++        assert response is post_response
++        actions = [
++            call.kwargs["action"]
++            for call in streaming_client.streaming_tool_call_request.await_args_list
++        ]
++        assert actions == ["start", "append", "close"]
++        assert (
++            streaming_client.streaming_tool_call_request.await_args_list[0].kwargs[
++                "tool_output"
++            ]
++            == "partial"
++        )
++        assert (
++            streaming_client.streaming_tool_call_request.await_args_list[1].kwargs[
++                "tool_output"
++            ]
++            == "partial output"
++        )
++        assert (
++            streaming_client.streaming_tool_call_request.await_args_list[-1].kwargs[
++                "tool_output"
++            ]
++            == final_observation.to_agent_observation()
++        )
++
++    def test_execute_action_skips_streaming_for_short_completed_output(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="short output",
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        def get(*args, **kwargs):
++            release_post.set()
++            response = MagicMock()
++            response.json.return_value = {"revision": 1, "content": "short output"}
++            return response
++
++        session.post.side_effect = post
++        session.get.side_effect = get
++        streaming_client = MagicMock()
++        streaming_client.streaming_tool_call_request = AsyncMock()
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="short-response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "min_chunk_chars": 256,
++                "flush_interval_seconds": 0.001,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["short-response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="short-response", choices=[]),
++            total_calls_in_response=1,
++        )
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime.ClientSession"
++            ) as client_session,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        streaming_client.streaming_tool_call_request.assert_not_awaited()
++        client_session.assert_not_called()
++
++    def test_execute_action_skips_streaming_for_single_completed_snapshot(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        output = "complete output larger than one chunk"
++        final_observation = CmdOutputObservation(
++            content=output,
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        def get(*args, **kwargs):
++            release_post.set()
++            response = MagicMock()
++            response.json.return_value = {"revision": 1, "content": output}
++            return response
++
++        session.post.side_effect = post
++        session.get.side_effect = get
++        streaming_client = MagicMock()
++        streaming_client.streaming_tool_call_request = AsyncMock()
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="single-response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "min_chunk_chars": 1,
++                "flush_interval_seconds": 0.001,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["single-response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="single-response", choices=[]),
++            total_calls_in_response=1,
++        )
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime.ClientSession"
++            ) as client_session,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        streaming_client.streaming_tool_call_request.assert_not_awaited()
++        client_session.assert_not_called()
+diff --git a/tests/unit/runtime/utils/test_bash_session.py b/tests/unit/runtime/utils/test_bash_session.py
+index 6823d33d0..9af6b9f77 100644
+--- a/tests/unit/runtime/utils/test_bash_session.py
++++ b/tests/unit/runtime/utils/test_bash_session.py
+@@ -365,24 +365,48 @@ def test_python_interactive_input():
+ 
+     # Start Python with the interactive script
+     obs = session.execute(CmdRunAction(f'python3 -c "{python_script}"'))
+-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+-    assert 'Enter your name:' in obs.content
++    logger.info(obs, extra={"msg_type": "OBSERVATION"})
++    assert "Enter your name:" in obs.content
+     assert obs.metadata.exit_code == -1  # -1 indicates command is still running
+     assert session.prev_status == BashCommandStatus.NO_CHANGE_TIMEOUT
+ 
+     # Send first input (name)
+-    obs = session.execute(CmdRunAction('Alice', is_input=True))
+-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+-    assert 'Enter your age:' in obs.content
++    obs = session.execute(CmdRunAction("Alice", is_input=True))
++    logger.info(obs, extra={"msg_type": "OBSERVATION"})
++    assert "Enter your age:" in obs.content
+     assert obs.metadata.exit_code == -1
+     assert session.prev_status == BashCommandStatus.NO_CHANGE_TIMEOUT
+ 
+     # Send second input (age)
+-    obs = session.execute(CmdRunAction('25', is_input=True))
+-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+-    assert 'Hello Alice, you are 25 years old' in obs.content
++    obs = session.execute(CmdRunAction("25", is_input=True))
++    logger.info(obs, extra={"msg_type": "OBSERVATION"})
++    assert "Hello Alice, you are 25 years old" in obs.content
+     assert obs.metadata.exit_code == 0
+-    assert obs.metadata.suffix == '\n[The command completed with exit code 0.]'
++    assert obs.metadata.suffix == "\n[The command completed with exit code 0.]"
+     assert session.prev_status == BashCommandStatus.COMPLETED
+ 
+     session.close()
++
++
++def test_stream_snapshot_is_revisioned_and_command_echo_is_removed():
++    session = BashSession(work_dir=os.getcwd())
++    session._closed = True
++    session._reset_stream_snapshot()
++    initial_snapshot = session.get_stream_snapshot()
++
++    session._update_stream_snapshot(
++        command="echo hello",
++        pane_content="echo hello\nhello",
++        ps1_matches=[],
++    )
++    updated_snapshot = session.get_stream_snapshot()
++    session._update_stream_snapshot(
++        command="echo hello",
++        pane_content="echo hello\nhello",
++        ps1_matches=[],
++    )
++
++    assert initial_snapshot["content"] == ""
++    assert updated_snapshot["content"] == "hello"
++    assert updated_snapshot["revision"] == initial_snapshot["revision"] + 1
++    assert session.get_stream_snapshot() == updated_snapshot
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+new file mode 100644
+index 000000000..af59d59ec
+--- /dev/null
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -0,0 +1,87 @@
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++from omegaconf import OmegaConf
++
++from openhands.agenthub import nemo_gym_client as client_module
++from openhands.agenthub.nemo_gym_client import (
++    NemoGymClient,
++    StreamingToolCallContext,
++)
++
++
++@pytest.mark.asyncio
++async def test_streaming_request_uses_loop_local_session(monkeypatch):
++    client = NemoGymClient.__new__(NemoGymClient)
++    client.ng_server_client = MagicMock()
++    client.ng_server_client.post = AsyncMock()
++    client.ng_server_client.global_config_dict = OmegaConf.create(
++        {
++            "policy_model": {
++                "responses_api_models": {
++                    "vllm_model": {"host": "model-host", "port": 1234}
++                }
++            }
++        }
++    )
++    client.model_server_cookies = {"session": "sticky"}
++    http_session = MagicMock()
++    http_session.post = AsyncMock()
++    response = MagicMock()
++    response.cookies = {"session": "sticky"}
++    http_session.post.return_value = response
++    monkeypatch.setattr(client_module, "raise_for_status", AsyncMock())
++    monkeypatch.setattr(
++        client_module,
++        "get_response_json",
++        AsyncMock(return_value={"sequence_no": 0, "chunk_tokens": 0}),
++    )
++    monkeypatch.setenv("NEMO_GYM_MODEL_SERVER_NAME", "policy_model")
++    context = StreamingToolCallContext(
++        client=client,
++        response_id="response",
++        tool_call_id="call",
++        function_name="execute_bash",
++        chat_completion={
++            "messages": [
++                {"role": "user", "content": "fix it"},
++                {
++                    "role": "assistant",
++                    "content": None,
++                    "tool_calls": [],
++                    "prompt_token_ids": [1, 2],
++                    "generation_token_ids": [3],
++                    "generation_log_probs": [-0.1],
++                },
++            ],
++            "tools": [],
++        },
++        config={"enabled": True},
++    )
++
++    result = await client.streaming_tool_call_request(
++        action="start",
++        session_id="session",
++        context=context,
++        sequence_no=0,
++        tool_output="partial output",
++        http_session=http_session,
++    )
++
++    assert result == {"sequence_no": 0, "chunk_tokens": 0}
++    client.ng_server_client.post.assert_not_awaited()
++    request_call = http_session.post.await_args
++    assert request_call.args == (
++        "http://model-host:1234/v1/streaming_tool_call/start",
++    )
++    request = request_call.kwargs
++    assert request["cookies"] == {"session": "sticky"}
++    assert request["json"]["chat_completion"]["messages"][-1] == {
++        "role": "tool",
++        "content": "partial output",
++        "tool_call_id": "call",
++        "name": "execute_bash",
++    }
++    assert request["json"]["chat_completion"]["messages"][-2][
++        "generation_token_ids"
++    ] == [3]
+

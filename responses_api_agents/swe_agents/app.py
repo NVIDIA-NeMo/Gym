@@ -242,6 +242,14 @@ class SWEBenchMetrics(BaseModel):
     initialize_runtime_time: Optional[float] = None
     total_command_exec_time: Optional[float] = None
     total_model_call_time: Optional[float] = None
+    streaming_tool_call_sessions_started: Optional[int] = None
+    streaming_tool_call_prefill_requests: Optional[int] = None
+    streaming_tool_call_prefill_tokens: Optional[int] = None
+    streaming_tool_call_completed_chunks: Optional[int] = None
+    streaming_tool_call_dummy_tokens: Optional[int] = None
+    streaming_tool_call_prefix_matches: Optional[int] = None
+    streaming_tool_call_fallbacks: Optional[int] = None
+    streaming_tool_call_overhead_seconds: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
 
@@ -1062,6 +1070,30 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
+    def _apply_streaming_tool_call_patch(self, openhands_dir: Path) -> None:
+        patch_path = self.parent_dir / "patches" / "streaming_tool_call.patch"
+        reverse_check = subprocess_run(
+            ["git", "apply", "--reverse", "--check", str(patch_path)],
+            cwd=openhands_dir,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode == 0:
+            return
+
+        apply_check = subprocess_run(
+            ["git", "apply", "--check", str(patch_path)],
+            cwd=openhands_dir,
+            capture_output=True,
+            text=True,
+        )
+        if apply_check.returncode != 0:
+            raise RuntimeError(
+                "OpenHands streaming tool-call patch is incompatible with "
+                f"{self.config.agent_framework_commit}: {apply_check.stderr}"
+            )
+        subprocess_run(["git", "apply", str(patch_path)], cwd=openhands_dir, check=True)
+
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
@@ -1070,6 +1102,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             miniforge_dir = setup_dir / "miniforge3"
 
             if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
+                self._apply_streaming_tool_call_patch(openhands_dir)
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
                 return setup_dir
 
@@ -2046,7 +2079,20 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             / "generation_apptainer_spinup_timestamp",
         )
 
-        params.metrics_fpath.write_text("{}")
+        params.metrics_fpath.write_text(
+            json.dumps(
+                {
+                    "streaming_tool_call_sessions_started": 0,
+                    "streaming_tool_call_prefill_requests": 0,
+                    "streaming_tool_call_prefill_tokens": 0,
+                    "streaming_tool_call_completed_chunks": 0,
+                    "streaming_tool_call_dummy_tokens": 0,
+                    "streaming_tool_call_prefix_matches": 0,
+                    "streaming_tool_call_fallbacks": 0,
+                    "streaming_tool_call_overhead_seconds": 0.0,
+                }
+            )
+        )
 
         if params.agent_prompt_overrides:
             overrides = params.agent_prompt_overrides
