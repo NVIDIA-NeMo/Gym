@@ -20,7 +20,7 @@ Output is written to data/secque_questions.jsonl.
 
 import json
 
-from convert_questions import convert_entry
+from scripts.convert_questions import convert_entry
 from datasets import load_dataset
 
 

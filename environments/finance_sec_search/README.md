@@ -4,6 +4,10 @@ Financial information retrieval using SEC EDGAR filings with optional web search
 
 **Only companies listed in the [SEC company tickers file](https://www.sec.gov/files/company_tickers.json) are supported.** Questions about companies not in this list will fail at the ticker lookup step.
 
+Example data files are provided in `environments/finance_sec_search/data/`:
+- `example_questions.jsonl` — raw question/answer pairs
+- `example.jsonl` — converted Gym input format (ready to use for rollouts)
+
 ## Tools
 
 | Tool | Description |
@@ -31,7 +35,7 @@ search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: empty
 search_judge_model_name: gpt-5-mini
 
-# Optional: enable web_search tool (requires Tavily API key)
+# Optional: enable web_search tool (requires Tavily API key). Set to `null` to run without web_search tool
 tavily_api_key: tvly-XXX
 ```
 
@@ -153,7 +157,8 @@ public benchmark lives in `benchmarks/finance_sec_search/`. It downloads the
 
 ```bash
 # Prepare via Gym CLI (recommended — used by ng_run with benchmark configs):
-ng_prepare_benchmark +benchmark=benchmarks/finance_sec_search/config_no_web_search.yaml
+ng_prepare_benchmark +config_paths=[benchmarks/finance_sec_search/config_no_web_search.yaml]   # without web_search
+ng_prepare_benchmark +config_paths=[benchmarks/finance_sec_search/config_web_search.yaml]      # with web_search
 
 # Or run the script directly:
 python benchmarks/finance_sec_search/prepare.py            # without web_search
@@ -185,9 +190,9 @@ This writes `data/secque_questions.jsonl`. Use it as the `input_jsonl_fpath` in 
 
 **Note that this dataset is not used for training anywhere and is only used for eval/benchmark purposes.**
 
-### 2. Start the vLLM server
+### 2. Start the vLLM server (optional)
 
-Launch a vLLM-compatible model server (e.g. Qwen3-30B-A3B) so the policy and judge endpoints are available.
+Launch a vLLM-compatible model server(s) (e.g. Qwen3-30B-A3B) to use them as the policy and judge endpoints. Make sure to populate `env.yaml` to match your endpoint(s) specification. Alternatively you can use an externally hosted OpenAI-compatible endpoint.
 
 ### 3. Start the Gym servers
 
@@ -224,13 +229,13 @@ ng_collect_rollouts \
   +limit=1
 ```
 
-### Run tests
-
-```bash
-ng_test +entrypoint=environments/finance_sec_search
-```
-
 ## Verification
 
-Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). Only fully correct answers ([[2]]) receive reward 1.0. The judge prompt and rubric are defined in /prompt_templates.
+Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). Only fully correct answers ([[2]]) receive reward 1.0. The judge prompt and rubric are defined in `environments/finance_sec_search/prompt_templates/`.
+
+To inspect a rollout's verification scores, view the output JSONL after collecting rollouts:
+
+```bash
+head -1 results/finance_sec_search_rollouts.jsonl | python3 -m json.tool | grep -A5 reward
+```
 
