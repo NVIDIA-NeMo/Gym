@@ -780,6 +780,30 @@ class TestAssetSelectors:
             "+output_dirpath=data/example_multi_step",
         }
 
+    def test_collate_model_type_selector(self, monkeypatch: MonkeyPatch) -> None:
+        # `dataset collate` accepts --model-type so model-dependent data workflows (e.g. train_preparation that
+        # generates with a model) can select the model by name instead of an internal config path.
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "collate",
+                "--resources-server",
+                "format_verification/freeform_formatting",
+                "--model-type",
+                "vllm_model",
+                "--mode",
+                "train_preparation",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:prepare_data"
+        paths, others = _split_overrides(overrides)
+        assert paths == {
+            str(WORKING_DIR / "resources_servers/format_verification/configs/freeform_formatting.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+        }
+        assert others == {"+mode=train_preparation"}
+
     def test_resource_server_flavor_syntax(self, monkeypatch: MonkeyPatch) -> None:
         # `<server>/<flavor>` picks a named config inside the server's configs/ dir; math_with_judge ships several
         # flavoured configs (see reference/faq.mdx, which pairs a math_with_judge dataset flavour for profiling).
