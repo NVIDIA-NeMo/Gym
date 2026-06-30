@@ -1079,7 +1079,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
             judge_call_start = time()
             try:
-                temp = 0.0 if attempt == 0 else min(0.3 + 0.1 * attempt, 1.0)
+                # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
+                # re-sample at 1.0 (which already varies the output — no need to escalate from 0.0).
+                temp = 1.0
                 judge_create_params.temperature = temp
 
                 print(
