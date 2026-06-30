@@ -576,14 +576,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _format_validation_error(exc) -> str:
-    """Render a pydantic ValidationError as a concise CLI message instead of a stack trace.
+def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> None:
+    # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
+    # pydantic sets ValidationError.title to the validated
+    # model's name, so we match it against the CLI config classes.
+    from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
-    A missing required flag/config value is the common case (it surfaces as a `missing` error);
-    other failures (wrong type, bad value) are listed with pydantic's own message. Mirrors the
-    `Error: <msg>` style of `exit_cleanly_on_config_error`, which only covers ConfigError, not the
-    pydantic ValidationError raised by every command's `model_validate`.
-    """
+    config_names = {BaseNeMoGymCLIConfig.__name__}
+    stack = [BaseNeMoGymCLIConfig]
+    while stack:
+        cls = stack.pop()
+        for sub in cls.__subclasses__():
+            if sub.__name__ not in config_names:
+                config_names.add(sub.__name__)
+                stack.append(sub)
+    if exc.title not in config_names:
+        # if this is not a user's config validation error, raise the original error
+        raise
+
+    # For user's config validation, raise a descriptive error message
     missing: list[str] = []
     invalid: list[str] = []
     for error in exc.errors():
@@ -601,7 +612,7 @@ def _format_validation_error(exc) -> str:
         )
     if invalid:
         parts.append(f"invalid configuration: {'; '.join(invalid)}.")
-    return " ".join(parts) if parts else str(exc)
+    parser.error(" ".join(parts) if parts else str(exc))
 
 
 def main() -> None:
@@ -646,5 +657,4 @@ def main() -> None:
         else:
             dispatch(command.target, overrides)
     except ValidationError as exc:
-        # descriptive error message for pydantic validation errors
-        getattr(args, "_parser", parser).error(_format_validation_error(exc))
+        _handle_pydantic_validation_error(exc, getattr(args, "_parser", parser))
