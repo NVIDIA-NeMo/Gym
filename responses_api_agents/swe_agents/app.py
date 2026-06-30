@@ -239,6 +239,7 @@ class SWEBenchMetrics(BaseModel):
     openhands_run_time: Optional[float] = None
     generation_start_timestamp: Optional[str] = None
     evaluation_start_timestamp: Optional[str] = None
+    per_turn_metrics: Optional[dict] = None
     generation_apptainer_spinup_time: Optional[float] = None
     create_runtime_time: Optional[float] = None
     connect_to_runtime_time: Optional[float] = None
@@ -1481,6 +1482,7 @@ class RunOpenHandsAgent(BaseModel):
         with open(out_file, "r") as f:
             out_dict = json.loads(f.read().strip())
 
+        metrics.per_turn_metrics = out_dict.get("metrics")
         metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
 
         patch = out_dict["test_result"]["git_patch"] or None
