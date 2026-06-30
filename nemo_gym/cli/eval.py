@@ -404,9 +404,7 @@ def e2e_rollout_collection():  # pragma: no cover
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
             if not module_name or not fn_name:
-                raise ConfigError(
-                    f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r})."
-                )
+                raise ConfigError(f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r}).")
             driver_fn = getattr(importlib.import_module(module_name), fn_name)
             resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
