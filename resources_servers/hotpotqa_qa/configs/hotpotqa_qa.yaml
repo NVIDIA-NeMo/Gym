@@ -22,4 +22,4 @@ hotpotqa_qa_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/hotpotqa_qa/data/example.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
+          license: CC BY-SA 4.0
