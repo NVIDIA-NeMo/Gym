@@ -396,6 +396,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
             SEARCH_DIR,
             _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
             _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
