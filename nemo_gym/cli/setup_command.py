@@ -172,16 +172,24 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
+def run_command(
+    command: str, working_dir_path: Path, server_name: str = "", project_root: Path | None = None
+) -> Popen:
     global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    py_path = custom_env.get("PYTHONPATH", None)
-    if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
-    else:
-        custom_env["PYTHONPATH"] = work_dir
+    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
+    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
+    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
+    # this generic helper doesn't bake a layout assumption in for its other callers.
+    py_path_entries = [work_dir]
+    if project_root is not None:
+        py_path_entries.append(f"{project_root.absolute()}")
+    existing_py_path = custom_env.get("PYTHONPATH")
+    if existing_py_path:
+        py_path_entries.append(existing_py_path)
+    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 

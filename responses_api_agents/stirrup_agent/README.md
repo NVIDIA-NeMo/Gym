@@ -11,7 +11,6 @@ healthcare, and engineering.
 - [Dataset](#dataset)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Full GDPVal Evaluation](#full-gdpval-evaluation)
 - [Configuration](#configuration)
 - [Advanced Features](#advanced-features)
   - [Apptainer Sandboxing](#apptainer-sandboxing)
@@ -191,7 +190,7 @@ Enable it via the config key or the `JUDGE_ONLY` env var honored by
 
 ```bash
 JUDGE_ONLY=true PERSIST_DELIVERABLES_DIR=/abs/path/to/cached/deliverables \
-  ng_e2e_collect_rollouts ...
+  gym eval run ...
 ```
 
 or as a Hydra override:
@@ -272,10 +271,11 @@ absolute path — without it nothing is saved and the mode is rejected at startu
 EXECUTE_ONLY=true \
 PERSIST_DELIVERABLES_DIR=/abs/path/to/output/gdpval/my-model \
 HF_TOKEN=... \
-ng_e2e_collect_rollouts \
-  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
-  ++split=benchmark \
-  ++output_jsonl_fpath=results/gdpval_execute_only.jsonl
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_execute_only.jsonl
 ```
 
 The cached deliverables can later be scored with a separate rubric or

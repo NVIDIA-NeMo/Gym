@@ -1,6 +1,6 @@
 ---
 title: "Aggregate Metrics"
-description: ""
+description: "Compute summary statistics, customize per-environment metrics, and merge shard outputs from gym eval aggregate."
 position: 4
 ---
 After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
@@ -148,6 +148,10 @@ Given 3 tasks with 4 rollouts each (task 0: all correct, task 1: all wrong, task
 ---
 
 <Cards>
+
+<Card title="Benchmarks" href="/evaluation/benchmarks">
+How to choose a benchmark, what the categories cover, and how to interpret results.
+</Card>
 
 <Card title="Diagnose Results" href="/evaluation/diagnose-results">
 Go beyond the scorecard: use BLADE and other analysis skills to find why scores changed, which tasks failed, and what intervention to prioritize.

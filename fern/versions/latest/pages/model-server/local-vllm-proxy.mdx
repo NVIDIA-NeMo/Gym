@@ -43,9 +43,9 @@ policy_model_reasoning_off:
 Run it alongside the backing LocalVLLMModel by chaining both configs in `config_paths`:
 
 ```bash
-config_paths="responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml,\
-responses_api_models/local_vllm_model_proxy/configs/local_vllm_model_proxy.yaml"
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model_proxy/configs/local_vllm_model_proxy.yaml \
     ++policy_model_proxy.responses_api_models.local_vllm_model_proxy.model_server.name=gpt-oss-20b-reasoning-high
 ```
 

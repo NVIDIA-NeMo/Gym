@@ -26,6 +26,9 @@ import pytest
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
 
 
+pytestmark = pytest.mark.sandbox
+
+
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
 
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
@@ -187,11 +190,9 @@ def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
     with pytest.raises(TypeError, match="extensions"):
-        opensandbox_provider._spec_extensions(
-            SandboxSpec(image="image:tag", provider_options={"extensions": ["not", "a", "mapping"]})
-        )
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"extensions": ["not", "a", "mapping"]})
     with pytest.raises(TypeError, match="must be a bool"):
-        opensandbox_provider._provider_option_bool({"skip_health_check": "true"}, "skip_health_check")
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"skip_health_check": "true"})
 
     assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
@@ -240,6 +241,38 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert attrs["next_sleep_s"] == 0.5
 
 
+def test_provider_options_from_mapping() -> None:
+    options_cls = opensandbox_provider.OpenSandboxProviderOptions
+
+    assert options_cls.from_mapping(None) == options_cls()
+
+    parsed = options_cls.from_mapping(
+        {
+            "platform": {"os": "linux", "arch": "amd64"},
+            "snapshot_id": "snap-1",
+            "volumes": [{"name": "workspace"}],
+            "skip_health_check": True,
+            "extensions": {"imagePullPolicy": "Never"},
+        }
+    )
+    assert parsed.platform == {"os": "linux", "arch": "amd64"}
+    assert parsed.snapshot_id == "snap-1"
+    assert parsed.volumes == ({"name": "workspace"},)
+    assert parsed.skip_health_check is True
+    assert parsed.extensions == {"imagePullPolicy": "Never"}
+
+    with pytest.raises(ValueError, match="Unknown OpenSandbox provider option"):
+        options_cls.from_mapping({"bogus": 1})
+    with pytest.raises(TypeError, match="provider_options must be a mapping"):
+        options_cls.from_mapping(["not", "a", "mapping"])
+    with pytest.raises(TypeError, match="'platform' must be a mapping"):
+        options_cls.from_mapping({"platform": "linux/amd64"})
+    with pytest.raises(TypeError, match="'snapshot_id' must be a string"):
+        options_cls.from_mapping({"snapshot_id": 123})
+    with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):
+        options_cls.from_mapping({"volumes": ["workspace"]})
+
+
 def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
@@ -262,14 +295,12 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
 
-    spec = SandboxSpec(image="image:tag", provider_options={"extensions": {"imagePullPolicy": "Never"}})
-    updated = provider._with_default_image_pull_policy(spec)
-    extensions = updated.provider_options["extensions"]
+    extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
     assert extensions["opensandbox.extensions.image-pull-policy"] == "Never"
 
     no_policy_provider = opensandbox_provider.OpenSandboxProvider(create={"image_pull_policy": None})
-    assert no_policy_provider._with_default_image_pull_policy(spec) is spec
+    assert no_policy_provider._resolve_extensions({"imagePullPolicy": "Never"}) == {"imagePullPolicy": "Never"}
 
 
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
