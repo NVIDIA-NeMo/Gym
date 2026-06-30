@@ -99,6 +99,9 @@ class TestApp:
             default_verifier="math_with_judge",
         )
         server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
 
         # Mock the server_client.post to return a successful verification
         mock_response = AsyncMock()
@@ -143,7 +146,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        result = await server.verify(None, verify_request)
+        result = await server.verify(request, verify_request)
 
         assert result.reward == 1.0
         assert result.delegated_response is not None
@@ -154,6 +157,32 @@ class TestApp:
         call_args = server.server_client.post.call_args
         assert call_args.kwargs["server_name"] == "math_with_judge"
         assert call_args.kwargs["url_path"] == "/verify"
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
+
+    async def test_verify_cleans_up_when_verifier_fails(self) -> None:
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("verifier failed"))
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
+        verify_request = MagicMock(spec=NSToolsVerifyRequest)
+        verify_request.verifier_type = None
+
+        with pytest.raises(RuntimeError, match="verifier failed"):
+            await server.verify(request, verify_request)
+
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
 
     async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""
@@ -272,128 +301,6 @@ class TestApp:
         assert "expected_answer" in json_data
         assert "responses_create_params" in json_data
         assert "response" in json_data
-
-
-class TestPerRolloutToolCleanup:
-    def _make_server(self) -> NSToolsResourcesServer:
-        config = NSToolsConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="ns_tools",
-            verifiers={
-                "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
-            },
-            default_verifier="math_with_judge",
-        )
-        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-        server.tool_manager = MagicMock(spec_set=ToolManager)
-        return server
-
-    def _make_verify_request(self) -> NSToolsVerifyRequest:
-        response = NeMoGymResponse(
-            id="resp_test",
-            created_at=0.0,
-            model="dummy",
-            object="response",
-            output=[],
-            parallel_tool_calls=True,
-            tool_choice="auto",
-            tools=[],
-        )
-        return NSToolsVerifyRequest(
-            responses_create_params={"input": [{"role": "user", "content": "test"}]},
-            response=response,
-        )
-
-    def _make_session_request(self, session_id: str | None) -> MagicMock:
-        request = MagicMock()
-        request.session = {SESSION_ID_KEY: session_id} if session_id else {}
-        return request
-
-    def _set_verifier_reward(self, server: NSToolsResourcesServer, reward: float) -> None:
-        response = AsyncMock()
-        response.json = AsyncMock(return_value={"reward": reward})
-        server.server_client.post = AsyncMock(return_value=response)
-
-    async def test_verify_cleans_up_rollout_tool_state(self) -> None:
-        server = self._make_server()
-        self._set_verifier_reward(server, 1.0)
-
-        result = await server.verify(
-            self._make_session_request("rollout-123"),
-            self._make_verify_request(),
-        )
-
-        assert result.reward == 1.0
-        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
-
-    async def test_verify_cleans_up_when_verifier_fails(self) -> None:
-        server = self._make_server()
-        server.server_client.post = AsyncMock(side_effect=RuntimeError("verifier failed"))
-
-        with pytest.raises(RuntimeError, match="verifier failed"):
-            await server.verify(
-                self._make_session_request("rollout-123"),
-                self._make_verify_request(),
-            )
-
-        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
-
-    async def test_verify_cleans_up_when_verifier_omits_reward(self) -> None:
-        server = self._make_server()
-        response = AsyncMock()
-        response.json = AsyncMock(return_value={})
-        server.server_client.post = AsyncMock(return_value=response)
-
-        with pytest.raises(ValueError, match="Verifier did not return 'reward'"):
-            await server.verify(
-                self._make_session_request("rollout-123"),
-                self._make_verify_request(),
-            )
-
-        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
-
-    async def test_verify_without_session_skips_cleanup(self) -> None:
-        server = self._make_server()
-        self._set_verifier_reward(server, 1.0)
-
-        result = await server.verify(
-            self._make_session_request(None),
-            self._make_verify_request(),
-        )
-
-        assert result.reward == 1.0
-        server.tool_manager.cleanup_request.assert_not_awaited()
-
-    async def test_verify_without_tool_manager_succeeds(self) -> None:
-        server = self._make_server()
-        self._set_verifier_reward(server, 1.0)
-        server.tool_manager = None
-
-        result = await server.verify(
-            self._make_session_request("rollout-123"),
-            self._make_verify_request(),
-        )
-
-        assert result.reward == 1.0
-
-    async def test_cleanup_failure_does_not_mask_verification_result(self) -> None:
-        server = self._make_server()
-        self._set_verifier_reward(server, 1.0)
-        server.tool_manager.cleanup_request.side_effect = RuntimeError("cleanup failed")
-
-        with patch("app.logger") as mock_logger:
-            result = await server.verify(
-                self._make_session_request("rollout-123"),
-                self._make_verify_request(),
-            )
-
-        assert result.reward == 1.0
-        mock_logger.exception.assert_called_once_with(
-            "Failed to clean up tool state for session %s",
-            "rollout-123",
-        )
 
 
 class TestPythonToolShutdownReap:

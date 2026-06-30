@@ -3,8 +3,6 @@ This is a resources server for executing NeMo Skills tools (e.g., stateful Pytho
 
 It integrates with the NeMo Skills ToolManager to dynamically load and execute tools, maintaining stateful sessions across multiple tool calls within a rollout.
 
-Tool state lasts until `/verify` completes. Verification ends the rollout and cleans its request-scoped tool state even when the delegated verifier fails. A later rollout starts with fresh tool state.
-
 # Example usage
 
 ## Running servers
