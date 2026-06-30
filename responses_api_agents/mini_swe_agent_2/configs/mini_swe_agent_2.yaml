@@ -1,0 +1,47 @@
+# Provider-neutral mini-swe-agent 2 config.
+#
+# `sandbox_provider` names the sandbox to use; its config lives in a separate
+# provider file, so swapping providers is swapping that path in `+config_paths`:
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, $MODEL]"
+mini_swe_agent_2:
+  responses_api_agents:
+    mini_swe_agent_2:
+      entrypoint: app.py
+      domain: coding
+      description: Software engineering tasks driven by mini-swe-agent harness on a Gym sandbox.
+      value: Improve agentic software engineering capabilities.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 64
+      env: sandbox
+      # Name of the sandbox to use; include a provider config that defines a
+      # `sandbox` block (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 20
+        provider_options:
+          platform:
+            os: linux
+            arch: amd64
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
+      sandbox_environment_kwargs:
+        cwd: /testbed
+        conda_env: testbed
+        activate_conda: true
+        user: root
+      run_golden: false
+      step_timeout: 600
+      eval_timeout: 1800
+      skip_if_exists: false
+      step_limit: 250

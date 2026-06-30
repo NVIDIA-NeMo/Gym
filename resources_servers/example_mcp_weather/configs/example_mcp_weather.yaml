@@ -1,0 +1,32 @@
+example_mcp_weather:
+  resources_servers:
+    example_mcp_weather:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Claude Code MCP smoke test with a Gym-owned weather tool
+
+example_mcp_weather_claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: example_mcp_weather
+      concurrency: 1
+      model: claude-sonnet-4-6
+      anthropic_api_key: ${anthropic_api_key}
+      anthropic_base_url: null
+      max_turns: 10
+      timeout: 300
+      system_prompt: null
+      allowed_tools: null
+      disallowed_tools: null
+      claude_code_version: null
+      bare: true
+      mcp_config: null
+      settings: null
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl

@@ -1600,6 +1600,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
                 "provider_specific_fields": {
                     "prompt_token_ids": [1, 2],
                     "generation_token_ids": [3, 4],
+                    "routed_experts": [[[0, 1]], [[2, 3]], [[4, 5]], [[6, 7]]],
                 },
                 "response": {
                     "choices": [
@@ -1619,6 +1620,12 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             assert len(messages) == 3  # system, user, assistant
             assert messages[2]["role"] == "assistant"
             assert messages[2]["prompt_token_ids"] == [1, 2]
+            assert messages[2]["routed_experts"] == [
+                [[0, 1]],
+                [[2, 3]],
+                [[4, 5]],
+                [[6, 7]],
+            ]
             assert len(tools) == 1
 
     def test_no_completions_dir(self, monkeypatch) -> None:

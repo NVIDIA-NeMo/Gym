@@ -24,6 +24,8 @@ import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AlmostServerError,
+    ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     MalformedConfigPathsError,
@@ -895,8 +897,10 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        with raises(ValueError, match="almost-server.*validation errors"):
+        # AlmostServerError is a ConfigError, so the CLI reports it cleanly (no traceback).
+        with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
+        assert isinstance(exc_info.value, ConfigError)
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
