@@ -264,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [full-test-suite, server-suite-result, test-wheel-install]
     environment: main
-    if: ${{ always() && (needs.full-test-suite.result == 'failure' || needs.server-suite-result.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
+    if: ${{ always() && !cancelled() && (needs.full-test-suite.result == 'failure' || needs.server-suite-result.result == 'failure' || needs.test-wheel-install.result == 'failure') }}
     steps:
       - name: Send Slack notification
         env:
