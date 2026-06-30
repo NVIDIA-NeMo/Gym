@@ -9,7 +9,7 @@ This is an escalation ladder. Do not patch agents, resource servers, model adapt
 1. Enable Gym's existing request debug flag:
 
    ```bash
-   ng_run '+config_paths=[...]' ++global_aiohttp_client_request_debug=True
+   gym env start --config ... ++global_aiohttp_client_request_debug=True
    ```
 
 2. Re-run the smallest failing case and capture stdout/stderr.

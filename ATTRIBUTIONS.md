@@ -14,6 +14,7 @@ All third-party software is used as obtained, without modification, unless other
 | **Hydra-core** | Configuration management | MIT | Facebook Research | https://github.com/facebookresearch/hydra |
 | **MLflow** | Experiment tracking | Apache-2.0 | Databricks Inc. | https://github.com/mlflow/mlflow |
 | **Math-Verify** | Math reasoning verifier | Apache-2.0 | Hugging Face | https://github.com/huggingface/Math-Verify |
+| **MCP Python SDK** | Model Context Protocol SDK | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/python-sdk |
 | **OmegaConf** | Config library | BSD-3-Clause | Omry Yadan | https://github.com/omry/omegaconf |
 | **OpenAI Python** | API client | Apache-2.0 | OpenAI | https://github.com/openai/openai-python |
 | **spaCy Model (en_core_web_sm)** | NLP embedding model | MIT | Explosion AI | https://github.com/explosion/spacy-models/releases/tag/en_core_web_sm-3.8.0 |

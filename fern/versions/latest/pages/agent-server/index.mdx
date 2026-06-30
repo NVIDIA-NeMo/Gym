@@ -1,5 +1,5 @@
 ---
-title: "Agent Server"
+title: "Configure Agents"
 description: ""
 position: 1
 ---
@@ -44,15 +44,9 @@ class Agent:
         return conversation
 ```
 
-## Integrate Existing Agents
+## Existing Agents
 
-You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
-
-[`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format.
-
-### Tools in Agent vs. Resources Server
-
-Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.
+See [Integrate Existing Agents](/agent-server/integrate-existing-agents) to use a built-in NeMo Gym agent, wrap an external agent harness, or decide when tool logic belongs in the Agent server versus the Resources server.
 
 ## Server Configuration
 <Note>

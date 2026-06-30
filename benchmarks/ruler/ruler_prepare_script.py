@@ -152,7 +152,7 @@ def get_ruler_data(
         # `nltk.download(...)` branch entirely.
         #
         # The lock also coordinates across multiple `get_ruler_data`
-        # callers (e.g. `ng_prepare_benchmark` pool workers) on the same
+        # callers (e.g. `gym eval prepare` pool workers) on the same
         # host — `tempfile.gettempdir()` is `/tmp`, host-shared, and
         # `flock(2)` is a kernel-level lock, so it serializes correctly
         # across processes regardless of which Python venv they run in.

@@ -16,6 +16,7 @@ import asyncio
 import glob as glob_module
 import json
 import os
+import warnings
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -26,7 +27,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -37,6 +38,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
@@ -44,13 +46,13 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
-    get_global_config_dict,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
     raise_for_status,
     set_global_aiohttp_client,
 )
+from nemo_gym.skills import SkillsConfig, load_skill_directory
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +130,7 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
         description=(
             "Skip the post-rollout aggregate-metrics computation and file write. "
             "Used when sharding rollouts across multiple jobs that will be aggregated together "
-            "afterward by `ng_aggregate_rollouts`."
+            "afterward by `gym eval aggregate`."
         ),
     )
 
@@ -140,7 +142,7 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     Examples:
 
     ```bash
-    ng_collect_rollouts \
+    gym eval run \
         +output_jsonl_fpath=weather_rollouts.jsonl \
         +num_samples_in_parallel=10
     ```
@@ -157,7 +159,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     Examples:
 
     ```bash
-    ng_collect_rollouts \
+    gym eval run --no-serve \
         +agent_name=example_single_tool_call_simple_agent \
         +input_jsonl_fpath=weather_query.jsonl \
         +output_jsonl_fpath=weather_rollouts.jsonl \
@@ -177,9 +179,14 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     limit: Optional[int] = Field(
         default=None, description="Maximum number of examples to load and take from the input dataset."
     )
-    num_repeats: Optional[int] = Field(
-        default=None,
-        description="The number of times to repeat each example to run. Useful if you want to calculate mean@k e.g. mean@4 or mean@16.",
+    num_repeats: Union[int, Dict[str, int]] = Field(
+        default=1,
+        description=(
+            "How many times to repeat each example. Either an int (applied to every row) or a "
+            "dict keyed by agent_ref.name (e.g. {simple_agent: 32, swe_agent: 1}). In dict form, "
+            "every agent that appears in the input rows must have an entry, unless a special "
+            '"_default" key is provided as a fallback. Useful for mean@k.'
+        ),
     )
     num_repeats_add_seed: bool = Field(
         default=False,
@@ -193,6 +200,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    skills: Optional[SkillsConfig] = Field(
+        default=None,
+        description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_num_repeats(self) -> "RolloutCollectionConfig":
+        nr = self.num_repeats
+        if isinstance(nr, int):
+            if nr < 1:
+                raise ValueError(f"num_repeats must be >= 1, got {nr}")
+        else:
+            bad = {name: n for name, n in nr.items() if n < 1}
+            if bad:
+                raise ValueError(f"num_repeats dict values must be >= 1, got {bad}")
+        return self
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
@@ -233,15 +256,34 @@ class RolloutCollectionHelper(BaseModel):
         else:
             responses_create_params_overrides = dict()
 
-        num_repeats = config.num_repeats or 1
-        if num_repeats:
-            print(f"Repeating rows {num_repeats} times (in a pattern of abc to aabbcc)!")
+        if isinstance(config.num_repeats, int):
+            fixed_num_repeats: Optional[int] = config.num_repeats
+            per_agent_repeats: Dict[str, int] = {}
+            default_repeats: Optional[int] = None
+            print(f"Repeating rows {fixed_num_repeats} times (in a pattern of abc to aabbcc)!")
+        else:
+            fixed_num_repeats = None
+            per_agent_repeats = {k: v for k, v in config.num_repeats.items() if k != "_default"}
+            default_repeats = config.num_repeats.get("_default")
+            print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
+        agents_seen: set[str] = set()
 
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
+
+        # Resolve skills once for the whole run (hash is content-derived, computed at startup).
+        skills_ref_dict = None
+        if config.skills:
+            skills_ref = load_skill_directory(config.skills.path)
+            skills_ref_dict = skills_ref.model_dump()
+            print(
+                f"Using skills from {config.skills.path} "
+                f"(hash={skills_ref.hash}, {len(skills_ref.skills)} skill(s): "
+                f"{', '.join(s.name for s in skills_ref.skills)})"
+            )
 
         _input_path = Path(config.input_jsonl_fpath)
         if not _input_path.is_absolute():
@@ -257,22 +299,33 @@ class RolloutCollectionHelper(BaseModel):
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
-        # For ng_reward_profile to match rollouts to tasks
+        # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
+        agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         for row_idx, row_str, row in raw_rows:
-            # Resolve agent name
+            # Resolve agent name. Missing agent_ref is a hard error reported in
+            # bulk after the loop; skip the row immediately so the rest of the
+            # body can assume agent_name is non-None.
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
-            elif not row.get(AGENT_REF_KEY_NAME, dict()).get("name"):
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if agent_name is None:
                 row_idxs_missing_agent_ref.append(row_idx)
+                continue
+            agents_seen.add(agent_name)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
             )
+
+            # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
+            # /run request body and propagated to results. The source dataset stays untouched.
+            if skills_ref_dict is not None:
+                row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
             # Resolve task index. Honor a caller-provided value when present (e.g. when an
             # upstream slicer has stamped a globally-stable index across chunks so that
@@ -281,7 +334,19 @@ class RolloutCollectionHelper(BaseModel):
             if TASK_INDEX_KEY_NAME not in row:
                 row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            for _ in range(num_repeats):
+            # Resolve num_repeats for this row, batching dict-form misses for
+            # one consolidated raise after the loop.
+            if fixed_num_repeats is not None:
+                row_num_repeats = fixed_num_repeats
+            elif agent_name in per_agent_repeats:
+                row_num_repeats = per_agent_repeats[agent_name]
+            elif default_repeats is not None:
+                row_num_repeats = default_repeats
+            else:
+                agents_missing_from_num_repeats.add(agent_name)
+                continue
+
+            for _ in range(row_num_repeats):
                 row = deepcopy(row)
 
                 # Resolve rollout index
@@ -299,6 +364,20 @@ class RolloutCollectionHelper(BaseModel):
         if row_idxs_missing_agent_ref:
             raise ValueError(
                 f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+            )
+
+        if agents_missing_from_num_repeats:
+            raise ValueError(
+                f"num_repeats dict has no entry for agents {sorted(agents_missing_from_num_repeats)} "
+                f"and no '_default' fallback. Listed agents: {sorted(per_agent_repeats)}"
+            )
+
+        unknown_agents = set(per_agent_repeats) - agents_seen
+        if unknown_agents:
+            warnings.warn(
+                f"num_repeats dict contains agent names that never appeared in input rows "
+                f"(possible typo?): {sorted(unknown_agents)}",
+                stacklevel=2,
             )
 
         return rows
@@ -410,6 +489,8 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if SKILLS_REF_KEY_NAME in row:
+                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -464,7 +545,7 @@ class RolloutCollectionHelper(BaseModel):
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
-                "Run `ng_aggregate_rollouts` after all shards finish to compute the global metrics."
+                "Run `gym eval aggregate` after all shards finish to compute the global metrics."
             )
             aggregate_metrics_fpath = None
         else:
@@ -617,16 +698,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return server_client
 
 
-def collect_rollouts():  # pragma: no cover
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-    rch = RolloutCollectionHelper()
-
-    asyncio.run(rch.run_from_config(config))
-
-
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     """
-    Aggregate metrics across rollout shards produced by `ng_collect_rollouts +disable_aggregation=true`.
+    Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
     Reads every JSONL file matching `input_glob`, computes aggregate metrics by POSTing to each
     agent server's `/aggregate_metrics` endpoint over the global union of records, and writes a
@@ -636,7 +710,7 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_aggregate_rollouts \
+    gym eval aggregate \
         "+config_paths=[benchmarks/aime24/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
         +input_glob='results/rollouts-rs*-chunk*.jsonl' \
         +output_jsonl_fpath=results/rollouts.jsonl
@@ -721,8 +795,15 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return aggregate_metrics_fpath
 
 
-def aggregate_rollouts():  # pragma: no cover
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
-    rah = RolloutAggregationHelper()
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
-    asyncio.run(rah.run_from_config(config))
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "collect_rollouts": "nemo_gym.cli.eval",
+        "aggregate_rollouts": "nemo_gym.cli.eval",
+    },
+)
