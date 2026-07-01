@@ -171,6 +171,20 @@ express the full run explicitly as a one-stage multi-stage run:
 | `seed` | *(none)* | Seed for reproducible task sampling and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
 
+### Resuming an interrupted multi-stage run
+
+Set `RERUN_INCOMPLETE=true` (with the same `PERSIST_DELIVERABLES_DIR` as the
+original run) to resume a staged run that was cut short. A task whose deliverable
+already **finished** on disk (marked by `finish_params.json`) skips the policy
+rollout and is judged from cache; a task that never finished is re-rolled. On top
+of that, `rerun_incomplete` reuses **cached judgements**: the verify cache is keyed
+by each stage's reference subset, so a resumed stage that reselects the same
+references returns its cached judgement instead of re-judging. Use the same
+`multistage.seed` so the stage task sampling — and therefore the reference subsets —
+are reproducible across the resumed run. See
+[Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
+for the full semantics.
+
 ## Aggregate metrics
 
 After `gym eval run` returns, the resources server's
