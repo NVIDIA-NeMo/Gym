@@ -1,0 +1,126 @@
+---
+title: "Claude"
+description: "Use Anthropic Claude models through NeMo Gym's Responses API"
+position: 4
+---
+
+NeMo Gym offers two complementary ways to work with Claude, aimed at different audiences:
+
+- **Egress (`anthropic_model` — this page):** Your harness speaks NeMo Gym's native [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) on `/v1/responses` and the backend is Anthropic Claude. Use this when you already run Gym agents or harnesses in Responses format and want Claude as the policy model.
+- **Ingress (built into every model server):** Your harness speaks Anthropic's [Messages API](https://docs.anthropic.com/en/api/messages) on `/v1/messages` and the backend is any Gym model server (vLLM, OpenAI, an inference provider, etc.). Every Gym model server exposes `/v1/messages` by default, mapping Messages ↔ Responses around its own `responses()` implementation. Blackbox agents that already talk Anthropic Messages — notably the [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) — can target any Gym backend without rewriting to Responses.
+
+The `anthropic_model` server is the egress path: it accepts Responses API requests, translates them to Anthropic `/v1/messages`, and maps Anthropic responses back to Responses objects.
+
+Conversion logic lives in `nemo_gym.anthropic_converter` and is shared with the ingress `/v1/messages` route on other Gym model servers.
+
+<Info>
+For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Anthropic's hosted API does not expose the token-level information needed for RL training.
+
+</Info>
+
+## Supported APIs
+
+This server exposes one endpoint and converts to Anthropic Messages under the hood:
+
+- **OpenAI Responses** — `/v1/responses`
+
+Chat Completions (`/v1/chat/completions`) is not supported on this server.
+
+If your agent speaks Anthropic Messages instead of Responses, you do not need `anthropic_model`. Point the agent at any Gym model server's `/v1/messages` endpoint (see ingress above).
+
+## Set Your Credentials
+
+Store your values in `env.yaml` in the project root (gitignored):
+
+```yaml
+policy_base_url: https://api.anthropic.com
+policy_api_key: your-api-key
+policy_model_name: claude-sonnet-4-6
+```
+
+`policy_base_url` accepts either a host-only or `/v1` style URL. Both `https://api.anthropic.com` and `https://api.anthropic.com/v1` resolve to `/v1/messages`.
+
+## Configuration Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `anthropic_base_url` | `str` | `https://api.anthropic.com/v1` | Base URL for the Anthropic API. |
+| `anthropic_api_key` | `str` | — | **Required.** Anthropic API key (`x-api-key` header). |
+| `anthropic_model` | `str` | — | **Required.** Model identifier (for example, `claude-sonnet-4-6`). |
+| `max_tokens` | `int` | `32768` | Maximum tokens to generate per request when `max_output_tokens` is not set on the Responses request. |
+| `anthropic_version` | `str` | `2023-06-01` | Value for the `anthropic-version` header. |
+| `thinking` | `dict` | `null` | Typed thinking config for modern Claude models (for example, `{type: adaptive}`). |
+| `thinking_budget_tokens` | `int` | `null` | Budget for older models that use `thinking: {type: enabled, budget_tokens: ...}`. |
+| `max_concurrent_requests` | `int` | `null` | Cap on in-flight upstream requests (per-process). `null` = unlimited. |
+| `extra_body` | `dict` | `{}` | Provider-specific fields merged into every Anthropic request body. |
+
+<Note>
+**The model is fixed by configuration.** This server always sends the configured `anthropic_model` (from `policy_model_name`) to Anthropic. To run a different model, change the config and start a new server.
+
+Do not set both `thinking` and `thinking_budget_tokens` — the server rejects ambiguous thinking configuration.
+
+</Note>
+
+### Thinking configuration
+
+For modern Claude models, prefer adaptive thinking:
+
+```yaml
+thinking:
+  type: adaptive
+```
+
+`thinking_budget_tokens` remains available for older models that require manual `thinking: {type: enabled, budget_tokens: ...}`.
+
+### Model-specific behavior
+
+Claude Opus 4.7 and 4.8 reject configurable sampling parameters (`temperature`, `top_p`, `top_k`). Omit them from requests and use prompting or adaptive thinking/effort controls instead.
+
+Responses `input_image` parts are supported when `image_url` is a base64 data URL. Supported media types are `image/jpeg`, `image/png`, `image/gif`, and `image/webp`; remote image URLs are rejected with HTTP 400.
+
+Provider-specific Anthropic fields that are not modeled as typed config can be passed through `extra_body`.
+
+## Usage Example
+
+### 1. Set model and environment config
+
+```bash
+environment_config="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml"
+model_config="responses_api_models/anthropic_model/configs/anthropic_model.yaml"
+```
+
+### 2. Start servers
+
+```bash
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+### 3. Evaluate your agent
+
+```bash
+mkdir -p results
+
+ng_collect_rollouts +agent_name=example_single_tool_call_simple_agent \
+    +input_jsonl_fpath=resources_servers/example_single_tool_call/data/example.jsonl \
+    +output_jsonl_fpath=results/claude_example_single_tool_call_rollouts.jsonl \
+    +limit=1 \
+    +num_repeats=1
+```
+
+### Smoke test the model server
+
+Once the model server is running, send a direct Responses request:
+
+```bash
+curl -s <POLICY_MODEL_URL>/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": "Say hello in one short sentence.",
+    "max_output_tokens": 64
+  }' | python -m json.tool
+```
+
+<Note>
+This example uses the simple agent harness because it exercises `anthropic_model` as the policy model server through NeMo Gym's `/v1/responses` interface. For Claude Code workflows that speak Anthropic Messages, use the ingress path: set the agent's `model_server` ref so the CLI targets `/v1/messages` on any Gym model server (see [Claude Code Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent)).
+
+</Note>
