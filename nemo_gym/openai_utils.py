@@ -566,3 +566,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
+
+    async def create_generate(self, **kwargs):
+        # SGLang's native (non-OpenAI) generation endpoint. Used by the SGLang
+        # engine path because, on the pinned SGLang v0.5.10, /v1/chat/completions
+        # does not expose the exact sampled integer token ids (its logprobs.token
+        # is a decoded string and there is no return_tokens_as_token_ids), whereas
+        # /generate with return_logprob=True returns meta_info.output_token_logprobs
+        # whose tuples are (logprob, token_id, ...). Lives at the server root, not /v1.
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/generate",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
