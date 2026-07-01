@@ -21,6 +21,7 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
 
+import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
@@ -35,11 +36,15 @@ from nemo_gym.cli.env import (
     TestConfig,
     _resolve_server_dir,
     _select_shard,
-    exit_cleanly_on_config_error,
+    dump_config,
     init_resources_server,
     list_environments,
+    pip_list,
+    run,
+    status,
     validate,
 )
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.registry import EnvironmentEntry
 
@@ -284,6 +289,11 @@ class TestRunHelperShutdownReap:
 class TestExitCleanlyOnConfigError:
     """The CLI decorator turns ConfigError into a clean message + non-zero exit, not a traceback."""
 
+    # Every CLI entrypoint that must carry the clean-error contract (each calls get_global_config_dict
+    # and wears @exit_cleanly_on_config_error). Keep this list in sync when decorating new commands —
+    # it's the single place that asserts each one actually exits cleanly on a config error.
+    DECORATED_COMMANDS = [run, validate, dump_config, status, pip_list]
+
     def test_config_error_becomes_clean_exit(self) -> None:
         @exit_cleanly_on_config_error
         def boom():
@@ -314,6 +324,31 @@ class TestExitCleanlyOnConfigError:
 
     def test_config_error_base_catches_subclasses(self) -> None:
         assert issubclass(NoServerInstancesError, ConfigError)
+
+    @pytest.mark.parametrize("command", DECORATED_COMMANDS)
+    def test_command_exits_cleanly_on_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        # A ConfigError surfacing from config parsing becomes exit(1), not a traceback. Without the
+        # decorator the ConfigError would propagate as itself, so asserting SystemExit is exactly what
+        # proves each command is decorated.
+        def _raise(*args, **kwargs):
+            raise NoServerInstancesError("nothing configured to run")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            command()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.parametrize("command", DECORATED_COMMANDS)
+    def test_command_propagates_non_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        # The decorator must only swallow ConfigError; an unexpected error must surface unchanged.
+        def _raise(*args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(RuntimeError, match="unexpected"):
+            command()
 
 
 class TestValidate:
@@ -349,17 +384,6 @@ class TestValidate:
         )
         with raises(SystemExit) as exc_info:
             self._validate_config(monkeypatch, tmp_path, bad)
-        assert exc_info.value.code == 1
-
-    def test_config_error_becomes_clean_exit(self, monkeypatch: MonkeyPatch) -> None:
-        # Fast unit check of the decorator path: any ConfigError -> exit(1), no traceback.
-        def _raise(**kwargs):
-            raise NoServerInstancesError("nothing configured to run")
-
-        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
-
-        with raises(SystemExit) as exc_info:
-            validate()
         assert exc_info.value.code == 1
 
 
