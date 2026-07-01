@@ -1,0 +1,5 @@
+{"responses_create_params":{"input":[{"role":"user","content":"Run the pinned DeepSWE task identified by verifier_metadata."}]},"verifier_metadata":{"task_id":"abs-module-cache-flags"}}
+{"responses_create_params":{"input":[{"role":"user","content":"Run the pinned DeepSWE task identified by verifier_metadata."}]},"verifier_metadata":{"task_id":"abs-stepped-slices"}}
+{"responses_create_params":{"input":[{"role":"user","content":"Run the pinned DeepSWE task identified by verifier_metadata."}]},"verifier_metadata":{"task_id":"actionlint-action-pinning-lint"}}
+{"responses_create_params":{"input":[{"role":"user","content":"Run the pinned DeepSWE task identified by verifier_metadata."}]},"verifier_metadata":{"task_id":"adaptix-name-mapping-aliases"}}
+{"responses_create_params":{"input":[{"role":"user","content":"Run the pinned DeepSWE task identified by verifier_metadata."}]},"verifier_metadata":{"task_id":"aiomonitor-task-snapshots-diff"}}

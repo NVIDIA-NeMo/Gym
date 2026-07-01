@@ -244,6 +244,11 @@ sandbox = [
     # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
     # License: Apache 2.0
     "opensandbox>=0.1.9",
+
+    # Modal SDK: used by the Modal sandbox provider for registry images, execution, and file transfer.
+    # Updated: Tue Jun 30, 2026 with modal==1.5.1
+    # License: Apache 2.0 https://github.com/modal-labs/modal-client/blob/main/LICENSE
+    "modal==1.5.1",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).

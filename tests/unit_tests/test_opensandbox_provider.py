@@ -392,6 +392,8 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     await provider.download_file(handle, "/remote/download.txt", download_path)
     assert raw.files.writes == [("/remote/upload.txt", b"upload")]
     assert download_path.read_bytes() == b"bytes:/remote/download.txt"
+    with pytest.raises(NotImplementedError, match="bounded sandbox downloads"):
+        await provider.download_file(handle, "/remote/download.txt", download_path, max_bytes=1024)
     assert await provider.status(handle) == SandboxStatus.RUNNING
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN

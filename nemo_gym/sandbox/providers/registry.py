@@ -137,5 +137,12 @@ def _load_apptainer_provider() -> ProviderClass:
     return ApptainerProvider
 
 
+def _load_modal_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.modal import ModalProvider
+
+    return ModalProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
+_BUILTIN_PROVIDER_LOADERS["modal"] = _load_modal_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider

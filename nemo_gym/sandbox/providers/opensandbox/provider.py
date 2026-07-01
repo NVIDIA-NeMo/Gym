@@ -941,8 +941,17 @@ class OpenSandboxProvider:
         """Upload one local file into an OpenSandbox sandbox."""
         await self._write_file(handle, target_path, source_path.read_bytes())
 
-    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+    async def download_file(
+        self,
+        handle: SandboxHandle,
+        source_path: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         """Download one file from an OpenSandbox sandbox."""
+        if max_bytes is not None:
+            raise NotImplementedError("OpenSandbox does not support bounded sandbox downloads")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(await self._read_file(handle, source_path))
 

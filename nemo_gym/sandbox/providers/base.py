@@ -121,6 +121,10 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
+class SandboxDownloadLimitExceeded(RuntimeError):
+    """Raised before a sandbox download can write more than its byte budget."""
+
+
 class SandboxProvider(Protocol):
     """Runtime/infra provider contract used by the public sandbox API."""
 
@@ -153,8 +157,15 @@ class SandboxProvider(Protocol):
         """Upload one local file into a sandbox."""
         ...
 
-    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one sandbox file to the local filesystem."""
+    async def download_file(
+        self,
+        handle: SandboxHandle,
+        source_path: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Download one sandbox file, enforcing ``max_bytes`` or rejecting that option."""
         ...
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

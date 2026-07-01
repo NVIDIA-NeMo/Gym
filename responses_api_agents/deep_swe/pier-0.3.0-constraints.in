@@ -1,0 +1,3 @@
+# Root requirements for the isolated Pier runtime.
+datacurve-pier @ git+https://github.com/datacurve-ai/pier.git@e69a20e4e0ac073ec71fde0274bab3d9f40bac87
+modal==1.5.1

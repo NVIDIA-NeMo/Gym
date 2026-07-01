@@ -560,6 +560,8 @@ async def test_download_fast_path(fake_binary: str, monkeypatch: pytest.MonkeyPa
 
     assert dest.read_bytes() == b"result"
     assert rec.calls == []
+    with pytest.raises(NotImplementedError, match="bounded sandbox downloads"):
+        await provider.download_file(handle, "/sandbox/out/r.txt", dest, max_bytes=1024)
 
 
 async def test_download_fallback(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

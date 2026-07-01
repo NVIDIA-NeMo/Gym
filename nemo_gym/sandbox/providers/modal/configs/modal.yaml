@@ -1,0 +1,18 @@
+# Modal sandbox provider config.
+#
+# Modal authentication is resolved by the SDK from its normal profile or
+# MODAL_TOKEN_ID / MODAL_TOKEN_SECRET. Credential values do not belong here.
+sandbox:
+  default_metadata:
+    sandbox-api: modal-sdk
+  modal:
+    connection:
+      app_name: nemo-gym-sandbox
+      create_if_missing: true
+    create:
+      default_timeout_s: 21600
+      ready_timeout_s: 1200
+    probe:
+      command: printf modal-sandbox-ready
+      expected_stdout: modal-sandbox-ready
+      timeout_s: 60
