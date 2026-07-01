@@ -5,10 +5,10 @@
 # you may not use this file except in compliance with the License.
 """Generic VLMEvalKit (audio) -> NeMo Gym JSONL converter.
 
-REQUIRES the internal mcore fork of VLMEvalKit (it has the ``avlm`` audio
-datasets that OSS open-compass lacks) importable as ``vlmeval``:
+REQUIRES a VLMEvalKit install that provides the target audio (``avlm``)
+datasets, importable as ``vlmeval``:
 
-    uv pip install -e /home/mj/repos/forks/VLMEvalKitMcore --no-deps
+    uv pip install -e <path-to-your-vlmevalkit> --no-deps
 
 and the benchmark's data staged under ``LMUDataRoot()`` (e.g. MMAU needs
 ``MMAU_test.json`` + the referenced wav files). This is the real-run path

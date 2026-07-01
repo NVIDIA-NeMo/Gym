@@ -2,7 +2,7 @@
 # -> no download). For the kick-off demo: real audio-understanding questions
 # through the generic driver against the hosted Inference Hub Omni model.
 # Data file (gitignored, *validation.jsonl) is produced by staging 5 real MMAU
-# samples; see tasks/kit/build_status.md.
+# samples (see prepare_data.py or your dataset staging script).
 vlm_eval_kit_audio_resources_server:
   resources_servers:
     vlm_eval_kit_audio:

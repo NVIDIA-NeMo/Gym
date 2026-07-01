@@ -14,7 +14,7 @@
 # limitations under the License.
 """Generic VLMEvalKit driver (audio-first) as a NeMo Gym resources server.
 
-Option "B" from tasks/kit/plan.md: one generic scorer that dispatches on the
+A single generic scorer that dispatches on the
 VLMEvalKit ``DATASET_TYPE`` (MCQ / QA / Y-N / VQA) instead of a hand-written
 ``_score_<bench>`` per benchmark. Audio rows carry their clip via
 ``responses_create_params.metadata.audio_path`` / ``audio_data`` — the
@@ -71,9 +71,7 @@ def strip_think(text: str) -> str:
     """Drop ``<think>...</think>`` reasoning before parsing the answer.
 
     Thinking models leak option letters inside the reasoning block; scoring the
-    raw text would match those instead of the final answer (the exact bug fixed
-    in the mcore fork's ``strip_think`` on the API path — see
-    tasks/kit/prior_work_eval0849.md).
+    raw text would match those instead of the final answer.
     """
     if not text:
         return ""
