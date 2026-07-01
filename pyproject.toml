@@ -234,6 +234,10 @@ docs = [
 ]
 
 [project.optional-dependencies]
+all = [
+    "nemo-gym[dev,sandbox]",
+]
+
 sandbox = [
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
