@@ -91,6 +91,7 @@ class FakeSandboxProvider:
         self.exec_calls: list[dict[str, Any]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+        self.download_limits: list[int | None] = []
         self.closed: list[SandboxHandle] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
@@ -130,8 +131,16 @@ class FakeSandboxProvider:
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         self.upload_calls.append((handle, source_path, target_path))
 
-    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+    async def download_file(
+        self,
+        handle: SandboxHandle,
+        source_path: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         self.download_calls.append((handle, source_path, target_path))
+        self.download_limits.append(max_bytes)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"downloaded")
 
@@ -177,6 +186,8 @@ class PlainSandboxProvider:
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         del handle, source_path, target_path
 
+    # Deliberately retains the pre-max_bytes provider signature to verify that
+    # unbounded public-API downloads remain compatible with third-party providers.
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         del handle, source_path
         target_path.write_bytes(b"downloaded")
@@ -199,6 +210,7 @@ class TransferOnlySandboxProvider:
         self.created_handles: list[SandboxHandle] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+        self.download_limits: list[int | None] = []
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         handle = SandboxHandle(
@@ -225,8 +237,16 @@ class TransferOnlySandboxProvider:
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         self.upload_calls.append((handle, source_path, target_path))
 
-    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+    async def download_file(
+        self,
+        handle: SandboxHandle,
+        source_path: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         self.download_calls.append((handle, source_path, target_path))
+        self.download_limits.append(max_bytes)
         target_path.write_bytes(b"fallback")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
@@ -267,6 +287,8 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     provider = FakeSandboxProvider.last_instance
     assert provider is not None
     handle = provider.created_handles[0]
+    assert sandbox.sandbox_id == handle.sandbox_id
+    assert sandbox.provider_name == provider.name
     assert provider.marker == "configured"
     assert provider.created_specs[0].image == "image:tag"
     assert provider.created_specs[0].metadata == {"suite": "unit"}
@@ -289,10 +311,14 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     target_path = tmp_path / "nested" / "target.txt"
     source_path.write_text("local", encoding="utf-8")
     await sandbox.upload(source_path, "/remote/source.txt")
-    await sandbox.download("/remote/source.txt", target_path)
+    await sandbox.download("/remote/source.txt", target_path, max_bytes=10)
     assert provider.upload_calls[1] == (handle, source_path, "/remote/source.txt")
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
+    assert provider.download_limits == [10]
     assert target_path.read_bytes() == b"downloaded"
+    for invalid_limit in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            await sandbox.download("/remote/source.txt", target_path, max_bytes=invalid_limit)  # type: ignore[arg-type]
 
     await sandbox.stop()
     await sandbox.stop()
@@ -325,6 +351,57 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
             )
         )
     ]
+    assert failing_provider.aclosed is True
+    assert failing_sandbox._handle == failing_provider.created_handles[0]
+    assert failing_sandbox._stopped is True
+    assert failing_sandbox._closed is True
+
+    class CloseFailureProvider(FailingUploadProvider):
+        async def close(self, handle: SandboxHandle) -> None:
+            self.closed.append(handle)
+            raise RuntimeError("close failed")
+
+    close_failure_provider = CloseFailureProvider()
+    close_failure_sandbox = AsyncSandbox(close_failure_provider)
+    with pytest.raises(RuntimeError, match="upload failed") as failure:
+        await close_failure_sandbox.start(SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"}))
+    assert close_failure_provider.aclosed is True
+    assert any("cleanup also failed" in note for note in getattr(failure.value, "__notes__", ()))
+
+    class CancelledUploadProvider(FakeSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.upload_started = asyncio.Event()
+            self.close_started = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+            self.upload_calls.append((handle, source_path, target_path))
+            self.upload_started.set()
+            await asyncio.Future()
+
+        async def close(self, handle: SandboxHandle) -> None:
+            self.closed.append(handle)
+            self.close_started.set()
+            await self.release_close.wait()
+
+    cancelled_provider = CancelledUploadProvider()
+    cancelled_sandbox = AsyncSandbox(cancelled_provider)
+    start_task = asyncio.create_task(
+        cancelled_sandbox.start(SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"}))
+    )
+    await cancelled_provider.upload_started.wait()
+    start_task.cancel()
+    await cancelled_provider.close_started.wait()
+    start_task.cancel()
+    cancelled_provider.release_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+    assert cancelled_provider.closed == cancelled_provider.created_handles
+    assert cancelled_provider.aclosed is True
+    assert cancelled_sandbox._handle == cancelled_provider.created_handles[0]
+    assert cancelled_sandbox._stopped is True
+    assert cancelled_sandbox._closed is True
 
     unstarted = AsyncSandbox(FakeSandboxProvider())
     with pytest.raises(RuntimeError, match="not been started"):
@@ -556,6 +633,9 @@ async def _assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: P
     plain_provider = PlainSandboxProvider()
     plain_sandbox = AsyncSandbox(plain_provider)
     await plain_sandbox.start(SandboxSpec(image="image:tag"))
+    legacy_target = tmp_path / "legacy-target.txt"
+    await plain_sandbox.download("/remote/legacy.txt", legacy_target)
+    assert legacy_target.read_bytes() == b"downloaded"
     assert await plain_sandbox.status() == SandboxStatus.UNKNOWN
 
 
@@ -662,10 +742,11 @@ def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
         target_path = tmp_path / "target.txt"
         source_path.write_text("local", encoding="utf-8")
         sandbox.upload(source_path, "/remote/source.txt")
-        sandbox.download("/remote/source.txt", target_path)
+        sandbox.download("/remote/source.txt", target_path, max_bytes=10)
 
     assert provider.upload_calls == [(handle, source_path, "/remote/source.txt")]
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
+    assert provider.download_limits == [10]
     assert target_path.read_bytes() == b"downloaded"
 
 

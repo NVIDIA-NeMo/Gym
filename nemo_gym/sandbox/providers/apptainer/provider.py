@@ -583,13 +583,22 @@ class ApptainerProvider:
         finally:
             host_tmp.unlink(missing_ok=True)
 
-    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+    async def download_file(
+        self,
+        handle: SandboxHandle,
+        source_path: str,
+        target_path: Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         """Download one sandbox file to the host.
 
         Fast path (source under the bind mount): read directly from the host side
         of the shared folder. Fallback (arbitrary path): cp inside the container
         into the shared folder, then read the host side.
         """
+        if max_bytes is not None:
+            raise NotImplementedError("Apptainer does not support bounded sandbox downloads")
         inst = handle.raw
         target_path.parent.mkdir(parents=True, exist_ok=True)
 

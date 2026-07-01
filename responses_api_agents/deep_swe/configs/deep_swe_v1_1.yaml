@@ -1,0 +1,2 @@
+config_paths:
+- responses_api_agents/deep_swe/configs/deep_swe.yaml

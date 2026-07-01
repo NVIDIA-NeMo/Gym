@@ -38,6 +38,32 @@ SYNC_OPERATION_TIMEOUT_S = 3600.0
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
 
 
+async def _settle_cleanup(
+    awaitable: Awaitable[None],
+    *,
+    initial_cancellation: asyncio.CancelledError | None = None,
+) -> tuple[BaseException | None, asyncio.CancelledError | None]:
+    """Finish provider cleanup even when the calling task is cancelled repeatedly."""
+    task = asyncio.create_task(awaitable)
+    cancellation = initial_cancellation
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if task.done():
+                break
+            if cancellation is None:
+                cancellation = error
+        except BaseException:
+            # Collected from task.result() after the task reaches a terminal state.
+            pass
+    try:
+        task.result()
+    except BaseException as error:
+        return error, cancellation
+    return None, cancellation
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider."""
 
@@ -57,6 +83,16 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def sandbox_id(self) -> str:
+        """Provider-issued identifier for the active sandbox."""
+        return self._require_handle().sandbox_id
+
+    @property
+    def provider_name(self) -> str:
+        """Resolved provider name for the active sandbox."""
+        return self._require_handle().provider_name
+
     async def start(
         self,
         spec: SandboxSpec | None = None,
@@ -70,6 +106,9 @@ class AsyncSandbox:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
         handle = await self._provider.create(requested_spec)
+        self._spec = requested_spec
+        self._handle = handle
+        self._stopped = False
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -78,15 +117,21 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
-            raise
+        except BaseException as error:
+            cleanup_error, cancellation = await _settle_cleanup(
+                self._close_provider(),
+                initial_cancellation=error if isinstance(error, asyncio.CancelledError) else None,
+            )
+            if cancellation is not None:
+                if error is not cancellation:
+                    cancellation.add_note(f"Sandbox start also failed: {type(error).__name__}")
+                if cleanup_error is not None:
+                    cancellation.add_note(f"Sandbox cleanup also failed: {type(cleanup_error).__name__}")
+                raise cancellation
+            if cleanup_error is not None:
+                error.add_note(f"Sandbox cleanup also failed: {type(cleanup_error).__name__}")
+            raise error
 
-        self._spec = requested_spec
-        self._handle = handle
-        self._stopped = False
         return self
 
     async def exec(
@@ -110,8 +155,24 @@ class AsyncSandbox:
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
-    async def download(self, remote_path: str, local_path: Path | str) -> None:
-        await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+    async def download(
+        self,
+        remote_path: str,
+        local_path: Path | str,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
+        if max_bytes is not None and (isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0):
+            raise ValueError("Sandbox download max_bytes must be a positive integer")
+        if max_bytes is None:
+            await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+            return
+        await self._provider.download_file(
+            self._require_handle(),
+            remote_path,
+            Path(local_path),
+            max_bytes=max_bytes,
+        )
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -120,16 +181,38 @@ class AsyncSandbox:
             return SandboxStatus.STOPPED
         return await self._provider.status(self._handle)
 
+    async def _close_provider(self) -> None:
+        if self._closed:
+            return
+        errors: list[BaseException] = []
+        self._stopped = True
+        try:
+            if self._handle is not None:
+                await self._provider.close(self._handle)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            await self._provider.aclose()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            self._closed = True
+        if errors:
+            primary = errors[0]
+            for secondary in errors[1:]:
+                primary.add_note(f"Sandbox provider aclose also failed: {type(secondary).__name__}")
+            raise primary
+
     async def stop(self) -> None:
         if self._closed:
             return
-        try:
-            if self._handle is not None and not self._stopped:
-                self._stopped = True
-                await self._provider.close(self._handle)
-        finally:
-            await self._provider.aclose()
-            self._closed = True
+        cleanup_error, cancellation = await _settle_cleanup(self._close_provider())
+        if cancellation is not None:
+            if cleanup_error is not None:
+                cancellation.add_note(f"Sandbox cleanup also failed: {type(cleanup_error).__name__}")
+            raise cancellation
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def __aenter__(self) -> "AsyncSandbox":
         return self
@@ -271,8 +354,17 @@ class Sandbox:
     def upload(self, local_path: Path | str, remote_path: str) -> None:
         self._runner.run("upload", lambda: self._async_sandbox.upload(local_path, remote_path))
 
-    def download(self, remote_path: str, local_path: Path | str) -> None:
-        self._runner.run("download", lambda: self._async_sandbox.download(remote_path, local_path))
+    def download(
+        self,
+        remote_path: str,
+        local_path: Path | str,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
+        self._runner.run(
+            "download",
+            lambda: self._async_sandbox.download(remote_path, local_path, max_bytes=max_bytes),
+        )
 
     def status(self) -> SandboxStatus:
         if self._closed:

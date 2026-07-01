@@ -1,0 +1,43 @@
+deep_swe:
+  responses_api_agents:
+    deep_swe:
+      entrypoint: app.py
+      domain: coding
+      description: DeepSWE v1.1 tasks executed by Claude Code through the pinned Pier harness.
+      value: Reproduce agentic software-engineering evaluations with pristine verification and ATIF trajectories.
+      model_base_url: ${policy_base_url}
+      model_api_key: ${policy_api_key}
+      model_name: ${policy_model_name}
+      claude_code_version: 2.1.153
+      claude_code_install_method: pier
+      claude_code_kwargs: {}
+      benchmark_git_url: https://github.com/datacurve-ai/deep-swe.git
+      benchmark_git_commit: 8cae5984d5dd0ee37445beff0e928dc10c331116  # pragma: allowlist secret
+      benchmark_expected_task_count: 113
+      sandbox_provider: sandbox
+      sandbox_required_provider: modal
+      sandbox_spec:
+        ttl_s: 14400
+        ready_timeout_s: 1800
+        entrypoint: [sleep, infinity]
+        provider_options: {}
+        metadata:
+          benchmark: deep-swe-v1.1
+          harness: claude-code-pier
+      sandbox_supports_disable_internet: true
+      sandbox_supports_filtered_egress: true
+      sandbox_supports_gpus: false
+      sandbox_supports_disk_resource: false
+      sandbox_preinstall_agent_in_image: true
+      sandbox_transfer_timeout_s: 1800
+      max_concurrent: 4
+      datasets:
+      - name: deep_swe_v1_1
+        type: benchmark
+        jsonl_fpath: responses_api_agents/deep_swe/data/deep_swe_benchmark_validation.jsonl
+        prompt_config: null
+        prepare_script: responses_api_agents/deep_swe/prepare.py
+        num_repeats: 3
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/deep_swe/data/example.jsonl
