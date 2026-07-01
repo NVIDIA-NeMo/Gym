@@ -1037,6 +1037,23 @@ def test_extract_token_stats_anthropic_cache_fold():
     assert stats["cache_creation_tokens"] == 30
 
 
+def test_extract_token_stats_anthropic_fully_cached_zero_base():
+    from nemo_gym.trajectory_capture import extract_token_stats
+
+    # A fully-cached Anthropic response omits input_tokens; a 0 base preserves the folded prompt
+    # size instead of leaving tokens_in null.
+    stats = extract_token_stats(
+        {
+            "output_tokens": 12,
+            "cache_read_input_tokens": 500,
+            "cache_creation_input_tokens": 0,
+        }
+    )
+    assert stats["tokens_in"] == 500  # 0 base + cache_read 500 + cache_creation 0
+    assert stats["tokens_out"] == 12
+    assert stats["cache_creation_tokens"] == 0
+
+
 def test_extract_token_stats_openai_cached_not_double_counted():
     from nemo_gym.trajectory_capture import extract_token_stats
 

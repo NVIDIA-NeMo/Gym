@@ -395,13 +395,17 @@ class _CaptureMiddleware:
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
             # malformed body can never surface as an ASGI error after the response was already sent.
+            #
+            # Ordering: the response is forwarded before this fsynced write runs, so a step becomes
+            # durable slightly after its bytes reach the agent. The capture JSONL (not memory) is the
+            # source of truth the rollout merge re-reads, and the agent -> orchestrator /run round-trip
+            # that precedes any merge dominates this sub-fsync window, so the final step is present in
+            # practice; num_steps is always recomputed from the durable file.
             response_body = None
             if body_bytes:
                 try:
                     response_body = (
-                        _reconstruct_streamed_response(body_bytes, dialect)
-                        if streaming
-                        else json.loads(body_bytes)
+                        _reconstruct_streamed_response(body_bytes, dialect) if streaming else json.loads(body_bytes)
                     )
                 except Exception:
                     response_body = None
