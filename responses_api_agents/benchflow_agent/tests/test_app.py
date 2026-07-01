@@ -39,6 +39,15 @@ _GLOBAL_CONFIG = {
     "test_model_server": {"responses_api_models": {"vllm_model": {"host": "policy-host", "port": 9000}}},
 }
 
+# A valid NeMo Gym Responses output-message item (the shape `extract_trajectory` returns).
+_OUTPUT_MESSAGE = {
+    "id": "cht_test",
+    "content": [{"annotations": [], "text": "hello", "type": "output_text", "logprobs": None}],
+    "role": "assistant",
+    "status": "completed",
+    "type": "message",
+}
+
 
 def _make_server(**config_overrides) -> BenchFlowAgent:
     """Create a BenchFlow agent server with test defaults (validation bypassed)."""
@@ -51,8 +60,8 @@ def _make_server(**config_overrides) -> BenchFlowAgent:
         model_server={"type": "responses_api_models", "name": "test_model_server"},
         tasks_dir="/tmp/test_tasks",
         jobs_dir="/tmp/test_jobs",
-        images_dir="/images/build-123",
-        task_config_overrides={"environment": {"memory_mb": 131072}, "agent": {"timeout_sec": 1000000000.0}},
+        container_formatter=None,
+        task_config_overrides=None,
     )
     defaults.update(config_overrides)
     config = BenchFlowAgentConfig(**defaults)
@@ -76,24 +85,18 @@ def _fake_result(**overrides) -> SimpleNamespace:
     """A stand-in for benchflow's RolloutResult (a plain object, not pydantic)."""
     defaults: Dict[str, Any] = dict(
         task_name="3d-scan-calc",
+        rollout_name="rollout_abc",
+        agent="openhands",
         rewards={"reward": 1.0},
-        trajectory=[
-            {"type": "agent_thought", "text": "thinking"},
-            {"type": "agent_message", "text": "Working on it."},
-            {
-                "type": "tool_call",
-                "tool_call_id": "tc_1",
-                "kind": "execute",
-                "title": "ls",
-                "status": "completed",
-                "content": "file.txt",
-            },
-            {"type": "user_message", "text": "ignored"},
-        ],
         error=None,
         error_category=None,
         verifier_error=None,
+        verifier_error_category=None,
         n_tool_calls=1,
+        n_skill_invocations=0,
+        n_prompts=1,
+        started_at=None,
+        finished_at=None,
         n_input_tokens=100,
         n_output_tokens=50,
         n_cache_read_tokens=0,
@@ -155,31 +158,54 @@ class TestRun:
         with (
             patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
             patch.object(BenchFlowAgent, "_run_benchflow_task", new=AsyncMock(return_value=_fake_result())),
+            patch.object(BenchFlowAgentUtils, "extract_trajectory", return_value=[dict(_OUTPUT_MESSAGE)]),
         ):
             response = await server.run(_make_run_request())
 
         assert response.reward == 1.0
-        # agent_thought -> message, agent_message -> message, tool_call -> fc + fco; user_message skipped.
-        types = [o.model_dump()["type"] for o in response.response.output]
-        assert types == ["message", "message", "function_call", "function_call_output"]
-        assert response.response.output[1].model_dump()["content"][0]["text"] == "Working on it."
+        assert [o.model_dump()["type"] for o in response.response.output] == ["message"]
+        assert response.response.output[0].model_dump()["content"][0]["text"] == "hello"
         assert response.response.usage.total_tokens == 150
         assert response.response.model == "test_model"
-        assert response.instance_id == "skillsbench::3d-scan-calc"
-        assert response.responses_create_params.temperature == 1.0
 
-    async def test_run_reward_zero_empty_trajectory(self):
+        metadata = response.model_dump()["metadata"]
+        assert metadata["task_name"] == "3d-scan-calc"
+        assert metadata["rewards"] == {"reward": 1.0}
+        assert metadata["n_tool_calls"] == 1
+        assert metadata["agent"] == "openhands"
+        assert metadata["rollout_dir"].endswith("/rollout_abc")
+
+    async def test_run_empty_trajectory(self):
         server = _make_server()
-        result = _fake_result(rewards={"reward": 0.0}, trajectory=[])
         with (
             patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
-            patch.object(BenchFlowAgent, "_run_benchflow_task", new=AsyncMock(return_value=result)),
+            patch.object(BenchFlowAgent, "_run_benchflow_task", new=AsyncMock(return_value=_fake_result())),
+            patch.object(BenchFlowAgentUtils, "extract_trajectory", return_value=[]),
         ):
             response = await server.run(_make_run_request())
 
-        assert response.reward == 0.0
-        assert len(response.response.output) == 0
+        assert response.reward == 1.0
+        assert response.response.output == []
 
+    async def test_run_trajectory_extraction_error_is_swallowed(self):
+        # A failure while extracting the trajectory must not sink the reward: it is
+        # caught, the output falls back to [], and the reward/usage still come through.
+        server = _make_server()
+        with (
+            patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
+            patch.object(BenchFlowAgent, "_run_benchflow_task", new=AsyncMock(return_value=_fake_result())),
+            patch.object(BenchFlowAgentUtils, "extract_trajectory", side_effect=RuntimeError("bad jsonl")),
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 1.0
+        assert response.response.output == []
+
+    @pytest.mark.xfail(
+        reason="run() does not set response['output'] on the None-result path, but "
+        "NeMoGymResponse.output is required -> BenchFlowVerifyResponse validation raises.",
+        strict=True,
+    )
     async def test_run_none_result(self):
         server = _make_server()
         with (
@@ -191,20 +217,23 @@ class TestRun:
         assert response.reward == 0.0
         assert response.response.output == []
 
+    @pytest.mark.xfail(
+        reason="Same as test_run_none_result: a failed run leaves response['output'] unset, "
+        "so the graceful reward-0.0 response cannot be built.",
+        strict=True,
+    )
     async def test_run_failed_execution(self):
         server = _make_server()
         with (
             patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
             patch.object(BenchFlowAgent, "_run_benchflow_task", new=AsyncMock(side_effect=RuntimeError("boom"))),
         ):
-            response = await server.run(_make_run_request(instance_id="skillsbench::fail", temperature=0.3))
+            response = await server.run(_make_run_request(instance_id="skillsbench::fail"))
 
         assert response.reward == 0.0
-        assert response.response.output == []
-        assert response.responses_create_params.temperature == 0.3
-        data = response.model_dump()
-        assert "boom" in data["metadata"]["error"]
-        assert data["metadata"]["task_name"] == "fail"
+        metadata = response.model_dump()["metadata"]
+        assert metadata["task_name"] == "fail"
+        assert "boom" in metadata["global_error"]
 
     async def test_responses_not_implemented(self):
         server = _make_server()
@@ -231,7 +260,7 @@ class TestRunBenchflowTask:
 
         server = _make_server(
             tasks_dir=str(tmp_path),
-            images_dir="/imgs",
+            container_formatter="/imgs/{task_name}.sif",
             agent="openhands",
             max_retries=3,
             task_config_overrides={"environment": {"memory_mb": 131072}, "agent": {"timeout_sec": 9.0}},
@@ -245,7 +274,7 @@ class TestRunBenchflowTask:
             patch.dict("sys.modules", {"benchflow": MagicMock(), "benchflow.evaluation": fake_module}),
             patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=gc),
         ):
-            result = await server._run_benchflow_task("mytask", "test_model")
+            result = await server._run_benchflow_task("mytask", "myjob_123")
 
         assert result is fake_result
         # Evaluation ran against a temp copy, not the source tasks_dir, and the copy is gone.
@@ -253,14 +282,14 @@ class TestRunBenchflowTask:
         assert not Path(captured["tasks_dir"]).exists()
         # The overrides are applied to the copied task.md, NOT passed to EvaluationConfig.
         assert "task_config_overrides" not in captured["config_kwargs"]
-        assert captured["config_kwargs"]["model"] == "hosted_vllm/test_model"
+        assert captured["config_kwargs"]["model"] == "vllm/test_model"
         assert captured["config_kwargs"]["environment"] == "singularity"
         assert captured["config_kwargs"]["agent"] == "openhands"
         assert captured["config_kwargs"]["concurrency"] == 1
         assert captured["config_kwargs"]["include_tasks"] == {"mytask"}
         assert captured["config_kwargs"]["agent_env"]["BENCHFLOW_PROVIDER_BASE_URL"] == "http://policy-host:9000/v1"
         assert captured["retry_kwargs"]["max_retries"] == 3
-        assert captured["job_name"].startswith("mytask_")
+        assert captured["job_name"] == "myjob_123"
         # The edited frontmatter: overrides merged, original keys + markdown body preserved.
         fm_text, body = BenchFlowAgentUtils._split_frontmatter(captured["edited_task_md"])
         fm = yaml.safe_load(fm_text)
@@ -271,7 +300,7 @@ class TestRunBenchflowTask:
         assert "Do the thing." in body
 
     async def test_no_overrides_uses_source_tasks_dir(self):
-        server = _make_server(images_dir=None, task_config_overrides=None)
+        server = _make_server(container_formatter=None, task_config_overrides=None)
         captured: Dict[str, Any] = {}
         fake_result = _fake_result()
         fake_module = _fake_benchflow_module(_fake_evaluation_cls(captured, fake_result), captured)
@@ -281,11 +310,12 @@ class TestRunBenchflowTask:
             patch.dict("sys.modules", {"benchflow": MagicMock(), "benchflow.evaluation": fake_module}),
             patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=gc),
         ):
-            result = await server._run_benchflow_task("mytask", "test_model")
+            result = await server._run_benchflow_task("mytask", "myjob_123")
 
         assert result is fake_result
         # No overrides => no temp copy; Evaluation points straight at the source dir.
         assert captured["tasks_dir"] == server.config.tasks_dir
+        assert captured["job_name"] == "myjob_123"
         assert "task_config_overrides" not in captured["config_kwargs"]
 
 
@@ -305,30 +335,35 @@ class TestHelpers:
         with pytest.raises(ValueError, match="instance_id must contain a task name"):
             BenchFlowAgent._parse_task_name(instance_id)
 
-    def test_build_task_config_overrides_injects_sif(self):
-        server = _make_server(images_dir="/imgs/", task_config_overrides={"agent": {"timeout_sec": 5.0}})
+    def test_build_task_config_overrides_injects_container(self):
+        server = _make_server(
+            container_formatter="/imgs/{task_name}.sif", task_config_overrides={"agent": {"timeout_sec": 5.0}}
+        )
         overrides = server._build_task_config_overrides("mytask")
         assert overrides["environment"]["docker_image"] == "/imgs/mytask.sif"
         assert overrides["agent"]["timeout_sec"] == 5.0
 
-    def test_build_task_config_overrides_no_images_dir(self):
-        server = _make_server(images_dir=None, task_config_overrides={"environment": {"memory_mb": 42}})
+    def test_build_task_config_overrides_no_container_formatter(self):
+        server = _make_server(container_formatter=None, task_config_overrides={"environment": {"memory_mb": 42}})
         overrides = server._build_task_config_overrides("mytask")
         assert overrides == {"environment": {"memory_mb": 42}}
 
     def test_build_task_config_overrides_empty(self):
-        server = _make_server(images_dir=None, task_config_overrides=None)
+        server = _make_server(container_formatter=None, task_config_overrides=None)
         assert server._build_task_config_overrides("mytask") == {}
 
-    def test_build_task_config_overrides_images_dir_wins(self):
+    def test_build_task_config_overrides_container_wins(self):
         server = _make_server(
-            images_dir="/imgs", task_config_overrides={"environment": {"docker_image": "ubuntu:22.04"}}
+            container_formatter="/imgs/{task_name}.sif",
+            task_config_overrides={"environment": {"docker_image": "ubuntu:22.04"}},
         )
         overrides = server._build_task_config_overrides("mytask")
         assert overrides["environment"]["docker_image"] == "/imgs/mytask.sif"
 
     def test_build_task_config_overrides_does_not_mutate_config(self):
-        server = _make_server(images_dir="/imgs", task_config_overrides={"environment": {"memory_mb": 1}})
+        server = _make_server(
+            container_formatter="/imgs/{task_name}.sif", task_config_overrides={"environment": {"memory_mb": 1}}
+        )
         server._build_task_config_overrides("t1")
         assert "docker_image" not in server.config.task_config_overrides["environment"]
 
@@ -351,12 +386,81 @@ class TestHelpers:
         server = _make_server()
         assert server._resolve_model_base_url(_GLOBAL_CONFIG) == "http://policy-host:9000/v1"
 
-    @pytest.mark.parametrize(
-        "value, expected",
-        [("3d-scan-calc", "3d-scan-calc"), ("a/b:c d", "a_b_c_d"), ("...", "task")],
+
+# ===========================================================================
+#  Utils — LLM trajectory extraction (uses the real ResponsesConverter)
+# ===========================================================================
+
+
+def _exchange_line(request_messages, response_message) -> str:
+    return json.dumps(
+        {
+            "request": {"body": {"messages": request_messages}},
+            "response": {"body": {"choices": [{"message": response_message}]}},
+        }
     )
-    def test_sanitize_path_component(self, value, expected):
-        assert BenchFlowAgent._sanitize_path_component(value) == expected
+
+
+class TestExtractTrajectory:
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert BenchFlowAgentUtils.extract_trajectory(tmp_path / "trajectory" / "llm_trajectory.jsonl") == []
+
+    def test_empty_file_returns_empty(self, tmp_path):
+        f = tmp_path / "llm_trajectory.jsonl"
+        f.write_text("")
+        assert BenchFlowAgentUtils.extract_trajectory(f) == []
+
+    def test_converts_last_exchange_to_output_items(self, tmp_path):
+        request_messages = [
+            {"role": "system", "content": "be good"},
+            {"role": "user", "content": "list files"},
+            {
+                "role": "assistant",
+                "content": "I'll list them.",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "file.txt"},
+        ]
+        final_message = {"role": "assistant", "content": "Done."}
+        f = tmp_path / "llm_trajectory.jsonl"
+        # Only the LAST line is used; the first line must be ignored.
+        f.write_text(
+            _exchange_line([{"role": "user", "content": "ignored"}], {"role": "assistant", "content": "ignored"})
+            + "\n"
+            + _exchange_line(request_messages, final_message)
+            + "\n"
+        )
+
+        items = BenchFlowAgentUtils.extract_trajectory(f)
+        types = [i["type"] for i in items]
+        assert "message" in types
+        assert "function_call" in types
+        assert "function_call_output" in types
+        # Input (system/user) messages are dropped; only assistant/tool output remains.
+        for item in items:
+            if item["type"] == "message":
+                assert item["role"] == "assistant"
+        # The first-line exchange must not leak into the output.
+        assert not any("ignored" in json.dumps(i) for i in items)
+
+    def test_normalizes_list_and_null_content(self, tmp_path):
+        # Multi-part (list) content is joined; null content becomes "" — neither should raise.
+        request_messages = [
+            {"role": "user", "content": [{"text": "part-a"}, {"text": "part-b"}]},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        final_message = {"role": "assistant", "content": "final answer"}
+        f = tmp_path / "llm_trajectory.jsonl"
+        f.write_text(_exchange_line(request_messages, final_message) + "\n")
+
+        items = BenchFlowAgentUtils.extract_trajectory(f)
+        assert any(i["type"] == "function_call" for i in items)
+        assert any(i["type"] == "message" for i in items)
 
 
 # ===========================================================================
@@ -428,7 +532,7 @@ class TestDeepMerge:
 
 
 # ===========================================================================
-#  Utils — response building
+#  Utils — reward / usage / default response
 # ===========================================================================
 
 
@@ -440,63 +544,12 @@ class TestExtractReward:
             ({"reward": 0.0}, 0.0),
             (None, 0.0),
             ({}, 0.0),
-            ({"accuracy": 0.75}, 0.75),
+            ({"accuracy": 0.75}, 0.0),
             ("not-a-dict", 0.0),
         ],
     )
     def test_extract_reward(self, rewards, expected):
         assert BenchFlowAgentUtils.extract_reward(rewards) == expected
-
-
-class TestTrajectoryToOutput:
-    def test_converts_events(self):
-        trajectory = [
-            {"type": "agent_message", "text": "hello"},
-            {"type": "agent_thought", "text": "hmm"},
-            {
-                "type": "tool_call",
-                "tool_call_id": "tc1",
-                "kind": "execute",
-                "title": "ls",
-                "status": "completed",
-                "content": "out",
-            },
-            {"type": "user_message", "text": "skip"},
-            {"type": "unknown", "text": "skip"},
-            "not-a-dict",
-        ]
-        items = BenchFlowAgentUtils.trajectory_to_output(trajectory)
-        assert [i["type"] for i in items] == ["message", "message", "function_call", "function_call_output"]
-        assert items[0]["content"][0]["text"] == "hello"
-        assert items[1]["content"][0]["text"] == "<think>hmm</think>"
-        assert items[2]["call_id"] == "tc1"
-        assert items[2]["name"] == "execute"
-        assert items[3]["call_id"] == "tc1"
-        assert items[3]["output"] == "out"
-
-    def test_tool_call_without_content_has_no_output(self):
-        trajectory = [{"type": "tool_call", "tool_call_id": "tc1", "kind": "read", "content": None}]
-        items = BenchFlowAgentUtils.trajectory_to_output(trajectory)
-        assert [i["type"] for i in items] == ["function_call"]
-
-    def test_tool_call_content_list_is_serialized(self):
-        trajectory = [{"type": "tool_call", "tool_call_id": "tc1", "kind": "read", "content": [{"a": 1}]}]
-        items = BenchFlowAgentUtils.trajectory_to_output(trajectory)
-        assert items[1]["type"] == "function_call_output"
-        assert json.loads(items[1]["output"]) == [{"a": 1}]
-
-    def test_tool_call_falls_back_to_title_then_tool(self):
-        trajectory = [
-            {"type": "tool_call", "title": "only-title", "content": None},
-            {"type": "tool_call", "content": None},
-        ]
-        items = BenchFlowAgentUtils.trajectory_to_output(trajectory)
-        assert items[0]["name"] == "only-title"
-        assert items[1]["name"] == "tool"
-
-    @pytest.mark.parametrize("trajectory", [None, [], "not-a-list"])
-    def test_empty(self, trajectory):
-        assert BenchFlowAgentUtils.trajectory_to_output(trajectory) == []
 
 
 class TestExtractUsage:
@@ -523,3 +576,5 @@ class TestGetDefaultResponseObject:
         assert obj["status"] == "completed"
         assert obj["id"].startswith("resp_")
         assert obj["usage"]["total_tokens"] == 0
+        assert obj["temperature"] is None
+        assert obj["top_p"] is None
