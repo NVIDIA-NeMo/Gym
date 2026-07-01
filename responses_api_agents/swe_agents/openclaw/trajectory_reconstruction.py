@@ -51,6 +51,39 @@ def _dedupe_superseded_turns(proxy_log: list[dict]) -> list[dict]:
     ]
 
 
+def validate_contiguity(output_items: list) -> None:
+    """Assert reconstructed output items form an on-policy-contiguous token stream.
+
+    Walking the output items that carry generation token IDs, each such item's `prompt_token_ids` 
+    must begin with the concatenation of all previously-seen (prompt + generation) tokens. If it
+    doesn't, the reconstructed trajectory would be off-policy for training — the model would
+    be trained on a token prefix it never actually saw/generated.
+
+    This is a strict no-op unless token IDs are present:
+      - Eval runs use `return_token_id_information=false`, so items carry no
+        `generation_token_ids` and every item is skipped — nothing is asserted.
+      - Items without both `prompt_token_ids` and `generation_token_ids`, and non-dict
+        items, are skipped rather than raising, so malformed/partial data can never turn
+        this into a crash. It only ever asserts genuine non-contiguity.
+    """
+    seen: list[int] = []
+    for item in output_items:
+        if not isinstance(item, dict) or "generation_token_ids" not in item:
+            continue
+        prompt_token_ids = item.get("prompt_token_ids")
+        generation_token_ids = item.get("generation_token_ids")
+        if prompt_token_ids is None or generation_token_ids is None:
+            continue
+        assert seen == prompt_token_ids[: len(seen)], (
+            "Non-contiguous OpenClaw trajectory: a turn's prompt_token_ids do not extend the "
+            "prior turns' (prompt + generation) tokens, so the reconstructed trajectory would "
+            "be off-policy.\n"
+            f"Seen ({len(seen)} tokens): {seen}\n"
+            f"Prompt token IDs ({len(prompt_token_ids)} tokens): {prompt_token_ids}"
+        )
+        seen = list(prompt_token_ids) + list(generation_token_ids)
+
+
 def reconstruct_responses_items(proxy_log: list[dict]) -> tuple[list, list, list]:
     """Return (input_items, output_items, tools).
 
@@ -88,6 +121,7 @@ def reconstruct_responses_items(proxy_log: list[dict]) -> tuple[list, list, list
                 output_items.append(item)
         prev_request_input = req.get("input", [])
         output_items.extend(resp.get("output", []))
+    validate_contiguity(output_items)
     return initial_input, output_items, tools
 
 
