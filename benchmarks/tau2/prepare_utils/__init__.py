@@ -47,7 +47,7 @@ TAU2_BENCH_DATA_REPO_URL_ENV = "NEMO_GYM_TAU2_BENCH_DATA_REPO_URL"
 TAU2_BENCH_DATA_REF_ENV = "NEMO_GYM_TAU2_BENCH_DATA_REF"
 
 DEFAULT_TAU2_BENCH_DATA_REPO_URL = "https://github.com/bxyu-nvidia/tau2-bench"
-DEFAULT_TAU2_BENCH_DATA_REF = "jk/bxyu-nemo-gym-data-upstream-main-tau3"
+DEFAULT_TAU2_BENCH_DATA_REF = "edobrowolska/jk/bxyu-nemo-gym-data-upstream-main-tau3"
 
 
 def get_tau2_bench_data_repo_url() -> str:
