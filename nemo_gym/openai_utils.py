@@ -197,6 +197,50 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseMcpCall(BaseModel):
+    """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
+
+    Emitted when the upstream endpoint executes a tool *server-side* (e.g.
+    NVIDIA-hosted gpt-oss surfacing its built-in python tool as MCP) instead of
+    returning a client-executed ``function_call``. The ``output``/``error``
+    fields are already populated by the server, so the agent parses and passes
+    it through; there is no client-side execution and hence no training variant.
+    Fields beyond the call itself are optional to tolerate endpoints that omit
+    them.
+    """
+
+    arguments: str
+    name: str
+    type: Literal["mcp_call"] = "mcp_call"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+    approval_request_id: Optional[str] = None
+    error: Optional[str] = None
+    output: Optional[str] = None
+    status: Optional[str] = None
+
+
+class NeMoGymResponseMcpListTools(BaseModel):
+    """A hosted-MCP tool listing (OpenAI Responses ``mcp_list_tools`` output item)."""
+
+    type: Literal["mcp_list_tools"] = "mcp_list_tools"
+    # Override the Iterable to avoid lazy iterators in Pydantic validation.
+    tools: List[Any] = Field(default_factory=list)
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+    error: Optional[str] = None
+
+
+class NeMoGymResponseMcpApprovalRequest(BaseModel):
+    """A hosted-MCP approval request (OpenAI Responses ``mcp_approval_request`` item)."""
+
+    arguments: str
+    name: str
+    type: Literal["mcp_approval_request"] = "mcp_approval_request"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -237,6 +281,9 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseMcpCall,
+    NeMoGymResponseMcpListTools,
+    NeMoGymResponseMcpApprovalRequest,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
