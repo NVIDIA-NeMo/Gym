@@ -1,0 +1,32 @@
+vlm_eval_kit_audio_resources_server:
+  resources_servers:
+    vlm_eval_kit_audio:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Generic VLMEvalKit driver (audio-first) — MCQ/QA/Y-N/VQA scoring.
+      value: Measure Omni (audio) model capabilities via VLMEvalKit benchmarks
+vlm_eval_kit_audio_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vlm_eval_kit_audio_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: MMAU_test
+        type: validation
+        jsonl_fpath: resources_servers/vlm_eval_kit_audio/data/MMAU_test_validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: vlm_eval_kit_audio
+          version: 0.0.1
+          artifact_fpath: MMAU_test_validation.jsonl
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/vlm_eval_kit_audio/data/example.jsonl
+        num_repeats: 1
