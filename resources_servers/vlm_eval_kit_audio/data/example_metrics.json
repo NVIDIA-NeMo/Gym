@@ -1,12 +1,12 @@
 {
-    "name": "audio_smoke",
-    "type": "validation",
+    "name": "example",
+    "type": "example",
     "jsonl_fpath": "resources_servers/vlm_eval_kit_audio/data/example.jsonl",
     "num_repeats": 1,
     "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": "TBD",
+    "license": null,
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
