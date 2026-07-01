@@ -1,0 +1,37 @@
+mini_swe_agent_2:
+  responses_api_agents:
+    mini_swe_agent_2:
+      entrypoint: app.py
+      domain: coding
+      description: Software engineering tasks driven by mini-swe-agent harness on ECS Fargate.
+      value: Improve agentic software engineering capabilities.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      env: sandbox
+      # Region-only config: the provider auto-discovers cluster/subnets/SGs/roles and the
+      # SSH-sidecar key ARNs from SSM (/<ssm_project>/ecs-sandbox/config, ssm_project="harbor").
+      sandbox_provider:
+        ecs_fargate:
+          region: ${oc.env:AWS_REGION}
+          cpu: "2048"
+          memory: "8192"
+          ephemeral_storage_gib: 50
+      sandbox_spec:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
+          sandbox-api: ecs-fargate
+      sandbox_environment_kwargs:
+        cwd: /testbed
+        conda_env: testbed
+        activate_conda: true
+        user: root
+      run_golden: false
+      step_timeout: 600
+      eval_timeout: 1800
+      skip_if_exists: false
+      step_limit: 250
