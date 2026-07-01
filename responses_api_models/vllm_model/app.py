@@ -814,6 +814,22 @@ class VLLMModel(SimpleResponsesAPIModel):
         content = self._SGLANG_TOOL_CALL_PATTERN.sub("", remainder).strip()
         return reasoning_content, content, tool_calls
 
+    def _sglang_length_finish(self, prompt_token_ids: List[int]) -> NeMoGymChatCompletion:
+        """Graceful over-context terminal turn (mirrors the vLLM context-length path in
+        chat_completions): SGLang /generate hard-rejects input >= context_length, which 500s
+        and corrupts the multi-turn trajectory (-> nemo_gym.py contiguity assert -> stalled
+        step). Instead, end the turn cleanly with finish_reason="length"."""
+        msg: Dict[str, Any] = dict(role="assistant", content=None, tool_calls=None)
+        if self.config.return_token_id_information:
+            msg.update(dict(prompt_token_ids=list(prompt_token_ids), generation_token_ids=[], generation_log_probs=[]))
+        return NeMoGymChatCompletion.model_validate(dict(
+            id=f"chtcmpl-{uuid4().hex}", object="chat.completion", created=int(time()),
+            model=self.config.model,
+            choices=[dict(index=0, finish_reason="length", message=msg, logprobs=None)],
+            usage=dict(prompt_tokens=len(prompt_token_ids), completion_tokens=0,
+                       total_tokens=len(prompt_token_ids)),
+        ))
+
     async def _sglang_chat_completion(
         self, request: Request, body_dict: Dict[str, Any]
     ) -> NeMoGymChatCompletion:
@@ -870,11 +886,27 @@ class VLLMModel(SimpleResponsesAPIModel):
             if body_dict.get(key) is not None:
                 sampling_params[key] = body_dict[key]
 
-        gen = await client.create_generate(
-            input_ids=prompt_token_ids,
-            sampling_params=sampling_params,
-            return_logprob=True,
-        )
+        # Over-context guard: SGLang /generate hard-rejects input >= context_length. When the
+        # spliced multi-turn prompt already fills the window, end cleanly (finish_reason=length)
+        # rather than 500 -> trajectory corruption -> contiguity assert -> stalled step.
+        _ctx_cap = self.config.sglang_max_total_sequence_length
+        if _ctx_cap is not None and len(prompt_token_ids) >= _ctx_cap:
+            return self._sglang_length_finish(prompt_token_ids)
+        try:
+            gen = await client.create_generate(
+                input_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+                return_logprob=True,
+            )
+        except ClientResponseError as _e:
+            _body = ""
+            try:
+                _body = _e.response_content.decode()
+            except Exception:
+                _body = str(_e)
+            if any(s in _body for s in ("context length", "longer than", "max_total", "is longer")):
+                return self._sglang_length_finish(prompt_token_ids)
+            raise
 
         meta_info = gen.get("meta_info") or {}
         # Each tuple is (logprob, token_id, ...). Sourcing both ids and logprobs from the SAME
