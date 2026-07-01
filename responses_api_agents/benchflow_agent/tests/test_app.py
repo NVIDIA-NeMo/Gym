@@ -201,11 +201,6 @@ class TestRun:
         assert response.reward == 1.0
         assert response.response.output == []
 
-    @pytest.mark.xfail(
-        reason="run() does not set response['output'] on the None-result path, but "
-        "NeMoGymResponse.output is required -> BenchFlowVerifyResponse validation raises.",
-        strict=True,
-    )
     async def test_run_none_result(self):
         server = _make_server()
         with (
@@ -217,11 +212,6 @@ class TestRun:
         assert response.reward == 0.0
         assert response.response.output == []
 
-    @pytest.mark.xfail(
-        reason="Same as test_run_none_result: a failed run leaves response['output'] unset, "
-        "so the graceful reward-0.0 response cannot be built.",
-        strict=True,
-    )
     async def test_run_failed_execution(self):
         server = _make_server()
         with (
