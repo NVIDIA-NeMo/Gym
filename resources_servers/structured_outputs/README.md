@@ -99,7 +99,7 @@ python resources_servers/structured_outputs/misc/breakdown_rollouts_metrics.py \
 You can prepare the data for training with:
 ```bash
 gym dataset collate \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --resources-server structured_outputs/structured_outputs_json \
     --output-dir data/structured_outputs \
     --mode train_preparation \
@@ -110,7 +110,7 @@ gym dataset collate \
 ```bash
 # prepare
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server structured_outputs/structured_outputs_json_yaml_xml_v1 \
     --output-dir data/structured_outputs/ \
     --mode train_preparation \
@@ -120,7 +120,7 @@ gym dataset collate \
 ### Version 3 [260409] (JSON, YAML, XML, TOML, CSV)
 ```bash
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server structured_outputs/structured_outputs_v3 \
     --output-dir data/structured_outputs_v3/ \
     --mode train_preparation \
@@ -141,7 +141,7 @@ The uploaded GitLab dataset is:
 Prepare the v4 training data with:
 ```bash
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server structured_outputs/structured_outputs_v4 \
     --output-dir data/structured_outputs_v4_tool_call/ \
     --mode train_preparation \

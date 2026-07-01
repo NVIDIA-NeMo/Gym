@@ -63,7 +63,7 @@ gym eval run --no-serve \
 ### Freeform Formatting
 ```bash
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server format_verification/freeform_formatting \
     --output-dir data/format_verification_freeform/ \
     --mode train_preparation \
@@ -73,7 +73,7 @@ gym dataset collate \
 ### Citation Format
 ```bash
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server format_verification/citation_format \
     --output-dir data/format_verification_citation/ \
     --mode train_preparation \

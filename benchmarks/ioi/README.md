@@ -47,7 +47,7 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 ## Running
 
 ```bash
-gym dataset collate --config benchmarks/ioi/config.yaml \
+gym dataset collate --benchmark ioi \
   --output-dir benchmarks/ioi/data \
   --mode benchmark_preparation
 

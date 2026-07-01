@@ -209,7 +209,7 @@ anthropic_api_key: sk-ant-...
 Then start the servers:
 
 ```bash
-gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+gym env start --resources-server example_mcp_weather
 ```
 
 Then collect rollouts against the `example` dataset and reward-profile as in the [quickstart](/get-started/quickstart). A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.

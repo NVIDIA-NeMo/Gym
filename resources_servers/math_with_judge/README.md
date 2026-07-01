@@ -39,7 +39,7 @@ gym eval run --no-serve \
 ```bash
 gym dataset collate \
     --config resources_servers/math_with_judge/configs/dapo17k_trajectory_collection.yaml \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/dapo17k_trajectory_collection \
     --mode train_preparation \
     --download

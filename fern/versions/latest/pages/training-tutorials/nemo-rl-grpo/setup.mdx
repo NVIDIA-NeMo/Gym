@@ -227,7 +227,7 @@ Prepare the data:
 
 ```bash
 gym dataset collate \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --resources-server workplace_assistant \
     --output-dir data/workplace_assistant \
     --mode train_preparation \
