@@ -138,10 +138,11 @@ Avoid spawning additional threads or processes unless necessary. A single Gym in
 
 ### NeMo Gym OpenAI Client
 
-We recommend using the NeMo Gym OpenAI client from `nemo_gym.openai_utils`:
+We recommend using the NeMo Gym OpenAI client. Import it and the core types from the top-level
+`nemo_gym` package:
 
 ```python
-from nemo_gym.openai_utils import (
+from nemo_gym import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -152,16 +153,21 @@ The NeMo Gym client is optimized for scale and provides consistent behavior. Ext
 
 ### Pydantic Models
 
-Consider using Pydantic models for request and response validation by extending base classes from `nemo_gym.base_resources_server`:
+Consider using Pydantic models for request and response validation by extending base classes
+imported from the top-level `nemo_gym` package:
 
 ```python
 from pydantic import BaseModel
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym import BaseVerifyRequest, BaseVerifyResponse
 
 class MyVerifyRequest(BaseVerifyRequest):
     expected_result: str
     difficulty: int
 ```
+
+Import base classes and core types from `nemo_gym` directly rather than from internal module paths
+(such as `nemo_gym.base_resources_server` or `nemo_gym.openai_utils`). The top-level surface is the
+supported, stable API; the internal module layout may change.
 
 ### Error Handling
 
