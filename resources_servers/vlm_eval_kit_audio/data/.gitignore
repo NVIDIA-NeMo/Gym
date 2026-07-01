@@ -3,3 +3,6 @@
 *train_prepare.jsonl
 *validation_prepare.jsonl
 *example_prepare.jsonl
+*validation_metrics.json
+*train_metrics.json
+*benchmark_metrics.json
