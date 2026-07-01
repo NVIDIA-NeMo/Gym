@@ -11,9 +11,11 @@ healthcare, and engineering.
 - [Dataset](#dataset)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Full GDPVal Evaluation](#full-gdpval-evaluation)
 - [Configuration](#configuration)
 - [Advanced Features](#advanced-features)
+  - [Task-Only Execution Mode](#task-only-execution-mode)
+  - [Judge-Only Mode](#judge-only-mode)
+  - [Task Re-run Mode](#task-re-run-mode)
   - [Apptainer Sandboxing](#apptainer-sandboxing)
   - [Pairwise ELO Judging](#pairwise-elo-judging)
   - [Tavily Web Search](#tavily-web-search)
@@ -86,23 +88,22 @@ For each GDPVal task, the agent:
 The canonical entry point for GDPVal is the benchmark at
 [`benchmarks/gdpval/`](../../benchmarks/gdpval/README.md), which composes this
 agent with the GDPVal resources server and supports
-`ng_prepare_benchmark` + `ng_e2e_collect_rollouts`:
+`gym eval prepare` + `gym eval run`:
 
 ```bash
 # 1. Prepare the GDPVal benchmark JSONL.
-ng_prepare_benchmark "+config_paths=[benchmarks/gdpval/config.yaml]"
+gym eval prepare --benchmark gdpval
 
 # 2. Collect rollouts end-to-end (servers spin up automatically).
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-benchmarks/gdpval/config.yaml"
 JUDGE_API_KEY=... HF_TOKEN=... \
-ng_e2e_collect_rollouts \
-  "+config_paths=[${config_paths}]" \
-  ++split=benchmark \
-  ++output_jsonl_fpath=results/gdpval_rubric.jsonl \
-  ++policy_base_url=https://api.openai.com/v1 \
-  ++policy_api_key=$OPENAI_API_KEY \
-  ++policy_model_name=gpt-4.1-2025-04-14
+gym eval run \
+  --model-type openai_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_rubric.jsonl \
+  --model-url https://api.openai.com/v1 \
+  --model-api-key $OPENAI_API_KEY \
+  --model gpt-4.1-2025-04-14
 ```
 
 Each output line contains `responses_create_params`, the full `response`, a
@@ -125,6 +126,9 @@ The agent reads its Hydra config at `configs/stirrup_gdpval.yaml`. Notable keys:
 | `resources_server` | required | Reference to the GDPVal resources server (which scores the deliverable via `/verify`). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
 | `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. |
+| `execute_only` | `false` | If true, run tasks and cache deliverables but **skip judging** — no `reward` / `judge_response` (see [Task-Only Execution Mode](#task-only-execution-mode)). Mutually exclusive with `judge_only`. |
+| `judge_only` | `false` | If true, skip task execution and score the deliverables already cached under `persist_deliverables_dir` (see [Judge-Only Mode](#judge-only-mode)). Mutually exclusive with `execute_only`. |
+| `rerun_incomplete` | `false` | If true, skip the rollout for tasks that already **finished** (a finish marker is cached) and only re-run the ones that didn't (see [Task Re-run Mode](#task-re-run-mode)). Composes with `execute_only` and `judge_only`. |
 | `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
@@ -160,6 +164,204 @@ sporadic HTTP 400 responses at the vLLM proxy.
 
 ## Advanced Features
 
+NeMo Gym splits a GDPVal evaluation into two halves — *executing* the task
+(running the agent to produce deliverables) and *judging* it (scoring those
+deliverables with the rubric LLM). By default a run does both back to back, but
+each half can run on its own: [Task-Only Execution Mode](#task-only-execution-mode)
+(`execute_only`) runs and caches deliverables without judging, and
+[Judge-Only Mode](#judge-only-mode) (`judge_only`) scores cached deliverables
+without re-running the agent. [Task Re-run Mode](#task-re-run-mode)
+(`rerun_incomplete`) then lets you resume any of these flows, redoing only the
+work that didn't finish.
+
+### Task-Only Execution Mode
+
+Sometimes you want to *run* the tasks and keep their deliverables without judging
+them — e.g. to build a reference set for later pairwise comparison, to defer
+scoring to a separate pass, or to inspect raw model outputs. Set `execute_only:
+true` (or export `EXECUTE_ONLY=true` with the benchmark config) to do exactly
+that:
+
+- Each task runs through the Stirrup agent and its deliverables are cached to
+  `persist_deliverables_dir/task_<task_id>/repeat_<n>/` (the same layout used by
+  comparison mode's `reference_deliverables_dir`).
+- The judge `/verify` call is **skipped entirely** — no judgement is made or
+  sent, and no LLM-judge tokens are spent.
+- Each rollout row carries the `response`, the `deliverables_dir`, and
+  `execute_only: true`, but **no `reward`** and **no `judge_response`**.
+- `aggregate_metrics` returns baseline (reward-free) stats instead of proxying
+  to the judge server.
+
+`execute_only: true` is mutually exclusive with `judge_only`, and **requires**
+`persist_deliverables_dir` to be set to an absolute path — without it nothing is
+saved and the mode is rejected at startup.
+
+```bash
+EXECUTE_ONLY=true \
+PERSIST_DELIVERABLES_DIR=/abs/path/to/output/gdpval/my-model \
+HF_TOKEN=... \
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_execute_only.jsonl
+```
+
+The cached deliverables can later be scored with a separate rubric or
+comparison run by pointing the resources server at the same directory — see
+[Judge-Only Mode](#judge-only-mode).
+
+### Judge-Only Mode
+
+`judge_only` re-scores a set of deliverables that an earlier run already
+produced, **without** re-executing the (expensive) agent task. It is the
+counterpart to a plain execute-then-judge run: the agent loop is skipped
+entirely and only the resources server `/verify` step runs.
+
+How it works:
+
+- For each task, the agent locates the cached deliverable directory at
+  `persist_deliverables_dir/task_<task_id>/repeat_<rollout_index>/` — the same
+  layout a normal run writes when `persist_deliverables_dir` is set.
+- If the directory exists, a placeholder response is built and `/verify` is
+  called with `deliverables_dir` pointing at the cached files, so the judge
+  scores the on-disk deliverables (not fresh model output).
+- If no cached directory exists for a task, that task is reported as
+  **skipped** (terminal — re-dispatching it would not create the files) and
+  `/verify` is never called.
+
+Requirements / notes:
+
+- `persist_deliverables_dir` must be set (and absolute); it is the source of
+  the deliverables to score. The agent raises at startup otherwise.
+- Run judge-only over the same benchmark / `num_repeats` that produced the
+  cache so the `task_<id>/repeat_<n>` directories line up.
+- To **resume an interrupted judging pass** (re-judge only the tasks that were
+  not scored yet, skipping the ones already judged), combine `judge_only` with
+  `rerun_incomplete` — see [Task Re-run Mode](#task-re-run-mode).
+
+Enable it via the config key or the `JUDGE_ONLY` env var honored by
+`benchmarks/gdpval/config.yaml`:
+
+```bash
+JUDGE_ONLY=true PERSIST_DELIVERABLES_DIR=/abs/path/to/cached/deliverables \
+  gym eval run ...
+```
+
+or as a Hydra override:
+
+```bash
+++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true
+```
+
+### Task Re-run Mode
+
+`rerun_incomplete` re-runs **only** the tasks that did not finish, without
+paying the (expensive) rollout cost on tasks that already did. It composes with
+all three execution flows: the full rollout+judge run, [task-only
+execution](#task-only-execution-mode) (`execute_only`), and
+[judge-only](#judge-only-mode) (`judge_only`). What "re-run" means depends on
+which flow it is layered on:
+
+| Layered on… | Finished task (finish marker cached) | Unfinished task |
+|-------------|--------------------------------------|-----------------|
+| full rollout+judge | skip rollout; return cached `/verify` if present, else judge once and cache it | roll out again, then judge |
+| `+ execute_only` | skip rollout; return cached deliverable payload as-is (never judged) | roll out again |
+| `+ judge_only` | return cached `/verify` if present, else judge the cached deliverables once and cache it (no rollout in either case) | reported `skipped` (no deliverables to judge) |
+
+The per-task cache at
+`persist_deliverables_dir/task_<task_id>/repeat_<rollout_index>/` is the source
+of truth for "did this task finish". A task counts as **finished** once it has
+persisted the finish marker `finish_params.json`. That file is written only
+*after* the Stirrup session runs to completion, so its presence definitively
+means the agent loop reached the end. A finished task is **not** re-run even
+when it produced **no deliverable files**: that means the model was simply
+unable to make a deliverable (a finished, typically low-scoring outcome), not
+that the run was cut short. Deliverable files (and the `history.*` /
+`metadata.json` artifacts), when present, are still used to score the task and
+collect run metadata — they just aren't what decides whether the task finished.
+
+For each task:
+
+- **Already finished** (a finish marker is cached) → the Stirrup rollout is
+  **skipped**. In `execute_only` mode the cached payload is returned as-is. In
+  the full mode, a task that was **already judged** returns its cached `/verify`
+  result directly (no rollout *and* no judge call); a finished task that was
+  never successfully judged is scored via `/verify` once (whether or not it has
+  deliverables), and that judgement is cached for next time. The judgement is
+  stored as a sibling file (`task_<id>/repeat_<n>_verify_response.json`), never
+  inside the deliverables directory, so it cannot leak into the judge's input.
+- **Never finished** (no finish marker — killed, OOM, or crashed before
+  persisting) → the task is rolled out again. If the fresh rollout *still* does
+  not persist a finish marker, the result is routed as a retryable `incomplete`
+  failure to the failures sidecar (`<output>_failures.jsonl`) instead of the
+  main rollouts JSONL, so it is not mistaken for a success.
+
+Combine it with `--resume` (`resume_from_cache`) to re-dispatch *only* the
+unfinished tasks across runs: successes stay gated out of the main JSONL while
+`incomplete` sidecar rows are retried up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`
+(default 3). To give tasks that already exhausted that budget another shot on a
+re-run, raise the cap (e.g. `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=6`) — tasks are gated
+only once their recorded attempt count reaches the cap, so a higher value
+re-dispatches them.
+
+**Combined with `judge_only`**, `rerun_incomplete` resumes an interrupted
+judging pass: a task that already has a cached `/verify` result is returned
+as-is, and only tasks whose judgement was never cached are (re-)scored. (A task
+with no cached deliverables to judge is still reported `skipped`, as in plain
+judge-only mode.) Use this to finish judging a deliverable set without
+re-judging the tasks that were already scored.
+
+**Combined with multi-stage ELO** (`++multistage.enabled=true`), `rerun_incomplete`
+resumes an interrupted staged run. Deliverable reuse-vs-rerun already works there
+(a finished task skips the rollout; an unfinished one is re-rolled), so the extra
+thing `rerun_incomplete` adds is **cached judgements**. Because each stage scores
+the *same* deliverable against a *different* reference subset, a judgement is only
+valid for the exact references it scored — so the verify cache is **keyed by the
+reference subset** (`repeat_<n>_verify_response_<refset-hash>.json`). A resumed
+stage that reselects the same references returns its cached judgement (no re-judge);
+a stage that scores a new subset judges once and caches that separately. Run with
+the same `multistage.seed` so the stage plans — and therefore the reference subsets
+— line up across the resumed run.
+
+Requirements / notes:
+
+- `persist_deliverables_dir` must be set (and absolute) — it is the cache the
+  finish-marker / cached-judgement checks read. The agent raises at startup
+  otherwise.
+- Point at the same `persist_deliverables_dir` the original run used so the
+  `task_<id>/repeat_<n>` directories line up.
+
+```bash
+# Re-run only the GDPVal tasks that didn't finish, then judge them.
+RERUN_INCOMPLETE=true \
+PERSIST_DELIVERABLES_DIR=/abs/path/to/output/gdpval/my-model \
+HF_TOKEN=... JUDGE_API_KEY=... \
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --resume \
+  --output results/gdpval.jsonl
+```
+
+To instead **finish an interrupted judging pass** — re-judge only the tasks
+that were never scored, without re-running any rollout or re-judging the ones
+already cached — layer `rerun_incomplete` on top of `judge_only`:
+
+```bash
+# Judge only the GDPVal deliverables that don't yet have a cached judgement.
+RERUN_INCOMPLETE=true JUDGE_ONLY=true \
+PERSIST_DELIVERABLES_DIR=/abs/path/to/output/gdpval/my-model \
+JUDGE_API_KEY=... \
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --resume \
+  --output results/gdpval.jsonl
+```
+
 ### Apptainer Sandboxing
 
 Some GDPVal tasks ask the model to install packages or run untrusted code. By default the
@@ -175,7 +377,7 @@ apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.
 Then:
 
 ```yaml
-# env.yaml or ng_run override
+# env.yaml or gym env start override
 stirrup_agent:
   responses_api_agents:
     stirrup_agent:
@@ -188,10 +390,11 @@ Pairwise comparison vs. a reference model is built into the GDPVal resources
 server (`resources_servers/gdpval`). Drive it from the benchmark config:
 
 ```bash
-ng_e2e_collect_rollouts \
-  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]" \
-  ++split=benchmark \
-  ++output_jsonl_fpath=results/gdpval_compare.jsonl \
+gym eval run \
+  --model-type vllm_model \
+  --benchmark gdpval \
+  --split benchmark \
+  --output results/gdpval_compare.jsonl \
   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
   ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=output/gdpval/reference-model
 ```

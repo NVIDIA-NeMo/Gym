@@ -108,8 +108,8 @@ def filter_rollouts(input_file: str, output_file: str, filters: Dict):
             # Apply filters
             if (rollout.get('reward', 0) >= filters.get('min_reward', 0.5) and
                 rollout.get('success', False) and
-                len(rollout.get('output', [])) >= filters.get('min_turns', 2) and
-                len(rollout.get('output', [])) <= filters.get('max_turns', 20)):
+                len(rollout.get('response', {}).get('output', [])) >= filters.get('min_turns', 2) and
+                len(rollout.get('response', {}).get('output', [])) <= filters.get('max_turns', 20)):
                 
                 out.write(line)
                 kept += 1
@@ -173,7 +173,7 @@ def process_sft_data(filtered_rollout_file: str, output_file: str):
         for line in f:
             rollout = json.loads(line)
             sft_example = {
-                "messages": rollout['output'],
+                "messages": rollout['response']['output'],
                 "reward": rollout['reward'],
                 "task_type": rollout.get('metadata', {}).get('task_type', 'general')
             }
@@ -219,8 +219,8 @@ def create_dpo_pairs(filtered_rollout_file: str, output_file: str):
             if quality_diff >= 0.1:  # Minimum difference threshold
                 pairs.append({
                     "prompt": chosen['responses_create_params']['input'],
-                    "chosen": chosen['output'],
-                    "rejected": rejected['output'],
+                    "chosen": chosen['response']['output'],
+                    "rejected": rejected['response']['output'],
                     "quality_difference": quality_diff
                 })
     
@@ -267,9 +267,10 @@ Test your improved model by generating new rollouts on held-out evaluation tasks
 
 ```bash
 # Generate rollouts with improved model
-ng_collect_rollouts +agent_name=improved_agent \
-    +input_jsonl_fpath=evaluation_tasks.jsonl \
-    +output_jsonl_fpath=post_training_rollouts.jsonl
+gym eval run --no-serve \
+    --agent improved_agent \
+    --input evaluation_tasks.jsonl \
+    --output post_training_rollouts.jsonl
 ```
 
 Compare key metrics like average reward, success rate, and task-specific performance against your baseline to measure improvement.

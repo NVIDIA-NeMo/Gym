@@ -27,9 +27,8 @@ from typing import Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 
 
 class PromptConfig(BaseModel):
@@ -39,26 +38,18 @@ class PromptConfig(BaseModel):
     system: Optional[str] = None
 
 
-def _resolve_path(path: str) -> Path:
-    """Resolve a path relative to the Gym root (PARENT_DIR), consistent with config_paths resolution."""
-    p = Path(path)
-    if not p.is_absolute():
-        p = PARENT_DIR / p
-    return p
-
-
 @lru_cache(maxsize=64)
 def load_prompt_config(path: str) -> PromptConfig:
     """Load and validate a YAML prompt config file.
 
-    Relative paths are resolved against the Gym root directory (``PARENT_DIR``),
-    consistent with how ``config_paths`` and other Gym paths are resolved.
+    Relative paths are resolved against the current working directory first, then the Gym install
+    root, consistent with how ``config_paths`` and other Gym paths are resolved.
 
     Returns a ``PromptConfig`` with required ``user`` and optional ``system`` fields.
     Each value is a string template with ``{placeholder}`` syntax.
     Results are cached so the same file is only parsed once.
     """
-    resolved = _resolve_path(path)
+    resolved = _resolve_under_cwd_or_install(path)
     with open(resolved) as f:
         data = yaml.safe_load(f)
     return PromptConfig.model_validate(data)
@@ -126,7 +117,7 @@ def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str)
         output_jsonl: Path to write materialized JSONL (with responses_create_params.input).
     """
     prompt_cfg = load_prompt_config(prompt_config)
-    resolved_prompt_path = str(_resolve_path(prompt_config))
+    resolved_prompt_path = str(_resolve_under_cwd_or_install(prompt_config))
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +143,7 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_materialize_prompts \\
+    gym dataset render \\
         +input_jsonl_fpath=data/my_dataset.jsonl \\
         +prompt_config=/path/to/my_prompt.yaml \\
         +output_jsonl_fpath=my_dataset_materialized.jsonl
@@ -164,12 +155,14 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="Output path for materialized JSONL with populated prompts.")
 
 
-def materialize_prompts_cli() -> None:  # pragma: no cover
-    """CLI entry point for ng_materialize_prompts."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    config = MaterializePromptsConfig.model_validate(global_config_dict)
-    materialize_prompts(config.input_jsonl_fpath, config.prompt_config, config.output_jsonl_fpath)
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "materialize_prompts_cli": "nemo_gym.cli.dataset",
+    },
+)

@@ -3,7 +3,7 @@ title: "Prepare and Validate"
 description: ""
 position: 2
 ---
-Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`.
+Format and validate JSONL datasets for NeMo Gym training using `gym dataset collate`.
 
 <Info>
 
@@ -13,7 +13,7 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 
 **In this guide, you will**:
 
-1. Validate datasets with `ng_prepare_data`
+1. Validate datasets with `gym dataset collate`
 2. Generate training and validation splits
 3. Understand the JSONL data format
 
@@ -30,12 +30,11 @@ Format and validate JSONL datasets for NeMo Gym training using `ng_prepare_data`
 From the repository root:
 
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_prepare_data \
-    "+config_paths=[$config_paths]" \
-    +output_dirpath=data/test \
-    +mode=example_validation
+gym dataset collate \
+    --resources-server example_multi_step \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --output-dir data/test \
+    --mode example_validation
 ```
 
 Success output:
@@ -106,7 +105,7 @@ Check `resources_servers/<name>/README.md` for required fields specific to each 
 
 ## Preprocess Raw Datasets
 
-If your dataset doesn't have `responses_create_params`, you need to preprocess it before using `ng_prepare_data`.
+If your dataset doesn't have `responses_create_params`, you need to preprocess it before using `gym dataset collate`.
 
 **When to preprocess**:
 - Downloaded datasets without NeMo Gym format
@@ -178,7 +177,7 @@ wc -l train.jsonl validation.jsonl
 
 ### Create Config for Custom Data
 
-After preprocessing, create a config file to point `ng_prepare_data` at your local files.
+After preprocessing, create a config file to point `gym dataset collate` at your local files.
 
 <Accordion title="Example config: custom_data.yaml">
 
@@ -216,8 +215,11 @@ custom_simple_agent:
 Run data preparation:
 
 ```bash
-config_paths="custom_data.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" +mode=train_preparation +output_dirpath=data
+gym dataset collate \
+    --config custom_data.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --mode train_preparation \
+    --output-dir data
 ```
 
 This validates your data and adds the `agent_ref` field to each row, routing samples to your resources server.
@@ -234,28 +236,32 @@ This validates your data and adds the `agent_ref` field to each row, routing sam
 ### Example Validation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/example_multi_step/configs/example_multi_step.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +output_dirpath=data/example_multi_step \
-    +mode=example_validation
+gym dataset collate \
+    --resources-server example_multi_step \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --output-dir data/example_multi_step \
+    --mode example_validation
 ```
 
 ### Training Preparation
 
 ```bash
-ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/workplace_assistant.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +output_dirpath=data/workplace_assistant \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --resources-server workplace_assistant \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --output-dir data/workplace_assistant \
+    --mode train_preparation \
+    --download
 ```
 
 ### CLI Parameters
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `+config_paths` | Yes | YAML config paths |
-| `+output_dirpath` | Yes | Output directory |
-| `+mode` | Yes | `example_validation` or `train_preparation` |
-| `+should_download` | No | Download missing datasets (default: `false`) |
+| `--config` | Yes | YAML config paths (repeatable) |
+| `--output-dir` | Yes | Output directory |
+| `--mode` | Yes | `example_validation` or `train_preparation` |
+| `--download` | No | Download missing datasets (default: `false`) |
 | `+data_source` | No | `huggingface` (default) or `gitlab` |
 
 ---
@@ -267,7 +273,7 @@ ng_prepare_data "+config_paths=[resources_servers/workplace_assistant/configs/wo
 | Missing `responses_create_params` | Sample silently skipped | Add field with valid `input` |
 | Invalid JSON | Sample skipped | Fix JSON syntax |
 | Invalid role | Sample skipped | Use `user`, `assistant`, `system`, or `developer` |
-| Missing dataset file | `AssertionError` | Create file or set `+should_download=true` |
+| Missing dataset file | `AssertionError` | Create file or pass `--download` |
 
 <Warning>
 Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data format.
@@ -305,7 +311,7 @@ with open("your_data.jsonl") as f:
 
 ## Validation Process
 
-`ng_prepare_data` performs these steps:
+`gym dataset collate` performs these steps:
 
 1. **Load configs** — Parse server configs, identify datasets
 2. **Check files** — Verify dataset files exist
