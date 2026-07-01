@@ -40,6 +40,7 @@ from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR
 from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym.cli.utils import print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -714,7 +715,7 @@ def test_all():  # pragma: no cover
     table.add_column("Time taken (s)")
     for time_taken, dir_path in times_taken:
         table.add_row(str(dir_path), f"{time_taken:.2f}")
-    rich.print(table)
+    print_rich_table(table)
 
     print(f"""Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}
 
@@ -980,7 +981,7 @@ def list_environments() -> None:
     for name, environment in environments.items():
         table.add_row(name, environment.domain or "", environment.description or "")
 
-    rich.print(table)
+    print_rich_table(table)
 
 
 @exit_cleanly_on_config_error
