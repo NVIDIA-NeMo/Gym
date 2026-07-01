@@ -447,6 +447,7 @@ class Judge:
     model: str
     create_overrides: Optional[dict] = None
     weight: float = 1.0
+    handles_audio_video: bool = False
 
 
 def run_trials(

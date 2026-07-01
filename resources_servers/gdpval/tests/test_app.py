@@ -264,6 +264,44 @@ class TestApp:
         assert captured["rng"] is not None
 
     @pytest.mark.asyncio
+    async def test_verify_rubric_routes_audio_video_to_capable_judge(self, tmp_path) -> None:
+        """Rubric mode routes a task with audio/video deliverables to the
+        AV-capable panel member(s) before scoring."""
+        deliv = tmp_path / "task_task-1" / "repeat_0"
+        deliv.mkdir(parents=True)
+        (deliv / "narration.mp3").write_bytes(b"\x00")
+
+        server = _server(
+            reward_mode="rubric",
+            judge_panel=[
+                {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
+                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini", "handles_audio_video": True},
+            ],
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverables_dir=str(deliv))
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            # Avoid pulling in real file-reader conversion for the .mp3 stub.
+            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch(
+                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                return_value=[],
+            ),
+        ):
+            await server.verify(body)
+
+        assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
+
+    @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:
         server = _server(
             reward_mode="comparison",
@@ -491,6 +529,62 @@ class TestApp:
         assert per_judge["gemini-3.1-pro"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2}
         assert resp.total_wins == 4
         assert resp.reward == 1.0
+        assert resp.judge_response["av_routed"] is False
+
+    @pytest.mark.asyncio
+    async def test_verify_comparison_routes_audio_video_to_capable_judge(self, tmp_path) -> None:
+        """A task with an audio/video file is graded only by the AV-capable panel
+        member(s) — the whole comparison is routed to that judge subset."""
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "finish_params.json").write_text("{}")
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+        # Eval deliverable contains a video file → AV routing kicks in.
+        (eval_dir / "walkthrough.mp4").write_bytes(b"\x00")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=2,
+            judge_panel=[
+                {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
+                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini", "handles_audio_video": True},
+                {"name": "claude-opus-4.8", "model": "anthropic/claude"},
+            ],
+        )
+
+        captured: dict = {}
+
+        def fake_run_trials(**kwargs):
+            captured.update(kwargs)
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 0,
+                "win_count_b": 2,
+                "tie_count": 0,
+                "task_count": 2,
+                "per_judge": {"gemini-3.1-pro": {"win_count_a": 0, "win_count_b": 2, "tie_count": 0, "trials": 2}},
+                "trial_judges": ["gemini-3.1-pro", "gemini-3.1-pro"],
+            }
+
+        body = _verify_request(deliverables_dir=str(eval_dir))
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        # Only the AV-capable member is passed to run_trials and recorded.
+        assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
+        assert resp.judge_response["av_routed"] is True
+        assert [m["name"] for m in resp.judge_response["judge_panel"]] == ["gemini-3.1-pro"]
 
     @pytest.mark.asyncio
     async def test_persist_raw_judge_responses_rubric(self) -> None:

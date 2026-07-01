@@ -51,7 +51,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.server_utils import get_server_url
-from resources_servers.gdpval.judge_panel import ResolvedJudge, make_rng, panel_summary
+from resources_servers.gdpval.judge_panel import (
+    ResolvedJudge,
+    dir_contains_audio_video,
+    make_rng,
+    panel_summary,
+    select_av_judges,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -141,6 +147,10 @@ class JudgePanelMember(BaseModel):
     create_params_overrides: Dict[str, Any] = {}
     # Relative sampling weight; defaults to equal weighting across the panel.
     weight: float = 1.0
+    # Set True for a member that natively reads audio/video (e.g. Gemini 3.1 Pro
+    # Preview). Tasks whose deliverables/references contain audio or video files
+    # are routed to the AV-capable member(s) instead of the sampled panel.
+    handles_audio_video: bool = False
 
 
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
@@ -343,6 +353,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     api_key=api_key,
                     create_overrides=overrides or None,
                     weight=member.weight,
+                    handles_audio_video=member.handles_audio_video,
                 )
             )
         return judges
@@ -363,6 +374,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
 
         judges = self._resolve_judges()
+        # Route tasks with audio/video deliverables to the AV-capable judge(s) —
+        # most judges can't read those modalities natively.
+        if dir_contains_audio_video(body.deliverables_dir):
+            av_judges = select_av_judges(judges)
+            if [j.name for j in av_judges] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {body.task_id} has audio/video deliverables; routing to "
+                    f"{[j.name for j in av_judges]}",
+                    flush=True,
+                )
+            judges = av_judges
         # Seed per task so a rerun samples the same judge(s); the ``rubric`` tag
         # keeps the stream distinct from the comparison path.
         rng = make_rng(self.config.judge_sampling_seed, body.task_id, "rubric")
@@ -532,9 +554,26 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model=rj.model,
                 create_overrides=rj.create_overrides or None,
                 weight=rj.weight,
+                handles_audio_video=rj.handles_audio_video,
             )
             for rj in resolved_judges
         ]
+
+        # Route tasks with audio/video files (in the eval submission or any
+        # reference) to the AV-capable judge(s) — most judges can't read those
+        # modalities natively. Detection peeks into zip archives too.
+        av_routed = dir_contains_audio_video(eval_task_dir) or any(
+            dir_contains_audio_video(d) for dirs in ref_dirs_by_id.values() for d in dirs
+        )
+        if av_routed:
+            av_judges = select_av_judges(judges)
+            if [j.name for j in av_judges] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {body.task_id} has audio/video files; routing comparison to "
+                    f"{[j.name for j in av_judges]}",
+                    flush=True,
+                )
+            judges = av_judges
 
         total_wins = 0
         total_losses = 0
@@ -664,6 +703,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 # per-member vote tally (eval-perspective).
                 "judge_panel": panel_summary(judges),
                 "per_judge": per_judge_totals,
+                # True when this task's audio/video content forced routing to the
+                # AV-capable judge subset (``judge_panel`` above reflects it).
+                "av_routed": av_routed,
             },
             win=reward == 1.0,
             loss=reward == 0.0,

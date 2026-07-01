@@ -80,6 +80,8 @@ gdpval_resources_server:
         - name: gemini-3.1-pro
           model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
           create_params_overrides: { extra_body: { reasoning_effort: high } }
+          # Handles audio/video natively — tasks with those files route here.
+          handles_audio_video: true
         - name: claude-opus-4.8
           model: ${oc.env:JUDGE_CLAUDE_MODEL,anthropic/claude-opus-4.8}
           create_params_overrides: { extra_body: { thinking: { type: enabled } } }
