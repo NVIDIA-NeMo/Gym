@@ -32,7 +32,9 @@
 # otherwise behaves exactly like the standard single-pass collection.
 rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
-# Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
+# Judge model — proxy to the NVIDIA inference API. A single proxy server fronts
+# every frontier judge (Gemini, GPT, Claude); the panel members below select
+# among them by model id, so one server is enough.
 gdpval_judge_model:
   responses_api_models:
     openai_model:
@@ -63,6 +65,27 @@ gdpval_resources_server:
         type: responses_api_models
         name: gdpval_judge_model
       judge_responses_create_params_overrides: {}
+      # Multi-judge panel (applies to every judge mode — rubric text/visual/
+      # structured and pairwise comparison, including multi-stage ELO): a panel
+      # of frontier judges, one sampled per comparison/scoring call. This is the
+      # default. All three route through the single gdpval_judge_model proxy and
+      # differ only by model id + reasoning knobs; set a per-member model_server
+      # to point at distinct endpoints. To fall back to a single judge, override
+      # ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
+      # (the lone judge then comes from judge_model_server above).
+      judge_panel:
+        - name: gpt-5.5
+          model: ${oc.env:JUDGE_GPT_MODEL,openai/gpt-5.5}
+          create_params_overrides: { reasoning_effort: medium }
+        - name: gemini-3.1-pro
+          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          create_params_overrides: { extra_body: { reasoning_effort: high } }
+        - name: claude-opus-4.8
+          model: ${oc.env:JUDGE_CLAUDE_MODEL,anthropic/claude-opus-4.8}
+          create_params_overrides: { extra_body: { thinking: { type: enabled } } }
+      # Seed for reproducible per-call judge sampling (null = seed only on task
+      # identity, still stable per task).
+      judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
 
 # Stirrup agent paired with the resources server above.
 gdpval_stirrup_agent:

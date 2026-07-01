@@ -176,9 +176,11 @@ class TestApp:
     async def test_verify_rubric_passes_create_overrides_through(self) -> None:
         """``judge_responses_create_params_overrides`` must reach the scoring fn.
 
-        ``model`` and ``api_key`` are pulled out as their own kwargs; everything
-        else (e.g. ``max_tokens``, ``temperature``) flows through as
-        ``create_overrides`` and gets merged into ``client.chat.completions.create``.
+        With no ``judge_panel`` the server resolves a single judge from
+        ``judge_model_server`` + the legacy overrides: ``model`` and ``api_key``
+        become the judge's own fields; everything else (``max_tokens``,
+        ``temperature``, …) is its ``create_overrides``, merged into
+        ``client.chat.completions.create``.
         """
         server = _server(
             reward_mode="rubric",
@@ -204,9 +206,62 @@ class TestApp:
         ):
             await server.verify(body)
 
-        assert captured["model_name"] == "custom-judge"
-        assert captured["api_key"] == "sk-custom"  # pragma: allowlist secret
-        assert captured["create_overrides"] == {"max_tokens": 16384, "temperature": 0.0}
+        judges = captured["judges"]
+        assert len(judges) == 1
+        judge = judges[0]
+        assert judge.model == "custom-judge"
+        assert judge.api_key == "sk-custom"  # pragma: allowlist secret
+        assert judge.base_url == "http://localhost:9999/v1"
+        assert judge.create_overrides == {"max_tokens": 16384, "temperature": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_samples_from_judge_panel(self) -> None:
+        """A configured ``judge_panel`` reaches the scoring fn as multiple judges.
+
+        Each member resolves to its own model + reasoning knobs; members without
+        an explicit ``model_server`` share the server-level ``judge_model_server``
+        proxy (same base_url).
+        """
+        server = _server(
+            reward_mode="rubric",
+            judge_panel=[
+                {
+                    "name": "gpt-5.5",
+                    "model": "openai/gpt-5.5",
+                    "create_params_overrides": {"reasoning_effort": "medium"},
+                },
+                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini-3.1-pro-preview"},
+                {"name": "claude-opus-4.8", "model": "anthropic/claude-opus-4.8", "weight": 2.0},
+            ],
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            await server.verify(body)
+
+        judges = captured["judges"]
+        assert [j.name for j in judges] == ["gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8"]
+        assert [j.model for j in judges] == [
+            "openai/gpt-5.5",
+            "gcp/google/gemini-3.1-pro-preview",
+            "anthropic/claude-opus-4.8",
+        ]
+        assert judges[0].create_overrides == {"reasoning_effort": "medium"}
+        assert judges[2].weight == 2.0
+        # All share the single proxy base_url.
+        assert {j.base_url for j in judges} == {"http://localhost:9999/v1"}
+        # A seeded rng is threaded through for reproducible sampling.
+        assert captured["rng"] is not None
 
     @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:
@@ -370,6 +425,72 @@ class TestApp:
 
         assert captured_kwargs["return_raw_responses"] is True
         assert resp.judge_response["per_ref_repeat"][0]["raw_responses"] == canned_raw
+
+    @pytest.mark.asyncio
+    async def test_verify_comparison_panel_metadata_and_per_judge(self, tmp_path) -> None:
+        """Comparison mode passes the resolved panel to ``run_trials`` and folds
+        each matchup's ``per_judge`` counts into eval-perspective panel totals,
+        surfacing ``judge_panel`` + ``per_judge`` on the response."""
+        ref_root = tmp_path / "ref"
+        task_dir = ref_root / "task_task-1"
+        for i in range(2):
+            r = task_dir / f"repeat_{i}"
+            r.mkdir(parents=True)
+            (r / "finish_params.json").write_text("{}")
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=2,
+            judge_panel=[
+                {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
+                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini-3.1-pro-preview"},
+            ],
+        )
+
+        captured: dict = {}
+
+        def fake_run_trials(**kwargs):
+            captured.update(kwargs)
+            # eval (B) wins both trials; attribute one to each panel member.
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 0,
+                "win_count_b": 2,
+                "tie_count": 0,
+                "task_count": 2,
+                "per_judge": {
+                    "gpt-5.5": {"win_count_a": 0, "win_count_b": 1, "tie_count": 0, "trials": 1},
+                    "gemini-3.1-pro": {"win_count_a": 0, "win_count_b": 1, "tie_count": 0, "trials": 1},
+                },
+                "trial_judges": ["gpt-5.5", "gemini-3.1-pro"],
+            }
+
+        body = _verify_request(deliverables_dir=str(eval_dir))
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        # The panel (both members) is threaded into run_trials with a seeded rng.
+        judges = captured["judges"]
+        assert [j.name for j in judges] == ["gpt-5.5", "gemini-3.1-pro"]
+        assert captured["rng"] is not None
+        # Panel summary + pooled per-judge tally (over 2 ref repeats).
+        assert [m["name"] for m in resp.judge_response["judge_panel"]] == ["gpt-5.5", "gemini-3.1-pro"]
+        per_judge = resp.judge_response["per_judge"]
+        assert per_judge["gpt-5.5"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2}
+        assert per_judge["gemini-3.1-pro"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2}
+        assert resp.total_wins == 4
+        assert resp.reward == 1.0
 
     @pytest.mark.asyncio
     async def test_persist_raw_judge_responses_rubric(self) -> None:

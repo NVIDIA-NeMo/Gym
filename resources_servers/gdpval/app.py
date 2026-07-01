@@ -25,6 +25,13 @@ selected via ``reward_mode`` config:
 
 Scoring internals live in ``scoring.py`` (rubric) and ``comparison.py``
 (pairwise judge + ELO math).
+
+Both modes grade with a multi-judge *panel* (``judge_panel``): a set of frontier
+judges (e.g. GPT-5.5, Gemini 3.1 Pro Preview, Claude Opus 4.8, each at their own
+reasoning settings) that are sampled per comparison/scoring call. Panel sampling
++ seeding lives in ``judge_panel.py``. A single judge is just the degenerate
+one-member panel synthesized from ``judge_model_server`` when ``judge_panel`` is
+unset — there is one panel-based code path either way.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.server_utils import get_server_url
+from resources_servers.gdpval.judge_panel import ResolvedJudge, make_rng, panel_summary
 
 
 LOGGER = logging.getLogger(__name__)
@@ -109,6 +117,32 @@ class ReferenceModelConfig(BaseModel):
     elo: float = _DEFAULT_REFERENCE_ELO
 
 
+class JudgePanelMember(BaseModel):
+    """One judge in a multi-judge panel.
+
+    Each member is a distinct frontier model + reasoning configuration. For every
+    comparison/scoring call one member is sampled (see
+    ``judge_panel.sample_judge``). Members may share the single
+    ``judge_model_server`` proxy and differ only by ``model`` + reasoning knobs,
+    or point at distinct servers via ``model_server``.
+    """
+
+    # Human-readable label used in logs and the per-judge metrics breakdown,
+    # e.g. "gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8". Defaults to ``model``.
+    name: Optional[str] = None
+    # Upstream model id as the judge endpoint expects (e.g. "openai/gpt-5.5").
+    # Falls back to ``create_params_overrides.model`` then the legacy default.
+    model: Optional[str] = None
+    # Defaults to the server-level ``judge_model_server`` when omitted.
+    model_server: Optional[ModelServerRef] = None
+    # Provider-specific generation/reasoning knobs merged into
+    # ``chat.completions.create`` (e.g. ``{reasoning_effort: high}`` or
+    # ``{extra_body: {...}}``). A ``None`` value drops the matching default.
+    create_params_overrides: Dict[str, Any] = {}
+    # Relative sampling weight; defaults to equal weighting across the panel.
+    weight: float = 1.0
+
+
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     reward_mode: Literal["rubric", "comparison"] = "rubric"
 
@@ -148,6 +182,20 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
     judge_prompt_template_fpath: Optional[str] = None
+
+    # Multi-judge panel. Every comparison/scoring call samples one member. A
+    # single judge is just the degenerate case: when this is None a one-member
+    # panel is synthesized from ``judge_model_server`` +
+    # ``judge_responses_create_params_overrides`` (see ``_effective_panel``), so
+    # there is a single panel-based code path with no separate single-judge
+    # branch. Applies to every judge mode (rubric text/visual/structured and
+    # pairwise comparison, including multi-stage ELO).
+    judge_panel: Optional[List[JudgePanelMember]] = None
+    # Seed for reproducible per-call judge sampling. The RNG is seeded per
+    # (task_id, mode/ref_repeat) so reruns of the same task draw the same
+    # judges. Leave None to seed only on those identity parts (still stable per
+    # task); set an int to additionally shift the whole stream.
+    judge_sampling_seed: Optional[int] = None
 
     # Rubric-mode scoring backend:
     # - ``"binary"`` (default, legacy): judge emits a JSON ``{criteria_scores:
@@ -249,6 +297,56 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 )
         super().model_post_init(context)
 
+    def _effective_panel(self) -> List[JudgePanelMember]:
+        """The panel to grade with — always a non-empty list of members.
+
+        A single judge is just the degenerate case: when ``judge_panel`` is unset
+        we synthesize a one-member panel from the legacy single-judge fields
+        (``judge_model_server`` + ``judge_responses_create_params_overrides``), so
+        every code path downstream is panel-based.
+        """
+        if self.config.judge_panel:
+            return self.config.judge_panel
+        # Degenerate 1-member panel: inherit the legacy create-params overrides
+        # (model/api_key are split out during resolution, the rest become the
+        # member's reasoning/generation knobs).
+        return [
+            JudgePanelMember(create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}))
+        ]
+
+    def _resolve_judges(self) -> List[ResolvedJudge]:
+        """Resolve the (always non-empty) panel to concrete upstream coordinates.
+
+        Every judge — including the single-judge special case (see
+        :meth:`_effective_panel`) — is resolved through this one loop. Members may
+        share ``judge_model_server`` (differing only by model + reasoning) or
+        point at their own ``model_server``. Per-member ``model`` / ``api_key``
+        fall back to the legacy ``judge_responses_create_params_overrides`` then to
+        sane defaults.
+        """
+        legacy_overrides = dict(self.config.judge_responses_create_params_overrides or {})
+
+        def _url(server: ModelServerRef) -> str:
+            return get_server_url(server.name) + "/v1"
+
+        judges: List[ResolvedJudge] = []
+        for i, member in enumerate(self._effective_panel()):
+            server = member.model_server or self.config.judge_model_server
+            overrides = dict(member.create_params_overrides or {})
+            model = member.model or overrides.pop("model", None) or legacy_overrides.get("model", "judge")
+            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "dummy")
+            judges.append(
+                ResolvedJudge(
+                    name=member.name or model or f"judge_{i}",
+                    base_url=_url(server),
+                    model=model,
+                    api_key=api_key,
+                    create_overrides=overrides or None,
+                    weight=member.weight,
+                )
+            )
+        return judges
+
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
@@ -264,13 +362,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 invalid_judge_response=True,
             )
 
-        overrides = dict(self.config.judge_responses_create_params_overrides or {})
-        judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.pop("model", "judge")
-        judge_api_key = overrides.pop("api_key", "dummy")
-        # Anything left in `overrides` (max_tokens, temperature, top_p, …) is
-        # merged into the judge's chat.completions.create kwargs.
-        judge_create_overrides = overrides or None
+        judges = self._resolve_judges()
+        # Seed per task so a rerun samples the same judge(s); the ``rubric`` tag
+        # keeps the stream distinct from the comparison path.
+        rng = make_rng(self.config.judge_sampling_seed, body.task_id, "rubric")
 
         deliverable_text = _safe_output_text(body.response)
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
@@ -303,9 +398,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_json=body.rubric_json,
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
+                judges=judges,
+                rng=rng,
                 num_trials=self.config.rubric_structured_num_trials,
                 formatting_retries=self.config.rubric_structured_formatting_retries,
                 deliverable_content_blocks=deliverable_content_blocks,
@@ -320,10 +414,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
                 judge_prompt_template=self._judge_prompt_fpath,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
-                create_overrides=judge_create_overrides,
+                judges=judges,
+                rng=rng,
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
         else:
@@ -335,10 +427,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
                 judge_prompt_template=self._judge_prompt_fpath,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
-                create_overrides=judge_create_overrides,
+                judges=judges,
+                rng=rng,
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
@@ -367,6 +457,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         from resources_servers.gdpval.comparison import (
             JUDGE_REQUEST_TIMEOUT_SECONDS,
+            Judge,
             build_file_section,
             clean_up_paths,
             run_trials,
@@ -418,15 +509,32 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     await self._preconvert_and_log(ref_dir, label=f"ref/{ref_id}/{body.task_id}/{ref_dir.name}")
 
         clean_up_list: List[Path] = []
-        overrides = dict(self.config.judge_responses_create_params_overrides or {})
-        judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.get("model", "judge")
-        judge_api_key = overrides.get("api_key", "dummy")
-        client = OpenAI(
-            base_url=judge_base_url,
-            api_key=judge_api_key,
-            timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
-        )
+        # Build the judge panel. Members may share a single proxy server (so we
+        # reuse one OpenAI client per distinct upstream) and differ only by model
+        # + reasoning settings. run_trials samples one member per trial.
+        resolved_judges = self._resolve_judges()
+        client_cache: Dict[tuple, Any] = {}
+
+        def _client_for(judge: ResolvedJudge) -> Any:
+            key = (judge.base_url, judge.api_key)
+            if key not in client_cache:
+                client_cache[key] = OpenAI(
+                    base_url=judge.base_url,
+                    api_key=judge.api_key,
+                    timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                )
+            return client_cache[key]
+
+        judges = [
+            Judge(
+                name=rj.name,
+                client=_client_for(rj),
+                model=rj.model,
+                create_overrides=rj.create_overrides or None,
+                weight=rj.weight,
+            )
+            for rj in resolved_judges
+        ]
 
         total_wins = 0
         total_losses = 0
@@ -435,6 +543,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
         per_ref_results: List[Dict[str, Any]] = []
+        # eval-perspective per-judge tally pooled across every reference × repeat.
+        per_judge_totals: Dict[str, Dict[str, int]] = {}
         # Per-reference judge failures (timeouts, upstream 5xx, oversize/context
         # payloads). With multiple references a single failed matchup must NOT
         # discard the whole rollout — we skip just that (ref × repeat) and keep
@@ -460,17 +570,21 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     )
                     ref_submission = build_file_section(str(ref_dir), clean_up_list)
                     attempted_matchups += 1
+                    # Seed per (task, ref_id, ref_repeat) so judge sampling is
+                    # reproducible and each reference subset draws independently —
+                    # this makes multi-stage ELO reruns replayable per stage.
+                    rng = make_rng(self.config.judge_sampling_seed, body.task_id, ref_id, ref_dir.name)
                     try:
                         result = await asyncio.to_thread(
                             run_trials,
-                            client=client,
-                            model=judge_model_name,
+                            judges=judges,
                             task_prompt=body.prompt or "",
                             refs=refs,
                             submission_a=ref_submission,
                             submission_b=eval_submission,
                             num_trials=self.config.num_comparison_trials,
                             return_raw_responses=self.config.persist_raw_judge_responses,
+                            rng=rng,
                         )
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
@@ -486,6 +600,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
                     ref_judged_repeats += 1
+                    # Fold per-judge counts into eval-perspective panel totals
+                    # (B=eval, A=ref) so the per-member balance is auditable.
+                    for jname, jc in (result.get("per_judge") or {}).items():
+                        agg = per_judge_totals.setdefault(jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0})
+                        agg["wins"] += jc.get("win_count_b", 0)
+                        agg["losses"] += jc.get("win_count_a", 0)
+                        agg["ties"] += jc.get("tie_count", 0)
+                        agg["trials"] += jc.get("trials", 0)
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
                 # Only record references that produced at least one valid matchup;
@@ -538,6 +660,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 # References (and their repeats) whose judge calls failed and
                 # were skipped. Empty when every matchup succeeded.
                 "ref_errors": ref_errors,
+                # Multi-judge panel that graded this rollout + the pooled
+                # per-member vote tally (eval-perspective).
+                "judge_panel": panel_summary(judges),
+                "per_judge": per_judge_totals,
             },
             win=reward == 1.0,
             loss=reward == 0.0,
