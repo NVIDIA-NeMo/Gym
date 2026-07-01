@@ -407,8 +407,8 @@ class TestDatasetFlags:
 
     def test_bool_flags_omitted_when_unset(self, monkeypatch: MonkeyPatch) -> None:
         # --create-pr not passed -> no +create_pr override leaks in.
-        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--name", "my_ds"])
-        assert overrides == ["+dataset_name=my_ds"]
+        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--input", "d.jsonl", "--name", "my_ds"])
+        assert set(overrides) == {"+input_jsonl_fpath=d.jsonl", "+dataset_name=my_ds"}
 
     def test_collate_mode_rejects_invalid_choice(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "collate", "--mode", "bogus"])
@@ -423,6 +423,78 @@ class TestEvalAggregateFlags:
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
         assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
+
+
+class TestFriendlyValidationError:
+    """No flag is argparse-required (every value can also be supplied as a Hydra `+key=value` override).
+    A missing required value therefore surfaces from the command's own model_validate as a pydantic
+    ValidationError, which the router renders as a concise message + exit 2 instead of a raw traceback."""
+
+    def test_format_lists_missing_and_invalid_fields(self) -> None:
+        from pydantic import ValidationError
+
+        from nemo_gym.cli.main import _handle_pydantic_validation_error
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+        # A CLI config (so it passes the scoping check) with one missing and one invalid field.
+        class _Model(BaseNeMoGymCLIConfig):
+            required_path: str
+            count: int
+
+        class _FakeParser:
+            message: str = ""
+
+            def error(self, message: str) -> None:
+                self.message = message
+
+        recorder = _FakeParser()
+        try:
+            _Model.model_validate({"count": "not-an-int"})
+        except ValidationError as exc:
+            _handle_pydantic_validation_error(exc, recorder)
+
+        assert "missing required configuration: required_path" in recorder.message
+        assert "+required_path=<value>" in recorder.message
+        assert "invalid configuration: count" in recorder.message
+
+    def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+        # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
+        class _Config(BaseNeMoGymCLIConfig):
+            materialized_inputs_jsonl_fpath: str
+
+        def _raise_validation_error(target: str, overrides: list[str]) -> None:
+            _Config.model_validate({})  # missing required field -> ValidationError
+
+        monkeypatch.setattr(cli_main, "dispatch", _raise_validation_error)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "aggregate"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "gym eval aggregate: error:" in err
+        assert "missing required configuration: materialized_inputs_jsonl_fpath" in err
+
+    def test_non_config_validation_error_is_reraised(self, monkeypatch: MonkeyPatch) -> None:
+        # A ValidationError from a non-CLI-config model (e.g. a server response validated deep inside a
+        # command) is a real error, not a user-config mistake: it must propagate, not be rendered as a
+        # misleading "invalid configuration".
+        from pydantic import BaseModel, ValidationError
+
+        class _ServerResponse(BaseModel):  # NOT a BaseNeMoGymCLIConfig subclass
+            count: int
+
+        def _raise_validation_error(target: str, overrides: list[str]) -> None:
+            _ServerResponse.model_validate({"count": "not-an-int"})
+
+        monkeypatch.setattr(cli_main, "dispatch", _raise_validation_error)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "run"])
+
+        with pytest.raises(ValidationError):
+            main()
 
 
 class TestDispatch:

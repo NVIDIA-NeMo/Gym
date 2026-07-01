@@ -883,6 +883,7 @@ Dependencies
 """)
 
 
+@exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
     Display the resolved Hydra configuration for debugging purposes.
@@ -982,6 +983,7 @@ def list_environments() -> None:
     rich.print(table)
 
 
+@exit_cleanly_on_config_error
 def status():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -1007,6 +1009,7 @@ class PipListConfig(RunConfig):
     )
 
 
+@exit_cleanly_on_config_error
 def pip_list():  # pragma: no cover
     """List packages installed in a server's virtual environment."""
     global_config_dict = get_global_config_dict()
