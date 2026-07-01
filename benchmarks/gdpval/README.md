@@ -204,9 +204,9 @@ The default panel (see `benchmarks/gdpval/config.yaml`) is:
 
 | Member | Model (default) | Reasoning |
 |--------|-----------------|-----------|
-| `gpt-5.5` | `openai/gpt-5.5` | medium |
+| `gpt-5.5` | `openai/openai/gpt-5.5` | medium |
 | `gemini-3.1-pro` | `gcp/google/gemini-3.1-pro-preview` | high (handles audio/video) |
-| `claude-opus-4.8` | `anthropic/claude-opus-4.8` | thinking enabled |
+| `claude-opus-4.8` | `aws/anthropic/bedrock-claude-opus-4-8` | thinking enabled |
 
 All three route through the single `gdpval_judge_model` proxy server and differ
 only by model id + reasoning knobs, so one judge endpoint is enough. Override the
