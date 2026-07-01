@@ -52,6 +52,24 @@ class TestApp:
     def test_sanity(self) -> None:
         self._dummy_server()
 
+    async def test_run_retries_failed_task(self) -> None:
+        _, server = self._dummy_server()
+        config = MagicMock(max_retries=3, retry_delay=1.0)
+        result = MagicMock()
+
+        with (
+            patch(
+                "responses_api_agents.tau2.app.run_single_task",
+                new=AsyncMock(side_effect=[ValueError("empty user message"), result]),
+            ) as run_single_task_mock,
+            patch("responses_api_agents.tau2.app.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        ):
+            actual = await server._run_single_task_with_retry({"config": config})
+
+        assert actual is result
+        assert run_single_task_mock.await_count == 2
+        sleep_mock.assert_awaited_once_with(1.0)
+
     def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
         with example_jsonl.open() as f:
