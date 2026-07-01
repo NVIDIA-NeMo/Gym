@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import shlex
-from functools import wraps
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -34,14 +33,13 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
-from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR
 from nemo_gym.cli.setup_command import run_command, setup_env_command
-from nemo_gym.cli.utils import print_rich_table
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -68,26 +66,6 @@ from nemo_gym.server_utils import (
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
-
-
-def exit_cleanly_on_config_error(fn):
-    """Decorator: turn user-facing ConfigError into a clean message + non-zero exit.
-
-    Config mistakes (missing/typo'd config_paths, malformed config_paths, nothing configured to
-    run) should fail fast with an actionable message, not a Python traceback. Unexpected errors
-    still propagate normally.
-    """
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except ConfigError as e:
-            # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
-            rich.print(f"[red]Error:[/red] {escape(str(e))}")
-            raise SystemExit(1)
-
-    return wrapper
 
 
 def _resolve_server_dir(rel_path: Path) -> Path:

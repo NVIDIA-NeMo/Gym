@@ -30,8 +30,8 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmarks_from_config_paths
-from nemo_gym.cli.env import RunHelper, exit_cleanly_on_config_error
-from nemo_gym.cli.utils import print_rich_table
+from nemo_gym.cli.env import RunHelper
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
