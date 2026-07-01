@@ -15,10 +15,22 @@
 # references — each reference is judged separately and the eval model's rating
 # is fit globally, with per-reference + total win stats reported):
 #   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.deliverables_dir=/gdpval/refs/kimi \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.elo=1290 \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.deliverables_dir=/gdpval/refs/gpt5 \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.elo=1320
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.claude_opus_4_8.deliverables_dir=/gdpval/refs/claude_opus_4_8 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.claude_opus_4_8.elo=1599 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.deliverables_dir=/gdpval/refs/kimi_k2_6 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.elo=1193
+#
+# Multi-stage adaptive ELO (comparison mode): the driver below runs the staged
+# procedure when enabled and otherwise delegates to the standard collection, so
+# all that's needed to opt in is:
+#   ++multistage.enabled=true \
+#   ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
+# See benchmarks/gdpval/README.md for the full recipe.
+
+# Rollout-collection driver: routes `gym eval run` through the GDPVal
+# orchestrator, which runs multi-stage ELO when ++multistage.enabled=true and
+# otherwise behaves exactly like the standard single-pass collection.
+rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
 # Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
 gdpval_judge_model:
@@ -85,4 +97,4 @@ gdpval_stirrup_agent:
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
           prompt_config: null
           prepare_script: benchmarks/gdpval/prepare.py
-          num_repeats: 2
+          num_repeats: 1
