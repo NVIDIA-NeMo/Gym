@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,9 +16,10 @@
 from collections import defaultdict
 from os import environ
 from pathlib import Path
-from subprocess import run
 from time import time
 from typing import Any, Dict, List, Literal, Optional
+
+from responses_api_agents.tau2.source import ensure_tau2_data_dir
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -95,20 +96,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     __key_metrics: Optional[List[str]] = None
 
     def setup_webserver(self):
-        cwd = Path(__file__).parent
-        if not DATA_DIR.exists():
-            run(
-                """git clone https://github.com/bxyu-nvidia/tau2-bench \
-&& cd tau2-bench \
-&& git checkout bxyu/nemo_gym_stable \
-&& cd .. \
-&& mv tau2-bench/data tau2_data \
-&& rm -rf tau2-bench""",
-                shell=True,
-                cwd=cwd,
-                check=True,
-                executable="/bin/bash",
-            )
+        ensure_tau2_data_dir(DATA_DIR)
 
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")

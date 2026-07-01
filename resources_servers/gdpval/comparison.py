@@ -23,14 +23,18 @@ from __future__ import annotations
 import base64
 import math
 import os
+import random
 import shutil
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from openai import APITimeoutError
+
+from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
 
 
 JUDGE_PROMPT = (
@@ -343,18 +347,28 @@ def send_judge_request(
     model: str,
     messages: list[dict],
     max_output_tokens: int = 65535,
+    create_overrides: Optional[dict] = None,
 ) -> str:
-    """Send a judge request with exponential-backoff retry.  Returns response text."""
+    """Send a judge request with exponential-backoff retry.  Returns response text.
+
+    *create_overrides* (a panel member's reasoning/generation knobs) is merged
+    over the default create kwargs; a ``None`` value removes the matching
+    default (e.g. to drop ``temperature`` for a reasoning model that rejects it).
+    """
     backoff = REQUEST_INITIAL_BACKOFF_SECONDS
+    create_kwargs = merge_create_kwargs(
+        {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_output_tokens,
+            "temperature": 1.0,
+        },
+        create_overrides,
+    )
 
     for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_output_tokens,
-                temperature=1.0,
-            )
+            response = client.chat.completions.create(**create_kwargs)
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
             retryable = _is_retryable(error)
@@ -418,9 +432,26 @@ def tally_result(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class Judge:
+    """A panel member bound to a live (sync) OpenAI client for the trial loop.
+
+    Built by the resources server from a
+    :class:`resources_servers.gdpval.judge_panel.ResolvedJudge` (with one OpenAI
+    client per distinct upstream, so members that share a proxy reuse a client).
+    ``run_trials`` samples one of these per trial.
+    """
+
+    name: str
+    client: Any
+    model: str
+    create_overrides: Optional[dict] = None
+    weight: float = 1.0
+    handles_audio_video: bool = False
+
+
 def run_trials(
-    client: Any,
-    model: str,
+    judges: list[Judge],
     task_prompt: str,
     refs: list[dict],
     submission_a: list[dict],
@@ -428,22 +459,40 @@ def run_trials(
     num_trials: int = 4,
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
+    rng: Optional[random.Random] = None,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
+    For each trial one member of *judges* is sampled (see
+    ``judge_panel.sample_judge``) — the "sample between the judges for each
+    comparison" panel behavior. With a single-member panel this reduces to the
+    historical single-judge loop. Pass *rng* (a seeded ``random.Random``) for
+    reproducible judge selection.
+
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
-    ``tie_count``, and ``task_count``.
+    ``tie_count``, ``task_count``, ``per_judge`` (per-member a/b/tie/trial
+    counts keyed by judge name), and ``trial_judges`` (the judge name that graded
+    each trial, ordered by trial index — always present so the grader of every
+    match is documented).
 
     When ``return_raw_responses`` is True, the dict also carries
-    ``raw_responses``: a list of the per-trial judge completion strings,
-    ordered by trial index (so trial ``i`` was swapped iff ``i % 2 != 0``).
+    ``raw_responses`` (per-trial judge completion strings, same ordering as
+    ``trial_judges`` — trial ``i`` was swapped iff ``i % 2 != 0``).
     """
+    if not judges:
+        raise ValueError("run_trials requires a non-empty judge panel")
+    rng = rng or random.Random()
+
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
     raw_responses: list[str] = []
+    trial_judges: list[str] = []
+    per_judge: dict[str, dict] = {}
 
     for i in range(num_trials):
+        judge = sample_judge(judges, rng)
+        trial_judges.append(judge.name)
         swapped = i % 2 != 0
         current_a = submission_b if swapped else submission_a
         current_b = submission_a if swapped else submission_b
@@ -454,11 +503,21 @@ def run_trials(
             submission_a=current_a,
             submission_b=current_b,
         )
-        response_text = send_judge_request(client, model, messages, max_output_tokens)
+        response_text = send_judge_request(
+            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
+        )
         if return_raw_responses:
             raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
         win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
+
+        # Per-judge tally (same A=submission_a / B=submission_b convention as the
+        # global counts) so the panel's per-member balance is auditable.
+        jc = per_judge.setdefault(judge.name, {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0})
+        jc["win_count_a"], jc["win_count_b"], jc["tie_count"] = tally_result(
+            judgement, swapped, jc["win_count_a"], jc["win_count_b"], jc["tie_count"]
+        )
+        jc["trials"] += 1
 
     if win_count_a > win_count_b:
         winner = A_WIN_RESPONSE
@@ -473,6 +532,10 @@ def run_trials(
         "win_count_b": win_count_b,
         "tie_count": tie_count,
         "task_count": num_trials,
+        "per_judge": per_judge,
+        # Always recorded (just judge names, ordered by trial) so every match's
+        # per-trial grader is documented even when raw responses aren't kept.
+        "trial_judges": trial_judges,
     }
     if return_raw_responses:
         result["raw_responses"] = raw_responses

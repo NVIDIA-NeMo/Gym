@@ -80,6 +80,10 @@ Rollouts: results/mcqa_rollouts.jsonl
 Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 ```
 
+<Warning>
+If `gym eval run` fails with a `500 Internal Server Error` on the `/run` endpoint, the most common cause is an invalid or missing API key. Verify that `policy_api_key` and `policy_base_url` in your `env.yaml` are correct.
+</Warning>
+
 For per-task pass rates, see `gym eval profile` in the [CLI Reference](/reference/cli-commands).
 
 ## Explore
@@ -93,19 +97,19 @@ gym list benchmarks
 ```
 
 ```text
-Available benchmarks in NeMo Gym
-┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-┃ Benchmark name   ┃ Agent name                        ┃ Num repeats ┃
-┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-│ aalcr            │ aalcr_benchmark_simple_agent      │ 16          │
-│ aime25           │ aime25_math_with_judge_simple_ag… │ 32          │
-│ browsecomp       │ browsecomp_tavily_search_simple_… │ 1           │
-│ gpqa             │ gpqa_mcqa_simple_agent            │ 8           │
-│ ifbench          │ ifbench_benchmark_simple_agent    │ 5           │
-| ...              | ...                               | ...         |
-│ tau2             │ tau2_benchmark_agent              │ 8           │
-│ xstest           │ xstest_benchmark_simple_agent     │ 4           │
-└──────────────────┴───────────────────────────────────┴─────────────┘
+Available benchmarks in NeMo Gym (76)
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Benchmark name   ┃ Domain             ┃ Agent name                        ┃ Num repeats ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ aime24           │ math               │ aime24_math_with_judge_simple_ag… │ 32          │
+│ aime25           │ math               │ aime25_math_with_judge_simple_ag… │ 32          │
+│ browsecomp       │ agent              │ browsecomp_tavily_search_simple_… │ 1           │
+│ gpqa             │ knowledge          │ gpqa_mcqa_simple_agent            │ 8           │
+│ ifbench          │ instruction_fol…   │ ifbench_benchmark_simple_agent    │ 5           │
+| ...              | ...                | ...                               | ...         |
+│ tau2             │ agent              │ tau2_benchmark_agent              │ 8           │
+│ xstest           │ safety             │ xstest_benchmark_simple_agent     │ 4           │
+└──────────────────┴────────────────────┴───────────────────────────────────┴─────────────┘
 ```
 
 This lists benchmarks with pre-configured agents. For the full set of environments (including training environments), see the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table.

@@ -75,4 +75,4 @@ gym eval run --no-serve \
     --output resources_servers/arc_agi/data/example_2_rollouts.jsonl
 ```
 
-For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html).
+For training, see the [docs](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo).
