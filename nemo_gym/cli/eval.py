@@ -71,11 +71,12 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
 
 
 def _benchmark_domain(bench: BenchmarkConfig) -> str:
-    """Resolve a benchmark's config to its resources server `domain` (for the domain column and `gym search`).
+    """Resolve a benchmark's config to its `domain` (for the domain column and `gym search`).
 
-    `BenchmarkConfig` flattens away the resources server `domain`, so we re-resolve the config with the
-    same parser `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read
-    the field back out.
+    `BenchmarkConfig` flattens away the `domain`, so we re-resolve the config with the same parser
+    `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read the field
+    back out. `domain` may be declared on any server config — a resources server (e.g. `aime24`) or an
+    agent (e.g. `tau2`) — so we scan every server group.
     """
     initial_config_dict = OmegaConf.load(bench.path)
     if POLICY_MODEL_KEY_NAME not in initial_config_dict:
@@ -84,20 +85,21 @@ def _benchmark_domain(bench: BenchmarkConfig) -> str:
         )
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
 
-    domain = ""
     for instance_name in resolved:
         instance = resolved[instance_name]
         if not isinstance(instance, (dict, DictConfig)):
             continue
 
-        resources_servers = instance.get("resources_servers")
-        if resources_servers:
-            for rs_config in resources_servers.values():
-                found_domain = (rs_config or {}).get("domain")
+        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
+            servers = instance.get(group_key)
+            if not servers:
+                continue
+            for server_config in servers.values():
+                found_domain = (server_config or {}).get("domain")
                 if found_domain:
-                    domain = str(found_domain)
+                    return str(found_domain)
 
-    return domain
+    return ""
 
 
 def list_benchmarks() -> None:
