@@ -21,6 +21,7 @@ from app import (
     ToolCallMultiRewardVerifyRequest,
 )
 
+from nemo_gym.base_resources_server import MultiRewardVerifyResponse
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
@@ -96,6 +97,14 @@ class TestApp:
         result = await _server().verify(
             _request([_function_call("get_weather", json.dumps({"city": "San Francisco"}))])
         )
+        assert result.reward_components == {"correctness": 1.0, "schema_valid": 1.0, "format": 1.0}
+        assert result.reward == 3.0
+
+    async def test_verify_uses_shared_multi_reward_contract(self) -> None:
+        result = await _server().verify(
+            _request([_function_call("get_weather", json.dumps({"city": "San Francisco"}))])
+        )
+        assert isinstance(result, MultiRewardVerifyResponse)
         assert result.reward_components == {"correctness": 1.0, "schema_valid": 1.0, "format": 1.0}
         assert result.reward == 3.0
 
