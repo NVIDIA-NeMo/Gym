@@ -267,6 +267,10 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     prompt size (and cache-creation is surfaced separately as ``cache_creation_tokens``). OpenAI /
     Responses usage already includes cached tokens in ``input_tokens`` / ``prompt_tokens`` (where
     ``cached_tokens`` is a subset), so it is left untouched -- no double counting.
+
+    ``tokens_in`` is a prompt-*size* metric, not a cost proxy: providers price cache-read (~0.1x) and
+    cache-creation (~1.25x) differently from base input, so cost-accurate consumers should weight
+    ``cached_tokens`` and ``cache_creation_tokens`` separately rather than summing ``tokens_in``.
     """
     if not usage:
         return {
@@ -285,8 +289,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     # Anthropic-native shape: top-level cache_* keys mean input_tokens excludes cached tokens.
     cache_read = usage.get("cache_read_input_tokens")
     cache_creation = usage.get("cache_creation_input_tokens")
-    if tokens_in is not None and (cache_read is not None or cache_creation is not None):
-        tokens_in = tokens_in + (cache_read or 0) + (cache_creation or 0)
+    if cache_read is not None or cache_creation is not None:
+        # A fully-cached response can omit input_tokens; use a 0 base so the folded prompt size is
+        # preserved rather than dropped to null. (Top-level cache_* keys are Anthropic-only, so the
+        # OpenAI/Responses path -- nested prompt_tokens_details.cached_tokens -- never enters here.)
+        tokens_in = (tokens_in or 0) + (cache_read or 0) + (cache_creation or 0)
     tokens_total = usage.get("total_tokens")
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -399,7 +406,9 @@ class StepRecord(BaseModel):
     dialect: Optional[str] = None
     status_code: Optional[int] = None
 
-    # Token accounting (aggregable to per-turn / per-trial).
+    # Token accounting (aggregable to per-turn / per-trial). tokens_reasoning is OpenAI/Responses-only
+    # (sourced from *_tokens_details.reasoning_tokens); Anthropic does not expose it, so it is null
+    # there -- consumers must treat null as "unknown", not 0.
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
     tokens_reasoning: Optional[int] = None
@@ -519,8 +528,9 @@ def aggregate_step_records(steps: list[StepRecord]) -> dict[str, Any]:
         values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
         return sum(values) if values else None
 
-    # num_turns counts distinct derived turns (None when turn derivation did not apply); num_steps
-    # is the authoritative per-rollout count of model calls.
+    # num_turns is best-effort and often null: turn derivation nulls the whole rollout on any
+    # non-prefix-extension (sub-agent, compaction, even a whitespace change), so consumers should not
+    # divide by it. num_steps is the authoritative per-rollout count of model calls.
     turns = {s.turn_index for s in steps if s.turn_index is not None}
     return {
         "tokens_in": _sum("tokens_in"),
