@@ -52,7 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -3315,6 +3315,177 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+
+def _make_token_information_model() -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=True,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _make_chat_request() -> MagicMock:
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "session-1"}
+    return request
+
+
+class TestTokenIDInformation:
+    async def test_uses_native_engine_data_without_choice_logprobs_or_tokenize(self) -> None:
+        model = _make_token_information_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+        chat_completion = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+            "nvext": {
+                "engine_data": {
+                    "prompt_token_ids": [1, 2, 3],
+                    "completion_token_ids": [11, 12],
+                    "completion_logprobs": [-0.1, -0.2],
+                    "finished": True,
+                },
+            },
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("must not tokenize"))
+        model._clients = [mock_client]
+
+        response = await model.chat_completions(_make_chat_request(), body)
+
+        message = response.choices[0].message
+        assert message.prompt_token_ids == [1, 2, 3]
+        assert message.generation_token_ids == [11, 12]
+        assert message.generation_log_probs == [-0.1, -0.2]
+        assert response.choices[0].logprobs is None
+        mock_client.create_tokenize.assert_not_awaited()
+
+    async def test_native_engine_data_ignores_postprocessed_choice_logprobs(self) -> None:
+        model = _make_token_information_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+        chat_completion = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {"role": "assistant", "content": None},
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:12", "logprob": -9.2},
+                        ]
+                    },
+                }
+            ],
+            "nvext": {
+                "engine_data": {
+                    "prompt_token_ids": [1, 2, 3],
+                    "completion_token_ids": [11, 12],
+                    "completion_logprobs": [-0.1, -0.2],
+                    "finished": True,
+                },
+            },
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("must not tokenize"))
+        model._clients = [mock_client]
+
+        response = await model.chat_completions(_make_chat_request(), body)
+
+        message = response.choices[0].message
+        assert message.prompt_token_ids == [1, 2, 3]
+        assert message.generation_token_ids == [11, 12]
+        assert message.generation_log_probs == [-0.1, -0.2]
+        mock_client.create_tokenize.assert_not_awaited()
+
+    async def test_missing_engine_data_keeps_vllm_tokenize_fallback(self) -> None:
+        model = _make_token_information_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+        chat_completion = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:21", "logprob": -0.3},
+                            {"token": "token_id:22", "logprob": -0.4},
+                        ]
+                    },
+                }
+            ],
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_completion)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [5, 6, 7]})
+        model._clients = [mock_client]
+
+        response = await model.chat_completions(_make_chat_request(), body)
+
+        message = response.choices[0].message
+        assert message.prompt_token_ids == [5, 6, 7]
+        assert message.generation_token_ids == [21, 22]
+        assert message.generation_log_probs == [-0.3, -0.4]
+        mock_client.create_tokenize.assert_awaited_once()
+
+    async def test_malformed_engine_data_raises_without_tokenize(self) -> None:
+        model = _make_token_information_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "hello"}])
+        chat_completion = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                    "logprobs": {"content": [{"token": "token_id:11", "logprob": -0.1}]},
+                }
+            ],
+            "nvext": {"engine_data": {"completion_token_ids": [11]}},
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("must not tokenize"))
+        model._clients = [mock_client]
+
+        try:
+            await model.chat_completions(_make_chat_request(), body)
+        except ValueError as e:
+            assert "prompt_token_ids" in str(e)
+        else:
+            raise AssertionError("expected malformed native token metadata to raise")
+
+        mock_client.create_tokenize.assert_not_awaited()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
