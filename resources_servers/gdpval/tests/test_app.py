@@ -486,6 +486,491 @@ class TestApp:
         assert abs(result.agent_metrics["comparison/win_rate"] - (13.0 / 24.0)) < 1e-6
 
 
+class TestMleElo:
+    def test_single_reference_matches_closed_form(self) -> None:
+        """For one reference the anchored MLE reduces exactly to ``calculate_elo``."""
+        from resources_servers.gdpval.comparison import calculate_elo, calculate_mle_elo
+
+        # 7 wins, 2 losses, 1 tie vs a single reference at ELO 1000 → win_rate 0.75.
+        closed_elo, closed_norm = calculate_elo(0.75, 1000.0)
+        mle = calculate_mle_elo([(1000.0, 7, 2, 1)])
+        assert mle is not None
+        mle_elo, mle_norm = mle
+        assert abs(mle_elo - closed_elo) < 0.5
+        assert abs(mle_norm - closed_norm) < 1e-3
+
+    def test_two_references_fits_midpoint(self) -> None:
+        """50% win rate vs two references at 1000 and 1400 ⇒ eval ELO ≈ 1200."""
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        mle = calculate_mle_elo([(1000.0, 5, 5, 0), (1400.0, 5, 5, 0)])
+        assert mle is not None
+        eval_elo, _ = mle
+        assert abs(eval_elo - 1200.0) < 1.0
+
+    def test_stronger_eval_gets_higher_rating(self) -> None:
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        weak = calculate_mle_elo([(1200.0, 2, 8, 0)])
+        strong = calculate_mle_elo([(1200.0, 8, 2, 0)])
+        assert weak is not None and strong is not None
+        assert strong[0] > 1200.0 > weak[0]
+
+    def test_degenerate_all_wins_is_finite_and_high(self) -> None:
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        mle = calculate_mle_elo([(1000.0, 10, 0, 0), (1100.0, 10, 0, 0)])
+        assert mle is not None
+        eval_elo, _ = mle
+        import math as _math
+
+        assert _math.isfinite(eval_elo)
+        assert eval_elo > 1100.0
+
+    def test_no_games_returns_none(self) -> None:
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        assert calculate_mle_elo([]) is None
+        assert calculate_mle_elo([(1000.0, 0, 0, 0)]) is None
+
+
+class TestMultiReference:
+    @pytest.mark.asyncio
+    async def test_verify_judges_every_reference_model(self, tmp_path) -> None:
+        """Each eval rollout is judged against every configured reference model,
+        and per-reference vote tallies are recorded on the response."""
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        ref_roots = {}
+        for ref_id in ("kimi", "gpt5"):
+            root = tmp_path / ref_id
+            td = root / "task_task-1"
+            td.mkdir(parents=True)
+            (td / "finish_params.json").write_text("{}")
+            ref_roots[ref_id] = root
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "kimi": {"deliverables_dir": str(ref_roots["kimi"]), "elo": 1290.0},
+                "gpt5": {"deliverables_dir": str(ref_roots["gpt5"]), "elo": 1320.0},
+            },
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+        )
+
+        def fake_run_trials(**_kwargs):
+            # 3 eval wins (B), 1 ref win (A) per matchup.
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 1,
+                "win_count_b": 3,
+                "tie_count": 0,
+                "task_count": 4,
+            }
+
+        body = _verify_request(deliverables_dir=str(eval_dir))
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        assert set(resp.per_reference) == {"kimi", "gpt5"}
+        assert resp.per_reference["kimi"] == {
+            "wins": 3,
+            "losses": 1,
+            "ties": 0,
+            "reference_elo": 1290.0,
+            "ref_repeat_count": 1,
+        }
+        assert resp.per_reference["gpt5"]["reference_elo"] == 1320.0
+        # Totals are pooled across both references.
+        assert resp.total_wins == 6
+        assert resp.total_losses == 2
+        assert resp.judge_response["reference_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_reference_ids_filter_judges_subset(self, tmp_path) -> None:
+        """``reference_ids`` on the verify request restricts judging to the named
+        references; unknown ids are ignored."""
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        ref_roots = {}
+        for ref_id in ("kimi", "gpt5"):
+            root = tmp_path / ref_id
+            td = root / "task_task-1"
+            td.mkdir(parents=True)
+            (td / "finish_params.json").write_text("{}")
+            ref_roots[ref_id] = root
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "kimi": {"deliverables_dir": str(ref_roots["kimi"]), "elo": 1290.0},
+                "gpt5": {"deliverables_dir": str(ref_roots["gpt5"]), "elo": 1320.0},
+            },
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+        )
+
+        def fake_run_trials(**_kwargs):
+            return {"winner": "[[B]]", "win_count_a": 1, "win_count_b": 3, "tie_count": 0, "task_count": 4}
+
+        # Only judge against gpt5 (and an unknown id, which is ignored).
+        body = _verify_request(deliverables_dir=str(eval_dir), reference_ids=["gpt5", "nonexistent"])
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        assert set(resp.per_reference) == {"gpt5"}
+        assert resp.total_wins == 3
+        assert resp.total_losses == 1
+        assert resp.judge_response["reference_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_reference_ids_empty_yields_no_references(self, tmp_path) -> None:
+        """An empty ``reference_ids`` list judges against nothing → reference_missing."""
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+        root = tmp_path / "kimi"
+        (root / "task_task-1").mkdir(parents=True)
+        (root / "task_task-1" / "finish_params.json").write_text("{}")
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"kimi": {"deliverables_dir": str(root), "elo": 1290.0}},
+            preconvert_office_to_pdf=False,
+        )
+        body = _verify_request(deliverables_dir=str(eval_dir), reference_ids=[])
+
+        with patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"):
+            resp = await server.verify(body)
+
+        assert resp.reward == 0.0
+        assert resp.judge_response == {"error": "reference_missing"}
+
+    @staticmethod
+    def _two_ref_server_and_body(tmp_path):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+        ref_roots = {}
+        for ref_id in ("kimi", "gpt5"):
+            root = tmp_path / ref_id
+            td = root / "task_task-1"
+            td.mkdir(parents=True)
+            (td / "finish_params.json").write_text("{}")
+            ref_roots[ref_id] = root
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "kimi": {"deliverables_dir": str(ref_roots["kimi"]), "elo": 1284.0},
+                "gpt5": {"deliverables_dir": str(ref_roots["gpt5"]), "elo": 1320.0},
+            },
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @pytest.mark.asyncio
+    async def test_verify_skips_failed_reference_keeps_others(self, tmp_path) -> None:
+        """A judge failure on one reference is isolated: that reference is
+        skipped (recorded under ``ref_errors``) while the others still score."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        calls = {"n": 0}
+
+        def flaky_run_trials(**_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First matchup (kimi) blows up the way a judge timeout would.
+                raise RuntimeError("openai.APITimeoutError: Request timed out.")
+            return {
+                "winner": "[[B]]",
+                "win_count_a": 1,
+                "win_count_b": 3,
+                "tie_count": 0,
+                "task_count": 4,
+            }
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=flaky_run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            resp = await server.verify(body)
+
+        # Only the surviving reference contributes votes.
+        assert set(resp.per_reference) == {"gpt5"}
+        assert resp.total_wins == 3
+        assert resp.total_losses == 1
+        assert resp.reward == 1.0
+        # The failed reference is recorded but does not abort the rollout.
+        assert "kimi" in resp.judge_response["ref_errors"]
+        assert resp.judge_response["reference_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
+        """When every matchup fails the rollout is genuinely unjudgeable and
+        verify raises (surfacing as a failure) rather than faking a reward."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        def always_fail(**_kwargs):
+            raise RuntimeError("500 Internal Server Error")
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=always_fail),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+                await server.verify(body)
+
+    def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+
+        # One verify response carrying a per-reference breakdown: 50% vs each
+        # reference ⇒ MLE eval ELO ≈ 1200 (midpoint).
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "reward": 0.5,
+                "total_wins": 10,
+                "total_losses": 10,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                    "high": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1400.0},
+                },
+                "response": {},
+            }
+        ]
+        import asyncio as _asyncio
+
+        body = AggregateMetricsRequest(verify_responses=responses)
+        result = _asyncio.run(server.aggregate_metrics(body))
+        m = result.agent_metrics
+
+        # Total win stats.
+        assert m["comparison/wins"] == 10
+        assert m["comparison/losses"] == 10
+        assert m["comparison/judged"] == 20
+
+        # Per-reference win stats.
+        assert m["comparison/ref/low/wins"] == 5
+        assert m["comparison/ref/low/judged"] == 10
+        assert abs(m["comparison/ref/low/win_rate"] - 0.5) < 1e-9
+        assert m["comparison/ref/low/reference_elo"] == 1000.0
+        assert m["comparison/ref/high/reference_elo"] == 1400.0
+
+        # MLE ELO over both references.
+        assert m["comparison/num_references"] == 2
+        assert abs(m["comparison/eval_elo"] - 1200.0) < 1.0
+        # Every emitted metric value must be numeric (downstream coerces each
+        # into a float Score — a string value fails parsing and fails the run).
+        assert all(isinstance(v, (int, float)) for v in m.values())
+
+    def test_single_stage_matches_unstaged_full_run(self) -> None:
+        """A one-stage run is a special case of the full run: tagging the same
+        rollouts with a single ``stage_index`` must yield the same headline
+        eval_elo as the untagged (legacy full-220-vs-all-refs) aggregation."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+        per_reference = {
+            "low": {"wins": 7, "losses": 3, "ties": 0, "reference_elo": 1000.0},
+            "high": {"wins": 3, "losses": 7, "ties": 0, "reference_elo": 1400.0},
+        }
+        base_row = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "task_id": "t0",
+            "reward": 0.5,
+            "total_wins": 10,
+            "total_losses": 10,
+            "total_ties": 0,
+            "per_reference": per_reference,
+            "response": {},
+        }
+        import asyncio as _asyncio
+
+        unstaged = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[dict(base_row)]))
+        ).agent_metrics
+        staged = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[{**base_row, "stage_index": 0}]))
+        ).agent_metrics
+
+        # Headline ELO identical; the staged run just adds stage_* extras.
+        assert staged["comparison/eval_elo"] == unstaged["comparison/eval_elo"]
+        assert staged["comparison/num_references"] == unstaged["comparison/num_references"]
+        assert staged["comparison/num_stages"] == 1
+        assert staged["comparison/stage_0/eval_elo"] == unstaged["comparison/eval_elo"]
+        # Untagged run carries no stage_* keys at all.
+        assert not any(k.startswith("comparison/stage_") for k in unstaged)
+
+    def test_aggregate_metrics_stage_aware_headline_is_last_stage(self) -> None:
+        """When rollouts are tagged with ``stage_index`` the headline eval_elo is
+        the LAST stage's fit, and every stage's estimate is emitted as an extra."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+
+        # Stage 0: broad — vs both refs, 50/50 ⇒ stage ELO ≈ 1200 (midpoint).
+        # Stage 1: refined — vs the nearby "low" ref only, strong 8/2 win ⇒
+        # stage ELO well above 1000. Headline must equal the stage-1 fit, NOT
+        # the pooled fit over all rollouts.
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "task_id": "t0",
+                "reward": 0.5,
+                "total_wins": 5,
+                "total_losses": 5,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                    "high": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1400.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "task_id": "t1",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+        import asyncio as _asyncio
+
+        body = AggregateMetricsRequest(verify_responses=responses)
+        m = _asyncio.run(server.aggregate_metrics(body)).agent_metrics
+
+        assert m["comparison/num_stages"] == 2
+        # Per-stage estimates emitted.
+        assert abs(m["comparison/stage_0/eval_elo"] - 1200.0) < 1.0
+        assert m["comparison/stage_0/num_references"] == 2
+        assert m["comparison/stage_0/num_tasks"] == 1
+        assert m["comparison/stage_1/num_references"] == 1
+        assert m["comparison/stage_1/num_tasks"] == 1
+        # Stage 1 (0.8 win rate vs a 1000 anchor) must be above 1000.
+        assert m["comparison/stage_1/eval_elo"] > 1000.0
+        # Headline == last stage's fit, not the pooled midpoint.
+        assert m["comparison/eval_elo"] == m["comparison/stage_1/eval_elo"]
+        assert m["comparison/num_references"] == 1
+        # Pooled descriptive win stats still cover every stage.
+        assert m["comparison/wins"] == 13
+        assert m["comparison/judged"] == 20
+        assert all(isinstance(v, (int, float)) for v in m.values())
+
+    def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
+        """The same ``(task_index, rollout_index)`` may recur across stages (one
+        rollout judged against a different reference subset per stage). The
+        stage-aware aggregation must NOT trip RewardProfiler's duplicate-key
+        guard — stages are distinguished by ``stage_index`` alone, with no
+        per-stage index offset."""
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={
+                "low": {"deliverables_dir": "/tmp/low", "elo": 1000.0},
+                "high": {"deliverables_dir": "/tmp/high", "elo": 1400.0},
+            },
+        )
+
+        # Identical (task_index=0, rollout_index=0) in both stages; only the
+        # references judged and the stage_index differ.
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "task_id": "t0",
+                "reward": 0.5,
+                "total_wins": 5,
+                "total_losses": 5,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                    "high": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1400.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "task_id": "t0",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+        import asyncio as _asyncio
+
+        # Must not raise "Duplicate result row for rollout key".
+        m = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))).agent_metrics
+
+        assert m["comparison/num_stages"] == 2
+        # Headline tracks the last stage; pooled descriptive stats span both.
+        assert m["comparison/eval_elo"] == m["comparison/stage_1/eval_elo"]
+        assert m["comparison/wins"] == 13
+        assert m["comparison/judged"] == 20
+
+
 class TestComparisonPayloadHardening:
     """Three protections against multi-hour /verify stalls observed on the
     multimodal-heavy long-tail tasks (task_a941b6d8 video, task_4b894ae3

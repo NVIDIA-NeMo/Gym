@@ -111,28 +111,27 @@ For datasets with custom prompt formats, you can optionally use `template_metada
 
 **Standard format (with `grading_mode`):**
 ```bash
-config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/mcqa/configs/mcqa.yaml"
-
-
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server mcqa \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa
 
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=data/MCQA_filtered_decontaminated.jsonl \
-    +output_jsonl_fpath=data/MCQA_filtered_decontaminated_samples_rollouts.jsonl +limit=5
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input data/MCQA_filtered_decontaminated.jsonl \
+    --output data/MCQA_filtered_decontaminated_samples_rollouts.jsonl \
+    --limit 5
 ```
 
 **With template_metadata (custom regex):**
 ```bash
 # Using example file with 5 different custom prompt formats
-ng_collect_rollouts \
-    +agent_name=simple_agent \
-    +input_jsonl_fpath=resources_servers/mcqa/data/example_with_template_metadata.jsonl \
-    +output_jsonl_fpath=resources_servers/mcqa/data/example_rollouts_with_template_metadata.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input resources_servers/mcqa/data/example_with_template_metadata.jsonl \
+    --output resources_servers/mcqa/data/example_rollouts_with_template_metadata.jsonl \
+    --limit 5
 ```
 
 Rollout example

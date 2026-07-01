@@ -2,7 +2,7 @@
 # Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay
 # the PyTorch/transformers install cost.
-stirrup>=0.1.7
+stirrup>=0.1.11
 transformers>=5.8.1
 # Deliverable-processing deps for file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see
@@ -18,7 +18,8 @@ trafilatura>=1.12
 httpx>=0.27
 # moviepy (transitive from stirrup) imports PIL at module load; Pillow must
 # be installed in the same venv or the whole stirrup import chain breaks.
-Pillow==12.2.0
+# moviepy caps pillow<12, so we can't use the repo-wide 12.2.0 floor here.
+Pillow>=10.4.0,<12
 # PDF/Office generation libraries the agent prompt advertises; the model
 # tries to import these inside the sandbox, so they must be installed in
 # the agent venv (which the code sandbox inherits).

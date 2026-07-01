@@ -13,17 +13,19 @@ policy_model_name: gpt-4o
 ## Launch nemo gym servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_hermes_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server math_with_judge/math_with_judge_hermes_agent \
+    --model-type openai_model
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=math_with_judge_hermes_agent \
-    +input_jsonl_fpath=resources_servers/math_with_judge/data/example.jsonl \
-    +output_jsonl_fpath=hermes_agent_rollout.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent math_with_judge_hermes_agent \
+    --input resources_servers/math_with_judge/data/example.jsonl \
+    --output hermes_agent_rollout.jsonl \
+    --limit 1
 ```
 
 5 example math rollouts are at `responses_api_agents/hermes_agent/data/` with statistics:

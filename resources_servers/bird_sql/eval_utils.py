@@ -8,7 +8,7 @@ ground-truth SQL against the per-db_id SQLite file, compare result sets via
 
 SQL execution uses ``asyncio.to_thread`` rather than Ray remote tasks.
 When this resource server runs alongside a Ray-coordinated multi-node DP
-vLLM (Gym's ``ng_run`` attaches to the same Ray cluster), the vLLM engines
+vLLM (``gym env start`` attaches to the same Ray cluster), the vLLM engines
 consume the Ray slots and ``@ray.remote`` sqlite tasks sit in the scheduler
 queue past the per-query timeout, get cancelled, and every rollout reports
 ``gold_execution_error``. SQLite queries are fast and self-contained — no
