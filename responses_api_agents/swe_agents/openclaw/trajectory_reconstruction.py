@@ -15,7 +15,10 @@
 
 """Host-side reconstruction of Responses-API output items from the StreamShim
 JSONL log. Token IDs flow through verbatim — vllm_model attached them to each
-turn's last output item; we preserve them by reference."""
+turn's last output item; we preserve them by reference.
+
+NOTE: will be replaced in the future with a native support in NeMo-Gym for trajectory reconstruction.
+"""
 
 from __future__ import annotations
 
