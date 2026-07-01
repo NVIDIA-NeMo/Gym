@@ -29,14 +29,16 @@ block lives in its own provider config file, so swapping providers is swapping a
 An inline single-key mapping (``{provider_name: {...}}``) is also accepted for
 keeping everything in one file.
 
-A block may also carry a reserved ``default_metadata`` key. Its entries are merged
-into the sandbox's ``SandboxSpec.metadata`` as defaults (the agent's own
-``sandbox_spec.metadata`` overrides them), so provider-identifying tags live with
-the provider rather than the agent config::
+A block may also carry reserved ``default_metadata`` and
+``default_provider_options`` keys. Their top-level entries are shallow-merged
+into the sandbox's ``SandboxSpec.metadata`` and ``SandboxSpec.provider_options``
+respectively (the agent's own ``sandbox_spec`` entries override them), so
+provider-owned defaults live with the provider rather than the agent config::
 
     sandbox:
       opensandbox: { connection: { ... } }
       default_metadata: { sandbox-api: opensandbox-sdk }
+      default_provider_options: { platform: { os: linux, arch: amd64 } }
 """
 
 from collections.abc import Mapping
@@ -45,7 +47,13 @@ from typing import Any
 
 # Reserved keys inside a sandbox block that are not the provider config.
 SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
-SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY})
+SANDBOX_BLOCK_DEFAULT_PROVIDER_OPTIONS_KEY = "default_provider_options"
+SANDBOX_BLOCK_RESERVED_KEYS = frozenset(
+    {
+        SANDBOX_BLOCK_DEFAULT_METADATA_KEY,
+        SANDBOX_BLOCK_DEFAULT_PROVIDER_OPTIONS_KEY,
+    }
+)
 
 
 def _to_plain_dict(value: Any) -> Any:
@@ -124,8 +132,9 @@ def resolve_provider_config(
     Returns:
         A plain ``{provider_name: provider_kwargs}`` dict suitable for
         :func:`nemo_gym.sandbox.create_provider`. Reserved keys such as
-        ``default_metadata`` are excluded; read them with
-        :func:`resolve_provider_metadata`.
+        ``default_metadata`` and ``default_provider_options`` are excluded; read
+        them with :func:`resolve_provider_metadata` and
+        :func:`resolve_provider_default_options`.
 
     Raises:
         TypeError: If ``sandbox_provider`` is neither a string nor a mapping.
@@ -166,3 +175,29 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+
+def resolve_provider_default_options(
+    sandbox_provider: str | Mapping[str, Any],
+    named_configs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a sandbox block's ``default_provider_options``.
+
+    These provider-owned defaults are shallow-merged by top-level key into
+    ``SandboxSpec.provider_options``; explicit options from the agent's
+    ``sandbox_spec`` take precedence. Returns an empty dict when the block has no
+    ``default_provider_options`` key. See :func:`resolve_provider_config` for
+    argument semantics.
+    """
+    block, source = _resolve_block(sandbox_provider, named_configs)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+
+    options = block.get(SANDBOX_BLOCK_DEFAULT_PROVIDER_OPTIONS_KEY)
+    if options is None:
+        return {}
+    if not isinstance(options, Mapping):
+        raise ValueError(
+            f"Sandbox '{SANDBOX_BLOCK_DEFAULT_PROVIDER_OPTIONS_KEY}' from {source} must be a mapping, got: {options!r}"
+        )
+    return dict(options)

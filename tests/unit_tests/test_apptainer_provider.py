@@ -135,6 +135,66 @@ def test_config_validation() -> None:
     assert apptainer_provider.ApptainerProbeConfig(command=None, timeout_s=0).command is None
 
 
+def test_provider_options_from_mapping() -> None:
+    options_cls = apptainer_provider.ApptainerProviderOptions
+
+    assert options_cls.from_mapping(None) == options_cls()
+    assert options_cls.from_mapping({"binds": "/host:/container"}).binds == ("/host:/container",)
+    assert options_cls.from_mapping({"binds": ["/a:/a", "/b:/b:ro"]}).binds == (
+        "/a:/a",
+        "/b:/b:ro",
+    )
+    assert options_cls.from_mapping({"binds": ("/a:/a", "/b:/b:ro")}).binds == (
+        "/a:/a",
+        "/b:/b:ro",
+    )
+    assert options_cls.from_mapping({"binds": None}).binds == ()
+
+    with pytest.raises(ValueError, match="Unknown Apptainer provider option"):
+        options_cls.from_mapping({"bogus": True})
+    with pytest.raises(TypeError, match="provider_options must be a mapping"):
+        options_cls.from_mapping(["not", "a", "mapping"])
+    with pytest.raises(TypeError, match="'binds' must be a string or list/tuple of strings"):
+        options_cls.from_mapping({"binds": 123})
+    with pytest.raises(TypeError, match="'binds' must be a string or list/tuple of strings"):
+        options_cls.from_mapping({"binds": ["/host:/container", 123]})
+
+
+def test_bundled_provider_config(fake_binary: str) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox import (
+        resolve_provider_config,
+        resolve_provider_default_options,
+        resolve_provider_metadata,
+    )
+
+    config_path = Path(apptainer_provider.__file__).parent / "configs" / "apptainer.yaml"
+    agent_config_path = (
+        Path(__file__).parents[2] / "responses_api_agents" / "mini_swe_agent_2" / "configs" / "mini_swe_agent_2.yaml"
+    )
+    config = OmegaConf.merge(OmegaConf.load(config_path), OmegaConf.load(agent_config_path))
+    agent_config = config.mini_swe_agent_2.responses_api_agents.mini_swe_agent_2
+
+    assert agent_config.sandbox_provider == "sandbox"
+    assert "provider_options" not in agent_config.sandbox_spec
+    resolved = resolve_provider_config(agent_config.sandbox_provider, config)
+    assert resolve_provider_metadata(agent_config.sandbox_provider, config) == {"sandbox-api": "apptainer-cli"}
+    assert resolve_provider_default_options(agent_config.sandbox_provider, config) == {}
+
+    provider = apptainer_provider.ApptainerProvider(**resolved["apptainer"])
+    assert provider._exec_config == apptainer_provider.ApptainerExecConfig(
+        fakeroot_for_root=False,
+        extra_exec_args=["--cleanenv"],
+    )
+    assert provider._create_config == apptainer_provider.ApptainerCreateConfig(
+        start_timeout_s=1200,
+        extra_start_args=["--containall", "--cleanenv", "--fakeroot", "--writable-tmpfs"],
+        apply_resource_limits=False,
+    )
+    assert provider._probe == apptainer_provider.ApptainerProbeConfig(deadline_s=120)
+
+
 def test_resource_flags() -> None:
     flags = apptainer_provider._resource_flags(
         SandboxResources(cpu=2, memory_mib=1024, gpu=1, disk_gib=50, gpu_type="h100")
@@ -312,8 +372,22 @@ async def test_create_extra_binds_accepts_single_string(
 
 async def test_create_extra_binds_invalid_type_raises(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
-    with pytest.raises(apptainer_provider.ApptainerCreateError, match="must be a string or list"):
+    with pytest.raises(TypeError, match="must be a string or list/tuple of strings"):
         await provider.create(SandboxSpec(image="docker://img", provider_options={"binds": 123}))
+
+
+async def test_create_rejects_unknown_options_before_allocating(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    def unexpected_mkdtemp(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("mkdtemp must not run for invalid provider options")
+
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", unexpected_mkdtemp)
+    with pytest.raises(ValueError, match="Unknown Apptainer provider option"):
+        await provider.create(SandboxSpec(image="docker://img", provider_options={"platform": {}}))
+    assert rec.calls == []
 
 
 async def test_create_requires_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:

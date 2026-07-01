@@ -47,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_default_options, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -751,6 +751,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             if self.config.sandbox_provider is None:
                 raise ValueError("mini_swe_agent_2 requires sandbox_provider")
             resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+            provider_default_options = resolve_provider_default_options(
+                self.config.sandbox_provider, global_config_dict
+            )
             provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
             config.setdefault("environment", {}).update(self.config.sandbox_environment_kwargs or {})
             config["environment"]["provider"] = _sandbox_provider_for_config_dump(resolved_sandbox_provider)
@@ -762,6 +765,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             if provider_default_metadata:
                 # Provider defaults first; the agent's own spec metadata wins on conflict.
                 instance_spec["metadata"] = {**provider_default_metadata, **(instance_spec.get("metadata") or {})}
+            if provider_default_options:
+                # Provider defaults first; the agent's own provider_options win on conflict.
+                instance_spec["provider_options"] = {
+                    **provider_default_options,
+                    **(instance_spec.get("provider_options") or {}),
+                }
             config["environment"]["spec"] = instance_spec
             should_write_config = True
 

@@ -5,7 +5,8 @@
 #
 #   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
 #   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
-#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, $MODEL]"
+#   PROVIDER=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+#   ng_run "+config_paths=[$AGENT, $PROVIDER, $MODEL]"
 mini_swe_agent_2:
   responses_api_agents:
     mini_swe_agent_2:
@@ -19,7 +20,7 @@ mini_swe_agent_2:
       concurrency: 64
       env: sandbox
       # Name of the sandbox to use; include a provider config that defines a
-      # `sandbox` block (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
+      # `sandbox` block (e.g. a config under nemo_gym/sandbox/providers/).
       sandbox_provider: sandbox
       sandbox_spec:
         ttl_s: 18000
@@ -28,10 +29,6 @@ mini_swe_agent_2:
           cpu: 2
           memory_mib: 8192
           disk_gib: 20
-        provider_options:
-          platform:
-            os: linux
-            arch: amd64
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent

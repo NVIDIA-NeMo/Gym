@@ -1,0 +1,43 @@
+# Apptainer sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider:
+# sandbox`; the child key `apptainer` selects the provider class and its value
+# is passed to the provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping
+# providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml, $MODEL]"
+#
+# To run multiple sandboxes at once, give each block a distinct instance name
+# (e.g. `apptainer_foo`, `apptainer_baz`) and reference each by name.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    exec:
+      default_timeout_s: 180
+      # The instance itself starts with --fakeroot below; repeating it while
+      # joining instance:// is ignored by Apptainer.
+      fakeroot_for_root: false
+      default_binds: []
+      extra_exec_args: ["--cleanenv"]
+      concurrency: 32
+    create:
+      mount_point: /sandbox
+      start_timeout_s: 1200
+      extra_start_args: ["--containall", "--cleanenv", "--fakeroot", "--writable-tmpfs"]
+      # This provider skips CPU/memory cgroup flags when starting with --fakeroot.
+      apply_resource_limits: false
+    probe:
+      command: printf apptainer-sandbox-ready
+      expected_stdout: apptainer-sandbox-ready
+      timeout_s: 30
+      deadline_s: 120
+      stable_count: 1
+      stable_delay_s: 0.0

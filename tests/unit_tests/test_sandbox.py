@@ -38,6 +38,7 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
     resolve_provider_config,
+    resolve_provider_default_options,
     resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
@@ -512,25 +513,39 @@ def test_resolve_provider_config_errors() -> None:
         resolve_provider_config("sandbox_main", {"sandbox_main": {}})
 
 
-def test_resolve_provider_metadata() -> None:
+def test_resolve_provider_defaults() -> None:
     block = {
         "opensandbox": {"connection": {"domain": "sandbox.example"}},
         "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+        "default_provider_options": {"platform": {"os": "linux", "arch": "amd64"}},
     }
 
     # default_metadata is excluded from the provider config and read separately.
     assert resolve_provider_config(block) == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
     assert resolve_provider_metadata(block) == {"sandbox-api": "opensandbox-sdk"}
+    assert resolve_provider_default_options(block) == {
+        "platform": {"os": "linux", "arch": "amd64"},
+    }
 
     # A named reference works the same way.
     global_config = {"sandbox": block}
     assert resolve_provider_metadata("sandbox", global_config) == {"sandbox-api": "opensandbox-sdk"}
+    assert resolve_provider_default_options("sandbox", global_config) == {
+        "platform": {"os": "linux", "arch": "amd64"},
+    }
 
-    # No default_metadata key -> empty dict.
+    # No provider-owned defaults -> empty dicts.
     assert resolve_provider_metadata({"opensandbox": {}}) == {}
+    assert resolve_provider_default_options({"opensandbox": {}}) == {}
 
     with pytest.raises(ValueError, match="must be a mapping"):
         resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
+    # Preserve the stack's existing behavior for an empty falsy value.
+    assert resolve_provider_metadata({"opensandbox": {}, "default_metadata": []}) == {}
+
+    for invalid in ("not-a-mapping", []):
+        with pytest.raises(ValueError, match="must be a mapping"):
+            resolve_provider_default_options({"opensandbox": {}, "default_provider_options": invalid})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
