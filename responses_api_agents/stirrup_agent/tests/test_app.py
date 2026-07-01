@@ -754,6 +754,110 @@ class TestReuseCachedDeliverable:
         responses_mock.assert_awaited_once()
         assert result == {"reward": 0.5}
 
+class TestReferenceKeyedVerifyCache:
+    """rerun_incomplete + multi-stage ELO: the cached judgement is keyed by the
+    stage's reference subset, so each stage reuses only a judgement produced
+    against the SAME references (and re-judges otherwise)."""
+
+    def _body(self, reference_ids):
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        return StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+            reference_ids=list(reference_ids),
+        )
+
+    def test_cache_path_is_reference_set_keyed_and_order_independent(self, tmp_path) -> None:
+        d = str(tmp_path / "task_task-1" / "repeat_0")
+        unkeyed = _verify_cache_path(d)
+        bc = _verify_cache_path(d, ["ref_b", "ref_c"])
+        cb = _verify_cache_path(d, ["ref_c", "ref_b"])
+        bd = _verify_cache_path(d, ["ref_b", "ref_d"])
+        # No references ⇒ the single unkeyed slot.
+        assert unkeyed.name == "repeat_0_verify_response.json"
+        # Reference sets get distinct, order-independent slots.
+        assert bc == cb
+        assert bc != unkeyed
+        assert bc != bd
+
+    @pytest.mark.asyncio
+    async def test_same_reference_set_reuses_cached_judgement(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "report.docx").write_text("cached deliverable")
+        # A judgement for the {b,c} reference set is already cached.
+        cached = {"reward": 0.9, "judge_response": "bc"}
+        _verify_cache_path(str(deliverables_root), ["ref_b", "ref_c"]).write_text(json.dumps(cached))
+
+        config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        with patch.object(StirrupAgentWrapper, "responses", responses_mock):
+            result = await wrapper.run(request, self._body(["ref_c", "ref_b"]))
+
+        # Same reference set (order-independent) ⇒ cached judgement returned; no
+        # rollout and no /verify call.
+        responses_mock.assert_not_awaited()
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert verify_calls == []
+        assert result == cached
+
+    @pytest.mark.asyncio
+    async def test_different_reference_set_rejudges_and_caches_separately(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "report.docx").write_text("cached deliverable")
+        # Cached judgement is for {b,c}; this request judges against {a,b}.
+        bc_cached = {"reward": 0.9, "judge_response": "bc"}
+        bc_path = _verify_cache_path(str(deliverables_root), ["ref_b", "ref_c"])
+        bc_path.write_text(json.dumps(bc_cached))
+
+        config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        fresh = {"reward": 0.3, "judge_response": "ab"}
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value=fresh),
+            ),
+        ):
+            result = await wrapper.run(request, self._body(["ref_a", "ref_b"]))
+
+        # Different reference set ⇒ policy still skipped (deliverable cached) but
+        # the deliverable is re-judged against {a,b}...
+        responses_mock.assert_not_awaited()
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["reference_ids"] == ["ref_a", "ref_b"]
+        assert result == fresh
+        # ...the {b,c} cache is untouched and the {a,b} judgement is cached separately.
+        assert json.loads(bc_path.read_text()) == bc_cached
+        ab_path = _verify_cache_path(str(deliverables_root), ["ref_a", "ref_b"])
+        assert ab_path != bc_path
+        assert json.loads(ab_path.read_text()) == fresh
+
 
 class TestExampleDataset:
     def test_example_jsonl_is_valid(self) -> None:

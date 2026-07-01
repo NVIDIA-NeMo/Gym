@@ -312,6 +312,18 @@ with no cached deliverables to judge is still reported `skipped`, as in plain
 judge-only mode.) Use this to finish judging a deliverable set without
 re-judging the tasks that were already scored.
 
+**Combined with multi-stage ELO** (`++multistage.enabled=true`), `rerun_incomplete`
+resumes an interrupted staged run. Deliverable reuse-vs-rerun already works there
+(a finished task skips the rollout; an unfinished one is re-rolled), so the extra
+thing `rerun_incomplete` adds is **cached judgements**. Because each stage scores
+the *same* deliverable against a *different* reference subset, a judgement is only
+valid for the exact references it scored — so the verify cache is **keyed by the
+reference subset** (`repeat_<n>_verify_response_<refset-hash>.json`). A resumed
+stage that reselects the same references returns its cached judgement (no re-judge);
+a stage that scores a new subset judges once and caches that separately. Run with
+the same `multistage.seed` so the stage plans — and therefore the reference subsets
+— line up across the resumed run.
+
 Requirements / notes:
 
 - `persist_deliverables_dir` must be set (and absolute) — it is the cache the

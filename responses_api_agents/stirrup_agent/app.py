@@ -22,6 +22,7 @@ construction, scoring, response building) is delegated to a
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import sys
@@ -29,7 +30,7 @@ import tempfile
 import time
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import ray
 from fastapi import Request
@@ -160,7 +161,27 @@ def _task_finished(deliverables_dir: Optional[str]) -> bool:
     return (root / _FINISH_MARKER_FILE).is_file()
 
 
-def _verify_cache_path(deliverables_dir: Optional[str]) -> Optional[Path]:
+def _reference_set_key(reference_ids: Optional[Sequence[str]]) -> Optional[str]:
+    """Stable short key identifying a judgement's reference set, or None.
+
+    A GDPVal judgement is only valid for the exact reference subset it scored
+    against, and multi-stage ELO judges the *same* deliverable against a
+    *different* subset each stage. So a cached judgement must be keyed by that
+    subset. Returns a short hex digest of the sorted, de-duplicated
+    ``reference_ids`` (order-independent), or ``None`` when no references are in
+    play (rubric mode, or comparison mode where every request scores against the
+    same fixed set — a single unkeyed cache slot is correct there).
+    """
+    if not reference_ids:
+        return None
+    normalized = ",".join(sorted({str(r) for r in reference_ids}))
+    return hashlib.sha1(normalized.encode()).hexdigest()[:12]
+
+
+def _verify_cache_path(
+    deliverables_dir: Optional[str],
+    reference_ids: Optional[Sequence[str]] = None,
+) -> Optional[Path]:
     """Path of the cached ``/verify`` result for a task+repeat.
 
     Stored as a *sibling* of the deliverables directory (e.g. next to
@@ -168,11 +189,19 @@ def _verify_cache_path(deliverables_dir: Optional[str]) -> Optional[Path]:
     server, which reads every file *inside* ``deliverables_dir`` as deliverable
     content. ``rerun_incomplete`` uses this so an already-judged task can return
     its cached judgement instead of being re-judged.
+
+    When ``reference_ids`` identify a specific reference subset (multi-stage ELO),
+    the filename is keyed by that subset so each stage's judgement is cached (and
+    reused) independently — a resumed stage that reselects the same references
+    hits the cache, a different subset re-judges. Without references the single
+    ``_verify_response.json`` slot is used (rubric / fixed-reference comparison).
     """
     if not deliverables_dir:
         return None
     d = Path(deliverables_dir)
-    return d.parent / f"{d.name}_verify_response.json"
+    key = _reference_set_key(reference_ids)
+    suffix = f"_verify_response_{key}.json" if key else "_verify_response.json"
+    return d.parent / f"{d.name}{suffix}"
 
 
 def _has_user_code_frame(exc: BaseException) -> bool:
@@ -1182,6 +1211,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 and Path(deliverables_dir).is_dir()
                 and any(Path(deliverables_dir).iterdir())
             )
+            # The reference subset this request is judged against (multi-stage ELO
+            # tags each row with the stage's references; empty for rubric / fixed-
+            # reference comparison). A cached judgement is only valid for the exact
+            # subset it scored, so it keys the rerun_incomplete verify cache.
+            reference_ids = body_dict.get("reference_ids") or None
 
             if self.config.judge_only:
                 # Judge-only mode: do NOT run the agent. Score the pre-existing
@@ -1206,11 +1240,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         error_class="skipped",
                     )
                 # rerun_incomplete + judge_only: skip tasks already judged. If a
-                # cached /verify result exists, return it directly instead of
-                # re-running the judge; otherwise fall through to /verify (which
-                # caches the fresh judgement so the next pass skips it).
+                # cached /verify result exists (for this reference subset), return
+                # it directly instead of re-running the judge; otherwise fall
+                # through to /verify (which caches the fresh judgement so the next
+                # pass skips it).
                 if self.config.rerun_incomplete:
-                    cached_verify = self._read_cached_verify(deliverables_dir)
+                    cached_verify = self._read_cached_verify(deliverables_dir, reference_ids)
                     if cached_verify is not None:
                         task_info = self.task_strategy.extract_task_info(existing_metadata)
                         instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
@@ -1229,15 +1264,22 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # files (that is a finished, legitimately low-scoring outcome, not
                 # an unfinished run). In execute_only mode the cached payload is
                 # returned as-is below. In the full rollout+judge mode, if the task
-                # was already judged (a cached /verify result exists), return that
-                # judgement directly so it is NOT re-judged; otherwise score the
-                # cached deliverable via /verify once (using the same placeholder
-                # response path judge_only uses, since no fresh model output
-                # exists) and cache the result for next time.
+                # was already judged (a cached /verify result exists for this
+                # reference subset), return that judgement directly so it is NOT
+                # re-judged; otherwise score the cached deliverable via /verify once
+                # (using the same placeholder response path judge_only uses, since
+                # no fresh model output exists) and cache the result for next time.
+                #
+                # This also covers multi-stage ELO reuse rows
+                # (reuse_cached_deliverable=True): the cache is keyed by the
+                # request's reference subset, so each stage reuses only a judgement
+                # produced against the SAME references and otherwise re-judges — a
+                # resumed staged run skips only the (task, references) pairs it
+                # already scored.
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
                 instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                 if not self.config.execute_only:
-                    cached_verify = self._read_cached_verify(deliverables_dir)
+                    cached_verify = self._read_cached_verify(deliverables_dir, reference_ids)
                     if cached_verify is not None:
                         print(
                             f"[stirrup-rerun_incomplete-cached-judgement] {instance_hint}: returning cached "
@@ -1347,11 +1389,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(verify_response)
                 verify_result = await get_response_json(verify_response)
-                # Task re-run mode: cache the judgement next to the deliverables
-                # so a subsequent rerun_incomplete pass returns it instead of
-                # re-judging this task.
+                # Task re-run mode: cache the judgement next to the deliverables so
+                # a subsequent rerun_incomplete pass returns it instead of re-judging
+                # this task. The cache is keyed by the reference subset scored, so a
+                # multi-stage ELO run caches each stage's judgement independently
+                # and only replays it for a request against the same references.
                 if self.config.rerun_incomplete:
-                    self._write_cached_verify(deliverables_dir, verify_result)
+                    self._write_cached_verify(deliverables_dir, verify_result, reference_ids)
                 return verify_result
             except Exception as exc:
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
@@ -1370,14 +1414,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     error_class=failure_class,
                 )
 
-    def _read_cached_verify(self, deliverables_dir: Optional[str]) -> Optional[Dict[str, Any]]:
+    def _read_cached_verify(
+        self, deliverables_dir: Optional[str], reference_ids: Optional[Sequence[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Return the cached ``/verify`` result for *deliverables_dir*, or None.
 
         Used by ``rerun_incomplete`` to skip re-judging a task that was already
-        judged. Returns None on a missing or unreadable cache (the task is then
-        judged afresh).
+        judged. ``reference_ids`` scope the lookup to the judgement produced
+        against that reference subset (multi-stage ELO); omit it for rubric /
+        fixed-reference runs. Returns None on a missing or unreadable cache (the
+        task is then judged afresh).
         """
-        cache_path = _verify_cache_path(deliverables_dir)
+        cache_path = _verify_cache_path(deliverables_dir, reference_ids)
         if cache_path is None or not cache_path.is_file():
             return None
         try:
@@ -1389,13 +1437,20 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             print(f"[stirrup] warning: could not read cached verify result {cache_path}: {exc}", flush=True)
             return None
 
-    def _write_cached_verify(self, deliverables_dir: Optional[str], verify_result: Dict[str, Any]) -> None:
+    def _write_cached_verify(
+        self,
+        deliverables_dir: Optional[str],
+        verify_result: Dict[str, Any],
+        reference_ids: Optional[Sequence[str]] = None,
+    ) -> None:
         """Persist *verify_result* next to *deliverables_dir* (best-effort).
 
         Stored as a sibling file so it is never read by the resources server as
-        deliverable content. Failures are logged but never abort the run.
+        deliverable content. ``reference_ids`` key the cache to the reference
+        subset scored (multi-stage ELO), so each stage's judgement is cached
+        independently. Failures are logged but never abort the run.
         """
-        cache_path = _verify_cache_path(deliverables_dir)
+        cache_path = _verify_cache_path(deliverables_dir, reference_ids)
         if cache_path is None:
             return
         try:
