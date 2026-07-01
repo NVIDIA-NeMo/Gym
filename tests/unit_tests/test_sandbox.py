@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import importlib.util
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +21,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+
+# tenacity ships in the `sandbox` optional-dependency extra and is genuinely exercised by the
+# opensandbox tests below. Import it at module load (instead of importorskip / a skipif marker)
+# so a CI env that forgets `--extra sandbox` fails loudly here rather than silently skipping
+# these tests and quietly dropping coverage below the fail_under threshold. The `sandbox` marker
+# selects/deselects them; it is not a substitute for the dependency actually being installed.
+import tenacity  # noqa: F401
 
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
@@ -48,21 +54,7 @@ from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESan
 pytestmark = pytest.mark.sandbox
 
 
-def _has_module(module_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except ModuleNotFoundError:
-        return False
-
-
-requires_tenacity = pytest.mark.skipif(
-    not _has_module("tenacity"),
-    reason="tenacity optional sandbox dependency is not installed",
-)
-
-
 def _require_opensandbox_provider() -> tuple[Any, Any, Any, str, str]:
-    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider_module
     from nemo_gym.sandbox.providers.opensandbox.provider import (
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
@@ -684,7 +676,6 @@ def test_sync_sandbox_facade_rejects_async_context() -> None:
         raise AssertionError("expected sync Sandbox to reject async context")
 
 
-@requires_tenacity
 def test_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch))
 
@@ -738,7 +729,6 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
     assert extensions[IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY] == "IfNotPresent"
 
 
-@requires_tenacity
 def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
 
@@ -788,7 +778,6 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     }
 
 
-@requires_tenacity
 def test_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_create_probe_can_require_stable_successes(monkeypatch))
 
@@ -837,7 +826,6 @@ async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypa
     assert all(call["user"] == "root" for call in calls)
 
 
-@requires_tenacity
 def test_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch))
 
@@ -910,7 +898,6 @@ def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
-@requires_tenacity
 def test_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch))
 
@@ -975,7 +962,6 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
     assert raw.commands.calls == 3
 
 
-@requires_tenacity
 def test_opensandbox_command_retries_default_to_disabled(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_command_retries_default_to_disabled(monkeypatch))
 
@@ -1027,7 +1013,6 @@ async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -
     assert raw.commands.calls == 1
 
 
-@requires_tenacity
 def test_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
     asyncio.run(_assert_opensandbox_close_timeout_does_not_fail_after_stop())
 
@@ -1057,7 +1042,6 @@ async def _assert_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
     assert raw.killed is True
 
 
-@requires_tenacity
 def test_opensandbox_close_propagates_stop_failure() -> None:
     asyncio.run(_assert_opensandbox_close_propagates_stop_failure())
 
