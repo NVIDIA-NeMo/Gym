@@ -14,11 +14,13 @@ OpenCode must be on PATH (auto-installed on first start, or `npm install -g open
 `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_opencode_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+  --resources-server math_with_judge/math_with_judge_opencode_agent \
+  --model-type openai_model
 
-ng_collect_rollouts +agent_name=math_with_judge_opencode_agent \
-  +input_jsonl_fpath=responses_api_agents/opencode_agent/data/example.jsonl \
-  +output_jsonl_fpath=opencode_rollout.jsonl +limit=5
+gym eval run --no-serve --agent math_with_judge_opencode_agent \
+  --input responses_api_agents/opencode_agent/data/example.jsonl \
+  --output opencode_rollout.jsonl --limit 5
 ```
 
 Per request the agent writes `opencode.json` into an isolated run dir, runs one `opencode run` with

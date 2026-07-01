@@ -32,7 +32,7 @@ from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmarks_from_config_paths
 from nemo_gym.cli.env import RunHelper, exit_cleanly_on_config_error
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     POLICY_MODEL_KEY_NAME,
@@ -212,12 +212,14 @@ def _multiprocess_benchmark_prepare_fn(args):
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare()
-    assert output_fpath.absolute() == benchmark_config.dataset.jsonl_fpath.absolute(), (
-        f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
-    )
+    if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
+        raise ConfigError(
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+        )
     print(f"Benchmark data prepared at: {output_fpath}")
 
 
+@exit_cleanly_on_config_error
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
     global_config_dict = get_global_config_dict(
@@ -247,11 +249,12 @@ def prepare_benchmark() -> None:
         if len(datasets) < 1:
             continue
 
-        assert len(datasets) == 1, (
-            f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
-            f"but found {len(datasets)}: {[d.name for d in datasets]}. "
-            "A benchmark config must define a single benchmark dataset."
-        )
+        if len(datasets) != 1:
+            raise ConfigError(
+                f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
+                f"but found {len(datasets)}: {[d.name for d in datasets]}. "
+                "A benchmark config must define a single benchmark dataset."
+            )
 
         dataset = datasets[0]
 
@@ -263,15 +266,16 @@ def prepare_benchmark() -> None:
             dataset=dataset,
         )
 
-    assert benchmarks_dict, (
-        "No benchmark config found. "
-        + (
-            f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
-            if inspected_server_instances
-            else "No server instances with `responses_api_agents` were found in the resolved config."
+    if not benchmarks_dict:
+        raise ConfigError(
+            "No benchmark config found. "
+            + (
+                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
+                if inspected_server_instances
+                else "No server instances with `responses_api_agents` were found in the resolved config."
+            )
+            + " Pass a benchmark with `gym eval prepare --benchmark <name>` (e.g. `--benchmark aime24`)."
         )
-        + " Pass a benchmark with `gym eval prepare --benchmark <name>` (e.g. `--benchmark aime24`)."
-    )
 
     # Validate all benchmarks before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
@@ -322,7 +326,7 @@ def prepare_benchmark() -> None:
     if errors_to_print:
         errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
 {errors_to_print}"""
-        raise RuntimeError(errors_to_print)
+        raise ConfigError(errors_to_print)
 
     # Prepare after all validations pass
     if prepare_benchmark_config.num_prepare_benchmark_processes > 1:  # pragma: no cover
@@ -383,15 +387,29 @@ def e2e_rollout_collection():  # pragma: no cover
 
     rch = RolloutCollectionHelper()
 
+    # A benchmark can plug in a custom rollout-collection procedure via the
+    # ``rollout_collection_driver`` config field (a ``module.path:function``).
+    # The default path runs the built-in single-pass helper.
+    driver_path = e2e_rollout_collection_config.rollout_collection_driver
+
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
+{f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
     try:
-        asyncio.run(rch.run_from_config(rollout_collection_config))
+        if driver_path:
+            module_name, _, fn_name = driver_path.partition(":")
+            if not module_name or not fn_name:
+                raise ConfigError(f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r}).")
+            driver_fn = getattr(importlib.import_module(module_name), fn_name)
+            resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
+            asyncio.run(driver_fn(rollout_collection_config, resolved_config))
+        else:
+            asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         pass
     finally:

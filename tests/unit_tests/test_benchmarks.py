@@ -185,7 +185,7 @@ class TestPrepareBenchmark:
             prepare_benchmark()
             mock_module.prepare.assert_called_once()
 
-    def test_missing_prepare_py(self, tmp_path: Path) -> None:
+    def test_missing_prepare_py(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
         (bench_dir / "prepare.py").unlink()
 
@@ -198,10 +198,13 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
         ):
-            with pytest.raises(RuntimeError, match="The following benchmarks are missing a valid prepare script"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "The following benchmarks are missing a valid prepare script" in out
 
-    def test_missing_prepare_function(self, tmp_path: Path) -> None:
+    def test_missing_prepare_function(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
 
         mock_module = MagicMock()
@@ -216,13 +219,13 @@ class TestPrepareBenchmark:
             patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
-            with pytest.raises(
-                AssertionError,
-                match="Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config",
-            ):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config" in out
 
-    def test_no_benchmark_in_config_paths(self) -> None:
+    def test_no_benchmark_in_config_paths(self, capsys) -> None:
         with (
             patch(
                 "nemo_gym.cli.eval.get_global_config_dict",
@@ -230,10 +233,13 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
         ):
-            with pytest.raises(AssertionError, match="No benchmark config found"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "No benchmark config found" in out
 
-    def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path) -> None:
+    def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path, capsys) -> None:
         # A server instance is present but declares no `benchmark` dataset; the error should name it
         # so the user can see what was inspected.
         config = {
@@ -247,8 +253,11 @@ class TestPrepareBenchmark:
             },
         }
         with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
-            with pytest.raises(AssertionError, match=r"Inspected server instances \['dummy_agent'\]"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Inspected server instances ['dummy_agent']" in out
 
     def test_caching_sanity(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)

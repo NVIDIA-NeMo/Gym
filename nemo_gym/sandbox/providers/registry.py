@@ -12,19 +12,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Provider registration utilities."""
+"""Provider registration utilities.
 
+Providers can be made available three ways, in lookup precedence order:
+
+1. ``register_provider(name, cls)`` — explicit in-process registration.
+2. Built-in loaders shipped with NeMo Gym (e.g. ``opensandbox``).
+3. Python entry points in the ``nemo_gym.sandbox_providers`` group, so a separate
+   package can publish a provider that becomes available on install. Declare one
+   in that package's ``pyproject.toml``::
+
+       [project.entry-points."nemo_gym.sandbox_providers"]
+       my_provider = "my_pkg.provider:MyProvider"
+
+On name collisions: two entry points sharing a name raise (selection would be
+nondeterministic); an entry point shadowed by a higher-precedence built-in or
+registered provider is warned and ignored.
+"""
+
+import logging
 from collections.abc import Callable, Mapping
+from importlib.metadata import EntryPoint, entry_points
 from typing import Any, TypeAlias
 
 from nemo_gym.sandbox.providers.base import SandboxProvider
 
 
+LOGGER = logging.getLogger(__name__)
+
 ProviderClass: TypeAlias = type[SandboxProvider]
 ProviderLoader: TypeAlias = Callable[[], ProviderClass]
 
+ENTRY_POINT_GROUP = "nemo_gym.sandbox_providers"
+
 _PROVIDER_REGISTRY: dict[str, ProviderClass] = {}
 _BUILTIN_PROVIDER_LOADERS: dict[str, ProviderLoader] = {}
+_ENTRY_POINT_LOADERS: dict[str, ProviderLoader] | None = None
+
+
+def _entry_point_dist_name(ep: EntryPoint) -> str:
+    dist = getattr(ep, "dist", None)
+    return getattr(dist, "name", None) or "<unknown distribution>"
+
+
+def _entry_point_loaders() -> dict[str, ProviderLoader]:
+    """Discover provider loaders from installed entry points (cached).
+
+    Raises if two distributions publish the same provider name, since lookup
+    would otherwise pick one nondeterministically. Warns when an entry point is
+    shadowed by a built-in or explicitly registered provider of the same name.
+    """
+    global _ENTRY_POINT_LOADERS
+    if _ENTRY_POINT_LOADERS is None:
+        loaders: dict[str, ProviderLoader] = {}
+        dist_by_name: dict[str, str] = {}
+        for ep in entry_points(group=ENTRY_POINT_GROUP):
+            dist_name = _entry_point_dist_name(ep)
+            if ep.name in loaders:
+                raise ValueError(
+                    f"Duplicate sandbox provider entry point {ep.name!r} published by "
+                    f"{dist_by_name[ep.name]!r} and {dist_name!r}. Rename one of them."
+                )
+            if ep.name in _BUILTIN_PROVIDER_LOADERS or ep.name in _PROVIDER_REGISTRY:
+                LOGGER.warning(
+                    f"Sandbox provider entry point {ep.name!r} from {dist_name!r} is shadowed by a "
+                    f"built-in or registered provider of the same name and will not be used."
+                )
+            loaders[ep.name] = ep.load
+            dist_by_name[ep.name] = dist_name
+        _ENTRY_POINT_LOADERS = loaders
+    return _ENTRY_POINT_LOADERS
 
 
 def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:
@@ -37,15 +94,14 @@ def register_provider(name: str, provider_class: ProviderClass, *, override: boo
 
 
 def get_provider_class(name: str) -> ProviderClass:
-    """Return a registered provider class."""
-    try:
+    """Return a provider class by name (explicit > built-in > entry point)."""
+    if name in _PROVIDER_REGISTRY:
         return _PROVIDER_REGISTRY[name]
-    except KeyError as e:
-        loader = _BUILTIN_PROVIDER_LOADERS.get(name)
-        if loader is not None:
-            return loader()
-        available = ", ".join(list_providers()) or "<none>"
-        raise ValueError(f"Unknown sandbox provider {name!r}. Available providers: {available}") from e
+    loader = _BUILTIN_PROVIDER_LOADERS.get(name) or _entry_point_loaders().get(name)
+    if loader is not None:
+        return loader()
+    available = ", ".join(list_providers()) or "<none>"
+    raise ValueError(f"Unknown sandbox provider {name!r}. Available providers: {available}")
 
 
 def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
@@ -65,8 +121,8 @@ def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
 
 
 def list_providers() -> list[str]:
-    """List registered provider names."""
-    return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS})
+    """List available provider names from all sources."""
+    return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS, *_entry_point_loaders()})
 
 
 def _load_opensandbox_provider() -> ProviderClass:

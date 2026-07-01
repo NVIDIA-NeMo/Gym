@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -133,6 +133,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    rollout_collection_driver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dotted ``module.path:function`` to run rollout collection instead of the "
+            "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "When unset, the standard single-pass collection runs."
+        ),
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -204,6 +214,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
     )
+
+    @field_validator("num_repeats", mode="before")
+    @classmethod
+    def _coerce_null_num_repeats(cls, v):
+        # default to 1 if num_repeats is None
+        # for backwards compatibility
+        return 1 if v is None else v
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
