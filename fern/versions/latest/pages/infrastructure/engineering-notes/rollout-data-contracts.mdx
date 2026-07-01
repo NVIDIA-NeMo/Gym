@@ -1,0 +1,412 @@
+---
+title: "Rollout Data Contracts"
+description: "Responses API and ATIF tradeoffs for NeMo Gym rollout data."
+---
+This engineering note discusses whether NeMo Gym should keep the current Responses API based rollout contract, or adopt ATIF as the canonical rollout / trajectory contract and convert to Responses where existing training and evaluation flows need it.
+
+NeMo Gym already has a rollout contract. Today a rollout row is centered on:
+
+- `responses_create_params`
+- `response`
+- `reward`
+
+That contract is valuable. It is implemented in main, it matches the verifier boundary, and it is close to the training path because Gym can attach token IDs and logprobs to Responses items.
+
+The question is not whether Gym needs a standard. The question is whether the current standard is still the best long-term shape now that Gym needs the same rollout data to serve both:
+
+- training rollout collection, where exact model inputs, token IDs, logprobs, reward, and loss-mask semantics matter
+- evaluations and CLU readiness, where readable trajectories, per-turn metrics, tool timings, sandbox health, compaction, subagents, and observability matter
+
+In this note, **rollout** and **agent trajectory** mean the same semantic object: the collected history of one agent attempt on one task.
+
+## How did the current Responses rollout contract evolve?
+
+NeMo Gym uses the OpenAI Responses API as its native model-facing schema because Responses is a better fit for agentic model output than plain text completions or Chat Completions.
+
+The older Completions API was essentially:
+
+```json
+{
+  "prompt": "What is 2+2?"
+}
+```
+
+with a text response.
+
+Chat Completions improved this by adding message roles and tool calls:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "What is the weather in Seattle?" }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather"
+      }
+    }
+  ]
+}
+```
+
+Responses goes further by representing a model response as an ordered list of output items. That list can contain reasoning, messages, function calls, and function-call outputs.
+
+For Gym, this matters because a rollout is not only a final answer. It often contains model reasoning, tool calls, environment observations, and a verifier reward.
+
+The current Gym rollout shape is roughly:
+
+```json
+{
+  "responses_create_params": {
+    "input": [
+      { "role": "user", "content": "What is the weather in Seattle?" }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string" }
+          },
+          "required": ["city"]
+        }
+      }
+    ]
+  },
+  "response": {
+    "output": [
+      {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Seattle\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "Rainy, 54F"
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "It is rainy and 54F in Seattle."
+          }
+        ]
+      }
+    ],
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 32
+    }
+  },
+  "reward": 1.0
+}
+```
+
+Gym also extends Responses items with training fields when available:
+
+```json
+{
+  "prompt_token_ids": [101, 2045, 2003],
+  "generation_token_ids": [2009, 2003, 4542],
+  "generation_log_probs": [-0.1, -0.2, -0.05]
+}
+```
+
+This is the strongest reason to defend the current contract. Training should not have to reconstruct tokenization from text if the model server already produced exact token IDs and logprobs.
+
+## Why is the question changing?
+
+The current Responses rollout contract works well when Gym owns the loop:
+
+- Gym sends the model request.
+- Gym receives a Responses object.
+- Gym records or executes tool calls.
+- Gym sends the assembled response to `verify()`.
+- Gym stores `reward`.
+
+The problem becomes sharper with blackbox or external agents:
+
+- the agent may speak Anthropic Messages, Chat Completions, or another wire format
+- tool execution may happen inside a CLI or sandbox rather than through Gym
+- the final parsed output may be a text view rather than the authoritative model-call history
+- token IDs and logprobs may only exist inside the model server or capture layer
+- reward exists only after Gym verification
+- subagent calls, compaction, retries, and sandbox health may not naturally fit in the final `response`
+
+The CLU / Gym migration requirements make this concrete. A benchmark is not release-ready just because it runs. The rollout data should support:
+
+- stable IDs: `session_id`, `task_id` or `problem_id`, `trial_id`, `agent_id`, and `rollout_id`
+- every model request/response pair joined back to the rollout and turn
+- per-turn fields: `turn_no`, `num_turns`, prompt tokens, completion tokens including reasoning tokens, timestamp, finish reason, HTTP status, question, answer, and reasoning content when available
+- outcome fields: `reward`, `is_resolved`, verifier errors, harness errors, and retries
+- tool calls, tool outputs, and tool start/stop timestamps
+- sandbox health: CPU time, sandbox errors, retry counts, timeout/failure reasons
+- subagent or agent tree structure
+- compaction/context-management events
+- schema checks so new benchmarks and harnesses cannot silently omit mandatory fields
+
+This is where the contract discussion starts. Responses is already the Gym standard, but these requirements push it toward becoming a full trajectory schema, not only a model response schema.
+
+## What would it mean to keep Responses as canonical?
+
+Keeping Responses as the canonical rollout contract is the lowest migration-risk path.
+
+It preserves:
+
+- the current dataset shape
+- the `BaseVerifyResponse` boundary
+- the existing verifier flow
+- the current training/eval path
+- Gym's existing training extensions for token IDs and logprobs
+
+This is a strong argument. If Gym's priority is near-term training/eval continuity, Responses is defensible.
+
+But keeping Responses as canonical does not remove the need for schema work. It means Gym should define a formal **NeMo Gym Responses trajectory profile**.
+
+NeMoGymResponses plus the model-call capture work in PR #1715 can cover a large part of that profile.
+
+The split would be:
+
+- **NeMoGymResponses / `BaseVerifyResponse`** owns the canonical rollout container: task input, assembled response, reward, verifier-facing fields, and training extensions such as token IDs and logprobs when available.
+- **PR #1715 model-call capture** owns the per-call evidence: rollout correlation, raw request/response capture, dialect, token counts, reasoning text, tool-call requests, cache accounting, latency, status code, and error category.
+- **A Responses trajectory profile** would define how those pieces are joined and which fields are required for CLU readiness.
+
+That combination answers many of the questions below, but not all of them.
+
+That profile would need to answer:
+
+- where do `rollout_id`, `session_id`, `task_id`, `trial_id`, and `agent_id` live? PR #1715 covers deterministic rollout correlation; the profile still needs to standardize the public field names and nesting.
+- where do tool start/stop timestamps live? PR #1715 captures model-call latency and tool-call requests, but not tool execution timing inside the sandbox unless the harness or sandbox emits those events.
+- where does sandbox CPU time live? This is outside model-call capture and needs sandbox/harness telemetry.
+- where do retries, HTTP status, and error categories live? PR #1715 covers model-call status and error category; rollout-level retries and harness retries still need profile fields.
+- how are subagents represented? PR #1715 explicitly treats tree-structured assembly as out of scope; a profile or builder still needs to represent subagent trees.
+- how are compaction and history rewriting represented? PR #1715 may null turn indices for non-linear histories; a profile or builder still needs semantic compaction events.
+- how are turns counted when the agent rewrites or compresses context? PR #1715 has best-effort linear `turn_index`; non-linear cases still need a tree/prefix-aware trajectory builder.
+- how is model-call capture joined back to the rollout? PR #1715 introduces `ng_trajectory_capture = {rollout_id, metrics, steps}`; the profile needs to make that shape official if Responses remains canonical.
+- where do `reward`, `is_resolved`, verifier state, and benchmark health live? `reward` already lives on `BaseVerifyResponse`; `is_resolved`, verifier state, and health metrics need standardized fields.
+- which fields are mandatory for CLU readiness and checked in CI? PR #1715 provides JSONSchema for `StepRecord`, but benchmark-level required-field validation still needs to be defined.
+
+In other words, defending Responses as canonical means extending a model-response-oriented schema into a full rollout/trajectory profile.
+
+That may still be the right choice. The important thing is to be explicit that the work exists.
+
+## What would it mean to adopt ATIF?
+
+ATIF, the Agent Trajectory Interchange Format, is designed around the full interaction history of an agent run.
+
+An ATIF version of the same weather rollout might look like:
+
+```json
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "session_abc",
+  "agent": {
+    "name": "agent_main",
+    "version": "1.0.0",
+    "model_name": "example-model",
+    "tool_definitions": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": { "type": "string" }
+            },
+            "required": ["city"]
+          }
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "What is the weather in Seattle?"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "message": "I will check the weather.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1",
+          "function_name": "get_weather",
+          "arguments": { "city": "Seattle" }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_1",
+            "content": "Rainy, 54F"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 120,
+        "completion_tokens": 32,
+        "completion_token_ids": [2009, 2003, 4542],
+        "logprobs": [-0.1, -0.2, -0.05]
+      },
+      "extra": {
+        "turn_no": 1,
+        "finish_reason": "tool_call"
+      }
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "It is rainy and 54F in Seattle.",
+      "extra": {
+        "turn_no": 2,
+        "finish_reason": "stop"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 120,
+    "total_completion_tokens": 32,
+    "total_steps": 3
+  },
+  "extra": {
+    "gym_profile_version": "nemo-gym-trajectory-v1",
+    "rollout_id": "rollout_123",
+    "task_id": "weather_001",
+    "trial_id": "trial_3",
+    "agent_id": "agent_main",
+    "reward": 1.0,
+    "is_resolved": true
+  }
+}
+```
+
+ATIF starts closer to the shape of a full rollout:
+
+- user, system, and agent steps are first-class
+- tool calls are first-class
+- observations are first-class
+- per-step metrics are first-class
+- token IDs and logprobs have a place
+- subagent trajectories are supported
+- compaction/context-management can be represented as system steps
+- `extra` fields give Gym room for benchmark-specific metadata
+
+The cost is migration and profile work. ATIF is not currently Gym's main contract. Reward, `is_resolved`, sandbox health, verifier state, and CLU-required fields would still need a Gym profile. Existing training/eval/verifier paths would still need a Responses projection.
+
+So adopting ATIF is not "free standardization." It trades migration work for a rollout schema that is more naturally shaped around complete agent runs.
+
+## How do Responses and ATIF map?
+
+The mapping is plausible enough to justify converters:
+
+- Gym `responses_create_params.input` maps to ATIF `steps` with `source: "system"` / `"user"` / historical `"agent"` messages.
+- Gym `responses_create_params.tools` maps to ATIF `agent.tool_definitions`.
+- Gym `response.output[].type == "function_call"` maps to ATIF `step.tool_calls[]`.
+- Gym `response.output[].type == "function_call_output"` maps to ATIF `step.observation.results[]`.
+- Gym `response.output[].type == "message"` maps to ATIF `step.message`.
+- Gym `response.usage` maps to ATIF `step.metrics` or `final_metrics`.
+- Gym `prompt_token_ids` maps to ATIF `metrics.prompt_token_ids`.
+- Gym `generation_token_ids` maps to ATIF `metrics.completion_token_ids`.
+- Gym `generation_log_probs` maps to ATIF `metrics.logprobs`.
+- Gym `reward` maps to a Gym ATIF profile field, likely `extra.reward` unless ATIF adds a first-class reward field.
+- Gym `is_resolved` maps to a Gym ATIF profile field, likely `extra.is_resolved`.
+- Gym tool timings map to `tool_calls[].extra` or `observation.results[].extra`.
+- Gym sandbox CPU/errors/retries map to step or root `extra`.
+- Gym compaction events map to `source: "system"` steps with `extra.context_management`.
+- Gym subagent trees map to ATIF `subagent_trajectories` and `subagent_trajectory_ref`.
+
+The mapping is not perfectly lossless in both directions.
+
+Responses is organized around model input and output items. ATIF is organized around agent-run steps. One Responses object may contain several output items. One ATIF step may represent one LLM call, multiple tool calls, a deterministic system event, or an aggregated agent action.
+
+That mismatch is the core design decision.
+
+If Gym keeps Responses canonical, it optimizes for the existing model/verifier/training boundary and adds trajectory semantics as a Gym profile.
+
+If Gym adopts ATIF canonical, it optimizes for complete agent-run semantics and keeps Responses as a generated projection for existing Gym flows.
+
+## Does ATIF replace model-call capture?
+
+No.
+
+ATIF does not solve the same problem as model-server capture work such as PR #1715.
+
+Model-call capture solves this problem:
+
+> How do we reliably observe every model call made by any harness, including blackbox CLI agents, without modifying each harness?
+
+ATIF solves this problem:
+
+> Once enough evidence has been collected, what shape should the final rollout have?
+
+Those are complementary layers.
+
+Model-call capture records `/v1/responses`, `/v1/chat/completions`, and `/v1/messages` exchanges into per-rollout records. It captures request/response payloads, dialect, token counts, reasoning, tool calls, cache accounting, latency, status codes, and normalized errors. It also adds rollout correlation through `x-nemo-gym-rollout-id` or a `/ng-rollout/<id>/v1` base-URL prefix, which is important for CLI agents that only allow configuring a base URL.
+
+ATIF does not install middleware, tag model calls, reassemble streamed responses, normalize Anthropic cache tokens, classify errors, fsync capture files, or merge captured calls into rollout records.
+
+The relationship should be:
+
+```text
+model-call capture
+  -> raw per-rollout evidence
+  -> trajectory builder
+  -> canonical rollout contract: Responses or ATIF
+  -> optional projection for training/eval/reporting
+```
+
+Even if Gym adopts ATIF, the capture layer remains necessary for blackbox agents.
+
+## What gaps remain either way?
+
+Whether Gym keeps Responses canonical or adopts ATIF, several gaps remain:
+
+- **Trajectory builder:** Gym still needs logic that groups model calls into rollout steps, handles subagents, detects compaction, and separates task calls from auxiliary harness calls such as title generation or summarization.
+- **Training correctness:** training still needs exact token IDs, logprobs, loss masks, and validation against real training runs.
+- **Reward join:** reward comes from Gym verification, not raw model-call capture, so the contract must define how reward and `is_resolved` attach to the rollout.
+- **Tool execution visibility:** model-call capture sees model requests and responses, but tool execution inside a sandbox may need separate harness/sandbox events.
+- **Schema/profile:** mandatory CLU fields need a profile whether the base format is Responses or ATIF.
+- **Privacy/sanitization:** raw requests/responses may contain sensitive data; the contract should define what is embedded versus referenced.
+- **CI acceptance:** benchmark readiness needs validation rules for missing steps, missing rollout records, malformed capture, and unhealthy trajectories.
+
+## Work required by each path
+
+If Gym keeps Responses canonical:
+
+1. Define a formal NeMo Gym Responses trajectory profile.
+2. Specify where CLU fields live: tool timings, sandbox health, retries, HTTP status, compaction, subagents, and benchmark health.
+3. Define how model-call capture joins back into the Responses rollout.
+4. Add schema validation for mandatory rollout fields.
+5. Add CI/monitoring for missing steps, missing rollout records, missing required fields, and unhealthy trajectories.
+
+If Gym adopts ATIF canonical:
+
+1. Define `nemo-gym-trajectory-v1`, a Gym profile for ATIF.
+2. Define mandatory fields for CLU benchmark readiness.
+3. Add schema validation for new benchmarks/harnesses.
+4. Build ATIF to Responses conversion.
+5. Build Responses to ATIF conversion for native Gym agents.
+6. Build capture to ATIF assembly for blackbox agents.
+7. Decide which conversions must be lossless and which are best-effort.
+8. Add CI/monitoring for missing steps, missing rollout records, missing required fields, and unhealthy trajectories.
+
+## Decision framing
+
+NeMo Gym's current answer is Responses API. That choice is defensible and should not be dismissed. It is the safer choice if the priority is near-term training/eval continuity, low migration risk, and preserving the current verifier boundary.
+
+ATIF becomes attractive if the priority is a richer long-term rollout contract for both training and evaluations: human-readable agent runs, CLU logging, tool observations, subagents, compaction, sandbox health, and cross-harness interchange.
+
+So the decision is:
+
+> Either defend Responses as the canonical rollout contract by defining a formal NeMo Gym Responses trajectory profile, or adopt ATIF as the canonical rollout contract with a NeMo Gym profile and keep Responses as the required projection for existing training/eval/verifier workflows.
