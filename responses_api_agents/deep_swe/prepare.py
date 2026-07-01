@@ -26,8 +26,8 @@ from responses_api_agents.deep_swe.secure_paths import default_private_path, ens
 
 
 BENCHMARK_GIT_URL = "https://github.com/datacurve-ai/deep-swe.git"
-AA_V1_COMMIT = "c33fa70e68d11d85f9e58abcd5d78643705e916e"
-CURRENT_V1_1_COMMIT = "8cae5984d5dd0ee37445beff0e928dc10c331116"
+AA_V1_COMMIT = "c33fa70e68d11d85f9e58abcd5d78643705e916e"  # pragma: allowlist secret
+CURRENT_V1_1_COMMIT = "8cae5984d5dd0ee37445beff0e928dc10c331116"  # pragma: allowlist secret
 EXPECTED_TASK_COUNT = 113
 PROFILE_COMMITS = {
     "deep_swe_aa_v1": AA_V1_COMMIT,

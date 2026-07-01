@@ -33,7 +33,7 @@ from responses_api_agents.deep_swe.secure_paths import ensure_private_directory
 
 PIER_VERSION = "0.3.0"
 PIER_SOURCE_URL = "https://github.com/datacurve-ai/pier.git"
-PIER_SOURCE_COMMIT = "e69a20e4e0ac073ec71fde0274bab3d9f40bac87"
+PIER_SOURCE_COMMIT = "e69a20e4e0ac073ec71fde0274bab3d9f40bac87"  # pragma: allowlist secret
 PIER_REQUIREMENT = f"datacurve-pier @ git+{PIER_SOURCE_URL}@{PIER_SOURCE_COMMIT}"
 PIER_RUNTIME_MODAL_VERSION = "1.5.1"
 PIER_RUNTIME_LAYOUT_VERSION = 3

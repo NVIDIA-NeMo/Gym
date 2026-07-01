@@ -165,7 +165,7 @@ or `PIER_*` behavioral controls. In particular, host effort, turn, thinking-toke
 adaptive-thinking, model, and auth fallbacks are removed before Gym injects only the
 configured `ANTHROPIC_AUTH_TOKEN`. Ordinary process essentials such as `PATH`, `HOME`,
 locale, and proxy settings remain available, as do Modal credentials. Set intentional
-agent behavior through `claude_code_kwargs` or non-secret `claude_code_env`; those values
+agent behavior through `claude_code_kwargs` or non-secret `claude_code_env`; those values <!-- pragma: allowlist secret -->
 are serialized explicitly in the per-trial Pier config.
 
 Each DeepSWE v1.1 rollout uses one isolated agent sandbox followed sequentially by one

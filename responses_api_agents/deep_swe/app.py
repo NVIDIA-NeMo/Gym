@@ -72,7 +72,7 @@ from responses_api_agents.deep_swe.trajectory import (
 )
 
 
-DEFAULT_DEEP_SWE_COMMIT = "8cae5984d5dd0ee37445beff0e928dc10c331116"
+DEFAULT_DEEP_SWE_COMMIT = "8cae5984d5dd0ee37445beff0e928dc10c331116"  # pragma: allowlist secret
 DEFAULT_DEEP_SWE_TASK_COUNT = 113
 PIER_SANDBOX_ENVIRONMENT = "responses_api_agents.deep_swe.pier_sandbox_environment:PierSandboxEnvironment"
 PIER_CLAUDE_CODE_NPM_AGENT = "responses_api_agents.deep_swe.pier_claude_code:ClaudeCodeNpmInstall"

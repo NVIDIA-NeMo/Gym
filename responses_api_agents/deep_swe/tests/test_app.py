@@ -30,7 +30,7 @@ def _config(**overrides: Any) -> DeepSWEAgentConfig:
         "port": 9000,
         "entrypoint": "app.py",
         "model_base_url": "https://model.example",
-        "model_api_key": "secret-value",
+        "model_api_key": "secret-value",  # pragma: allowlist secret
         "model_name": "test-model",
         "sandbox_provider": {"fake": {}},
         "benchmark_expected_task_count": 1,
@@ -111,7 +111,7 @@ def test_gym_source_provenance_binds_clean_commit_remote_and_lock(tmp_path: Path
         "remote",
         "add",
         "origin",
-        "https://user:token@github.com/NVIDIA-NeMo/Gym.git?access_token=secret#fragment",
+        "https://user:token@github.com/NVIDIA-NeMo/Gym.git?access_token=secret#fragment",  # pragma: allowlist secret
     )
 
     provenance = app._gym_source_provenance(root)
@@ -145,7 +145,7 @@ def test_gym_source_provenance_binds_clean_commit_remote_and_lock(tmp_path: Path
     ("value", "expected"),
     [
         (
-            "ssh://user:secret@example.com:2222/NVIDIA-NeMo/Gym.git?token=secret#fragment",
+            "ssh://user:secret@example.com:2222/NVIDIA-NeMo/Gym.git?token=secret#fragment",  # pragma: allowlist secret
             "https://example.com:2222/NVIDIA-NeMo/Gym",
         ),
         ("git+ssh://token@example.com/org/repo.git?credential=secret", "https://example.com/org/repo"),
@@ -153,7 +153,7 @@ def test_gym_source_provenance_binds_clean_commit_remote_and_lock(tmp_path: Path
         ("https://github.com/NVIDIA-NeMo/Gym.git", "https://github.com/NVIDIA-NeMo/Gym"),
         ("git@github.com:NVIDIA-NeMo/Gym.git", "https://github.com/NVIDIA-NeMo/Gym"),
         ("file:///private/secret/repo", None),
-        ("ssh://user:secret@example.com:not-a-port/repo", None),
+        ("ssh://user:secret@example.com:not-a-port/repo", None),  # pragma: allowlist secret
     ],
 )
 def test_repository_url_provenance_strips_credentials_and_rejects_local_paths(
@@ -245,7 +245,7 @@ def test_agent_config_and_trial_uri(monkeypatch: pytest.MonkeyPatch) -> None:
     process_env = server._pier_process_env()
     assert process_env["ANTHROPIC_AUTH_TOKEN"] == "secret-value"
     assert process_env["MODAL_TOKEN_ID"] == "modal-token-id"
-    assert process_env["MODAL_TOKEN_SECRET"] == "modal-token-secret"
+    assert process_env["MODAL_TOKEN_SECRET"] == "modal-token-secret"  # pragma: allowlist secret
     assert process_env["DEEPSWE_RUNTIME_MARKER"] == "preserved"
     assert {name: process_env[name] for name in ("PATH", "HOME", "LANG", "HTTPS_PROXY")} == {
         "PATH": "/runtime/bin",
@@ -540,7 +540,7 @@ async def test_run_pier_uses_isolated_runtime_and_private_launcher_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server = _agent(
-        sandbox_provider={"fake": {"api_key": "provider-secret"}},
+        sandbox_provider={"fake": {"api_key": "provider-secret"}},  # pragma: allowlist secret
         work_root=str(tmp_path / "jobs"),
         pier_runtime_dir=str(tmp_path / "runtime"),
     )
@@ -591,7 +591,9 @@ async def test_run_pier_uses_isolated_runtime_and_private_launcher_config(
     assert captured["config"]["tasks"] == [{"path": str(task)}]
     assert captured["config"]["agents"][0]["env"]["ANTHROPIC_AUTH_TOKEN"] == "${ANTHROPIC_AUTH_TOKEN}"
     assert captured["process_env"]["ANTHROPIC_AUTH_TOKEN"] == "secret-value"
-    assert captured["runtime"]["provider"] == {"fake": {"api_key": "provider-secret"}}
+    assert captured["runtime"]["provider"] == {
+        "fake": {"api_key": "provider-secret"}  # pragma: allowlist secret
+    }
     assert captured["runtime"]["expected_agent_name"] == "claude-code"
     assert captured["runtime"]["expected_agent_version"] == "2.1.153"
     assert captured["runtime_mode"] == 0o600
@@ -843,7 +845,7 @@ def test_partial_trial_error_preserves_trajectory_and_sanitizes_secrets(tmp_path
         "exception_info": None,
         "agent_config": {
             "ANTHROPIC_AUTH_TOKEN": "secret-value",
-            "api_key": "secr****lue",
+            "api_key": "secr****lue",  # pragma: allowlist secret
         },
     }
     response = _agent()._error_response(

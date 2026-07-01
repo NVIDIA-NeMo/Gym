@@ -253,7 +253,7 @@ def test_configs_and_provider_options_validation() -> None:
     with pytest.raises(TypeError, match="block_network"):
         modal_provider.ModalProviderOptions.from_mapping({"block_network": "true"})
     with pytest.raises(TypeError, match="secret_names"):
-        modal_provider.ModalProviderOptions.from_mapping({"secret_names": "not-a-list"})
+        modal_provider.ModalProviderOptions.from_mapping({"secret_names": "not-a-list"})  # pragma: allowlist secret
     with pytest.raises(TypeError, match="image_setup_steps"):
         modal_provider.ModalProviderOptions.from_mapping({"image_setup_steps": "not-a-list"})
     with pytest.raises(TypeError, match="contain only mappings"):
@@ -349,7 +349,7 @@ async def test_create_maps_spec_and_builds_image() -> None:
         entrypoint=["sleep", "infinity"],
         provider_options={
             "name": "deep-swe-task",
-            "registry_secret_name": "registry-creds",
+            "registry_secret_name": "registry-creds",  # pragma: allowlist secret
             "secret_names": ["runtime-secret"],
             "network_allowlist": ["api.example.com"],
             "inbound_cidr_allowlist": ["10.0.0.0/8"],

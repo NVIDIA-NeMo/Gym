@@ -12,7 +12,7 @@ deep_swe:
       claude_code_install_method: pier
       claude_code_kwargs: {}
       benchmark_git_url: https://github.com/datacurve-ai/deep-swe.git
-      benchmark_git_commit: 8cae5984d5dd0ee37445beff0e928dc10c331116
+      benchmark_git_commit: 8cae5984d5dd0ee37445beff0e928dc10c331116  # pragma: allowlist secret
       benchmark_expected_task_count: 113
       sandbox_provider: sandbox
       sandbox_required_provider: modal

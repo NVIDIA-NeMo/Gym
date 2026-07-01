@@ -15,7 +15,7 @@ deep_swe_aa_v1:
         ANTHROPIC_CUSTOM_HEADERS: "X-NMP-Principal-Id: service:evaluator\nX-Inference-Priority: batch"
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       benchmark_git_url: https://github.com/datacurve-ai/deep-swe.git
-      benchmark_git_commit: c33fa70e68d11d85f9e58abcd5d78643705e916e
+      benchmark_git_commit: c33fa70e68d11d85f9e58abcd5d78643705e916e  # pragma: allowlist secret
       benchmark_expected_task_count: 113
       sandbox_provider: sandbox
       sandbox_required_provider: modal
