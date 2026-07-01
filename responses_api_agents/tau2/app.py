@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from collections import defaultdict
 from os import environ
 from pathlib import Path
@@ -110,6 +111,21 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
+    async def _run_single_task_with_retry(self, body_dict: dict[str, Any]) -> SimulationRun:
+        config: TextRunConfig = body_dict["config"]
+        for attempt in range(config.max_retries + 1):
+            try:
+                return await run_single_task(**body_dict)
+            except Exception as error:
+                if attempt == config.max_retries:
+                    raise
+                logger.warning(
+                    f"Tau2 task failed (attempt {attempt + 1}/{config.max_retries + 1}): {error}"
+                )
+                await asyncio.sleep(config.retry_delay)
+
+        raise RuntimeError("Tau2 retry loop exited unexpectedly")
+
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
@@ -137,7 +153,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         config.max_steps = self.config.max_steps
 
-        result = await run_single_task(**body_dict)
+        result = await self._run_single_task_with_retry(body_dict)
 
         messages_to_convert = []
         for message in result.messages:

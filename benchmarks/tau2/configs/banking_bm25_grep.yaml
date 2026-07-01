@@ -1,0 +1,29 @@
+config_paths:
+  - responses_api_agents/tau2/configs/tau2_agent.yaml
+
+gpt-5_4-mini:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ??
+      openai_model: azure/openai/gpt-5.4-mini
+      extra_body:
+        reasoning_effort: medium
+
+tau2_banking_knowledge_bm25_grep_agent:
+  _inherit_from: tau2_agent
+  responses_api_agents:
+    tau2:
+      user_model_server:
+        type: responses_api_models
+        name: gpt-5_4-mini
+      num_workers: 16
+      print_step_counts: true
+      datasets:
+      - name: tau2_banking_knowledge_bm25_grep
+        type: benchmark
+        jsonl_fpath: benchmarks/tau2/data/tau2_banking_knowledge_bm25_grep.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/tau2/prepare_utils/banking_bm25_grep.py
+        num_repeats: 5
