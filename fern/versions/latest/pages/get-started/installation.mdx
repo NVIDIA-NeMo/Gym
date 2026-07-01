@@ -43,6 +43,8 @@ Container choice depends on your NeMo Gym version and model recipe. See [RL Fram
 
 For NeMo Gym **v0.3.0** with the Nemotron 3 Ultra recipe, build the container from the NeMo RL `ultra-v3` branch (there is no pre-built NGC tag for this pairing):
 
+This command uses Docker Buildx and Docker 23+ syntax. By default, Docker builds for your host platform; add `--platform` only if you need to target a different architecture.
+
 ```bash
 git clone https://github.com/NVIDIA-NeMo/RL
 cd RL
@@ -52,7 +54,7 @@ git checkout ultra-v3
 docker buildx build \
   -f docker/Dockerfile \
   --target release \
-  -t nemo-rl-ultra:arm64 \
+  -t nemo-rl-ultra:latest \
   --build-context nemo-rl=. \
   .
 ```
