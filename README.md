@@ -50,16 +50,19 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 ## 📣 News
 
-* [06/04/2026] [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0) — 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
-* [06/04/2026] NeMo Gym v0.3.0 is available on [PyPI](https://pypi.org/project/nemo-gym/).
-* [04/15/2026] [Release v0.2.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.1) — bug fixes and documentation improvements.
+* **[07/01/2026]** [Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0):
+  * **Unified `gym` CLI**: discover agents and benchmarks with `gym list`, catch config errors before a run with `gym env validate`
+  * **BLADE diagnostics**: an analysis skill that reads your eval results and reports which tasks failed, why, and the highest-impact fix
+  * **Agent skill evaluation**: run the same tasks with different skill sets to measure each skill's impact
+  * **Pluggable sandboxes**: run tool-using agents in isolated environments via the sandbox provider of your choice
+  * **More agent harnesses**: OpenCode, OpenClaw, and Pi available out of the box
+  * **Hosted inference providers**: connect to Fireworks, Together.ai, OpenRouter, and more
+  * **New benchmarks**: across science, long-context, and interactive tasks
 
 <details>
 <summary>Previous News</summary>
 
-* [03/11/2026] [Release v0.2.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.2.0) — expanded environment hub, rollout collection improvements, and Fern docs migration.
-* [12/15/2025] [Release v0.1.1](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.1)
-* [11/15/2025] [Release v0.1.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.1.0) — initial public release.
+* **[06/04/2026]** [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0): 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
 
 </details>
 
