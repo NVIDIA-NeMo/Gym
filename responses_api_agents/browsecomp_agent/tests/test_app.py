@@ -252,6 +252,7 @@ class TestApp:
 
         tool_http = MagicMock()
         tool_http.ok = True
+        tool_http.status = 200
         tool_http.read = AsyncMock(
             side_effect=[
                 json.dumps(tool_response_data).encode(),  # model call 1
@@ -286,6 +287,7 @@ class TestApp:
 
         mock_http = MagicMock()
         mock_http.ok = True
+        mock_http.status = 200
         mock_http.read = AsyncMock(return_value=json.dumps(tool_response_data).encode())
         mock_http.content.read = AsyncMock(return_value=b"{}")
         mock_http.cookies = {}
