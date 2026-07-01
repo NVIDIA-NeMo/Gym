@@ -1,0 +1,31 @@
+# NeMo-Gym config for the Lexmount interactive-browser environment.
+lexmount_browser:
+  resources_servers:
+    lexmount_browser:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Interactive browser environment — navigate/click/type/observe a live page; pluggable local (Playwright) or Lexmount cloud backend.
+      backend: playwright          # "playwright" (open-source reference, default) | "lexmount" (cloud, production)
+      headless: true
+      endpoint: null               # optional Lexmount base_url override (else LEXMOUNT_BASE_URL from env)
+      browser_mode: normal         # Lexmount cloud browser mode (backend: lexmount)
+      max_elements: 50             # interactive elements shown per observation
+      # backend: lexmount reads credentials from the environment (never commit them):
+      #   LEXMOUNT_API_KEY, LEXMOUNT_PROJECT_ID, LEXMOUNT_BASE_URL
+
+lexmount_browser_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 12
+      resources_server:
+        type: resources_servers
+        name: lexmount_browser
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/lexmount_browser/data/example.jsonl

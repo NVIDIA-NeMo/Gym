@@ -1,0 +1,12 @@
+# nemo-gym brings fastapi + pydantic + the base server classes; required for the
+# gym-launched resources server (its per-component venv installs only this file).
+-e nemo-gym[dev] @ ../../
+
+# Reference backend (open-source) — used for CI and local dev.
+playwright>=1.40
+
+# Production backend (Lexmount cloud). Proprietary and intentionally NOT a hard
+# dependency, so the open-source reference + CI stay install-free. To use
+# `backend: lexmount`, install it separately:
+#   pip install "lexmount>=0.5.13"
+# and set LEXMOUNT_API_KEY / LEXMOUNT_PROJECT_ID / LEXMOUNT_BASE_URL in the env.
