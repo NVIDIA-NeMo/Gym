@@ -85,7 +85,7 @@ After changing `example.jsonl`, regenerate its static validation metrics:
 .venv/bin/gym dataset collate \
   --resources-server labbench2_vlm \
   --config resources_servers/labbench2_vlm/configs/judge_model_openai.yaml \
-  --config responses_api_models/openai_model/configs/openai_model.yaml \
+  --model-type openai_model \
   --mode example_validation \
   --output-dir /tmp/labbench2_vlm_example_validation \
   +overwrite_metrics_conflicts=true

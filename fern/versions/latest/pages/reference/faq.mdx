@@ -218,7 +218,7 @@ For every PR that contributes data, we require common dataset statistics and san
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```
@@ -227,7 +227,7 @@ To download missing datasets automatically, add --download. By default, datasets
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/example_multi_step \
     --mode train_preparation \
     --download
@@ -238,7 +238,7 @@ For NVIDIA internal users, you can download from GitLab instead:
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/example_multi_step \
     --mode train_preparation \
     --download \
@@ -273,7 +273,7 @@ The `gym dataset collate` command has 2 modes, one for actual train and validati
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```

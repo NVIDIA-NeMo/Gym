@@ -80,7 +80,7 @@ To validate the example data and regenerate metrics:
 ```bash
 gym dataset collate \
     --resources-server ns_tools \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/ns_tools \
     --mode example_validation
 ```

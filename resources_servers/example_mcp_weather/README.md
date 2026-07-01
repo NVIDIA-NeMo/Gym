@@ -14,7 +14,7 @@ Put your key in a repo-root `env.yaml` (the config interpolates `${anthropic_api
 
 ```bash
 # env.yaml:  anthropic_api_key: sk-ant-...
-gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+gym env start --resources-server example_mcp_weather
 ```
 
 Then collect rollouts against `data/example.jsonl` and reward-profile as in the

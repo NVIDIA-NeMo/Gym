@@ -32,7 +32,7 @@ From the repository root:
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --model-type openai_model \
     --output-dir data/test \
     --mode example_validation
 ```
@@ -217,7 +217,7 @@ Run data preparation:
 ```bash
 gym dataset collate \
     --config custom_data.yaml \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --model-type vllm_model \
     --mode train_preparation \
     --output-dir data
 ```
@@ -238,7 +238,7 @@ This validates your data and adds the `agent_ref` field to each row, routing sam
 ```bash
 gym dataset collate \
     --resources-server example_multi_step \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --model-type vllm_model \
     --output-dir data/example_multi_step \
     --mode example_validation
 ```
@@ -248,7 +248,7 @@ gym dataset collate \
 ```bash
 gym dataset collate \
     --resources-server workplace_assistant \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --model-type vllm_model \
     --output-dir data/workplace_assistant \
     --mode train_preparation \
     --download

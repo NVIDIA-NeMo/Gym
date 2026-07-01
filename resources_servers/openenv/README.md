@@ -185,7 +185,7 @@ Then start servers and collect rollouts:
 # Terminal 1: Start servers
 source .venv/bin/activate
 gym env start \
-    --config resources_servers/openenv/configs/openenv_<name>.yaml \
+    --resources-server openenv/openenv_<name> \
     --model-type openai_model
 
 # Terminal 2: Collect rollouts (after servers are ready)

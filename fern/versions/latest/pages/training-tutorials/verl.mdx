@@ -38,7 +38,7 @@ source .venv/bin/activate
 
 gym dataset collate \
     --resources-server workplace_assistant \
-    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --model-type vllm_model/vllm_model_for_training \
     --output-dir data/workplace_assistant \
     --mode train_preparation \
     --download \
