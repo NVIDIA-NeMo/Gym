@@ -1355,6 +1355,30 @@ class TestConfigLoadErrors:
         assert str(missing) in message
         assert message.count("  - ") == 1
 
+    def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("foo: [1, 2\nbar: : :\n")  # invalid YAML syntax
+        parser = GlobalConfigDictParser()
+        with raises(ConfigError) as exc_info:
+            parser.load_extra_config_paths([str(bad)])
+
+        message = str(exc_info.value)
+        assert "Malformed YAML" in message
+        assert str(bad) in message
+        assert "line" in message and "column" in message
+
+    def test_malformed_dotenv_yaml_raises_config_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "env.yaml"
+        bad.write_text("policy_api_key: [oops\n")  # invalid YAML syntax
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(dotenv_path=bad, skip_load_from_cli=True)
+        with raises(ConfigError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "Malformed YAML" in message
+        assert str(bad) in message
+
     def test_parse_malformed_config_paths_raises_actionable_error(self) -> None:
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
