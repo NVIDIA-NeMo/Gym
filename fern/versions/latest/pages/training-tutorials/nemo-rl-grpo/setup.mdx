@@ -111,9 +111,13 @@ CONTAINER_IMAGE_PATH=./$CONTAINER_IMAGE_PATH
 
 </Tip>
 
+<Note>
+This tutorial trains [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2), not Nemotron 3 Ultra. Use the Nano NGC container from the [RL Framework Compatibility](/reference/rl-framework-compatibility) table (v0.1.1 / Nemotron 3 Nano row). For Nemotron 3 Ultra training with NeMo Gym v0.3.0, build the `ultra-v3` Dockerfile instead.
+</Note>
+
 ```bash
-# Use the official NeMo RL container from NGC
-# See: https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
+# Nano recipe container — see RL Framework Compatibility table
+# https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
 CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
 
 NUM_ACTOR_NODES=1
