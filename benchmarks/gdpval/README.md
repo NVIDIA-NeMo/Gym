@@ -34,8 +34,15 @@ Required environment variables for the judge:
 - `JUDGE_API_KEY` — sk- key for the judge inference API (nvapi- keys 401 on
   multimodal payloads)
 - `JUDGE_BASE_URL` — defaults to NVIDIA's internal inference API
-- `JUDGE_MODEL_NAME` — defaults to `gcp/google/gemini-3.1-pro-preview`
+- `JUDGE_MODEL_NAME` — the single-judge fallback model (used only when the
+  [multi-judge panel](#multi-judge-panel) is disabled); defaults to
+  `gcp/google/gemini-3.1-pro-preview`
 - `HF_TOKEN` — for downloading reference files (avoids HF anonymous rate limits)
+
+By default deliverables are graded by a **panel** of judges (GPT-5.5, Gemini 3.1
+Pro Preview, Claude Opus 4.8), one sampled per call. See
+[Multi-judge panel](#multi-judge-panel) for how it works and how to configure or
+disable it.
 
 ## Run comparison mode (pairwise ELO vs. a reference model)
 
@@ -184,6 +191,80 @@ references returns its cached judgement instead of re-judging. Use the same
 are reproducible across the resumed run. See
 [Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
 for the full semantics.
+
+## Multi-judge panel
+
+By default every GDPVal deliverable is graded by a **panel** of frontier LLM
+judges rather than a single model. For each scoring call one panel member is
+sampled, so the reward pools verdicts across leading labs instead of trusting one
+judge. The panel applies to **every** judge mode — rubric (text / visual /
+structured) *and* pairwise comparison, including multi-stage ELO.
+
+The default panel (see `benchmarks/gdpval/config.yaml`) is:
+
+| Member | Model (default) | Reasoning |
+|--------|-----------------|-----------|
+| `gpt-5.5` | `openai/gpt-5.5` | medium |
+| `gemini-3.1-pro` | `gcp/google/gemini-3.1-pro-preview` | high (handles audio/video) |
+| `claude-opus-4.8` | `anthropic/claude-opus-4.8` | thinking enabled |
+
+All three route through the single `gdpval_judge_model` proxy server and differ
+only by model id + reasoning knobs, so one judge endpoint is enough. Override the
+model ids with the `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and
+`JUDGE_CLAUDE_MODEL` env vars.
+
+### How sampling works
+
+- **Rubric (text/visual):** one member is sampled per task and grades the
+  deliverable. Its label is recorded on the judge response as `judge_name`.
+- **Structured rubric:** a member is sampled *per trial*, so the averaged score
+  pools the panel across `rubric_structured_num_trials` trials
+  (`metadata.trial_judges` records which graded each trial).
+- **Comparison / multi-stage ELO:** a member is sampled *per pairwise trial*
+  (`num_comparison_trials`), alternating position swaps as before. The response
+  carries `judge_panel` (the panel that graded the rollout), `per_judge` (pooled
+  eval-perspective win/loss/tie/trial counts per member), and each matchup's
+  `trial_judges`.
+
+### Reproducibility
+
+Judge selection is seeded from a stable identity so a rerun of the same task
+draws the same judges: `(task_id, "rubric")` for rubric mode and
+`(task_id, ref_id, ref_repeat)` for comparison. Set `JUDGE_SAMPLING_SEED` (or
+`++gdpval_resources_server.resources_servers.gdpval.judge_sampling_seed=<int>`)
+to additionally shift the whole stream. This makes multi-stage ELO reruns
+replayable per stage — combined with `RERUN_INCOMPLETE` the reselected reference
+subset draws the same panel members it did originally.
+
+### Audio / video routing
+
+Tasks whose deliverables or references contain audio or video files (detected by
+extension, including inside `.zip` archives) are routed to the panel member(s)
+flagged `handles_audio_video: true` — Gemini 3.1 Pro Preview by default, which
+reads those modalities natively. The whole rollout for that task is graded by the
+AV-capable subset, and comparison responses set `av_routed: true`. If no member
+is flagged AV-capable, the full panel is used unchanged (best-effort).
+
+### Configuring the panel
+
+Each member accepts:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `name` | `model` | Label used in logs and the per-judge metrics breakdown. |
+| `model` | *(legacy default)* | Upstream model id the judge endpoint expects. |
+| `model_server` | `judge_model_server` | Point a member at a distinct endpoint instead of the shared proxy. |
+| `create_params_overrides` | `{}` | Generation/reasoning knobs merged into `chat.completions.create` (e.g. `{reasoning_effort: high}`, `{extra_body: {...}}`). A `null` value drops a default. |
+| `weight` | `1.0` | Relative sampling weight. |
+| `handles_audio_video` | `false` | Eligible to grade audio/video tasks (see above). |
+
+To grade with a **single judge** instead of the panel, set `judge_panel` to
+`null` — the lone judge is then taken from `judge_model_server` +
+`judge_responses_create_params_overrides`:
+
+```bash
+    ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
+```
 
 ## Aggregate metrics
 
