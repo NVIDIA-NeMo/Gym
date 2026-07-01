@@ -754,6 +754,7 @@ class TestReuseCachedDeliverable:
         responses_mock.assert_awaited_once()
         assert result == {"reward": 0.5}
 
+
 class TestReferenceKeyedVerifyCache:
     """rerun_incomplete + multi-stage ELO: the cached judgement is keyed by the
     stage's reference subset, so each stage reuses only a judgement produced
