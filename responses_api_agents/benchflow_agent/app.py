@@ -154,6 +154,7 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
                     metadata[key] = getattr(result, key, None)
             else:
                 reward = 0.0
+                response["output"] = []
                 metadata["global_error"] = error_message
 
             return BenchFlowVerifyResponse(
