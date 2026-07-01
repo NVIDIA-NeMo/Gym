@@ -17,6 +17,7 @@
 By default prepare() writes a reproducible 400-sample subset (seed 42); BROWSECOMP_RUN_FULL=1
 keeps the full 1266. These exercise the pure _select_samples helper without downloading the CSV.
 """
+
 import pandas
 
 from benchmarks.browsecomp.prepare import BROWSECOMP_SUBSET_N, BROWSECOMP_SUBSET_SEED, _select_samples

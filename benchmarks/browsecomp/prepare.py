@@ -136,8 +136,8 @@ TOOLS = [
             "Useful recipes:\n"
             "  ls pages/ | wc -l                              # how many pages saved so far\n"
             "  ls pages/ | head                                # glance at filenames (slugged from query/URL)\n"
-            "  grep -l \"<phrase>\" pages/*.txt | head           # which files mention X\n"
-            "  grep -m 5 -B 2 -A 4 \"<phrase>\" pages/0042_*     # context around hits in one file\n"
+            '  grep -l "<phrase>" pages/*.txt | head           # which files mention X\n'
+            '  grep -m 5 -B 2 -A 4 "<phrase>" pages/0042_*     # context around hits in one file\n'
             "  head -c 2000 pages/0042_*                       # peek at start of a file\n"
             "  sed -n '100,200p' pages/0042_*                  # specific line range\n"
             "  cut -f3 manifest.tsv | sort -u                  # all queries / URLs you've tried\n\n"

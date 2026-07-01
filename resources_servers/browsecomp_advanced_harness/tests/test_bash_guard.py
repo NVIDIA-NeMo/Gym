@@ -22,6 +22,7 @@ Either one blocking returns `[blocked: ...]\n[exit_code=-3]` without executing.
 NOT a security boundary — pragmatic speed-bumps; the `ulimit -f 0` in
 `_run_bash_readonly` is the kernel backstop.
 """
+
 import asyncio
 import os
 from unittest.mock import MagicMock
@@ -29,13 +30,13 @@ from unittest.mock import MagicMock
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
     _bash_allowlisted,
     _bash_denylisted,
 )
+
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(_TEST_DIR, "dummy_exclude_domains_file.json")

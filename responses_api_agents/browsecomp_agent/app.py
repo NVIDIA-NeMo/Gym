@@ -378,9 +378,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         rcp_input = body.responses_create_params.input
         if isinstance(rcp_input, str):
             rcp_input = [NeMoGymEasyInputMessage(role="user", content=rcp_input)]
-        qid = _qid(
-            json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str)
-        )
+        qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str))
         print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}", flush=True)
 
         try:
