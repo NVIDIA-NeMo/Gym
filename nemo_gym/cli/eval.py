@@ -23,7 +23,6 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import orjson
 import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -31,8 +30,9 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _load_benchmarks_from_config_paths
-from nemo_gym.cli.env import RunHelper, exit_cleanly_on_config_error
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError
+from nemo_gym.cli.env import RunHelper
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     POLICY_MODEL_KEY_NAME,
@@ -51,6 +51,7 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    loads_jsonl_line,
 )
 from nemo_gym.train_data_utils import TrainDataProcessor
 
@@ -65,18 +66,17 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
         if needle in haystack:
             return True
         tokens = haystack.replace("_", " ").replace("-", " ").split()
-        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.6):
+        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
             return True
     return False
 
 
-def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
-    """Resolve a benchmark's config to its `(domain, extra search terms)`.
+def _benchmark_domain(bench: BenchmarkConfig) -> str:
+    """Resolve a benchmark's config to its resources server `domain` (for the domain column and `gym search`).
 
-    `BenchmarkConfig` flattens away the resources server name, the resources server `domain`, and the
-    dataset names. We re-resolve the config with the same parser `BenchmarkConfig` uses (so chained
-    `config_paths` / `_inherit_from` are applied) and read those fields back out for the domain column
-    and richer `gym search` matching.
+    `BenchmarkConfig` flattens away the resources server `domain`, so we re-resolve the config with the
+    same parser `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read
+    the field back out.
     """
     initial_config_dict = OmegaConf.load(bench.path)
     if POLICY_MODEL_KEY_NAME not in initial_config_dict:
@@ -86,7 +86,6 @@ def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
 
     domain = ""
-    terms: list[str] = []
     for instance_name in resolved:
         instance = resolved[instance_name]
         if not isinstance(instance, (dict, DictConfig)):
@@ -94,23 +93,12 @@ def _benchmark_extras(bench: BenchmarkConfig) -> tuple[str, list[str]]:
 
         resources_servers = instance.get("resources_servers")
         if resources_servers:
-            terms.append(instance_name)  # e.g. aime24_math_with_judge_resources_server
-            for rs_name, rs_config in resources_servers.items():
-                terms.append(rs_name)  # e.g. math_with_judge
+            for rs_config in resources_servers.values():
                 found_domain = (rs_config or {}).get("domain")
                 if found_domain:
                     domain = str(found_domain)
 
-        agents = instance.get("responses_api_agents")
-        if agents:
-            for agent_config in agents.values():
-                for dataset in (agent_config or {}).get("datasets") or []:
-                    if (dataset or {}).get("name"):
-                        terms.append(dataset["name"])
-
-    if domain:
-        terms.append(domain)
-    return domain, terms
+    return domain
 
 
 def list_benchmarks() -> None:
@@ -130,25 +118,21 @@ def list_benchmarks() -> None:
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
-    # Resolve the domain + richer search terms once per benchmark, for the domain column and `gym search`.
-    extras = {name: _benchmark_extras(bench) for name, bench in benchmarks.items()}
+    # Resolve the domain once per benchmark, for the domain column and `gym search`.
+    domains = {name: _benchmark_domain(bench) for name, bench in benchmarks.items()}
 
-    # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches across the
-    # benchmark name, agent name, resources server name, dataset names, and domain.
+    # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
+    # across the benchmark name and domain.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        benchmarks = {
-            name: bench
-            for name, bench in benchmarks.items()
-            if _fuzzy_matches(query, name, bench.agent_name, *extras[name][1])
-        }
+        benchmarks = {name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, domains[name])}
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
                 "name": name,
                 "agent_name": bench.agent_name,
-                "domain": extras[name][0],
+                "domain": domains[name],
                 "num_repeats": bench.num_repeats,
             }
             for name, bench in benchmarks.items()
@@ -176,9 +160,9 @@ def list_benchmarks() -> None:
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, extras[name][0], bench.agent_name, str(bench.num_repeats))
+        table.add_row(name, domains[name], bench.agent_name, str(bench.num_repeats))
 
-    rich.print(table)
+    print_rich_table(table)
 
 
 class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
@@ -387,21 +371,36 @@ def e2e_rollout_collection():  # pragma: no cover
 
     rch = RolloutCollectionHelper()
 
+    # A benchmark can plug in a custom rollout-collection procedure via the
+    # ``rollout_collection_driver`` config field (a ``module.path:function``).
+    # The default path runs the built-in single-pass helper.
+    driver_path = e2e_rollout_collection_config.rollout_collection_driver
+
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
+{f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
     try:
-        asyncio.run(rch.run_from_config(rollout_collection_config))
+        if driver_path:
+            module_name, _, fn_name = driver_path.partition(":")
+            if not module_name or not fn_name:
+                raise ConfigError(f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r}).")
+            driver_fn = getattr(importlib.import_module(module_name), fn_name)
+            resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
+            asyncio.run(driver_fn(rollout_collection_config, resolved_config))
+        else:
+            asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
 
 
+@exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
@@ -409,6 +408,7 @@ def collect_rollouts():  # pragma: no cover
     asyncio.run(rch.run_from_config(config))
 
 
+@exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     config = RolloutAggregationConfig.model_validate(get_global_config_dict())
     rah = RolloutAggregationHelper()
@@ -416,14 +416,25 @@ def aggregate_rollouts():  # pragma: no cover
     asyncio.run(rah.run_from_config(config))
 
 
+@exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
+    if not Path(config.materialized_inputs_jsonl_fpath).exists():
+        raise ConfigPathNotFoundError(
+            f"Input file not found: '{config.materialized_inputs_jsonl_fpath}' (--inputs). "
+            "Check the path is spelled correctly."
+        )
+    if not Path(config.rollouts_jsonl_fpath).exists():
+        raise ConfigPathNotFoundError(
+            f"Input file not found: '{config.rollouts_jsonl_fpath}' (--rollouts). Check the path is spelled correctly."
+        )
+
     with open(config.materialized_inputs_jsonl_fpath) as f:
-        rows = list(map(orjson.loads, f))
+        rows = [loads_jsonl_line(line, config.materialized_inputs_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
     with open(config.rollouts_jsonl_fpath) as f:
-        results = list(map(orjson.loads, f))
+        results = [loads_jsonl_line(line, config.rollouts_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
     # Results may be out of order.
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
