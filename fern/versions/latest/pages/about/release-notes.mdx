@@ -38,12 +38,11 @@ Thank you to all the new contributors for helping make NeMo Gym better!
 - One `gym` command for the full workflow, with `gym env`, `gym eval`, `gym list`, and `gym dataset` subcommands
 - Reference agents, benchmarks, and environments by name: use `gym list` to see what is available
 - `gym env validate` checks your config for missing, malformed, or empty values before a run and reports actionable errors
-- Built-in servers, data, and prompts now resolve from the install root, so `gym` works from any directory or a wheel install
 
 ### Evaluation & Diagnostics
 
 - Skill evaluation: measure how agent skills affect performance by running the same tasks with different skill sets. Skills apply at rollout time as a run-level knob, so one dataset works across all skill variants and every rollout is tagged for comparison
-- BLADE (Benchmark Level Analysis and Diagnostics Engine): a built-in analysis skill that reads an agent run's rollouts, metrics, and configs and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (harness, training, verifier, or prompt)
+- BLADE (Benchmark Level Analysis and Diagnostics Engine): a built-in analysis skill that reads an agent run's rollouts, metrics, and configs and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (e.g. harness, training, verifier, or prompt)
 
 ### Sandboxing
 
