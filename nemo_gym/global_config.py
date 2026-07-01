@@ -39,6 +39,7 @@ from wandb import Run
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
+    ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     InheritPathNotFoundError,
@@ -171,6 +172,22 @@ class GlobalConfigDictParserConfig(BaseModel):
     )
 
 
+def _load_config_yaml(config_path):
+    """`OmegaConf.load`, converting a YAML syntax error into a clean `ConfigError` naming file + line/column.
+
+    `FileNotFoundError` is left to propagate so callers can report a missing-path error themselves.
+    """
+    from yaml import YAMLError
+
+    try:
+        return OmegaConf.load(config_path)
+    except YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        problem = getattr(e, "problem", None) or str(e).splitlines()[0]
+        raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
+
+
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
         # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
@@ -237,7 +254,7 @@ class GlobalConfigDictParser(BaseModel):
                 config_path = cwd_path if cwd_path.exists() else install_path
 
             try:
-                extra_config = OmegaConf.load(config_path)
+                extra_config = _load_config_yaml(config_path)
             except FileNotFoundError as e:
                 searched = "\n".join(f"  - {p}" for p in searched_locations)
                 raise ConfigPathNotFoundError(
@@ -546,7 +563,7 @@ For example, on the command line:
 
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
-            dotenv_extra_config = OmegaConf.load(dotenv_path)
+            dotenv_extra_config = _load_config_yaml(dotenv_path)
 
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
