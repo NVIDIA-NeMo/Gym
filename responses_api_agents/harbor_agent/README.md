@@ -276,7 +276,11 @@ hf download phylobio/BiomniBench-DA --repo-type dataset \
 
 `da-1-3`/`da-1-4` each belong to a `task_type` with too few tasks to pass the
 default train/test coverage filter, so a bare smoke materialization selects
-**zero** tasks. Pass `--include-singletons --include-uncovered` to keep them:
+**zero** tasks. Pass `--include-singletons --include-uncovered` to keep them.
+
+The command below materializes Harbor task dirs under `--output-dir` and also
+writes `rollout_input.jsonl` there — the `ng_collect_rollouts` input file (one row
+per task, `instance_id` form `biomnibench_da::<task_name>`):
 
 ```bash
 python responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py \
@@ -286,7 +290,11 @@ python responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py \
   --include-singletons --include-uncovered \
   --output-dir responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker \
   --overwrite
+# -> .../tasks_smoke_docker/rollout_input.jsonl  (2 rows for da-1-3-r001, da-1-4-r001)
 ```
+
+For a single-task smoke, pass one ID (e.g. `--tasks da-1-3`); `rollout_input.jsonl`
+will contain one row. Override the path with `--rollout-input-fpath` if needed.
 
 For HPC, use `--environment-type singularity` and
 `--output-dir .../tasks_smoke_singularity` instead.
@@ -337,7 +345,7 @@ ng_run "+config_paths=[${CONFIG_PATHS}]" &
 ./scripts/wait_for_servers.sh $!
 
 ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/biomnibench_da_smoke_input.jsonl \
+  +input_jsonl_fpath=responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker/rollout_input.jsonl \
   +output_jsonl_fpath=/tmp/biomnibench_da_smoke_rollouts.jsonl
 ```
 

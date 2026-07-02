@@ -13,8 +13,12 @@ Examples::
     --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source \\
     --environment-type docker \\
     --tasks da-1-3 da-1-4 \\
+    --include-singletons --include-uncovered \\
     --output-dir responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker \\
     --overwrite
+
+Also writes ``<output-dir>/rollout_input.jsonl`` — one ``ng_collect_rollouts`` row per
+materialized task (``instance_id`` form ``<dataset-name>::<task-name>``).
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ DEFAULT_SPLIT_SEED = "trace2skill-biomnibench-da"
 DEFAULT_TRAIN_FRACTION = 0.2
 DEFAULT_CONTAINER_DATA_DIR = "/app/data"
 DEFAULT_DOCKER_IMAGE = "biomnibench-da-runtime:smoke"
+DEFAULT_ROLLOUT_INPUT_NAME = "rollout_input.jsonl"
+DEFAULT_AGENT_NAME = "harbor_agent"
 HARBOR_AGENT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOCKERFILE = str(HARBOR_AGENT_ROOT / "docker" / "biomnibench-da-runtime.Dockerfile")
 
@@ -114,6 +120,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset-name", default="biomnibench_da")
     parser.add_argument(
+        "--rollout-input-fpath",
+        type=Path,
+        default=None,
+        help=f"ng_collect_rollouts input JSONL path (default: <output-dir>/{DEFAULT_ROLLOUT_INPUT_NAME}).",
+    )
+    parser.add_argument(
+        "--agent-name",
+        default=DEFAULT_AGENT_NAME,
+        help=f"agent_ref.name written into rollout input rows (default: {DEFAULT_AGENT_NAME}).",
+    )
+    parser.add_argument(
         "--environment-type",
         choices=["docker", "singularity"],
         default="docker",
@@ -149,6 +166,23 @@ def write_json(path: Path, value: Any) -> None:
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+
+
+def build_rollout_input_rows(
+    registry_tasks: list[dict[str, Any]],
+    *,
+    dataset_name: str,
+    agent_name: str,
+) -> list[dict[str, Any]]:
+    """Build ng_collect_rollouts rows for each materialized Harbor task."""
+    return [
+        {
+            "instance_id": f"{dataset_name}::{task['name']}",
+            "responses_create_params": {"input": []},
+            "agent_ref": {"name": agent_name},
+        }
+        for task in registry_tasks
+    ]
 
 
 def prepare_output_dir(path: Path, overwrite: bool) -> None:
@@ -1143,6 +1177,14 @@ def main() -> None:
     write_json(args.output_dir / "registry.json", registry)
     write_jsonl(args.output_dir / "answers.jsonl", answers_rows)
 
+    rollout_input_fpath = args.rollout_input_fpath or (args.output_dir / DEFAULT_ROLLOUT_INPUT_NAME)
+    rollout_rows = build_rollout_input_rows(
+        registry_tasks,
+        dataset_name=args.dataset_name,
+        agent_name=args.agent_name,
+    )
+    write_jsonl(rollout_input_fpath, rollout_rows)
+
     manifest_rows = []
     for task_id in sorted(all_tasks.keys(), key=paper_sort_key):
         info = all_tasks[task_id]
@@ -1198,6 +1240,11 @@ def main() -> None:
             "by_difficulty": dict(sorted(Counter(t["biomnibench_difficulty"] for t in registry_tasks).items())),
         },
         "tasks": registry_tasks,
+        "rollout_input": {
+            "path": str(rollout_input_fpath),
+            "agent_name": args.agent_name,
+            "rows": len(rollout_rows),
+        },
     }
     write_json(args.output_dir / "materialization_manifest.json", manifest)
 
@@ -1205,6 +1252,7 @@ def main() -> None:
     print(f"Tasks selected: {len(selected_ids)}; repeats: {args.n_repeats}")
     print(f"Partition counts: {manifest['counts']['by_partition']}")
     print(f"Task type counts: {manifest['counts']['by_task_type']}")
+    print(f"Rollout input: {rollout_input_fpath} ({len(rollout_rows)} rows)")
     print("Judge: upstream logic, OpenAI-compatible endpoint only")
     if is_docker_bind(args):
         print(f"Data: bind mount -> {DEFAULT_CONTAINER_DATA_DIR} via docker-compose.yaml")

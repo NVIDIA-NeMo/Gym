@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import json
 import subprocess
 import sys
 import tomllib
@@ -97,6 +98,13 @@ def test_materialize_docker_bind_compose(minimal_source: Path, tmp_path: Path) -
     toml = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
     assert toml["environment"]["docker_image"] == "biomnibench-da-runtime:smoke"
     assert (task_dir / "tests" / "llm_judge.py").is_file()
+
+    rollout_input = output / "rollout_input.jsonl"
+    assert rollout_input.is_file()
+    rows = [json.loads(line) for line in rollout_input.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["instance_id"] == "biomnibench_da::da-1-3-r001"
+    assert rows[0]["agent_ref"] == {"name": "harbor_agent"}
 
 
 def test_materialize_singularity_staging(minimal_source: Path, tmp_path: Path) -> None:
