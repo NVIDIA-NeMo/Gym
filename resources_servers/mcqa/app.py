@@ -78,6 +78,8 @@ CHOICE_LETTER_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])(?![A-Za-z])")
 # Box holds just a letter, e.g. "E", "[C]", "(B)".
 BOXED_LETTER_ONLY_PATTERN = re.compile(r"^[^A-Za-z]*([A-Z])[^A-Za-z]*$")
 # Box starts with a letter then a delimiter; ignore the option text after, e.g. "E: ...", "C) ...".
+# NOTE: ":" and ")" are unambiguous; "." and "-" are looser. We tolerate these for now,
+# but if we see new misreadings, such as "E. coli" -> "E", we can drop them.
 BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 # Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
