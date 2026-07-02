@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 
 
-HARBOR_AGENT_ROOT = Path(__file__).resolve().parents[1]
-MATERIALIZER = HARBOR_AGENT_ROOT / "scripts" / "materialize_biomnibench_da.py"
+ENV_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ENV_ROOT.parents[1]
+PREPARE = ENV_ROOT / "prepare.py"
 
 
 def _write_minimal_source_task(task_root: Path, task_id: str) -> None:
@@ -54,7 +55,7 @@ def minimal_source(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _run_materializer(
+def _run_prepare(
     source: Path,
     output: Path,
     environment_type: str,
@@ -63,7 +64,7 @@ def _run_materializer(
 ) -> None:
     cmd = [
         sys.executable,
-        str(MATERIALIZER),
+        str(PREPARE),
         "--local-dir",
         str(source),
         "--output-dir",
@@ -81,12 +82,12 @@ def _run_materializer(
     ]
     if overwrite:
         cmd.append("--overwrite")
-    subprocess.run(cmd, check=True, cwd=HARBOR_AGENT_ROOT.parents[1])
+    subprocess.run(cmd, check=True, cwd=REPO_ROOT)
 
 
-def test_materialize_docker_bind_compose(minimal_source: Path, tmp_path: Path) -> None:
+def test_prepare_docker_bind_compose(minimal_source: Path, tmp_path: Path) -> None:
     output = tmp_path / "docker_tasks"
-    _run_materializer(minimal_source, output, "docker")
+    _run_prepare(minimal_source, output, "docker")
 
     task_dir = output / "da-1-3-r001"
     compose = task_dir / "environment" / "docker-compose.yaml"
@@ -107,9 +108,9 @@ def test_materialize_docker_bind_compose(minimal_source: Path, tmp_path: Path) -
     assert rows[0]["agent_ref"] == {"name": "harbor_agent"}
 
 
-def test_materialize_singularity_staging(minimal_source: Path, tmp_path: Path) -> None:
+def test_prepare_singularity_staging(minimal_source: Path, tmp_path: Path) -> None:
     output = tmp_path / "sing_tasks"
-    _run_materializer(minimal_source, output, "singularity")
+    _run_prepare(minimal_source, output, "singularity")
 
     task_dir = output / "da-1-3-r001"
     env = task_dir / "environment"
@@ -122,3 +123,23 @@ def test_materialize_singularity_staging(minimal_source: Path, tmp_path: Path) -
 
     toml = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
     assert toml["environment"]["docker_image"] == "biomnibench-da-runtime:smoke"
+
+
+def test_prepare_requires_local_dir_or_download(tmp_path: Path) -> None:
+    missing_local_dir = tmp_path / "does_not_exist"
+    output = tmp_path / "out"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PREPARE),
+            "--local-dir",
+            str(missing_local_dir),
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "--download" in result.stderr

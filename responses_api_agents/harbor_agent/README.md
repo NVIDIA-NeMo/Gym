@@ -9,7 +9,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
   - [Custom agents](#custom-agents)
   - [Custom environments](#custom-environments)
 - [Quick Start](#quick-start)
-- [BiomniBench-DA](#biomnibench-da)
+- [Other datasets through this bridge](#other-datasets-through-this-bridge)
 - [Daytona execution path](#daytona-execution-path)
 - [NeMo RL Training](#nemo-rl-training)
   - [Required patches to Gym](#required-patches-to-gym)
@@ -255,119 +255,17 @@ gym eval run --no-serve \
 jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 ```
 
-## BiomniBench-DA
+## Other datasets through this bridge
 
-BiomniBench-DA runs through the same Harbor agent flow as Nemotron Terminal, with
-materialized task trees under `data/biomnibench_da/` (gitignored). Use Gym's venv
-from the repo root.
-
-
-### 1) Download the source dataset
-
-```bash
-cd /path/to/Gym
-source .venv/bin/activate
-
-hf download phylobio/BiomniBench-DA --repo-type dataset \
-  --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source
-```
-
-### 2) Materialize the smoke task tree (docker profile)
-
-`da-1-3`/`da-1-4` each belong to a `task_type` with too few tasks to pass the
-default train/test coverage filter, so a bare smoke materialization selects
-**zero** tasks. Pass `--include-singletons --include-uncovered` to keep them.
-
-The command below materializes Harbor task dirs under `--output-dir` and also
-writes `rollout_input.jsonl` there — the `ng_collect_rollouts` input file (one row
-per task, `instance_id` form `biomnibench_da::<task_name>`):
-
-```bash
-python responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py \
-  --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source \
-  --environment-type docker \
-  --tasks da-1-3 da-1-4 \
-  --include-singletons --include-uncovered \
-  --output-dir responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker \
-  --overwrite
-# -> .../tasks_smoke_docker/rollout_input.jsonl  (2 rows for da-1-3-r001, da-1-4-r001)
-```
-
-For a single-task smoke, pass one ID (e.g. `--tasks da-1-3`); `rollout_input.jsonl`
-will contain one row. Override the path with `--rollout-input-fpath` if needed.
-
-For HPC, use `--environment-type singularity` and
-`--output-dir .../tasks_smoke_singularity` instead.
-
-### 3) Build (or verify) the shared runtime image
-
-Docker profile tasks reference a prebuilt image
-(`[environment].docker_image` in each `task.toml`), not a per-task Dockerfile build.
-The generated `environment/docker-compose.yaml` will fail immediately if this image
-isn't present locally, so build/pull it once up front:
-
-```bash
-responses_api_agents/harbor_agent/docker/build_biomnibench_runtime_image.sh
-# Sanity check:
-docker image inspect biomnibench-da-runtime:smoke
-```
-
-### 4) Export judge credentials
-
-Each task's `[verifier.env]` in `task.toml` is resolved by **Harbor itself**
-(`harbor.utils.env.resolve_env_vars`) against literal OS environment variables —
-this is a separate mechanism from NeMo Gym's own `${...}` config interpolation in
-`env.yaml`/config YAMLs, so these must be `export`ed in the shell that launches
-`ng_run` (uppercase names, matching what's baked into `task.toml`):
-
-```bash
-export JUDGE_API_KEY=...     # same value as env.yaml's judge_api_key
-export JUDGE_BASE_URL=...    # same value as env.yaml's judge_base_url
-export JUDGE_MODEL=...       # same value as env.yaml's judge_model_name
-```
-
-### 5) Configure the policy model server
-
-Use `configs/vllm_model.yaml`, **not** `configs/vllm_model_for_training.yaml`,
-unless the policy model is a real self-hosted vLLM server. `vllm_model_for_training.yaml`
-sets `return_token_id_information: true`, which makes `app.py` inject a
-vLLM-specific `return_tokens_as_token_ids` sampling param — remote gateway models
-(e.g. `azure/openai/gpt-5.5` via `https://inference-api.nvidia.com/v1`) reject that
-param and the request fails with an opaque `500`.
-
-### 6) Launch Gym and collect rollouts
-
-```bash
-CONFIG_PATHS="responses_api_agents/harbor_agent/configs/harbor_agent_biomnibench_da_docker.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-ng_run "+config_paths=[${CONFIG_PATHS}]" &
-./scripts/wait_for_servers.sh $!
-
-ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker/rollout_input.jsonl \
-  +output_jsonl_fpath=/tmp/biomnibench_da_smoke_rollouts.jsonl
-```
-
-Rollout JSONL uses `instance_id` in the form `biomnibench_da::<task_name>` (for
-example `biomnibench_da::da-1-3-r001`). For HPC/Singularity, switch to
-`configs/harbor_agent_biomnibench_da_singularity.yaml` and the
-`tasks_smoke_singularity` dataset path.
-
-### Troubleshooting
-
-- **`service "main" has neither an image nor a build context specified`**: the
-  materialized `environment/docker-compose.yaml` is stale (missing `image:`/mount
-  overrides) — re-run step 2 to regenerate it, and confirm the runtime image exists
-  (step 3).
-- **`No such file or directory` from `tee .../logs/verifier/...` / trial fails with
-  `RewardFileNotFoundError` despite the judge printing a score**: same cause —
-  Harbor's Docker environment assumes `/logs/agent` and `/logs/verifier` are
-  bind-mounted from the trial dir (`harbor.models.trial.paths.EnvironmentPaths`);
-  regenerate the compose file (step 2) rather than hand-editing it.
-- **`Error response from daemon: all predefined address pools have been fully
-  subnetted`** when a trial's `docker compose up -d` tries to create a network:
-  
+Datasets that need their own materialization/download pipeline (rather than a
+checked-in `example/*.jsonl`) live under `environments/<name>/` and reuse this same
+Harbor agent bridge — only the dataset alias in `harbor_datasets` and the
+`--environment-type`/config differ. See
+[`environments/biomnibench_da`](../../environments/biomnibench_da) for a worked
+example (BiomniBench-DA data-analysis tasks): dataset download + materialization
+script, docker/singularity configs, and an LLM-judge verifier, all wired to this
+agent via `harbor_agent_import_path`/`harbor_datasets` the same way as the Quick
+Start above.
 
 ## Daytona execution path
 

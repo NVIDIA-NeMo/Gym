@@ -3,12 +3,12 @@ harbor_agent:
     harbor_agent:
       entrypoint: app.py
       domain: agent
-      description: Harbor agent for BiomniBench-DA (Singularity HPC profile).
+      description: Harbor agent for BiomniBench-DA (Docker bind-mount profile).
       concurrency: 4
 
       harbor_datasets:
         biomnibench_da:
-          local_dataset_path: "responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_singularity"
+          local_dataset_path: "environments/biomnibench_da/data/tasks_smoke_docker"
           workdir: "/app"
 
       harbor_agent_name: null
@@ -26,10 +26,9 @@ harbor_agent:
           input_cost_per_token: 0.0
           output_cost_per_token: 0.0
 
-      harbor_environment_type: null
-      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
-      harbor_environment_kwargs:
-        singularity_image_cache_dir: "responses_api_agents/harbor_agent/singularity_cache"
+      harbor_environment_type: "docker"
+      harbor_environment_import_path: null
+      harbor_environment_kwargs: {}
       harbor_no_delete: true
 
       model_server:

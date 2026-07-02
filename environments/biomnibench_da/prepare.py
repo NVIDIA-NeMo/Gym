@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Materialize BiomniBench-DA as Harbor tasks for NeMo Gym harbor_agent.
+"""Download and materialize BiomniBench-DA as Harbor tasks for NeMo Gym harbor_agent.
 
-Upstream-faithful task content with an OpenAI-compatible LLM judge. Supports two
+Downloads the upstream ``phylobio/BiomniBench-DA`` dataset from HuggingFace (unless
+already present locally), then materializes it into Harbor task trees with an
+OpenAI-compatible LLM judge, upstream-faithful content otherwise. Supports two
 deployment profiles via ``--environment-type``:
 
 - ``docker``: bind-mount source task data at ``/app/data`` via docker-compose.yaml
@@ -9,12 +11,21 @@ deployment profiles via ``--environment-type``:
 
 Examples::
 
-  python responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py \\
-    --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source \\
+  # Download (if needed) + materialize a 2-task smoke slice, docker profile
+  python environments/biomnibench_da/prepare.py \\
+    --download \\
     --environment-type docker \\
     --tasks da-1-3 da-1-4 \\
     --include-singletons --include-uncovered \\
-    --output-dir responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker \\
+    --output-dir environments/biomnibench_da/data/tasks_smoke_docker \\
+    --overwrite
+
+  # Materialize the full default (train+test) split, singularity profile,
+  # assuming the dataset was already downloaded to --local-dir
+  python environments/biomnibench_da/prepare.py \\
+    --local-dir environments/biomnibench_da/data/source \\
+    --environment-type singularity \\
+    --output-dir environments/biomnibench_da/data/tasks_singularity \\
     --overwrite
 
 Also writes ``<output-dir>/rollout_input.jsonl`` — one ``ng_collect_rollouts`` row per
@@ -45,8 +56,9 @@ DEFAULT_CONTAINER_DATA_DIR = "/app/data"
 DEFAULT_DOCKER_IMAGE = "biomnibench-da-runtime:smoke"
 DEFAULT_ROLLOUT_INPUT_NAME = "rollout_input.jsonl"
 DEFAULT_AGENT_NAME = "harbor_agent"
-HARBOR_AGENT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DOCKERFILE = str(HARBOR_AGENT_ROOT / "docker" / "biomnibench-da-runtime.Dockerfile")
+ENV_ROOT = Path(__file__).resolve().parent
+DEFAULT_LOCAL_DIR = ENV_ROOT / "data" / "source"
+DEFAULT_DOCKERFILE = str(ENV_ROOT / "docker" / "biomnibench-da-runtime.Dockerfile")
 
 SINGULARITY_SETUP_SH = """#!/bin/bash
 # BiomniBench-DA Singularity bootstrap: Harbor server deps + task data staging.
@@ -80,7 +92,21 @@ MIN_TEST_FOR_EVAL = 1
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--local-dir", type=Path, required=True, help="Local BiomniBench-DA download (from hf download)."
+        "--download",
+        action="store_true",
+        help=f"Download {DATASET_ID} from HuggingFace into --local-dir before materializing "
+        "(skipped automatically if --local-dir already exists and is non-empty).",
+    )
+    parser.add_argument(
+        "--hf-repo-id",
+        default=DATASET_ID,
+        help=f"HuggingFace dataset repo id to download (default: {DATASET_ID}).",
+    )
+    parser.add_argument(
+        "--local-dir",
+        type=Path,
+        default=DEFAULT_LOCAL_DIR,
+        help=f"Local BiomniBench-DA download dir, from `hf download` or --download (default: {DEFAULT_LOCAL_DIR}).",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
@@ -149,6 +175,22 @@ def parse_args() -> argparse.Namespace:
         help="Host root for docker bind mounts (default: --local-dir).",
     )
     return parser.parse_args()
+
+
+# --------------------------------------------------------------------------- #
+# Download
+# --------------------------------------------------------------------------- #
+def download_dataset(repo_id: str, local_dir: Path) -> None:
+    """Download the BiomniBench-DA dataset repo from HuggingFace into local_dir."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        raise SystemExit("Missing dependency `huggingface_hub`. Install with: pip install huggingface_hub")
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {repo_id} -> {local_dir} ...", file=sys.stderr)
+    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=str(local_dir))
+    print("Download complete.", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -1131,8 +1173,13 @@ def main() -> None:
     validate_options(args)
     if args.n_repeats < 1:
         raise SystemExit("--n-repeats must be >= 1.")
-    if not args.local_dir.is_dir():
-        raise SystemExit(f"--local-dir does not exist: {args.local_dir}")
+
+    local_dir_has_tasks = args.local_dir.is_dir() and any(args.local_dir.glob("da-*"))
+    if args.download and not local_dir_has_tasks:
+        download_dataset(args.hf_repo_id, args.local_dir)
+    elif not args.local_dir.is_dir():
+        raise SystemExit(f"--local-dir does not exist: {args.local_dir} (pass --download to fetch it).")
+
     prepare_output_dir(args.output_dir, args.overwrite)
 
     all_tasks = discover_tasks(args.local_dir)
@@ -1214,7 +1261,7 @@ def main() -> None:
     manifest = {
         "schema_version": "biomnibench_da_materialization_manifest.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "generator": "responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py",
+        "generator": "environments/biomnibench_da/prepare.py",
         "generation_command": " ".join(shlex.quote(arg) for arg in sys.argv),
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "variant": "upstream_faithful",
@@ -1257,7 +1304,7 @@ def main() -> None:
     if is_docker_bind(args):
         print(f"Data: bind mount -> {DEFAULT_CONTAINER_DATA_DIR} via docker-compose.yaml")
         print(
-            f"Runtime image: {args.docker_image} (build with harbor_agent/docker/build_biomnibench_runtime_image.sh)"
+            f"Runtime image: {args.docker_image} (build with environments/biomnibench_da/docker/build_biomnibench_runtime_image.sh)"
         )
     else:
         print("Data: copied to environment/files/data with setup.sh staging for Singularity")
