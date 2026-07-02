@@ -64,6 +64,13 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
+    soft_fail_run_errors: bool = Field(
+        default=False,
+        description=(
+            "When an agent /run request raises or returns a non-2xx response, persist a reward=0 rollout row "
+            "instead of aborting the whole collection job."
+        ),
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -141,6 +148,39 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
     }
     return {k: v for k, v in summary.items() if v is not None}
+
+
+def _make_soft_failed_run_result(row: Dict[str, Any], exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
+    result = {
+        k: deepcopy(v)
+        for k, v in row.items()
+        if k not in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME)
+    }
+
+    error_message = str(exc) or repr(exc)
+    result.update(
+        {
+            "reward": 0.0,
+            "_ng_soft_failed": True,
+            "_ng_soft_failure_stage": "agent_run",
+            "_ng_soft_failure_type": type(exc).__name__,
+            "_ng_soft_failure_message": error_message,
+            "response": {
+                "output": [],
+                "usage": None,
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": error_message,
+                    "http_status": status,
+                },
+            },
+        }
+    )
+
+    if status is not None:
+        result["_ng_soft_failure_http_status"] = status
+
+    return result
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -302,7 +342,11 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        for future in self.run_examples(
+            input_rows,
+            semaphore=semaphore,
+            soft_fail_run_errors=config.soft_fail_run_errors,
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -446,6 +490,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        soft_fail_run_errors: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -455,10 +500,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                res = None
                 try:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
-                except Exception:
+                    return row, await get_response_json(res)
+                except Exception as e:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
                             "[rollout_collection] /run failed "
@@ -466,8 +513,16 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
+                    if soft_fail_run_errors:
+                        status = getattr(res, "status", None)
+                        print(
+                            "[rollout_collection] soft-failing /run "
+                            f"status={status} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                        return row, _make_soft_failed_run_result(row, e, status)
                     raise
-                return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
