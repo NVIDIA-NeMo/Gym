@@ -264,6 +264,33 @@ class TestApp:
         config = create_test_config(model_name="")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    def test_committed_smoke_data_has_valid_rows(self) -> None:
+        data_path = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        rows = data_path.read_text(encoding="utf-8").splitlines()
+
+        assert len(rows) >= 5
+        required_fields = {
+            "instance_id",
+            "repo",
+            "base_commit",
+            "problem_statement",
+            "patch",
+            "test_patch",
+            "FAIL_TO_PASS",
+            "PASS_TO_PASS",
+            "responses_create_params",
+            "subset",
+            "split",
+        }
+        for line in rows:
+            row = json.loads(line)
+            assert required_fields <= row.keys()
+            # Rows must stay SWE-bench Verified; gym-subset rows are not in
+            # swebench's spec map and fail grading.
+            assert row["subset"] == "verified"
+            assert row["split"] == "test"
+            assert row["responses_create_params"].get("input") == []
+
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}
         assert _json_dict_from_metadata({"top_k": 20}, field_name="extra_body") == {"top_k": 20}
