@@ -84,9 +84,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             input_items = body_dict.get("input")
             if isinstance(input_items, list):
                 body_dict["input"] = [
-                    item
-                    for item in input_items
-                    if not (isinstance(item, dict) and item.get("type") == "reasoning")
+                    item for item in input_items if not (isinstance(item, dict) and item.get("type") == "reasoning")
                 ]
         async with self._semaphore:
             openai_response_dict = await self._client.create_response(**body_dict)

@@ -99,9 +99,7 @@ class TestNeMoGymResponseHostedMcpItems:
         assert call.output == "42\n"
 
     def test_mcp_call_tolerates_missing_optional_fields(self) -> None:
-        call = NeMoGymResponseMcpCall.model_validate(
-            {"type": "mcp_call", "name": "python", "arguments": "{}"}
-        )
+        call = NeMoGymResponseMcpCall.model_validate({"type": "mcp_call", "name": "python", "arguments": "{}"})
         assert call.id is None and call.server_label is None and call.output is None
 
     def test_mcp_list_tools_and_approval_request_validate(self) -> None:
