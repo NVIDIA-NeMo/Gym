@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from glob import glob
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -114,6 +115,24 @@ class TestLoadBenchmarksFromConfigPaths:
         assert set(result) == {"good_bench"}
         err = capsys.readouterr().err
         assert "Warning" in err and "bad.yaml" in err
+
+    def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
+        # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
+        # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve
+        # failure. Mirrors the content-based discovery in `list_benchmarks`.
+        from nemo_gym.benchmarks import BENCHMARKS_DIR, _load_benchmarks_from_config_paths
+
+        config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
+        config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+        assert config_paths, "no benchmark configs discovered under BENCHMARKS_DIR"
+
+        benchmarks = _load_benchmarks_from_config_paths(config_paths)
+
+        assert len(benchmarks) == len(config_paths), (
+            f"{len(config_paths)} benchmark config(s) discovered but only {len(benchmarks)} appear in the "
+            f"listing — a duplicate dataset name or resolve failure is hiding at least one.\n"
+            f"stderr:\n{capsys.readouterr().err}"
+        )
 
 
 class TestTolerantInterpolationParse:
