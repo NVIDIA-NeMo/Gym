@@ -27,7 +27,7 @@ from resources_servers.cvdp.app import (
     _parse_model_response,
 )
 from resources_servers.cvdp.cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
-from resources_servers.cvdp.harness import (
+from resources_servers.cvdp.testbench_runner import (
     _apply_substitutions,
     _build_binds,
     _build_command,
