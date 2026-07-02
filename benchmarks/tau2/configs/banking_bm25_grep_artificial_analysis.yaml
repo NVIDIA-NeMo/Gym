@@ -1,13 +1,15 @@
 # Artificial Analysis Tau3-Banking configuration.
 config_paths:
   - responses_api_agents/tau2/configs/tau2_agent.yaml
-  - responses_api_models/openai_model/configs/NVIDIA/gpt-5.4-mini.yaml
+  - responses_api_models/openai_model/configs/OpenAI/gpt-5.4-mini-2026-03-17.yaml
 
 # You must fill in this key to run.
-nvi-gpt-5_4-mini:
+gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
       openai_api_key: ??
+      extra_body:
+        reasoning_effort: medium
 
 tau2_banking_knowledge_bm25_grep_artificial_analysis_agent:
   _inherit_from: tau2_agent
@@ -15,7 +17,7 @@ tau2_banking_knowledge_bm25_grep_artificial_analysis_agent:
     tau2:
       user_model_server:
         type: responses_api_models
-        name: nvi-gpt-5_4-mini
+        name: gpt-5_4-mini-2026-03-17
       max_steps: 200
       num_workers: 16
       print_step_counts: true

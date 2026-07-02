@@ -18,24 +18,7 @@ gym env start \
     --config benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml \
     --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2_banking_bm25_grep_artificial_analysis \
-    '++nvi-gpt-5_4-mini.responses_api_models.openai_model.openai_api_key=${oc.env:NVI_KEY_EVALUATOR}'
-```
-
-This defaults to `openai/openai/gpt-5.4-mini`. To use the verified Azure-backed
-deployment, add:
-
-```bash
-'++nvi-gpt-5_4-mini.responses_api_models.openai_model.openai_model=azure/openai/gpt-5.4-mini'
-```
-
-For an endpoint-compatible score check, use GPT-5.2 from NVIDIA inference:
-
-```bash
-gym env start \
-    --config benchmarks/tau2/configs/banking_bm25_grep_gpt5_2.yaml \
-    --model-type openai_model \
-    ++nemo_gym_log_dir=results/tau2_banking_bm25_grep_gpt5_2 \
-    '++nvi-gpt-5_2.responses_api_models.openai_model.openai_api_key=${oc.env:NVI_KEY_EVALUATOR}'
+    '++gpt-5_4-mini-2026-03-17.responses_api_models.openai_model.openai_api_key=${openai_api_key}'
 ```
 
 ```bash
@@ -54,14 +37,13 @@ gym env start \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.openai_api_key=${openai_api_key}'
 ```
 
-`banking_bm25_grep_artificial_analysis` uses NVIDIA-hosted GPT-5.4 Mini with
-medium reasoning as the user simulator and runs five repeats over all 97 tasks.
-BM25+grep retrieval itself is offline and needs no sandbox tooling or retrieval
-API key. The GPT-5.2 variant uses `openai/openai/gpt-5.2` with low reasoning and
-the same prepared rows and repeat count. `terminal_use`
-requires local sandbox tooling: `srt`, `rg`, `bwrap`, and `socat`. `alltools`
-uses the same sandbox tooling and also requires `OPENAI_API_KEY` for dense
-retrieval at rollout time. You can check a mode with:
+`banking_bm25_grep_artificial_analysis` uses
+`gpt-5.4-mini-2026-03-17` with medium reasoning as the user simulator and runs
+five repeats over all 97 tasks. BM25+grep retrieval itself is offline and needs
+no sandbox tooling or retrieval API key. `terminal_use` requires local sandbox
+tooling: `srt`, `rg`, `bwrap`, and `socat`. `alltools` uses the same sandbox
+tooling and also requires `OPENAI_API_KEY` for dense retrieval at rollout time.
+You can check a mode with:
 
 ```bash
 python -m benchmarks.tau2.prepare_utils.runtime bm25_grep
@@ -76,7 +58,7 @@ and fetches the Tau `data/` tree from the same ref. Override with
 different PR branch or commit.
 
 Benchmark prepare uses a separate pinned data-generation branch,
-`https://github.com/bxyu-nvidia/tau2-bench@jk/bxyu-nemo-gym-data-upstream-main-tau3`.
+`https://github.com/bxyu-nvidia/tau2-bench@edobrowolska/jk/bxyu-nemo-gym-data-upstream-main-tau3`.
 That branch owns `dump_nemo_gym_data.sh`; Gym clones it, runs the dump script,
 and reads the resulting `nemo_gym_data` JSON files. Override that source with
 `NEMO_GYM_TAU2_BENCH_DATA_REPO_URL` and `NEMO_GYM_TAU2_BENCH_DATA_REF`.
