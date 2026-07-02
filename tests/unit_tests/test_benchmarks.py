@@ -92,6 +92,23 @@ class TestBenchmarkDomain:
 
         assert _benchmark_domain(bench) == "math"
 
+    def test_resolves_domain_defined_on_agent(self, tmp_path: Path) -> None:
+        # `domain` can be declared on the agent (responses_api_agents.<agent>.domain) rather than on a
+        # resources server, as the tau2 config does.
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """tau2_agent:
+  responses_api_agents:
+    tau2:
+      entrypoint: app.py
+      domain: agent
+"""
+        )
+        bench = MagicMock()
+        bench.path = config_path
+
+        assert _benchmark_domain(bench) == "agent"
+
 
 class TestSearchBenchmarks:
     # Map each benchmark name to the `domain` its config would resolve to.
@@ -252,6 +269,26 @@ class TestPrepareBenchmark:
         assert exc_info.value.code == 1
         out = " ".join(capsys.readouterr().out.split())
         assert "Inspected server instances ['dummy_agent']" in out
+
+    def test_no_prepare_script_args_does_not_error(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
+            ),
+            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with()
 
     def test_caching_sanity(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)

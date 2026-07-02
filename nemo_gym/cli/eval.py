@@ -21,7 +21,7 @@ from copy import deepcopy
 from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -72,11 +72,12 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
 
 
 def _benchmark_domain(bench: BenchmarkConfig) -> str:
-    """Resolve a benchmark's config to its resources server `domain` (for the domain column and `gym search`).
+    """Resolve a benchmark's config to its `domain` (for the domain column and `gym search`).
 
-    `BenchmarkConfig` flattens away the resources server `domain`, so we re-resolve the config with the
-    same parser `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read
-    the field back out.
+    `BenchmarkConfig` flattens away the `domain`, so we re-resolve the config with the same parser
+    `BenchmarkConfig` uses (so chained `config_paths` / `_inherit_from` are applied) and read the field
+    back out. `domain` may be declared on any server config — a resources server (e.g. `aime24`) or an
+    agent (e.g. `tau2`) — so we scan every server group.
     """
     initial_config_dict = OmegaConf.load(bench.path)
     if POLICY_MODEL_KEY_NAME not in initial_config_dict:
@@ -85,20 +86,21 @@ def _benchmark_domain(bench: BenchmarkConfig) -> str:
         )
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
 
-    domain = ""
     for instance_name in resolved:
         instance = resolved[instance_name]
         if not isinstance(instance, (dict, DictConfig)):
             continue
 
-        resources_servers = instance.get("resources_servers")
-        if resources_servers:
-            for rs_config in resources_servers.values():
-                found_domain = (rs_config or {}).get("domain")
+        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
+            servers = instance.get(group_key)
+            if not servers:
+                continue
+            for server_config in servers.values():
+                found_domain = (server_config or {}).get("domain")
                 if found_domain:
-                    domain = str(found_domain)
+                    return str(found_domain)
 
-    return domain
+    return ""
 
 
 def list_benchmarks() -> None:
@@ -185,17 +187,21 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     num_prepare_benchmark_processes: int = Field(
         default=1, description="Number of processes to parallelize benchmark preparation"
     )
+    prepare_script_args: Dict[str, Any] = Field(
+        default_factory=dict, description="Arguments forwarded to the benchmark's prepare() function"
+    )
 
 
 def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
-    (benchmark_config, prepare_module_path) = args
+    prepare_script_args: Dict[str, Any]
+    (benchmark_config, prepare_module_path, prepare_script_args) = args
 
     print(f"Preparing benchmark: {benchmark_config.name}")
 
     module = importlib.import_module(prepare_module_path)
-    output_fpath = module.prepare()
+    output_fpath = module.prepare(**prepare_script_args)
     if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
         raise ConfigError(
             f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
@@ -284,7 +290,7 @@ def prepare_benchmark() -> None:
             already_prepared.append(benchmark_config)
             continue
 
-        validated.append((benchmark_config, prepare_module_path))
+        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
