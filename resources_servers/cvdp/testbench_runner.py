@@ -13,16 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Apptainer verification harness.
+"""Apptainer testbench runner.
 
 This module owns the *mechanism* of CVDP verification: translating a dataset's
-docker-compose harness into Apptainer calls and executing it in a sandbox. The
-resources server (``app.py``) owns the *policy* (the HTTP contract and reward
-scoring) and delegates execution to :class:`HarnessRunner`.
+docker-compose test harness (the cocotb testbench + compose file each task ships)
+into Apptainer calls and executing it in a sandbox. The resources server
+(``app.py``) owns the *policy* (the HTTP contract and reward scoring) and
+delegates execution to :class:`TestbenchRunner`.
+
+Named for what it runs — CVDP's per-task *test harness* — and deliberately kept
+distinct from the "harness" concept on the agent side (a coding agent driven by
+``responses_api_agents/cvdp_agent/``).
 
 Layout:
 - module-level pure functions: compose -> Apptainer translation (stateless).
-- :class:`HarnessRunner`: stateful executor (SIF cache, per-image locks, the
+- :class:`TestbenchRunner`: stateful executor (SIF cache, per-image locks, the
   lazily-built sandbox provider).
 """
 
@@ -279,7 +284,7 @@ def _build_command(entrypoint: Any, command: Any) -> List[str]:
 # ----------------------------
 
 
-class HarnessRunner:
+class TestbenchRunner:
     """Runs a dataset's docker-compose harness inside Apptainer.
 
     Owns the SIF cache, per-image pull/build locks, and the lazily-constructed

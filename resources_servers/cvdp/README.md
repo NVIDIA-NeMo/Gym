@@ -14,15 +14,22 @@ JSONL entry so the server is self-contained.
 
 Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benchmark):
 
-1. Obtain the candidate RTL: grade the files the agent wrote on disk (`rtl_files` in the verify request, agentic flow) when present, otherwise parse the model's text response via `ModelHelpers.parse_model_response()`
+1. Obtain the candidate RTL: grade the files the harness wrote on disk (`rtl_files` in the verify request, sandboxed-harness flow) when present, otherwise parse the model's text response via `ModelHelpers.parse_model_response()`
 2. Write harness files to temp workspace — applies image placeholder substitutions
 3. Write extracted RTL to `workdir/rtl/`
 4. For each service in `docker-compose.yml`, pull the Docker image as a cached SIF file and run it through the Apptainer sandbox provider (`instance start` + `exec`) with `--bind` mounts for `rtl/`, `verif/`, `docs/`, `src/`, `rundir/`
 5. Exit code `0` across all services → reward `1.0`; any failure → reward `0.0`
 
-Code layout: `app.py` owns the HTTP `verify` contract and reward scoring; the sandbox execution (docker-compose → Apptainer translation, SIF cache, provider lifecycle) lives in `harness.py`'s `HarnessRunner`.
+### Code layout: `app.py` vs `testbench_runner.py`
 
-> **Note:** Both the verification harness here and the agentic agent share the same `ApptainerProvider`. Because `apptainer instance start` launches a long-lived instance, the provider starts it in "daemonize" mode (captures output to temp files and waits only for the foreground process) so the call returns immediately instead of blocking until the instance exits. This is internal to `create()` — nothing to configure here. See the [provider README](../../nemo_gym/sandbox/providers/apptainer/README.md#why-create-runs-instance-start-in-daemonize-mode).
+The verifier is split by concern — **contract/policy vs execution mechanism**:
+
+- `app.py` owns the **policy**: the HTTP `verify` contract, the request/response schemas, category routing, and how an answer becomes a reward (BLEU/ROUGE for code-comprehension, pass/fail for code-generation).
+- `testbench_runner.py`'s `TestbenchRunner` owns the **mechanism**: docker-compose → Apptainer translation, the SIF cache, per-image locks, and the sandbox-provider lifecycle that actually runs the test.
+
+Keeping execution in `testbench_runner.py` lets `app.py` stay focused on the contract and scoring, and isolates the stateful/heavy sandbox machinery (which is also what the agent side reuses via `ApptainerProvider`). It's named for what it runs — CVDP's per-task **test harness** (a cocotb testbench + `docker-compose.yml`), mirroring the execution path in `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benchmark) — and deliberately avoids the name "harness" so it doesn't collide with the coding-**harness** concept on the agent side.
+
+> **Note:** Both the verification harness here and the sandboxed-harness agent share the same `ApptainerProvider`. Because `apptainer instance start` launches a long-lived instance, the provider starts it in "daemonize" mode (captures output to temp files and waits only for the foreground process) so the call returns immediately instead of blocking until the instance exits. This is internal to `create()` — nothing to configure here. See the [provider README](../../nemo_gym/sandbox/providers/apptainer/README.md#why-create-runs-instance-start-in-daemonize-mode).
 
 ## Configuration
 
@@ -47,53 +54,99 @@ eda_sim_image: cvdp-cadence-verif:latest
 
 ## Agents
 
-There are two ways to drive this resources server:
+There are two ways to drive this resources server. Both use a Gym agent — they differ in **how the candidate RTL is produced and graded**:
 
-- **Non-agentic** (`cvdp_agent`, `responses_api_agents/cvdp_agent/app.py`, config `configs/cvdp_agent.yaml`): the model emits the RTL directly in its text response; the server parses it out and runs the harness.
-- **Agentic** (`cvdp_agent_agentic`, `responses_api_agents/cvdp_agent/agentic_app.py`, config `configs/cvdp_agent_agentic.yaml`): runs Claude Code **inside** the EDA sim container so it can edit files on disk and self-test with the in-container EDA tools, then reports the files it wrote back to the server as `rtl_files` for grading. See `[responses_api_agents/cvdp_agent/](../../responses_api_agents/cvdp_agent/)`.
+- **Direct generation** (`cvdp_agent`, `responses_api_agents/cvdp_agent/app.py`, config `configs/cvdp_agent.yaml`): the model emits the RTL inline in its response; the server parses it out (`_parse_model_response`) and runs the harness. A single completion — no tools, no file editing.
+- **Sandboxed harness** (`cvdp_agent_generic_*`, `responses_api_agents/cvdp_agent/agentic_generic.py`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a **first-class, config-selected unit** — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the illustrated default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script (no agent code changes). See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
 
-### Agentic agent settings (`configs/cvdp_agent_agentic.yaml`)
+### Sandboxed harness settings (`configs/cvdp_agent_generic_claude.yaml`)
 
+| Field                 | Default                                       | Description                                                                                          |
+| --------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `agent_server_module` | `responses_api_agents.claude_code_agent.app`  | Python module of the Gym harness agent booted inside the sandbox                                     |
+| `agent_server_class`  | `ClaudeCodeAgent`                             | Harness agent class                                                                                  |
+| `agent_config_class`  | `ClaudeCodeAgentConfig`                       | Harness agent config class                                                                           |
+| `agent_kwargs`        | `{}`                                          | Passed straight into the harness config class; keys must be valid fields on it (Claude: `model`, `anthropic_base_url`, `anthropic_api_key`, `max_turns`) |
+| `image`               | `${cvdp_sim_image}`                           | Sandbox image the harness runs inside. Any container ref works: a bare registry ref (`ghcr.io/hdl/sim/osvb`, `nvidia/cvdp-sim:v1.0.0`, …), an explicit `.sif` path, or a `docker://`/`oras://` uri. A bare ref is resolved to a cached `.sif` under `~/.cache/nemo-gym/sif/`, pulling it on first use; only prebuild it manually if the image exists locally-only — see below |
+| `sandbox_provider`    | `{apptainer: {create: {mount_point: /code, extra_start_args: [--writable-tmpfs]}}}` | Sandbox backend (single-key provider config). `mount_point` must match `container_workdir` (writable bind); `--writable-tmpfs` makes the rest of the container writable |
+| `deps_provision`      | `bind`                                        | `bind` = mount a portable deps prefix into the sandbox; `baked` = deps already in the image          |
+| `container_workdir`   | `/code`                                       | Workspace mount point + cwd inside the container (keep equal to `mount_point`)                       |
+| `model_server`        | `policy_model`                                | Gym model server reference                                                                           |
+| `timeout`             | `900`                                         | Per-task wall-clock budget (seconds)                                                                 |
+| `concurrency`         | `4`                                           | Max concurrent agent runs                                                                            |
 
-| Field                | Default                   | Description                                                                                    |
-| -------------------- | ------------------------- | ---------------------------------------------------------------------------------------------- |
-| `model`              | `${anthropic_model_name}` | Claude model used inside the container                                                         |
-| `anthropic_api_key`  | `${anthropic_api_key}`    | API key for Claude (set via env.yaml)                                                          |
-| `anthropic_base_url` | `${anthropic_base_url}`   | Anthropic-compatible endpoint                                                                  |
-| `sim_image`          | `nvidia/cvdp-sim:v1.0.0`  | EDA sim image Claude runs inside (pulled/converted to a cached `.sif`)                         |
-| `sif_path`           | `null`                    | Explicit `.sif` to use instead of pulling `sim_image`                                          |
-| `sif_cache_dir`      | `""`                      | SIF cache dir (defaults to `~/.cache/nemo-gym/sif`)                                            |
-| `claude_node_dir`    | `""`                      | Host Node+Claude prefix to bind into the container (defaults to a built-in self-contained one) |
-| `container_workdir`  | `/code`                   | Workspace mount point + cwd + `HOME` inside the container                                      |
-| `max_turns`          | `30`                      | Max Claude Code turns                                                                          |
-| `timeout`            | `900`                     | Per-task wall-clock budget (seconds)                                                           |
-| `concurrency`        | `4`                       | Max concurrent agent runs                                                                      |
-| `max_context_tokens` | `1000000`                 | Sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` inside the container                                     |
+The `agent_server_*` block selects **which** harness to boot; `agent_kwargs` are the knobs for **that specific harness** (so the valid keys depend on the harness's config class). To swap harnesses, change the `agent_server_*` block + `agent_kwargs` and provide a matching `setup_scripts/<key>_deps.sh`. A Hermes example is shipped at `configs/cvdp_agent_generic_hermes.yaml`.
 
+The first run for a harness downloads and caches its software (portable Python/Node + the harness CLI) into a deps prefix, so it needs network once; later runs are offline-fast.
 
-`system_prompt`, `allowed_tools`, `disallowed_tools`, and `claude_code_version` are inherited Claude Code knobs (leave `null` for defaults).
+**Sandbox image:** `cvdp_sim_image` is any container ref — a bare registry ref, an explicit
+`.sif` path, or a `docker://`/`oras://` uri. Both the sandboxed-harness agent and this verifier
+resolve a bare ref the same way: to a cached `.sif` under `~/.cache/nemo-gym/sif/` (same
+naming convention, `<ref with / and : replaced by _>.sif`), so one value works on both sides.
 
-Add the Claude settings to your repo-root `env.yaml`:
+- **Registry-hosted image (the common case):** point it at anything pullable — the CVDP default
+  `nvidia/cvdp-sim:v1.0.0`, the open-source simulator `ghcr.io/hdl/sim/osvb`, an `nvcr.io` image,
+  etc. On first use the resolver runs `apptainer pull docker://<ref>` into the cache automatically;
+  later runs are offline-fast. No manual prebuild needed.
+- **Local-only image (built yourself, never pushed):** `apptainer pull docker://…` can't reach an
+  image that only exists in your local Docker daemon, so prebuild it into the cache once with the
+  conventional name (this is only required for `nvidia/cvdp-sim:v1.0.0` if you built it locally per
+  [Build the Open-Source Simulation Image](#build-the-open-source-simulation-image) rather than
+  pulling it):
+
+  ```bash
+  apptainer build ~/.cache/nemo-gym/sif/nvidia_cvdp-sim_v1.0.0.sif docker-daemon://nvidia/cvdp-sim:v1.0.0
+  ```
+
+Add the harness settings to your repo-root `env.yaml` (Claude example). Set `cvdp_sim_image` to
+whatever image you want the harness to run inside — e.g. `ghcr.io/hdl/sim/osvb` to use the
+open-source simulator with no prebuild:
 
 ```yaml
 anthropic_model_name: <claude-model>
 anthropic_api_key: <your-api-key>
 anthropic_base_url: https://api.anthropic.com
+cvdp_sim_image: ghcr.io/hdl/sim/osvb   # or nvidia/cvdp-sim:v1.0.0, an .sif path, a docker:// uri, …
 ```
 
-To run the agentic variant, swap the agent config in and target the agent by name (no separate model server — the agent calls Claude itself):
+### Run the sandboxed-harness variant
+
+**Step 1 — Start servers** (loads the harness agent config; `apptainer` must be installed):
 
 ```bash
-ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent_agentic.yaml]"
-
-ng_collect_rollouts \
-    +agent_name=cvdp_agent_agentic \
-    +input_jsonl_fpath=resources_servers/cvdp/data/<dataset>.jsonl \
-    +output_jsonl_fpath=results/rollouts.jsonl \
-    +num_repeats=5 \
-    +num_samples_in_parallel=4 \
-    "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_agents/cvdp_agent/configs/cvdp_agent_agentic.yaml]"
+gym env start \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
+    --resources-server cvdp \
+    --model-type vllm_model
 ```
+
+**Step 2 — Collect rollouts** (`--agent` is the config's top-level name):
+
+```bash
+gym eval run --no-serve \
+    --agent cvdp_agent_generic_claude \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
+    --input resources_servers/cvdp/data/<dataset>.jsonl \
+    --output results/rollouts.jsonl \
+    --num-repeats 5 \
+    --concurrency 4 \
+    --resources-server cvdp \
+    --model-type vllm_model \
+    --resume
+```
+
+**Step 3 — Generate report:**
+
+```bash
+python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \
+    --rollouts  results/rollouts.jsonl \
+    --output    results/report/ \
+    --model     cvdp_agent_generic_claude \
+    --dataset   <original_cvdp_dataset>.jsonl \
+    --k         1
+```
+
+To run a different harness, swap `cvdp_agent_generic_claude` for another config (e.g. `cvdp_agent_generic_hermes`) in the commands above.
 
 ## Build the Open-Source Simulation Image
 

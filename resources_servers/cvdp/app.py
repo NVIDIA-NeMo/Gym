@@ -22,10 +22,10 @@ scored with BLEU/ROUGE against a reference answer (``_verify_subjective``),
 while code-generation tasks are graded by actually running the task's test
 harness (``_verify_objective``). The objective path either grades the files an
 agent already wrote (``rtl_files``) or parses RTL out of the model's text, then
-delegates execution to :class:`resources_servers.cvdp.harness.HarnessRunner`,
+delegates execution to :class:`resources_servers.cvdp.testbench_runner.TestbenchRunner`,
 which owns the *mechanism* (docker-compose → Apptainer translation, the SIF
-cache, and the sandbox provider). Keeping execution in ``harness.py`` lets this
-file stay focused on the contract and scoring.
+cache, and the sandbox provider). Keeping execution in ``testbench_runner.py``
+lets this file stay focused on the contract and scoring.
 """
 
 import asyncio
@@ -52,7 +52,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.cvdp.harness import HarnessRunner
+from resources_servers.cvdp.testbench_runner import TestbenchRunner
 
 
 _helpers = ModelHelpers()
@@ -166,7 +166,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
         # Sandbox execution (SIF cache, provider, compose translation) lives in
         # the harness runner; this server only owns the HTTP contract + scoring.
-        self._harness = HarnessRunner(self.config)
+        self._harness = TestbenchRunner(self.config)
 
         # Warn if commercial EDA image is not configured.
         # Categories 12, 13, 14 require a commercial EDA image (e.g. Cadence Xcelium).
