@@ -8,9 +8,25 @@ position: 2
 Python 3.12 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
 </Info>
 
-Clone from git to get the latest features and environments. If you intend to use NeMo Gym with NeMo RL, use the latest NGC container.
+Install from PyPI for the quickest setup. Clone from git if you need the latest features and environments, or use a NeMo RL container if you intend to train with NeMo Gym and NeMo RL.
 
 <Tabs>
+<Tab title="PyPI">
+
+```bash
+python3.12 -m pip install nemo-gym
+```
+
+Or with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install nemo-gym
+```
+
+The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.12 -m pip install nemo-gym==0.4.0`.
+
+</Tab>
 <Tab title="Git">
 
 ```bash
@@ -23,9 +39,27 @@ uv sync
 </Tab>
 <Tab title="Container">
 
+Container choice depends on your NeMo Gym version and model recipe. See [RL Framework Compatibility](/reference/rl-framework-compatibility) for the full mapping.
+
+For NeMo Gym **v0.3.0** with the Nemotron 3 Ultra recipe, build the container from the NeMo RL `ultra-v3` branch (there is no pre-built NGC tag for this pairing):
+
+This command uses Docker Buildx and Docker 23+ syntax. By default, Docker builds for your host platform; add `--platform` only if you need to target a different architecture.
+
 ```bash
-docker pull nvcr.io/nvidia/nemo-rl:v0.5.0.nemotron_3_super
+git clone https://github.com/NVIDIA-NeMo/RL
+cd RL
+git checkout ultra-v3
+# See build options in the Nemotron 3 Ultra guide:
+# https://github.com/NVIDIA-NeMo/RL/blob/ultra-v3/docs/guides/nemotron-3-ultra.md#container
+docker buildx build \
+  -f docker/Dockerfile \
+  --target release \
+  -t nemo-rl-ultra:latest \
+  --build-context nemo-rl=. \
+  .
 ```
+
+For other recipes (for example Nemotron 3 Nano or Super), use the NGC container listed in the compatibility table for that recipe.
 
 </Tab>
 </Tabs>
@@ -39,7 +73,7 @@ gym --version
 You should see output like:
 
 ```text
-NeMo Gym v0.3.0
+NeMo Gym v0.4.0
 Python 3.12.x
 Installation: /path/to/Gym
 ```

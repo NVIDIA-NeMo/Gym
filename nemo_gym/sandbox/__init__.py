@@ -15,6 +15,7 @@
 """Public sandbox API for NeMo Gym."""
 
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
     ExecResult,
     SandboxCreateError,
@@ -49,5 +50,7 @@ __all__ = [
     "get_provider_class",
     "list_providers",
     "register_provider",
+    "resolve_provider_config",
+    "resolve_provider_metadata",
     "rewrite_image",
 ]

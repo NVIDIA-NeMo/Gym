@@ -19,7 +19,7 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-from nemo_gym.cli.eval import _benchmark_extras, _fuzzy_matches, list_benchmarks, prepare_benchmark
+from nemo_gym.cli.eval import _benchmark_domain, _fuzzy_matches, list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
@@ -48,7 +48,7 @@ class TestListBenchmarks:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
             patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={"my_bench": bench}),
-            patch("nemo_gym.cli.eval._benchmark_extras", return_value=("math", ["math_with_judge"])),
+            patch("nemo_gym.cli.eval._benchmark_domain", return_value="math"),
         ):
             list_benchmarks()
         assert json.loads(capsys.readouterr().out) == [
@@ -84,40 +84,52 @@ class TestFuzzyMatches:
         assert not _fuzzy_matches("zzznomatch", "aime24", "math_with_judge")
 
 
-class TestBenchmarkExtras:
-    def test_resolves_domain_and_terms_from_real_config(self) -> None:
+class TestBenchmarkDomain:
+    def test_resolves_domain_from_real_config(self) -> None:
         from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig
 
         bench = BenchmarkConfig.from_config_path(BENCHMARKS_DIR / "aime24" / "config.yaml")
-        domain, terms = _benchmark_extras(bench)
 
-        assert domain == "math"
-        # The resources server's inner name and the dataset name are recovered for search.
-        assert "math_with_judge" in terms
-        assert "aime24" in terms
+        assert _benchmark_domain(bench) == "math"
+
+    def test_resolves_domain_defined_on_agent(self, tmp_path: Path) -> None:
+        # `domain` can be declared on the agent (responses_api_agents.<agent>.domain) rather than on a
+        # resources server, as the tau2 config does.
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """tau2_agent:
+  responses_api_agents:
+    tau2:
+      entrypoint: app.py
+      domain: agent
+"""
+        )
+        bench = MagicMock()
+        bench.path = config_path
+
+        assert _benchmark_domain(bench) == "agent"
 
 
 class TestSearchBenchmarks:
-    # Map each benchmark name to the (domain, extra terms) its config would resolve to.
-    # As in the real resolver, `domain` is also included among the search terms.
-    EXTRAS = {
-        "aime24": ("math", ["aime24_math_resources_server", "math_with_judge", "aime24", "math"]),
-        "gpqa_diamond": ("science", ["gpqa_resources_server", "gpqa", "gpqa_diamond", "science"]),
+    # Map each benchmark name to the `domain` its config would resolve to.
+    DOMAINS = {
+        "aime24": "math",
+        "gpqa_diamond": "science",
     }
 
     def _bench(self, key: str):
         bench = MagicMock(agent_name="my_agent", num_repeats=1)
-        bench.config_key = key  # let the patched _benchmark_extras find the right entry
+        bench.config_key = key  # let the patched _benchmark_domain find the right entry
         return bench
 
     def _benchmarks(self) -> dict:
-        return {name: self._bench(name) for name in self.EXTRAS}
+        return {name: self._bench(name) for name in self.DOMAINS}
 
     def _run(self, query: str, benchmarks: dict, capsys) -> str:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"query": query})),
             patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value=benchmarks),
-            patch("nemo_gym.cli.eval._benchmark_extras", side_effect=lambda b: self.EXTRAS[b.config_key]),
+            patch("nemo_gym.cli.eval._benchmark_domain", side_effect=lambda b: self.DOMAINS[b.config_key]),
         ):
             list_benchmarks()
         return capsys.readouterr().out
@@ -133,11 +145,10 @@ class TestSearchBenchmarks:
         assert "gpqa_diamond" in out
         assert "aime24" not in out
 
-    def test_query_matches_resource_server(self, capsys) -> None:
-        # "judge" only appears via aime24's resources server name.
-        out = self._run("judge", self._benchmarks(), capsys)
-        assert "aime24" in out
-        assert "gpqa_diamond" not in out
+    def test_query_does_not_match_resource_server(self, capsys) -> None:
+        # "judge" appears only in a resources server name, which is no longer searched:
+        # matching is restricted to the benchmark name and domain.
+        assert "No benchmarks match 'judge'" in self._run("judge", self._benchmarks(), capsys)
 
     def test_query_no_match_message(self, capsys) -> None:
         assert "No benchmarks match 'zzz'" in self._run("zzz", self._benchmarks(), capsys)
@@ -185,7 +196,7 @@ class TestPrepareBenchmark:
             prepare_benchmark()
             mock_module.prepare.assert_called_once()
 
-    def test_missing_prepare_py(self, tmp_path: Path) -> None:
+    def test_missing_prepare_py(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
         (bench_dir / "prepare.py").unlink()
 
@@ -198,10 +209,13 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
         ):
-            with pytest.raises(RuntimeError, match="The following benchmarks are missing a valid prepare script"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "The following benchmarks are missing a valid prepare script" in out
 
-    def test_missing_prepare_function(self, tmp_path: Path) -> None:
+    def test_missing_prepare_function(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
 
         mock_module = MagicMock()
@@ -216,13 +230,13 @@ class TestPrepareBenchmark:
             patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
-            with pytest.raises(
-                AssertionError,
-                match="Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config",
-            ):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config" in out
 
-    def test_no_benchmark_in_config_paths(self) -> None:
+    def test_no_benchmark_in_config_paths(self, capsys) -> None:
         with (
             patch(
                 "nemo_gym.cli.eval.get_global_config_dict",
@@ -230,10 +244,13 @@ class TestPrepareBenchmark:
             ),
             patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", return_value={}),
         ):
-            with pytest.raises(AssertionError, match="No benchmark config found"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "No benchmark config found" in out
 
-    def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path) -> None:
+    def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path, capsys) -> None:
         # A server instance is present but declares no `benchmark` dataset; the error should name it
         # so the user can see what was inspected.
         config = {
@@ -247,8 +264,11 @@ class TestPrepareBenchmark:
             },
         }
         with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
-            with pytest.raises(AssertionError, match=r"Inspected server instances \['dummy_agent'\]"):
+            with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
+        assert exc_info.value.code == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Inspected server instances ['dummy_agent']" in out
 
     def test_no_prepare_script_args_does_not_error(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)

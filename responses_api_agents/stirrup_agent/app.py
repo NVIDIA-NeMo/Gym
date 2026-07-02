@@ -22,6 +22,7 @@ construction, scoring, response building) is delegated to a
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import sys
@@ -29,7 +30,7 @@ import tempfile
 import time
 from asyncio import Semaphore
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import ray
 from fastapi import Request
@@ -130,6 +131,77 @@ _USER_CODE_PATH_SUBSTRINGS = (
     "responses_api_agents/",
     "/stirrup/",
 )
+
+# Bookkeeping artifact ``_run_stirrup_agent`` persists into the task directory
+# *immediately after* a Stirrup session runs to completion (see the
+# ``persist_deliverables_dir`` block). Its presence is the signal that the
+# rollout finished: the persist block only runs once ``session.run()`` has
+# returned, so a task dir containing this file definitively reached the end of
+# its agent loop — whether or not it managed to produce a deliverable.
+_FINISH_MARKER_FILE = "finish_params.json"
+
+
+def _task_finished(deliverables_dir: Optional[str]) -> bool:
+    """Return True if the task's rollout ran to completion.
+
+    Finishing is signaled solely by ``finish_params.json``, the bookkeeping
+    artifact ``_run_stirrup_agent`` persists right after a Stirrup session
+    completes. A finished task is NOT re-run even when it produced no deliverable
+    files: the model simply could not make a deliverable, which is a legitimate
+    (typically low-scoring) outcome rather than an unfinished run. Only a task
+    that never persisted ``finish_params.json`` — killed by Slurm/OOM, or crashed
+    before the persist block ran — is treated as incomplete and re-dispatched by
+    ``rerun_incomplete``.
+    """
+    if not deliverables_dir:
+        return False
+    root = Path(deliverables_dir)
+    if not root.is_dir():
+        return False
+    return (root / _FINISH_MARKER_FILE).is_file()
+
+
+def _reference_set_key(reference_ids: Optional[Sequence[str]]) -> Optional[str]:
+    """Stable short key identifying a judgement's reference set, or None.
+
+    A GDPVal judgement is only valid for the exact reference subset it scored
+    against, and multi-stage ELO judges the *same* deliverable against a
+    *different* subset each stage. So a cached judgement must be keyed by that
+    subset. Returns a short hex digest of the sorted, de-duplicated
+    ``reference_ids`` (order-independent), or ``None`` when no references are in
+    play (rubric mode, or comparison mode where every request scores against the
+    same fixed set — a single unkeyed cache slot is correct there).
+    """
+    if not reference_ids:
+        return None
+    normalized = ",".join(sorted({str(r) for r in reference_ids}))
+    return hashlib.sha1(normalized.encode()).hexdigest()[:12]
+
+
+def _verify_cache_path(
+    deliverables_dir: Optional[str],
+    reference_ids: Optional[Sequence[str]] = None,
+) -> Optional[Path]:
+    """Path of the cached ``/verify`` result for a task+repeat.
+
+    Stored as a *sibling* of the deliverables directory (e.g. next to
+    ``repeat_0/``, not inside it) so it is never picked up by the resources
+    server, which reads every file *inside* ``deliverables_dir`` as deliverable
+    content. ``rerun_incomplete`` uses this so an already-judged task can return
+    its cached judgement instead of being re-judged.
+
+    When ``reference_ids`` identify a specific reference subset (multi-stage ELO),
+    the filename is keyed by that subset so each stage's judgement is cached (and
+    reused) independently — a resumed stage that reselects the same references
+    hits the cache, a different subset re-judges. Without references the single
+    ``_verify_response.json`` slot is used (rubric / fixed-reference comparison).
+    """
+    if not deliverables_dir:
+        return None
+    d = Path(deliverables_dir)
+    key = _reference_set_key(reference_ids)
+    suffix = f"_verify_response_{key}.json" if key else "_verify_response.json"
+    return d.parent / f"{d.name}{suffix}"
 
 
 def _has_user_code_frame(exc: BaseException) -> bool:
@@ -307,7 +379,7 @@ async def _run_stirrup_agent(
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
-    max_turns: int = 100,
+    max_turns: int = 250,
     temperature: float = 0.6,
     max_tokens: int = 262144,
     reference_files: Optional[list] = None,
@@ -399,6 +471,19 @@ async def _run_stirrup_agent(
         mod = importlib.import_module(module_path)
         provider_cls = getattr(mod, class_name)
         exec_provider = provider_cls(**(exec_provider_kwargs or {}))
+    elif is_gdpval:
+        # GDPval must execute inside the Apptainer sandbox (see
+        # GDPValTask.get_exec_provider). The local backend runs on the
+        # evaluation container, which intentionally does NOT carry the heavy
+        # GDPval sandbox dependencies (TeX Live, the full data/ML/document
+        # stack, CPU torch, ...) — installing them here would bloat the eval
+        # image by many GB. Refuse rather than run tasks in a crippled env.
+        raise RuntimeError(
+            "GDPval requires the Apptainer sandbox but no exec provider was configured; "
+            "set `gdpval_container_path` to a .sif built from containers/gdpval.def. The "
+            "local backend is rejected because the sandbox dependencies are not installed "
+            "in the evaluation container."
+        )
     else:
         exec_provider = _SandboxTolerantExecProvider()
 
@@ -431,6 +516,16 @@ async def _run_stirrup_agent(
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
+    if is_gdpval:
+        # GDPval-AA v2 early-exit: expose a second finish tool the model can call
+        # instead of ``finish`` when it cannot complete the task (no files).
+        # Requires stirrup >= 0.1.9 (multiple finish tools, PR #49).
+        from responses_api_agents.stirrup_agent.finish_tool_coercing import (
+            ABANDON_FINISH_TOOL,
+            COERCING_FINISH_TOOL,
+        )
+
+        agent_kwargs["finish_tool"] = [COERCING_FINISH_TOOL, ABANDON_FINISH_TOOL]
     agent = NeMoAgent(**agent_kwargs)
 
     start_time = time.time()
@@ -691,7 +786,7 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Name of the task strategy to use (e.g. 'gdpval'). Must match a key in the task registry.",
     )
 
-    agent_max_turns: int = Field(default=100, description="Maximum turns for the Stirrup agent")
+    agent_max_turns: int = Field(default=250, description="Maximum turns for the Stirrup agent")
     concurrency: int = Field(default=32, description="Maximum concurrent runs")
     temperature: float = Field(default=0.6, description="Sampling temperature for the agent model")
 
@@ -740,6 +835,26 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "with no cached deliverable directory is reported as skipped). Use this to (re)score a "
         "deliverable set produced by an earlier run without paying the rollout cost again. "
         "Mutually exclusive with execute_only.",
+    )
+    rerun_incomplete: bool = Field(
+        default=False,
+        description="Task re-run mode. When True, the per-task cache under "
+        "persist_deliverables_dir/task_<task_id>/repeat_<rollout_index>/ is the source of truth "
+        "for whether a task already FINISHED. A task counts as finished once it has persisted the "
+        "finish marker finish_params.json, which only happens after "
+        "its Stirrup session ran to completion — even if the model produced no deliverable files "
+        "(that is a finished, legitimately low-scoring outcome, not an unfinished run). For each "
+        "task: if it already finished, the (expensive) Stirrup rollout is SKIPPED — in the full "
+        "rollout+judge mode an already-judged task returns its cached /verify result and an "
+        "un-judged one is scored once, while in execute_only mode the cached payload is returned "
+        "as-is. If the task never finished (no finish marker), it is rolled out again; should the "
+        "fresh rollout still not persist a finish marker, the result is routed as a retryable "
+        "'incomplete' failure (sidecar, not the main rollouts jsonl) so a subsequent "
+        "resume_from_cache run re-dispatches only those tasks. This lets you re-run just the tasks "
+        "that did not finish without redoing rollouts on every task. Combined with judge_only, it "
+        "instead re-judges only the tasks whose judgement was not cached previously (tasks with a "
+        "cached /verify result are returned as-is). Requires persist_deliverables_dir; works with "
+        "the full rollout+judge mode, execute_only, and judge_only.",
     )
     model_id: Optional[str] = Field(
         default=None,
@@ -869,6 +984,39 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             print(
                 "Stirrup agent running in judge_only mode: tasks will NOT be executed; the resources "
                 f"server will score cached deliverables under {self.config.persist_deliverables_dir!r}.",
+                flush=True,
+            )
+        # rerun_incomplete drives off the per-task cache, so it needs a populated
+        # persist_deliverables_dir to read from.
+        if self.config.rerun_incomplete and not self.config.persist_deliverables_dir:
+            raise ValueError(
+                "rerun_incomplete=True requires persist_deliverables_dir to be set — the per-task "
+                "finish marker / cached judgement there is the source of truth for what still needs "
+                "running."
+            )
+        if self.config.rerun_incomplete and self.config.judge_only:
+            print(
+                "Stirrup agent running in rerun_incomplete + judge_only mode: tasks that already have "
+                f"a cached judge result under {self.config.persist_deliverables_dir!r} are returned "
+                "as-is; only tasks whose judgement was not cached are (re-)scored via /verify.",
+                flush=True,
+            )
+        elif self.config.rerun_incomplete and self.config.execute_only:
+            print(
+                "Stirrup agent running in rerun_incomplete + execute_only (task-only) mode: for each "
+                f"task that already finished (a finish marker is cached under "
+                f"{self.config.persist_deliverables_dir!r}) the agent will skip the rollout and return "
+                "its cached deliverables without judging; tasks that never finished are rolled out "
+                "again.",
+                flush=True,
+            )
+        elif self.config.rerun_incomplete:
+            print(
+                "Stirrup agent running in rerun_incomplete mode: for each task that already finished "
+                f"(a finish marker is cached under {self.config.persist_deliverables_dir!r}) the agent "
+                "skips the rollout and, if a cached judge result already exists, returns it as-is; "
+                "only finished tasks without a cached judgement are scored via the judge (/verify). "
+                "Tasks that never finished are rolled out again and then judged.",
                 flush=True,
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
@@ -1054,6 +1202,21 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
 
+            # Per-request opt-in to judge an already-cached deliverable instead of
+            # re-running the policy. Unlike server-wide judge_only, it falls back
+            # to a normal rollout when no deliverable is cached yet.
+            reuse_requested = bool(body_dict.get("reuse_cached_deliverable"))
+            deliverable_cached = (
+                deliverables_dir is not None
+                and Path(deliverables_dir).is_dir()
+                and any(Path(deliverables_dir).iterdir())
+            )
+            # The reference subset this request is judged against (multi-stage ELO
+            # tags each row with the stage's references; empty for rubric / fixed-
+            # reference comparison). A cached judgement is only valid for the exact
+            # subset it scored, so it keys the rerun_incomplete verify cache.
+            reference_ids = body_dict.get("reference_ids") or None
+
             if self.config.judge_only:
                 # Judge-only mode: do NOT run the agent. Score the pre-existing
                 # cached deliverables at ``deliverables_dir``. A task whose
@@ -1076,6 +1239,71 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         skipped=True,
                         error_class="skipped",
                     )
+                # rerun_incomplete + judge_only: skip tasks already judged. If a
+                # cached /verify result exists (for this reference subset), return
+                # it directly instead of re-running the judge; otherwise fall
+                # through to /verify (which caches the fresh judgement so the next
+                # pass skips it).
+                if self.config.rerun_incomplete:
+                    cached_verify = self._read_cached_verify(deliverables_dir, reference_ids)
+                    if cached_verify is not None:
+                        task_info = self.task_strategy.extract_task_info(existing_metadata)
+                        instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                        print(
+                            f"[stirrup-judge_only-cached-judgement] {instance_hint}: returning cached "
+                            f"/verify result; skipping judge.",
+                            flush=True,
+                        )
+                        return cached_verify
+                response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
+                response_metadata = {}
+            elif self.config.rerun_incomplete and _task_finished(deliverables_dir):
+                # Task re-run mode: this task already ran to completion (a finish
+                # marker is cached), so skip the (expensive) Stirrup rollout and
+                # reuse what is on disk — even if the model produced no deliverable
+                # files (that is a finished, legitimately low-scoring outcome, not
+                # an unfinished run). In execute_only mode the cached payload is
+                # returned as-is below. In the full rollout+judge mode, if the task
+                # was already judged (a cached /verify result exists for this
+                # reference subset), return that judgement directly so it is NOT
+                # re-judged; otherwise score the cached deliverable via /verify once
+                # (using the same placeholder response path judge_only uses, since
+                # no fresh model output exists) and cache the result for next time.
+                #
+                # This also covers multi-stage ELO reuse rows
+                # (reuse_cached_deliverable=True): the cache is keyed by the
+                # request's reference subset, so each stage reuses only a judgement
+                # produced against the SAME references and otherwise re-judges — a
+                # resumed staged run skips only the (task, references) pairs it
+                # already scored.
+                task_info = self.task_strategy.extract_task_info(existing_metadata)
+                instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                if not self.config.execute_only:
+                    cached_verify = self._read_cached_verify(deliverables_dir, reference_ids)
+                    if cached_verify is not None:
+                        print(
+                            f"[stirrup-rerun_incomplete-cached-judgement] {instance_hint}: returning cached "
+                            f"/verify result; skipping rollout and judge.",
+                            flush=True,
+                        )
+                        return cached_verify
+                print(
+                    f"[stirrup-rerun_incomplete-reuse] {instance_hint}: task already finished at "
+                    f"{deliverables_dir}; skipping rollout"
+                    f"{'' if self.config.execute_only else ' (will judge cached deliverable)'}.",
+                    flush=True,
+                )
+                response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
+                response_metadata = {}
+            elif reuse_requested and deliverable_cached:
+                # Reuse a deliverable cached by an earlier stage: skip the policy
+                # rollout and judge the existing deliverable against THIS request's
+                # references (which may differ from the producing stage's set).
+                print(
+                    f"[stirrup-reuse] task_{task_id} repeat_{rollout_index}: "
+                    f"judging cached deliverable at {deliverables_dir}",
+                    flush=True,
+                )
                 response_clean = self._build_judge_only_response(existing_metadata, fixed_params.model)
                 response_metadata = {}
             else:
@@ -1101,6 +1329,35 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
                 response_clean = response.model_copy(update={"metadata": None})
                 response_metadata = response.metadata or {}
+
+                # Task re-run mode: if the fresh rollout returned but never
+                # persisted a finish marker (e.g. the persist block was
+                # interrupted), the task did not actually finish. Route the result
+                # as a retryable 'incomplete' failure (written to the failures
+                # sidecar, not the main rollouts jsonl) so a subsequent
+                # resume_from_cache run re-dispatches just this task. A rollout
+                # that finished but produced no deliverable is NOT incomplete — it
+                # finished, so it falls through to the normal verify/success path.
+                # Only applies when the cache location is determinable
+                # (deliverables_dir set); without it we cannot tell and fall back
+                # to the normal success path.
+                if (
+                    self.config.rerun_incomplete
+                    and deliverables_dir is not None
+                    and not _task_finished(deliverables_dir)
+                ):
+                    task_info = self.task_strategy.extract_task_info(existing_metadata)
+                    instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
+                    reason = f"rerun_incomplete: rollout did not persist a finish marker at {deliverables_dir}"
+                    print(f"[stirrup-incomplete] {instance_hint}: {reason}", flush=True)
+                    return self._build_failed_run_payload(
+                        body_dict=body_dict,
+                        fixed_params=fixed_params,
+                        task_info=task_info,
+                        reason=reason,
+                        skipped=False,
+                        error_class="incomplete",
+                    )
 
             # Task-only execution mode: the deliverables are already cached to
             # ``deliverables_dir`` by ``responses()``. Skip the /verify judge
@@ -1131,7 +1388,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_response)
-                return await get_response_json(verify_response)
+                verify_result = await get_response_json(verify_response)
+                # Task re-run mode: cache the judgement next to the deliverables so
+                # a subsequent rerun_incomplete pass returns it instead of re-judging
+                # this task. The cache is keyed by the reference subset scored, so a
+                # multi-stage ELO run caches each stage's judgement independently
+                # and only replays it for a request against the same references.
+                if self.config.rerun_incomplete:
+                    self._write_cached_verify(deliverables_dir, verify_result, reference_ids)
+                return verify_result
             except Exception as exc:
                 task_info = self.task_strategy.extract_task_info(existing_metadata)
                 failure_class = _classify_verify_failure(exc)
@@ -1148,6 +1413,54 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     skipped=False,
                     error_class=failure_class,
                 )
+
+    def _read_cached_verify(
+        self, deliverables_dir: Optional[str], reference_ids: Optional[Sequence[str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the cached ``/verify`` result for *deliverables_dir*, or None.
+
+        Used by ``rerun_incomplete`` to skip re-judging a task that was already
+        judged. ``reference_ids`` scope the lookup to the judgement produced
+        against that reference subset (multi-stage ELO); omit it for rubric /
+        fixed-reference runs. Returns None on a missing or unreadable cache (the
+        task is then judged afresh).
+        """
+        cache_path = _verify_cache_path(deliverables_dir, reference_ids)
+        if cache_path is None or not cache_path.is_file():
+            return None
+        try:
+            import json as _json
+
+            with cache_path.open("r", encoding="utf-8") as f:
+                return _json.load(f)
+        except Exception as exc:
+            print(f"[stirrup] warning: could not read cached verify result {cache_path}: {exc}", flush=True)
+            return None
+
+    def _write_cached_verify(
+        self,
+        deliverables_dir: Optional[str],
+        verify_result: Dict[str, Any],
+        reference_ids: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Persist *verify_result* next to *deliverables_dir* (best-effort).
+
+        Stored as a sibling file so it is never read by the resources server as
+        deliverable content. ``reference_ids`` key the cache to the reference
+        subset scored (multi-stage ELO), so each stage's judgement is cached
+        independently. Failures are logged but never abort the run.
+        """
+        cache_path = _verify_cache_path(deliverables_dir, reference_ids)
+        if cache_path is None:
+            return
+        try:
+            import json as _json
+
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with cache_path.open("w", encoding="utf-8") as f:
+                _json.dump(verify_result, f)
+        except Exception as exc:
+            print(f"[stirrup] warning: could not write cached verify result {cache_path}: {exc}", flush=True)
 
     def _build_judge_only_response(
         self,
@@ -1208,8 +1521,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
           resume's set-difference on the main jsonl re-dispatches the task.
         - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
           one sidecar entry, never retried.
-        - Otherwise (``legitimate``, ``transient``): sidecar entry per attempt;
-          retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain resume.
+        - Otherwise (``legitimate``, ``transient``, ``incomplete``): sidecar
+          entry per attempt; retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on
+          chain resume.
         """
         if error_class == "timeout_exceeded":
             suffix = "timeout"
@@ -1217,6 +1531,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         elif error_class == "kill_shaped":
             suffix = "killed"
             status_word = "Killed"
+        elif error_class == "incomplete":
+            # rerun_incomplete produced no valid deliverable. Not terminal: a
+            # resume_from_cache run re-dispatches it (capped by max_attempts).
+            suffix = "incomplete"
+            status_word = "Incomplete"
         elif skipped or error_class == "skipped":
             suffix = "skipped"
             status_word = "Skipped"
@@ -1262,8 +1581,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             elif error_class in ("timeout_exceeded", "skipped"):
                 # Sidecar entry written once; chain-hop 2 will not retry.
                 payload[NG_TERMINAL_KEY] = True
-            # 'legitimate' / 'transient': sidecar entry per attempt; retried
-            # by chain-hop up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
+            # 'legitimate' / 'transient' / 'incomplete': sidecar entry per
+            # attempt; retried by chain-hop / resume up to
+            # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
         return payload
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:

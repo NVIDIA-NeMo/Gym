@@ -1,0 +1,190 @@
+---
+title: "Adding a Sandbox Provider"
+description: "Implement and register a sandbox runtime backend for NeMo Gym."
+position: 3
+---
+
+Add a provider when NeMo Gym needs to create sandboxes through a new runtime backend, such as a container service, HPC isolation layer, or in-house execution platform. The public `AsyncSandbox` and `Sandbox` facades stay the same; the provider owns runtime-specific create, command, file transfer, status, and cleanup behavior.
+
+## Provider Contract
+
+Providers implement the `SandboxProvider` protocol from `nemo_gym.sandbox.providers.base`. Keep common caller fields on `SandboxSpec`; put backend-specific options in `SandboxSpec.provider_options`.
+
+```python
+from pathlib import Path
+
+from nemo_gym.sandbox.providers.base import (
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSpec,
+    SandboxStatus,
+)
+
+
+class MySandboxProvider:
+    name = "my_provider"
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        raw = await my_runtime_create(spec)
+        return SandboxHandle(sandbox_id=raw.id, provider_name=self.name, raw=raw)
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        result = await handle.raw.run(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        return SandboxExecResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            return_code=result.return_code,
+        )
+
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        await handle.raw.upload(source_path, target_path)
+
+    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        await handle.raw.download(source_path, target_path)
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        return SandboxStatus.RUNNING
+
+    async def close(self, handle: SandboxHandle) -> None:
+        await handle.raw.stop()
+
+    async def aclose(self) -> None:
+        return None
+```
+
+Provider implementations should preserve the same lifecycle contract as the built-in providers:
+
+- Return a `SandboxHandle` from `create()` only after the sandbox is ready enough to run commands and transfer files.
+- Return command status through `SandboxExecResult` for process exits, including nonzero exits.
+- Raise `SandboxCreateError` or `SandboxCreateVerificationError` for sandbox allocation and readiness failures.
+- Make `close()` safe to call from cleanup paths.
+- Use `aclose()` for provider-scoped resources such as SDK clients.
+
+## Provider Config
+
+Provider constructors receive the single provider-specific mapping from a named sandbox block:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: my-runtime
+  my_provider:
+    connection:
+      endpoint: https://sandbox.example
+    operations:
+      retries: 3
+```
+
+`resolve_provider_config("sandbox", global_config_dict)` returns only the single provider mapping:
+
+```python
+{"my_provider": {"connection": {"endpoint": "https://sandbox.example"}, "operations": {"retries": 3}}}
+```
+
+`resolve_provider_metadata("sandbox", global_config_dict)` returns the optional `default_metadata` block. Agents merge those values into `SandboxSpec.metadata` before provider create, with agent-level metadata taking precedence.
+
+Each named block must contain exactly one non-reserved provider key. The only reserved key today is `default_metadata`.
+
+## Provider Options
+
+Use `SandboxSpec.provider_options` for per-sandbox options that do not belong in the neutral schema. Validate that mapping before allocating runtime resources so bad configs fail early.
+
+```python
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class MyProviderOptions:
+    snapshot_id: str | None = None
+    labels: dict[str, str] | None = None
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any] | None) -> "MyProviderOptions":
+        if options is None:
+            return cls()
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(f"Unknown provider option(s): {', '.join(sorted(unknown))}")
+        return cls(**dict(options))
+```
+
+Then resolve it inside `create()`:
+
+```python
+async def create(self, spec: SandboxSpec) -> SandboxHandle:
+    options = MyProviderOptions.from_mapping(spec.provider_options)
+    ...
+```
+
+This keeps common fields such as `image`, `env`, `files`, `metadata`, and `resources` portable while still giving a provider room for runtime-specific behavior.
+
+## Registry
+
+The registry in `nemo_gym.sandbox.providers.registry` maps provider names from config to provider classes. Lookup order is:
+
+1. Explicit in-process registration with `register_provider()`.
+2. Built-in providers shipped with NeMo Gym.
+3. Installed Python entry points in the `nemo_gym.sandbox_providers` group.
+
+External packages and tests can register a provider directly:
+
+```python
+from nemo_gym.sandbox.providers.registry import register_provider
+
+
+register_provider("my_provider", MySandboxProvider)
+```
+
+In-tree built-in providers should use a lazy loader in `registry.py` so importing `nemo_gym.sandbox` does not eagerly import optional provider dependencies.
+
+```python
+def _load_my_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.my_provider import MySandboxProvider
+
+    return MySandboxProvider
+
+
+_BUILTIN_PROVIDER_LOADERS["my_provider"] = _load_my_provider
+```
+
+Out-of-tree packages can publish a provider entry point in their `pyproject.toml`:
+
+```toml
+[project.entry-points."nemo_gym.sandbox_providers"]
+my_provider = "my_pkg.provider:MyProvider"
+```
+
+Two entry points with the same provider name raise an error because selection would be nondeterministic. An entry point shadowed by a registered provider or a built-in provider is warned and ignored.
+
+After registration, callers select the provider with a single-key provider config:
+
+```python
+provider_config = {
+    "my_provider": {
+        "provider_setting": "value",
+    }
+}
+```
+
+## Provider Pages
+
+Each provider page should use the same shape so users can compare backends quickly:
+
+- Setup and optional dependencies
+- Named provider config block
+- `provider_options` accepted by `SandboxSpec`
+- Resource mapping and isolation properties
+- Minimal `gym env start` or local first-run example
+- Provider-specific operational notes

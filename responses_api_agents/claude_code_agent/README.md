@@ -39,7 +39,9 @@ Every Gym model server now exposes `POST /v1/messages` (a default Messages ↔ R
 `reasoning_gym_claude_code_agent_model_server.yaml` wires the agent's `model_server` ref to `policy_model`. Compose it with any model server (here a vLLM serving `policy_model`):
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+  --resources-server reasoning_gym/reasoning_gym_claude_code_agent_model_server \
+  --model-type vllm_model
 ```
 
 This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `anthropic_*` vars.
@@ -56,14 +58,14 @@ gym eval run --no-serve \
     --limit 1
 ```
 
-For the model-server config above, use `+agent_name=reasoning_gym_claude_code_agent_model_server`.
+For the model-server config above, use `--agent reasoning_gym_claude_code_agent_model_server`.
 
 ### Smoke test
 
-Check the `/v1/messages` proxy and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `ng_run` log (`'url': 'http://127.0.0.1:<port>'`):
+Check the `/v1/messages` proxy and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`):
 
 ```bash
-ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+gym env start --model-type vllm_model \
   +policy_base_url=https://integrate.api.nvidia.com/v1 \
   '+policy_api_key=${oc.env:NVIDIA_API_KEY}' +policy_model_name=meta/llama-3.1-8b-instruct
 
@@ -141,6 +143,55 @@ The agent defaults to a plain `bare` CLI call for simplicity and reproducibility
 - **Layer custom settings:** set `settings` to a JSON file path. It is merged into the per-run `CLAUDE_CONFIG_DIR/settings.json` (env shallow-merged onto the telemetry-disabling defaults).
 
 The per-run `CLAUDE_CONFIG_DIR` is created fresh for each request and removed afterward, so opted-in content is staged per rollout and does not leak between runs. This is the staging seam reused by skills evaluation (placing skills under `CLAUDE_CONFIG_DIR/skills/`).
+
+## Skills evaluation
+
+Skills are evaluated as a run-level variable, not a dataset field — the same skill-agnostic dataset is reused across skill variants (mirroring how `prompt_config` works). You point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CLAUDE_CONFIG_DIR/skills/` so Claude Code's native discovery picks them up. When skills are present, `--bare` is forced off for that request regardless of the `bare` config.
+
+Expected layout (each skill is a directory with a `SKILL.md`):
+
+```
+skills/variant_a/
+├── cot_enhanced/
+│   └── SKILL.md
+├── tool_focused/
+│   ├── SKILL.md
+│   └── references/
+│       └── api_spec.md
+└── baseline/
+    └── SKILL.md
+```
+
+Compare two variants over the same dataset by changing only `skills.path`:
+
+```bash
+gym eval run --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output rollouts_variant_a.jsonl \
+    +skills.path=skills/variant_a/
+
+gym eval run --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output rollouts_variant_b.jsonl \
+    +skills.path=skills/variant_b/
+```
+
+Each rollout result is stamped with a `skills_ref` for provenance and grouping during reward profiling:
+
+```json
+{
+  "reward": 1.0,
+  "skills_ref": {
+    "path": "skills/variant_a/",
+    "hash": "a1b2c3…",
+    "skills": [{"name": "cot_enhanced", "description": "..."}]
+  }
+}
+```
+
+`hash` is a content digest of the skill directory, so optimizer loops (e.g. ACE, GEPA, EvoSkill) that mutate a skill **in place** at the same path still produce distinguishable variants. For concurrent candidate evaluation, give each candidate its own directory (`skills/cand-0/`, `skills/cand-1/`, …) to avoid a path-reuse read/write race.
+
+The skills path is resolved like `input_jsonl_fpath` (relative paths check the working directory, then the Gym root). For distributed runs the directory must be on storage accessible to the agent process.
 
 ## Limitations
 

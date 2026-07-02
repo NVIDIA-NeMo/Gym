@@ -22,13 +22,13 @@ All provider configs live in [`responses_api_models/inference_provider/configs/`
 
 | Provider | Config | Base URL |
 |----------|--------|----------|
-| Baseten | `baseten.yaml` | `https://bridge.baseten.co/v1` |
+| Baseten | `baseten.yaml` | `https://inference.baseten.co/v1` |
 | DeepInfra | `deepinfra.yaml` | `https://api.deepinfra.com/v1/openai` |
 | Fireworks | `fireworks.yaml` | `https://api.fireworks.ai/inference/v1` |
-| Friendli | `friendli.yaml` | `https://inference.friendli.ai/v1` |
+| Friendli | `friendli.yaml` | `https://api.friendli.ai/serverless/v1` |
 | Gemini | `gemini.yaml` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | HF Inference | `hf_inference.yaml` | `https://router.huggingface.co/v1` |
-| Nebius | `nebius.yaml` | `https://api.studio.nebius.ai/v1` |
+| Nebius | `nebius.yaml` | `https://api.tokenfactory.nebius.com/v1/` |
 | OpenRouter | `openrouter.yaml` | `https://openrouter.ai/api/v1` |
 | Together.ai | `together.yaml` | `https://api.together.xyz/v1` |
 
@@ -80,13 +80,13 @@ For unlisted providers, use the generic config: `responses_api_models/inference_
 ### 2. Start servers
 
 ```bash
-ng_run "+config_paths=[${environment_config},${model_config}]"
+gym env start --config ${environment_config} --config ${model_config}
 ```
 
 ### 3. Evaluate your agent
 
 ```bash
-ng_collect_rollouts +agent_name=mcqa_simple_agent \
-    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
-    +output_jsonl_fpath=results/mcqa_rollouts.jsonl
+gym eval run --no-serve --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl
 ```

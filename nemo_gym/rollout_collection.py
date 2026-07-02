@@ -27,17 +27,18 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
@@ -51,6 +52,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
+from nemo_gym.skills import SkillsConfig, load_skill_directory
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    rollout_collection_driver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dotted ``module.path:function`` to run rollout collection instead of the "
+            "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "When unset, the standard single-pass collection runs."
+        ),
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -198,6 +210,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    skills: Optional[SkillsConfig] = Field(
+        default=None,
+        description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
+    )
+
+    @field_validator("num_repeats", mode="before")
+    @classmethod
+    def _coerce_null_num_repeats(cls, v):
+        # default to 1 if num_repeats is None
+        # for backwards compatibility
+        return 1 if v is None else v
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
@@ -268,14 +291,32 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
+        # Resolve skills once for the whole run (hash is content-derived, computed at startup).
+        skills_ref_dict = None
+        if config.skills:
+            skills_ref = load_skill_directory(config.skills.path)
+            skills_ref_dict = skills_ref.model_dump()
+            print(
+                f"Using skills from {config.skills.path} "
+                f"(hash={skills_ref.hash}, {len(skills_ref.skills)} skill(s): "
+                f"{', '.join(s.name for s in skills_ref.skills)})"
+            )
+
         _input_path = Path(config.input_jsonl_fpath)
         if not _input_path.is_absolute():
             _cwd_path = Path.cwd() / _input_path
             _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -304,6 +345,11 @@ class RolloutCollectionHelper(BaseModel):
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
             )
+
+            # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
+            # /run request body and propagated to results. The source dataset stays untouched.
+            if skills_ref_dict is not None:
+                row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
             # Resolve task index. Honor a caller-provided value when present (e.g. when an
             # upstream slicer has stamped a globally-stable index across chunks so that
@@ -467,6 +513,8 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if SKILLS_REF_KEY_NAME in row:
+                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -714,6 +762,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     )
 
 
+def loads_jsonl_line(raw, fpath, line_no: int):
+    """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
+    try:
+        return orjson.loads(raw)
+    except orjson.JSONDecodeError as e:
+        raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
+
+
 def _expand_input_glob(input_glob: str) -> List[str]:
     """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
 
@@ -733,7 +789,7 @@ class RolloutAggregationHelper(BaseModel):
     async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
-            raise FileNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+            raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
@@ -741,11 +797,11 @@ class RolloutAggregationHelper(BaseModel):
         results: List[Dict] = []
         for shard_path in input_paths:
             with open(shard_path, "rb") as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    results.append(orjson.loads(line))
+                    results.append(loads_jsonl_line(line, shard_path, line_no))
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)

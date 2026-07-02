@@ -38,8 +38,11 @@ from wandb import Run
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AlmostServerError,
+    ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerInstanceConfig,
@@ -117,6 +120,7 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+SKILLS_REF_KEY_NAME = "skills_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
@@ -166,6 +170,22 @@ class GlobalConfigDictParserConfig(BaseModel):
             POLICY_MODEL_KEY_NAME: {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
         }
     )
+
+
+def _load_config_yaml(config_path):
+    """`OmegaConf.load`, converting a YAML syntax error into a clean `ConfigError` naming file + line/column.
+
+    `FileNotFoundError` is left to propagate so callers can report a missing-path error themselves.
+    """
+    from yaml import YAMLError
+
+    try:
+        return OmegaConf.load(config_path)
+    except YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        problem = getattr(e, "problem", None) or str(e).splitlines()[0]
+        raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
 
 
 class GlobalConfigDictParser(BaseModel):
@@ -234,7 +254,7 @@ class GlobalConfigDictParser(BaseModel):
                 config_path = cwd_path if cwd_path.exists() else install_path
 
             try:
-                extra_config = OmegaConf.load(config_path)
+                extra_config = _load_config_yaml(config_path)
             except FileNotFoundError as e:
                 searched = "\n".join(f"  - {p}" for p in searched_locations)
                 raise ConfigPathNotFoundError(
@@ -278,7 +298,7 @@ Duplicate config paths:
     def raise_on_no_server_instances(self, global_config_dict: DictConfig) -> None:
         """Fail fast if a run has no server instances to start.
 
-        Without this, `ng_run` with an empty/omitted `config_paths` starts the head server and Ray
+        Without this, `gym env start` with an empty/omitted `config_paths` starts the head server and Ray
         and then hangs with nothing to run. We catch it before Ray initialises with an actionable
         message instead.
         """
@@ -508,7 +528,7 @@ For example, on the command line:
             # absent key still errors clearly.
             node = dict_config._get_node(k) if isinstance(dict_config, DictConfig) else None
             if node is None:
-                raise ValueError(f"Path specified does not exist in config: {path}")
+                raise InheritPathNotFoundError(f"Path specified does not exist in config: {path}")
 
             # The referenced value (or an ancestor of it) is unset. Return the _MISSING_REF sentinel
             # so the caller makes the swap/copy/inherit target '???' too (instead of calling .pop()/
@@ -543,7 +563,7 @@ For example, on the command line:
 
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
-            dotenv_extra_config = OmegaConf.load(dotenv_path)
+            dotenv_extra_config = _load_config_yaml(dotenv_path)
 
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
@@ -620,7 +640,7 @@ Pass each config with --config (it builds the list for you), e.g.:
 Found global config dict yaml:
 {config_to_log_yaml}"""
 
-                raise ValueError(error_msg)
+                raise AlmostServerError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
 
