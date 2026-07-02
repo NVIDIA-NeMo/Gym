@@ -1,0 +1,127 @@
+---
+title: "Benchmarks"
+description: "What benchmarks are, how they relate to environments, how to choose one, and how to interpret results."
+position: 2
+---
+
+<Info>
+New to the concepts? Read [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks) first.
+</Info>
+
+A benchmark is a fixed evaluation configuration built on top of an environment's resources server. It adds a frozen dataset split, a `prepare_script` to reproduce that data, and a documented repeat count — so different models and harnesses can be compared fairly across runs and teams.
+
+All environments can be used for training. A benchmark is the evaluation-configured overlay on top of the same verifier: same resources server, fixed data.
+
+## How Benchmarks Relate to Environments
+
+The same resources server powers both. For example, `math_with_judge` is used for RL training via the `code_gen` environment **and** as the verifier for benchmarks like `aime24`, `aime25`, and `gsm8k`. The benchmark config chains to the resources server via `config_paths` and adds a `type: benchmark` dataset with its own `prepare_script` and `num_repeats`.
+
+```yaml
+# benchmarks/aime24/config.yaml
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+aime24_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: aime24
+        type: benchmark
+        prepare_script: benchmarks/aime24/prepare.py
+        num_repeats: 32
+```
+
+## Discover Available Benchmarks
+
+Use the CLI to browse what's available before running:
+
+```bash
+# List all benchmarks with domain and repeat count
+gym list benchmarks
+
+# Filter to a capability area
+gym search math
+gym search coding
+gym search safety
+
+# Machine-readable output for scripting or CI
+gym list benchmarks --json
+```
+
+## Choosing a Benchmark
+
+Pick a benchmark that matches the capability you are actually measuring. Changing the model, harness, prompt, verifier, and dataset at the same time can still produce a useful score as a release gate — but it cannot explain what caused the difference. Vary one thing at a time.
+
+| Criterion | What to check |
+|---|---|
+| **Task fit** | Does the task distribution reflect the target use case? |
+| **Verifier fidelity** | Does the reward measure the target behavior, not just a proxy? |
+| **Model compatibility** | Does the benchmark require tool calls, images, long context, or structured output your model supports? |
+| **Harness fit** | Does the harness expose the interaction pattern the benchmark expects? |
+| **Variance** | Are repeated runs stable enough to separate real signal from noise? |
+| **Reproducibility** | Can another team reproduce the same score from the same config and data? |
+
+For external benchmarks, reproduce the original reported numbers outside Gym before integrating. This separates benchmark reproduction issues from Gym integration issues.
+
+## Benchmark Categories
+
+NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and repeat counts.
+
+**Math & Science**
+AIME, IMO, formal proofs (Lean4), physics (critpt, ugphysics), chemistry (ether0, BunsenBench), FrontierScience, and multilingual math. Verification ranges from exact match and math-verify to LLM judges for open-ended proofs.
+
+**Coding**
+Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIRD, Spider2), SWE-style patch generation, and RTL design. Most use code execution against a test suite.
+
+**Knowledge & Reasoning**
+Graduate-level science (GPQA Diamond), MMLU variants, HLE, multi-hop QA (HotPotQA), factual recall (SimpleQA, OmniScience), and abstract reasoning (ARC-AGI).
+
+**Agentic / Tool Use**
+Multi-step tool calling, web search (BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+
+**Instruction Following & Safety**
+IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, over-refusal calibration (XSTest), and structured output validation.
+
+**Other**
+ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
+
+## Interpreting Results
+
+A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.
+
+Use `gym eval profile` to compute pass@1, pass@k, and per-task variance from repeated rollouts. Use `gym eval aggregate` to merge shard outputs and compute summary statistics grouped by agent. Use BLADE to diagnose why a score changed and which tasks drove the shift.
+
+<Cards>
+
+<Card title="Build Verifiers" href="/build-verifiers">
+Understand the reward function backing each benchmark — SimpleResourcesServer, GymnasiumServer, and verification patterns.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Merge shard outputs, customize per-environment key metrics, and compute summary statistics across runs.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use BLADE to identify failure modes, sometimes-pass tasks, and what intervention to prioritize next.
+</Card>
+
+<Card title="Reward Profiling" href="/reference/cli-commands#eval-profile">
+Compute pass@1, pass@k, and per-task variance with <code>gym eval profile</code>.
+</Card>
+
+</Cards>
+
+## Next Steps
+
+<Cards>
+
+<Card title="Browse Environments" href="/evaluation/environment-list">
+Full table of built-in environments and benchmarks by category.
+</Card>
+
+<Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
+Contribution checklist for adding a new benchmark to Gym.
+</Card>
+
+</Cards>
