@@ -33,6 +33,32 @@ class TestListBenchmarks:
             list_benchmarks()
         assert "aime24" in capsys.readouterr().out
 
+    def test_discovers_by_type_benchmark_not_filename(self, tmp_path, capsys) -> None:
+        # Discovery is content-based (a `type: benchmark` dataset), not filename-based: any yaml that
+        # declares such a dataset is a candidate (e.g. tau2's `configs/tau2.yaml`), and yamls that don't
+        # are skipped — regardless of filename.
+        (tmp_path / "standard").mkdir()
+        (tmp_path / "standard" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
+        (tmp_path / "flavored" / "configs").mkdir(parents=True)
+        (tmp_path / "flavored" / "configs" / "myflavor.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
+        (tmp_path / "notbench").mkdir()
+        (tmp_path / "notbench" / "config.yaml").write_text("x:\n  prompt_config: hi.yaml\n")  # no benchmark dataset
+
+        captured = {}
+
+        def fake_load(paths):
+            captured["paths"] = {str(p.relative_to(tmp_path)) for p in paths}
+            return {}
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config()),
+            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", tmp_path),
+            patch("nemo_gym.cli.eval._load_benchmarks_from_config_paths", side_effect=fake_load),
+        ):
+            list_benchmarks()
+
+        assert captured["paths"] == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
+
     def test_no_benchmarks(self, capsys) -> None:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config()),

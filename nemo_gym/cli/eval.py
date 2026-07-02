@@ -114,9 +114,13 @@ def list_benchmarks() -> None:
 
     assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
 
-    config_paths = glob("**/config.yaml", root_dir=BENCHMARKS_DIR, recursive=True)
-    config_paths = [BENCHMARKS_DIR / p for p in config_paths]
-    config_paths = sorted(config_paths)
+    # A config defines a benchmark iff it declares a `type: benchmark` dataset (see `BenchmarkConfig`),
+    # regardless of its filename. So discovery is content-based: scan every yaml and keep the ones that
+    # literally declare such a dataset. That text check is a cheap prefilter so we only pay the resolve
+    # cost on real candidates (not every prompt/endpoint yaml), and it finds benchmarks whose config
+    # isn't named `config.yaml` — e.g. tau2's `configs/*.yaml` and livecodebench's `cascade.yaml`.
+    config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
+    config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
 
     benchmarks = _load_benchmarks_from_config_paths(config_paths)
 
