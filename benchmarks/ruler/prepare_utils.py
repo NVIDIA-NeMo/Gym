@@ -80,7 +80,7 @@ def prepare_helper(output_name: str, model: str, length: int) -> Path:
         short_name = subset_dir.name.split("_")[0]
         for sample in subset_samples:
             sample = {
-                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}], "max_new_tokens": TOKENS_TO_GENERATE[short_name]},
+                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}], "max_output_tokens": TOKENS_TO_GENERATE[short_name]},
                 "outputs": sample["outputs"],
                 "length": sample["length"],
                 "subset": subset_dir.name,
