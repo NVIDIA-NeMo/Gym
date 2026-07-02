@@ -292,6 +292,22 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 resources_server_cookies = api_response.cookies
 
                 tool_output = (await api_response.content.read()).decode()
+                # bc_frankie parity: the resources server wraps every tool result in a one-field
+                # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
+                # model then sees a single escaped line instead of raw multi-line text. This was
+                # the last remaining materialized-prompt difference vs the bc_frankie harness.
+                # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
+                # and non-JSON payloads are left untouched.
+                try:
+                    parsed_tool_output = json.loads(tool_output)
+                    if (
+                        isinstance(parsed_tool_output, dict)
+                        and set(parsed_tool_output) == {"results_string"}
+                        and isinstance(parsed_tool_output["results_string"], str)
+                    ):
+                        tool_output = parsed_tool_output["results_string"]
+                except json.JSONDecodeError:
+                    pass
                 if api_response.status >= 400:
                     print(
                         f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
