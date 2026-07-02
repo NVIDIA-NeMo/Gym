@@ -285,7 +285,11 @@ class TestApp:
         for line in rows:
             row = json.loads(line)
             assert required_fields <= row.keys()
-            assert row["responses_create_params"]["input"] == []
+            # Rows must stay SWE-bench Verified; gym-subset rows are not in
+            # swebench's spec map and fail grading.
+            assert row["subset"] == "verified"
+            assert row["split"] == "test"
+            assert row["responses_create_params"].get("input") == []
 
     def test_response_param_helpers_cover_metadata_and_tool_choice_modes(self) -> None:
         assert _json_dict_from_metadata(None, field_name="extra_body") == {}

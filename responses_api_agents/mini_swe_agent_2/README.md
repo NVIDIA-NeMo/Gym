@@ -67,7 +67,9 @@ supported eval path is `/run`, typically via `gym eval run --no-serve`.
 - A committed smoke input of five SWE-bench Verified rows (`subset: verified`)
   is available at `responses_api_agents/mini_swe_agent_2/data/example.jsonl`,
   with pre-generated rollouts at
-  `responses_api_agents/mini_swe_agent_2/data/example_rollouts.jsonl`.
+  `responses_api_agents/mini_swe_agent_2/data/example_rollouts.jsonl`. Those
+  rollouts were generated with `Qwen/Qwen3-30B-A3B` (recorded per row under
+  `response.model`).
 
 Example row shape:
 
@@ -416,10 +418,15 @@ The smoke command writes one rollout row plus sidecar files:
 - per-instance mini-swe-agent configs and result artifacts under
   `results/<subset>/<policy_model_name>/`
 
-The rollout row includes `reward`, `response`, `responses_create_params`,
-`eval_report`, and SWE-bench instance fields. A smoke run may receive reward
-`0.0` or `1.0` depending on the model output and verification result;
-infrastructure failures should appear in `eval_report`.
+The rollout row includes `reward`, `response`, `responses_create_params`, and a
+`metadata` object holding `eval_report`, `model_patch`, and `instance_id`. The
+full SWE-bench instance fields (`repo`, `base_commit`, `patch`, ...) are not
+copied onto the rollout row; they remain in the materialized inputs. A smoke run
+may receive reward `0.0` or `1.0` depending on the model output and verification
+result; infrastructure failures appear in `metadata.eval_report`. Note that an
+empty `model_patch` still counts as `patch_successfully_applied` in SWE-bench
+(an empty diff applies as a no-op), so a high `patch_applied_rate` in the
+aggregate metrics does not imply every rollout attempted a fix.
 
 Inspect the first row and aggregate metrics:
 
@@ -431,7 +438,8 @@ cat results/mini_swe_agent_2_smoke_aggregate_metrics.json
 ### Repeated Rollouts
 
 After the one-example smoke succeeds, increase `--num-repeats` and
-`--concurrency` for pass@k style runs:
+`--concurrency` for pass@k style runs. The command below is pass@8 on a single
+task (`--limit 1`); raise `--limit` to cover more rows of `example.jsonl`:
 
 ```bash
 gym eval run --no-serve \
