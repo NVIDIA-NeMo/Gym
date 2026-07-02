@@ -103,6 +103,8 @@ the `gym`/`ng` console scripts installed, which isn't always the case in an exis
 dev venv. The legacy `ng_run` / `ng_collect_rollouts` scripts are equivalent and are
 what's verified working end-to-end for this environment, so use those for now:
 
+Deprecated way:
+
 ```bash
 ng_run "+config_paths=[environments/biomnibench_da/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
 ./scripts/wait_for_servers.sh $!
@@ -124,9 +126,7 @@ example `biomnibench_da::da-1-3-r001`). For HPC/Singularity, swap in
 `ng_run` — Harbor resolves them from that process's OS environment when it launches
 each task's container, not from wherever `ng_collect_rollouts` is later run from.
 
-Once `gym`/`ng` are properly installed (e.g. after a fresh `pip install -e .` /
-`uv sync` picks up the console-script entry points from `pyproject.toml`), the
-equivalent modern-CLI commands are:
+New way:
 
 ```bash
 gym env start --environment biomnibench_da --model-type vllm_model &
@@ -156,6 +156,22 @@ bind-mounted from the trial dir (`harbor.models.trial.paths.EnvironmentPaths`);
 regenerate the compose file (step 1) rather than hand-editing it.
 - `**Error response from daemon: all predefined address pools have been fully subnetted`** when a trial's `docker compose up -d` tries to create a network: free
 up unused Docker networks (`docker network prune`) or reduce concurrency.
+- `**ValueError: Environment variable 'JUDGE_BASE_URL' not found in host environment**` (raised inside the trial by `harbor.utils.env.resolve_env_vars`,
+visible in `harbor_agent/jobs/.../exception.txt`): the `harbor_agent` server
+process — not the shell you're currently typing in — didn't have `JUDGE_*`
+exported when it was started. Harbor resolves `[verifier.env]` from that server
+process's own OS environment at verification time, so exporting the vars *after*
+`ng_run` is already running (or in a different terminal) has no effect on it, even
+if `echo $JUDGE_BASE_URL` shows it correctly in your current shell. Fix: kill the
+running `ng_run`, `export JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL` in that
+exact shell, then restart `ng_run` from there (step 3 must come first).
+- `**ng_collect_rollouts` crashes with `aiohttp.client_exceptions.ClientResponseError: 404 ... /aggregate_metrics*`* after "Computing aggregate metrics": harmless to your
+data — the rollouts JSONL is fully written and closed *before* this step runs, so
+nothing is lost. This was a real gap (now fixed) where `harbor_agent`'s
+`setup_webserver()` didn't register `/aggregate_metrics`, unlike the
+`SimpleResponsesAPIAgent` base class default. If you still hit this on an older
+checkout, pass `+disable_aggregation=true` to `ng_collect_rollouts`/`gym eval run`
+as a workaround, then run `gym eval aggregate` once all shards finish.
 
 See the [Harbor Agent README](../../responses_api_agents/harbor_agent/README.md) for
 details on the underlying Harbor bridge (custom agents/environments, NeMo RL

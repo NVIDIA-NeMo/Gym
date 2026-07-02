@@ -220,6 +220,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        # Registered explicitly because this override replaces (rather than extends)
+        # SimpleResponsesAPIAgent.setup_webserver(), which would otherwise add this route
+        # by default. HarborAgent doesn't override compute_metrics/get_key_metrics, so this
+        # uses AggregateMetricsMixin's generic reward-based aggregation (mean/max/min/median/std
+        # via RewardProfiler) over the `reward` field already present on every /run response.
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
