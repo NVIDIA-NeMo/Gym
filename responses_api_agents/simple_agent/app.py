@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -63,6 +64,37 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
+    @staticmethod
+    def _tool_names(body: NeMoGymResponseCreateParamsNonStreaming) -> set[str]:
+        tool_names = set()
+        for tool in body.tools:
+            if isinstance(tool, dict):
+                name = tool.get("name") or tool.get("function", {}).get("name")
+            else:
+                name = getattr(tool, "name", None)
+                if name is None:
+                    function = getattr(tool, "function", None)
+                    name = getattr(function, "name", None)
+            if name:
+                tool_names.add(name)
+        return tool_names
+
+    @staticmethod
+    def _invalid_tool_call_message(call_id: str, error: str) -> NeMoGymResponseOutputMessage:
+        return NeMoGymResponseOutputMessage(
+            id=f"msg_invalid_tool_call_{call_id}",
+            content=[
+                NeMoGymResponseOutputText(
+                    annotations=[],
+                    text=json.dumps({"error": error}),
+                    type="output_text",
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+
     async def responses(
         self,
         request: Request,
@@ -83,6 +115,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         while True:
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
+            allowed_tool_names = self._tool_names(body)
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -102,7 +135,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 ) from e
 
             output = model_response.output
-            new_outputs.extend(output)
 
             if not usage:
                 usage = model_response.usage
@@ -118,6 +150,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 usage.output_tokens_details.reasoning_tokens = 0
 
             if model_response.incomplete_details:
+                new_outputs.extend(output)
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
@@ -125,26 +158,45 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls and all_output_messages:
+                new_outputs.extend(output)
                 break
 
+            parsed_fn_calls = []
+            invalid_tool_call_message = None
             for output_function_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as e:
-                    # Model produced malformed tool-call arguments. Surface the
-                    # error back as a tool response so the rollout can continue
-                    # (or terminate with a low reward) instead of crashing the
-                    # whole batch on json.loads.
-                    tool_response = NeMoGymFunctionCallOutput(
-                        type="function_call_output",
+                    invalid_tool_call_message = self._invalid_tool_call_message(
                         call_id=output_function_call.call_id,
-                        # Use repr(e) so the exception type name is always
-                        # included even when str(e) would be empty.
-                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
+                        error=f"Invalid tool call arguments: {e!r}",
                     )
-                    new_outputs.append(tool_response)
-                    continue
+                    break
 
+                if not isinstance(parsed_arguments, dict):
+                    invalid_tool_call_message = self._invalid_tool_call_message(
+                        call_id=output_function_call.call_id,
+                        error=f"Invalid tool call arguments: expected object, got {type(parsed_arguments).__name__}",
+                    )
+                    break
+
+                if output_function_call.name not in allowed_tool_names:
+                    invalid_tool_call_message = self._invalid_tool_call_message(
+                        call_id=output_function_call.call_id,
+                        error=f"Invalid tool call name: {output_function_call.name!r}",
+                    )
+                    break
+
+                parsed_fn_calls.append((output_function_call, parsed_arguments))
+
+            if invalid_tool_call_message:
+                new_outputs.extend(o for o in output if o.type != "function_call")
+                new_outputs.append(invalid_tool_call_message)
+                break
+
+            new_outputs.extend(output)
+
+            for output_function_call, parsed_arguments in parsed_fn_calls:
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
