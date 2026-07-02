@@ -92,6 +92,106 @@ class TestListBenchmarks:
         assert json.loads(capsys.readouterr().out) == []
 
 
+class TestLoadBenchmarksFromConfigPaths:
+    def test_skips_configs_that_fail_to_resolve_with_warning(self, capsys) -> None:
+        # A candidate that still can't be resolved even with tolerance (e.g. a multi-benchmark suite) must
+        # be skipped with a warning — not crash the whole listing, and not vanish silently.
+        from nemo_gym.benchmarks import BenchmarkConfig, _load_benchmarks_from_config_paths
+
+        good = MagicMock()
+        good.name = "good_bench"
+
+        # Listing must resolve tolerantly (it scans files with no runtime context), so it opts out of strict.
+        def fake_from_config_path(path, *, strict=True):
+            assert strict is False
+            if Path(path).name == "bad.yaml":
+                raise RuntimeError("cannot resolve without runtime values")
+            return good
+
+        with patch.object(BenchmarkConfig, "from_config_path", side_effect=fake_from_config_path):
+            result = _load_benchmarks_from_config_paths([Path("bad.yaml"), Path("good.yaml")])
+
+        assert set(result) == {"good_bench"}
+        err = capsys.readouterr().err
+        assert "Warning" in err and "bad.yaml" in err
+
+
+class TestTolerantInterpolationParse:
+    # Unset `???` values and unresolved `${...}` interpolations reference runtime-only values that aren't
+    # needed to identify a benchmark; listing fills them with a placeholder so the config still resolves.
+    def _resolve(self, d: dict):
+        from nemo_gym.benchmarks import _parse_no_environment_tolerating_unset_values
+
+        return _parse_no_environment_tolerating_unset_values(OmegaConf.create(d))
+
+    @property
+    def _placeholder(self) -> str:
+        from nemo_gym.benchmarks import _UNSET_VALUE_PLACEHOLDER
+
+        return _UNSET_VALUE_PLACEHOLDER
+
+    def test_single_interpolation(self) -> None:
+        resolved = self._resolve({"foo": "${bar}"})
+        assert resolved["foo"] == self._placeholder
+
+    def test_single_missing_value(self) -> None:
+        resolved = self._resolve({"foo": "???"})
+        assert resolved["foo"] == self._placeholder
+
+    def test_mix(self) -> None:
+        # A mix across nested dicts: resolvable literals (incl. nested) pass through untouched, while an
+        # undefined `${...}` interpolation and unset `???` values (incl. nested) are filled with the
+        # placeholder.
+        resolved = self._resolve(
+            {
+                "name": "my_bench",
+                "num_repeats": 3,
+                "api_key": "${some_api_key}",
+                "server": {
+                    "endpoint": "https://example.com",
+                    "nested": {
+                        "enabled": True,
+                        "token": "???",
+                    },
+                },
+            }
+        )
+        # Correct key-value pairs are unmodified.
+        assert resolved["name"] == "my_bench"
+        assert resolved["num_repeats"] == 3
+        assert resolved["server"]["endpoint"] == "https://example.com"
+        assert resolved["server"]["nested"]["enabled"] is True
+        # Undefined `${...}` and unset `???` values are filled.
+        assert resolved["api_key"] == self._placeholder
+        assert resolved["server"]["nested"]["token"] == self._placeholder
+
+    def test_does_not_mutate_input(self) -> None:
+        from nemo_gym.benchmarks import _parse_no_environment_tolerating_unset_values
+
+        cfg = OmegaConf.create({"foo": "???", "bar": "${baz}"})
+        before = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
+        _parse_no_environment_tolerating_unset_values(cfg)
+        after = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
+        assert after == before == {"foo": "???", "bar": "${baz}"}
+
+    def test_strict_is_the_default_and_does_not_tolerate_unresolved_values(self) -> None:
+        # The tolerance is listing-only: `from_initial_config_dict` defaults to strict, so other workflows
+        # still get a hard error on an unresolved `${...}` rather than a silent placeholder.
+        from omegaconf.errors import InterpolationKeyError
+
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        cfg = OmegaConf.create({"foo": "${runtime_only_value}"})
+        with pytest.raises(InterpolationKeyError):
+            BenchmarkConfig.from_initial_config_dict(path=Path("x.yaml"), initial_config_dict=cfg)
+
+        # strict=False tolerates it (resolves, finds no benchmark dataset, returns None — no raise).
+        tolerated = BenchmarkConfig.from_initial_config_dict(
+            path=Path("x.yaml"), initial_config_dict=cfg, strict=False
+        )
+        assert tolerated is None
+
+
 class TestFuzzyMatches:
     def test_substring_matches(self) -> None:
         assert _fuzzy_matches("math", "math_with_judge")
