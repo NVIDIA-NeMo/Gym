@@ -50,7 +50,8 @@ litmus_agent:
         image: ${oc.env:LITMUS_AGENT_SANDBOX_IMAGE,docker.io/library/python:3.12-slim}
         ttl_s: 1800
         ready_timeout_s: 1200
-        workdir: /workspace
+        # OpenSandbox does not create workdir; must be a dir that exists in the image.
+        workdir: /tmp
         resources:
           cpu: 2
           memory_mib: 4096
