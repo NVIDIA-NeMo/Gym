@@ -1,0 +1,452 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""FastAPI agent that wraps OSWorld's desktop-env benchmark.
+
+OSWorld owns a complete agent harness: a VM provider, a multi-step rollout
+loop, and a per-task evaluator. The cleanest way to plug it into NeMo Gym is
+to wrap the harness at the *agent* layer (same pattern as ``mini_swe_agent``
+and ``tau2``): ``/run`` is the single entrypoint that takes a Gym JSONL row,
+runs the full OSWorld rollout against the Gym policy model, and returns a
+``BaseVerifyResponse`` with the final reward.
+
+There is no paired ``resources_servers/osworld/`` because OSWorld's evaluator
+runs inline in ``env.evaluate()`` — splitting it out would add an extra hop
+that nothing else uses.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from asyncio import Semaphore
+from typing import Any, Callable, Dict, List, Optional
+
+import ray
+from fastapi import Body
+from pydantic import ConfigDict, Field
+
+from nemo_gym.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import (
+    ServerClient,
+    get_first_server_config_dict,
+)
+from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME
+
+
+LOG = logging.getLogger("nemo_gym.osworld_agent")
+
+
+class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
+    """OSWorld agent config.
+
+    Fields named after upstream OSWorld so behaviour stays comparable to the
+    `run_multienv.py` harness.
+    """
+
+    model_server: ModelServerRef
+    concurrency: int = 4
+    provider_name: str = "docker"
+    container_image: str = "docker://happysixd/osworld-docker:latest"  # OSWorld upstream's recommended VM image
+    headless: bool = True
+    screen_width: int = 1920
+    screen_height: int = 1080
+    require_a11y_tree: bool = False
+    client_password: str = "password"
+    max_steps: int = 15
+    max_trajectory_length: int = 3
+    sleep_after_execution: float = 0.5
+    cache_dir: str = "cache"
+    max_tokens: int = 1500
+    temperature: float = 1.0
+    top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
+    mem_limit_mb: int = 16384  # cgroup memory cap for the VM container (~16 GB)
+    step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
+    task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    runner_name: str = DEFAULT_RUNNER_NAME
+    action_space: Optional[str] = None
+    observation_type: Optional[str] = None
+    env_class_path: Optional[str] = None
+    agent_class_path: Optional[str] = None
+    agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OSWorldRunRequest(BaseRunRequest):
+    """Per-task request. ``verifier_metadata`` holds the OSWorld task spec."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class OSWorldVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+    # NeMo-RL trainer drops the gradient when reward is unreliable. Set true on
+    # timeout / max_steps exhaustion (no DONE/FAIL) / evaluator throw.
+    mask_sample: bool = False
+
+
+# Imported lazily by ``_run_osworld_task_remote`` so this module imports
+# cleanly without OSWorld installed.
+def _build_model_fn(
+    *,
+    base_url: str,
+    model_name: str,
+    api_key: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: Optional[float],
+) -> Callable[[str, str, List[Dict[str, Any]]], str]:
+    """Return a sync ``model_fn`` that hits a Gym vLLM/OpenAI-compatible model.
+
+    OSWorld's loop is sync and runs inside Ray; we use the ``openai`` SDK in
+    sync mode here. The actual NeMo Gym model server speaks the chat
+    completions / responses API, so an OpenAI-compatible client over its
+    ``host:port/v1`` URL is the right shape.
+    """
+    from openai import OpenAI  # noqa: PLC0415  (lazy — heavy import)
+
+    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+
+    def _call(system_prompt: str, instruction: str, observation_history: List[Dict[str, Any]]) -> str:
+        # Build chat-style messages: system → (prev screenshots) → current screenshot+task.
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        if not observation_history:
+            return ""
+        for prev in observation_history[:-1]:
+            messages.append({"role": "user", "content": _format_observation(prev, instruction, is_current=False)})
+        messages.append(
+            {
+                "role": "user",
+                "content": _format_observation(observation_history[-1], instruction, is_current=True),
+            }
+        )
+        # Prompt-size instrumentation: log per-call bytes / approx tokens so we
+        # can spot context bloat. With a11y_tree on + max_trajectory_length=3,
+        # an LibreOffice task can accumulate >1M prompt tokens by step 3-4 and
+        # blow the 1M-context model ceiling; vision-only stays around ~10K tok.
+        # Counts:
+        #  - text_chars: every "text" part + system_prompt
+        #  - images: each "image_url" entry; Anthropic charges ~1568 tok per
+        #    1.15 MP image, so 1920×1080 ≈ 3000 tok/image
+        #  - approx_tok ≈ text_chars/4 + images*3000  (rough; final word from API)
+        text_chars = 0
+        img_count = 0
+        for _m in messages:
+            _content = _m.get("content")
+            if isinstance(_content, str):
+                text_chars += len(_content)
+            elif isinstance(_content, list):
+                for _part in _content:
+                    if isinstance(_part, dict):
+                        if _part.get("type") == "text":
+                            text_chars += len(_part.get("text", "") or "")
+                        elif _part.get("type") == "image_url":
+                            img_count += 1
+        approx_tok = text_chars // 4 + img_count * 3000
+        # print() not LOG.info because the gym Ray-worker config filters
+        # below-WARN from `nemo_gym.osworld_agent`; print to stdout is always
+        # captured by Ray + flushed to ng_run.log via the worker tag.
+        print(
+            f"[prompt-size] messages={len(messages)} text_chars={text_chars} "
+            f"images={img_count} ~approx_tok={approx_tok}",
+            flush=True,
+        )
+        create_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        # Some reasoning models (e.g. openai/openai/gpt-5.5 via inference-api)
+        # reject top_p outright with HTTP 400. Skip the kwarg when None so
+        # the request goes through cleanly; set top_p=null in osworld_agent.yaml
+        # to opt into this behaviour.
+        if top_p is not None:
+            create_kwargs["top_p"] = top_p
+        resp = client.chat.completions.create(**create_kwargs)
+        return resp.choices[0].message.content or ""
+
+    return _call
+
+
+def _build_messages_model_fn(
+    *,
+    base_url: str,
+    model_name: str,
+    api_key: str,
+):
+    """Return a sync model caller for native OSWorld agents.
+
+    Native mm_agents such as PromptAgent construct their own OpenAI-style
+    messages. Gym still owns the actual policy endpoint, so this thin adapter
+    forwards those messages to the configured model server.
+    """
+    from openai import OpenAI  # noqa: PLC0415
+
+    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+
+    def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> str:
+        create_kwargs: Dict[str, Any] = {
+            "model": payload.get("model") or model_name,
+            "messages": messages,
+            "max_tokens": payload.get("max_tokens"),
+            "temperature": payload.get("temperature"),
+        }
+        if payload.get("top_p") is not None:
+            create_kwargs["top_p"] = payload["top_p"]
+        resp = client.chat.completions.create(**create_kwargs)
+        return resp.choices[0].message.content or ""
+
+    return _call
+
+
+def _format_observation(obs: Dict[str, Any], instruction: str, *, is_current: bool) -> List[Dict[str, Any]]:
+    parts: List[Dict[str, Any]] = []
+    if is_current:
+        parts.append(
+            {
+                "type": "text",
+                "text": (
+                    f"Task: {instruction}\n"
+                    "Given the screenshot below, what's the next step you will take "
+                    "to help complete the task?"
+                ),
+            }
+        )
+    else:
+        parts.append({"type": "text", "text": "Previous screenshot:"})
+    screenshot = obs.get("screenshot_b64") or ""
+    if screenshot:
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot}", "detail": "high"},
+            }
+        )
+    a11y = obs.get("accessibility_tree")
+    if a11y:
+        parts.append({"type": "text", "text": f"Accessibility tree:\n{a11y}"})
+    return parts
+
+
+@ray.remote(num_cpus=1)
+def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Ray entrypoint: runs a single OSWorld task and returns a dict.
+
+    Each remote task gets its own DesktopEnv — VMs are not shareable.
+    """
+    from responses_api_agents.osworld_agent.client import run_osworld_task  # noqa: PLC0415
+
+    base_url = runner_kwargs.pop("base_url")
+    policy_base_url = runner_kwargs.pop("policy_base_url", "")
+    model_name = runner_kwargs.pop("model_name")
+    api_key = runner_kwargs.pop("api_key")
+    max_tokens = runner_kwargs.pop("max_tokens")
+    temperature = runner_kwargs.pop("temperature")
+    top_p = runner_kwargs.pop("top_p")
+    model_fn = _build_model_fn(
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    messages_model_fn = _build_messages_model_fn(
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+    )
+    result = run_osworld_task(
+        task_config,
+        model_fn=model_fn,
+        messages_model_fn=messages_model_fn,
+        policy_base_url=policy_base_url,
+        policy_api_key=api_key,
+        policy_model_name=model_name,
+        policy_max_tokens=max_tokens,
+        policy_temperature=temperature,
+        policy_top_p=top_p,
+        **runner_kwargs,
+    )
+    return {
+        "reward": result.reward,
+        "score": result.score,
+        "finished": result.finished,
+        "error": result.error,
+        "mask_sample": result.mask_sample,
+        "steps": [
+            {
+                "step": s.step,
+                "model_text": s.model_text,
+                "actions": s.actions,
+                "reward": s.reward,
+                "done": s.done,
+                "info": s.info,
+            }
+            for s in result.steps
+        ],
+    }
+
+
+class OSWorldAgent(SimpleResponsesAPIAgent):
+    config: OSWorldAgentConfig
+    sem: Optional[Semaphore] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        self.sem = Semaphore(self.config.concurrency)
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        # OSWorld's loop runs sync inside Ray; we do not expose a stand-alone
+        # /v1/responses endpoint for this agent.
+        raise NotImplementedError("OSWorldAgent runs full rollouts via /run only.")
+
+    async def run(self, body: OSWorldRunRequest = Body()) -> OSWorldVerifyResponse:
+        async with self.sem:
+            # The OSWorld task spec lives in verifier_metadata. Allow falling
+            # back to model_extra so simple JSONL files can put it at the top
+            # level — useful when hand-authoring examples.
+            metadata = body.verifier_metadata or {}
+            task_config = metadata.get("osworld_task") or (body.model_extra or {}).get("osworld_task")
+            if not task_config:
+                return _empty_response(body, error="No 'osworld_task' provided in verifier_metadata.")
+
+            model_server_name = self.config.model_server.name
+            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+            model_server_config = get_first_server_config_dict(global_config_dict, model_server_name)
+            policy_model_name = global_config_dict.get("policy_model_name", "")
+            policy_api_key = global_config_dict.get("policy_api_key", "")
+            policy_base_url = global_config_dict.get("policy_base_url", "")
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+
+            temperature = body.responses_create_params.temperature or self.config.temperature
+            top_p = body.responses_create_params.top_p or self.config.top_p
+
+            runner_kwargs: Dict[str, Any] = {
+                "provider_name": self.config.provider_name,
+                "container_image": self.config.container_image,
+                "headless": self.config.headless,
+                "screen_size": (self.config.screen_width, self.config.screen_height),
+                "require_a11y_tree": self.config.require_a11y_tree,
+                "client_password": self.config.client_password,
+                "max_steps": self.config.max_steps,
+                "max_trajectory_length": self.config.max_trajectory_length,
+                "sleep_after_execution": self.config.sleep_after_execution,
+                "cache_dir": self.config.cache_dir,
+                "mem_limit_mb": self.config.mem_limit_mb,
+                "step_timeout": self.config.step_timeout,
+                "task_timeout": self.config.task_timeout,
+                "base_url": base_url,
+                "policy_base_url": policy_base_url,
+                "model_name": policy_model_name,
+                "api_key": policy_api_key,
+                "max_tokens": self.config.max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "runner_name": self.config.runner_name,
+                "action_space": self.config.action_space,
+                "observation_type": self.config.observation_type,
+                "env_class_path": self.config.env_class_path,
+                "agent_class_path": self.config.agent_class_path,
+                "agent_kwargs": self.config.agent_kwargs,
+            }
+
+            try:
+                future = _run_osworld_task_remote.options(
+                    runtime_env={"py_executable": sys.executable},
+                ).remote(task_config, runner_kwargs)
+                result_dict: Dict[str, Any] = await asyncio.to_thread(ray.get, future)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("OSWorld rollout failed")
+                return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
+
+            return _build_response(body, result_dict, policy_model_name, temperature, top_p)
+
+
+def _build_response(
+    body: OSWorldRunRequest,
+    result: Dict[str, Any],
+    policy_model_name: str,
+    temperature: float,
+    top_p: Optional[float],
+) -> OSWorldVerifyResponse:
+    """Pack the OSWorld rollout into the shape the verify pipeline expects."""
+
+    response_dict: Dict[str, Any] = {
+        "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
+        "created_at": 0.0,
+        "model": policy_model_name,
+        "object": "response",
+        "output": [
+            {
+                "id": f"msg-step-{step['step']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "annotations": [],
+                        "text": step["model_text"],
+                    }
+                ],
+            }
+            for step in result.get("steps", [])
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "temperature": temperature,
+        "top_p": top_p,
+    }
+    metadata = dict(body.verifier_metadata or {})
+    metadata["osworld_score"] = result.get("score", 0.0)
+    metadata["osworld_finished"] = result.get("finished", False)
+    metadata["osworld_error"] = result.get("error")
+    metadata["osworld_steps"] = result.get("steps", [])
+
+    return OSWorldVerifyResponse(
+        responses_create_params=body.responses_create_params,
+        reward=float(result.get("reward", 0.0)),
+        response=response_dict,
+        verifier_metadata=metadata,
+        mask_sample=bool(result.get("mask_sample", False)),
+    )
+
+
+def _empty_response(body: OSWorldRunRequest, *, error: str) -> OSWorldVerifyResponse:
+    LOG.warning("Returning empty OSWorld response: %s", error)
+    metadata = dict(body.verifier_metadata or {})
+    metadata["osworld_error"] = error
+    return OSWorldVerifyResponse(
+        responses_create_params=body.responses_create_params,
+        reward=0.0,
+        response={
+            "id": "osworld-error",
+            "created_at": 0.0,
+            "model": "",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+        verifier_metadata=metadata,
+        mask_sample=True,  # drop gradient when we couldn't even start the rollout
+    )
+
+
+if __name__ == "__main__":
+    OSWorldAgent.run_webserver()

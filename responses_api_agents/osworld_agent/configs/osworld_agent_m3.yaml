@@ -1,0 +1,16 @@
+# MiniMax M3 overlay for the official OSWorld M3Agent scaffold.
+#
+# M3Agent sends screenshots directly to the configured InferenceHub policy
+# endpoint through Anthropic-compatible /v1/messages. It does not use the
+# OpenAI-compatible policy model server for inference.
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      runner_name: m3_agent
+      max_steps: 100
+      max_trajectory_length: 10
+      max_tokens: 8192
+      temperature: 0.6
+      top_p: null
+      sleep_after_execution: 3.0
+      task_timeout: 7200

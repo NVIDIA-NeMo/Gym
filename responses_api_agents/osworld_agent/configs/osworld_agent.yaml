@@ -1,0 +1,58 @@
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Real desktop-computer tasks driven by the OSWorld harness (DesktopEnv + inline evaluator).
+      value: Improve agentic computer-use capabilities (GUI navigation, multi-app workflows, OS-level operations).
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: responses_api_agents/osworld_agent/data/train.jsonl
+        gitlab_identifier:
+          dataset_name: osworld
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        huggingface_identifier:
+          repo_id: xlangai/osworld
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: responses_api_agents/osworld_agent/data/validation.jsonl
+        gitlab_identifier:
+          dataset_name: osworld
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        huggingface_identifier:
+          repo_id: xlangai/osworld
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/osworld_agent/data/example.jsonl
+      concurrency: 4
+      provider_name: docker
+      container_image: docker://happysixd/osworld-docker:latest
+      headless: true
+      screen_width: 1920
+      screen_height: 1080
+      require_a11y_tree: false    # a11y_tree gives precise UI coords from OS AT-SPI — info a human user wouldn't have. Set false for pure-VLM evaluation (matches OSWorld paper's vision-only baseline + OpenAI/Anthropic computer-use benchmarks). Set true if you want max accuracy on small-UI clicks at the cost of much larger prompts (one a11y dump can be 100s of KB of XML, which blows the context window quickly with max_trajectory_length>1).
+      client_password: password  # pragma: allowlist secret
+      max_steps: 15
+      max_trajectory_length: 3
+      sleep_after_execution: 10.0   # Generous post-action wait. pyautogui clicks actuate immediately but page nav/render can take 5-8s under software emulation (TCG) — 1.5s catches mid-render screenshots that look "unchanged" and trigger broken-record re-clicks. Under KVM (hardware-accelerated qemu) 0.5-1.5s usually suffices.
+      cache_dir: cache
+      max_tokens: 1500
+      temperature: 1.0
+      top_p: null  # null = skip the top_p kwarg entirely (some reasoning models reject it with HTTP 400). Set to e.g. 0.9 for permissive models that accept it.
+      runner_name: gym_pyautogui  # gym_pyautogui preserves the current Gym-built prompt path. Use prompt_agent for OSWorld's native PromptAgent default (screenshot_a11y_tree + computer_13), or explicit prompt_agent_* names for specific observation/action combinations.
+      action_space: null          # null = runner default. Override to pyautogui/computer_13 for compatible runners.
+      observation_type: null      # null = runner default. Override to screenshot/a11y_tree/screenshot_a11y_tree/som for compatible runners.
+      env_class_path: null        # null = runner default DesktopEnv. Custom runners can point at an OSWorld custom env class.
+      agent_class_path: null      # null = runner default agent class.
+      agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
+      mem_limit_mb: 0           # 0 = no docker --memory limit. Set to e.g. 16384 (16 GB) to cap container memory. Note: with the apptainer provider, this may not work under enroot+fakeroot+no-systemd setups (cgroups limitations).
+      step_timeout: 60          # per-action subprocess timeout
+      task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
