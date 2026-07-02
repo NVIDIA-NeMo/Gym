@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Download and materialize BiomniBench-DA as Harbor tasks for NeMo Gym harbor_agent.
 
 Downloads the upstream ``phylobio/BiomniBench-DA`` dataset from HuggingFace (unless
