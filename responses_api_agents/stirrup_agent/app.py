@@ -715,6 +715,26 @@ async def _run_stirrup_agent(
                 else:
                     shutil.copytree(src, task_dir / "reference_files", dirs_exist_ok=True)
 
+            # Make persisted artifacts group/world-accessible so other users
+            # sharing the run tree can read and intake them. This is done via an
+            # explicit chmod walk rather than a umask because ``shutil.copy2`` /
+            # ``shutil.copytree`` above preserve the *source* file mode (often
+            # ``0o600``/``0o644`` and frequently owned by another user) — a umask
+            # cannot override that. Only chmod-ing the freshly-created,
+            # self-owned paths works. Additive (``u+rwx,g+rx,o+rx``) so any
+            # existing extra bits are preserved rather than reset.
+            def _relax_perms(p: str) -> None:
+                try:
+                    os.chmod(p, os.stat(p).st_mode | 0o755)
+                except OSError as chmod_err:
+                    print(f"[stirrup] warning: could not chmod {p}: {chmod_err}", flush=True)
+
+            _relax_perms(str(task_dir.parent))  # task_<id> (so the path is navigable)
+            _relax_perms(str(task_dir))  # repeat_<n>
+            for root, dirs, files in os.walk(task_dir):
+                for name in dirs + files:
+                    _relax_perms(os.path.join(root, name))
+
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
