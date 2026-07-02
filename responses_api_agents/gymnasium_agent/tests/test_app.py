@@ -150,6 +150,36 @@ class TestRun:
         assert urls.count("/step") == 1
 
     @pytest.mark.asyncio
+    async def test_model_calls_carry_rollout_correlation_header(self):
+        # gymnasium_agent calls the model via ServerClient.post (not the base agent's URL resolver),
+        # so it forwards the rollout id explicitly as the x-nemo-gym-rollout-id header.
+        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+        from nemo_gym.server_utils import ROLLOUT_HEADER
+
+        agent = _make_agent()
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            "/v1/responses": [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+        }
+        seen = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            seen.append((url_path, headers))
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        await agent.run(req, body)
+        model_headers = [h for (u, h) in seen if u == "/v1/responses"]
+        assert model_headers and model_headers[0] == {ROLLOUT_HEADER: "2-0"}
+
+    @pytest.mark.asyncio
     async def test_multi_step_preserves_output_items_in_history(self):
         agent = _make_agent(max_steps=3)
         call_log = _wire_mock_client(

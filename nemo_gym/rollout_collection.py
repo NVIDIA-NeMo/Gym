@@ -36,12 +36,15 @@ from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsReq
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
+    peek_global_config_dict,
 )
+from nemo_gym.observability import capture_dirs_from_config, clear_captures_for_rollouts, merge_capture_into_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -446,6 +449,14 @@ class RolloutCollectionHelper(BaseModel):
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
+        # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
+        # captured trajectory is keyed separately from the prior attempt's (see
+        # rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        for row in input_rows:
+            attempt = attempts_by_key.get(get_key(row), 0)
+            if attempt > 0:
+                row[ATTEMPT_INDEX_KEY_NAME] = attempt
+
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
 
@@ -503,6 +514,18 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = _failures_path_for(output_fpath)
 
+        # Resolve capture dirs once so each rollout's captured model-call trajectory can be folded
+        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        try:
+            capture_dirs = capture_dirs_from_config(peek_global_config_dict() or {})
+        except Exception:
+            capture_dirs = []
+
+        # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
+        # same rollout ids, so clear the capture files this run is about to (re)write.
+        if capture_dirs and not config.resume_from_cache:
+            clear_captures_for_rollouts(input_rows, capture_dirs)
+
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
@@ -515,6 +538,16 @@ class RolloutCollectionHelper(BaseModel):
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+            if ATTEMPT_INDEX_KEY_NAME in row:
+                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+
+            # Fold this rollout's captured trajectory into its record (uniform across agents; no-op
+            # when capture is off). Never alters the harness output/reward already in `result`.
+            if capture_dirs:
+                try:
+                    merge_capture_into_record(result, capture_dirs)
+                except Exception:
+                    pass
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)

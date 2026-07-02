@@ -245,3 +245,45 @@ class TestTrajectoryToOutputItems:
         msgs = [None, "string", {"role": "assistant", "content": "ok"}]
         out = _trajectory_to_output_items(msgs, 0)
         assert len(out) == 1
+
+
+class TestRolloutCorrelation:
+    """The rollout header (set by run()) makes responses() build AIAgent with the per-rollout URL
+    prefix on the model base_url, so the model server captures the agent's calls per rollout."""
+
+    async def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
+        from fastapi import Request
+
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+
+        seen: dict = {}
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                seen["base_url"] = kwargs.get("base_url")
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+
+        def _request(headers: dict) -> Request:
+            return Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+
+        await agent.responses(
+            request=_request({"x-nemo-gym-rollout-id": "rid"}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+        )
+        assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
+
+        await agent.responses(request=_request({}), body=NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        assert seen["base_url"] == "http://h:1/v1"
