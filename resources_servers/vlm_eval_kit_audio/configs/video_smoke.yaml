@@ -1,0 +1,26 @@
+# Smoke config for the VIDEO path: synthetic multi-frame example.jsonl as a
+# local "validation" dataset (frames as input_image blocks; no download).
+vlm_eval_kit_audio_resources_server:
+  resources_servers:
+    vlm_eval_kit_audio:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Generic VLMEvalKit driver — video (frames-as-images) smoke.
+      value: Measure video-capable model performance on VLMEvalKit benchmarks
+vlm_eval_kit_audio_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vlm_eval_kit_audio_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: video_smoke
+        type: validation
+        jsonl_fpath: resources_servers/vlm_eval_kit_audio/data/video_example.jsonl
+        num_repeats: 1
+        license: TBD

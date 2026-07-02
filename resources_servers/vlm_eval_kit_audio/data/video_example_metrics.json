@@ -1,0 +1,55 @@
+{
+    "name": "video_smoke",
+    "type": "validation",
+    "jsonl_fpath": "resources_servers/vlm_eval_kit_audio/data/video_example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "TBD",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 37.2,
+        "Min": 32.0,
+        "Max": 41.0,
+        "Standard deviation": 3.63
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "answer": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "benchmark_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "dataset_type": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "index": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

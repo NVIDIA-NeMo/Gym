@@ -77,6 +77,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+    # Same as ``audio_root`` but for ``metadata.video_path`` entries.
+    video_root: Optional[str] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -256,6 +258,39 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    # Video counterpart of ``_AUDIO_EXT_TO_MIME`` for the ``data:video/<subtype>``
+    # URI used by the video sidechannel below.
+    _VIDEO_EXT_TO_MIME: ClassVar[Dict[str, str]] = {
+        ".mp4": "mp4",
+        ".webm": "webm",
+        ".mkv": "x-matroska",
+        ".mov": "quicktime",
+        ".avi": "x-msvideo",
+    }
+
+    def _resolve_video_path_to_url(self, video_path: str) -> str:
+        """Turn a ``video_path`` reference into a ``data:video/...;base64`` URI (mirrors audio)."""
+        if os.path.isabs(video_path):
+            resolved = video_path
+        elif self.config.video_root:
+            resolved = os.path.join(self.config.video_root, video_path)
+        else:
+            raise ValueError(
+                f"metadata.video_path={video_path!r} is relative but VLLMModelConfig.video_root "
+                "is unset. Set video_root in the model config or use absolute paths."
+            )
+        if not os.path.isfile(resolved):
+            raise FileNotFoundError(f"metadata.video_path resolved to {resolved!r}, which does not exist.")
+        ext = os.path.splitext(resolved)[1].lower()
+        mime = self._VIDEO_EXT_TO_MIME.get(ext)
+        if mime is None:
+            raise ValueError(
+                f"Unsupported video extension {ext!r} for {resolved!r}. Supported: {sorted(self._VIDEO_EXT_TO_MIME)}."
+            )
+        with open(resolved, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        return f"data:video/{mime};base64,{encoded}"
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -429,6 +464,51 @@ class VLLMModel(SimpleResponsesAPIModel):
             else:
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
+
+        # Video sidechannel: mirrors the audio one — ``metadata.video_data`` /
+        # ``video_path`` / ``video_paths`` become ``video_url`` blocks spliced
+        # into the most recent user message. Needed because hosted endpoints cap
+        # at one ``image_url`` per prompt (so video can't be sent as N sampled
+        # frames); native ``video_url`` is the supported path.
+        video_keys_present = [k for k in ("video_data", "video_path", "video_paths") if metadata.get(k)]
+        if len(video_keys_present) > 1:
+            raise ValueError(
+                f"metadata video keys are mutually exclusive — got {video_keys_present}. "
+                "Set exactly one of video_data / video_path / video_paths per row."
+            )
+
+        video_urls: List[str] = []
+        if metadata.get("video_data"):
+            video_urls.append(metadata["video_data"])
+            metadata.pop("video_data", None)
+        elif metadata.get("video_path"):
+            video_urls.append(self._resolve_video_path_to_url(metadata["video_path"]))
+            metadata.pop("video_path", None)
+        elif metadata.get("video_paths"):
+            vpaths = metadata["video_paths"]
+            if not isinstance(vpaths, list):
+                raise ValueError(f"metadata.video_paths must be a list, got {type(vpaths).__name__}.")
+            video_urls.extend(self._resolve_video_path_to_url(p) for p in vpaths)
+            metadata.pop("video_paths", None)
+
+        if video_urls:
+            if not metadata and "metadata" in body_dict:
+                body_dict.pop("metadata", None)
+            video_blocks = [{"type": "video_url", "video_url": {"url": url}} for url in video_urls]
+            messages = body_dict.get("messages", []) or []
+            for msg in reversed(messages):
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = video_blocks + [{"type": "text", "text": content}]
+                elif isinstance(content, list):
+                    msg["content"] = video_blocks + list(content)
+                else:
+                    msg["content"] = list(video_blocks)
+                break
+            else:
+                body_dict.setdefault("messages", []).append({"role": "user", "content": list(video_blocks)})
 
         return body_dict
 
