@@ -1,0 +1,33 @@
+swe_bench:
+  resources_servers:
+    swe_bench:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: SWE-bench Environment (seed_session + hermetic verify)
+      sandbox_provider:
+        docker: {}
+      container_formatter: swebench/sweb.eval.x86_64.{instance_id}
+      eval_timeout_s: 1800
+      flat_eval: true
+      default_topology: agent_in_env
+
+claude_code_swe_bench:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swe_bench
+      concurrency: 16
+      model: claude-sonnet-4-6
+      anthropic_api_key: ${anthropic_api_key}
+      anthropic_base_url: null
+      max_turns: 30
+      timeout: 1800
+      in_box_timeout_s: 1800
+      sandbox_provider:
+        docker: {}
+      bare: true
+      mcp_config: null
+      settings: null

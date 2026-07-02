@@ -1,0 +1,6 @@
+{"Time":"2026-06-23T00:00:00Z","Action":"run","Package":"github.com/acme/widget","Test":"TestAlpha"}
+{"Time":"2026-06-23T00:00:00Z","Action":"pass","Package":"github.com/acme/widget","Test":"TestAlpha","Elapsed":0.01}
+{"Time":"2026-06-23T00:00:01Z","Action":"run","Package":"github.com/acme/widget","Test":"TestBeta"}
+{"Time":"2026-06-23T00:00:01Z","Action":"pass","Package":"github.com/acme/widget","Test":"TestBeta","Elapsed":0.02}
+{"Time":"2026-06-23T00:00:02Z","Action":"run","Package":"github.com/acme/widget","Test":"TestGamma"}
+{"Time":"2026-06-23T00:00:02Z","Action":"fail","Package":"github.com/acme/widget","Test":"TestGamma","Elapsed":0.01}

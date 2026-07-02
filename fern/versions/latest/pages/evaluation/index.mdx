@@ -28,6 +28,10 @@ The most important rule: vary one thing at a time. Changing the model, harness, 
 
 NeMo Gym accesses models through the model server, which keeps provider-specific details behind the Responses API boundary — the same evaluation can compare hosted models, self-hosted vLLM instances, local checkpoints, or pre- and post-training snapshots.
 
+<Note>
+Outside Gym, “harness” often means the SWE-bench **grading pipeline** (`swebench.harness`) rather than agent orchestration. See [Harness Terminology](/infrastructure/engineering-notes/harness-terminology).
+</Note>
+
 <Cards>
 
 <Card title="Configure Models" href="/model-server">

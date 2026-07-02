@@ -1,0 +1,9 @@
++ cd /testbed
++ git apply -v /tmp/patch.diff
+Checking patch sphinx/ext/autodoc/__init__.py...
+error: while searching for:
+    def format_signature(self):
+error: patch failed: sphinx/ext/autodoc/__init__.py:120
+error: sphinx/ext/autodoc/__init__.py: patch does not apply
+>>>>> Patch Apply Failed
++ git checkout abc123 tests/test_ext_autodoc.py

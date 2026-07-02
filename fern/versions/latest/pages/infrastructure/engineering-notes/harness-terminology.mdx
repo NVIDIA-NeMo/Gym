@@ -1,0 +1,103 @@
+---
+title: "Harness Terminology"
+description: "How the agent-eval and SWE-bench communities use “harness,” and how NeMo Gym disambiguates agent orchestration from benchmark grading."
+---
+**“Harness” is overloaded.** In agentic coding and SWE-bench discussions, the same word often means either (a) the agent-side orchestration that runs a model on tasks, or (b) the benchmark-side pipeline that grades patches. There is no single community-wide definition — context disambiguates. This note maps the dominant usages and the vocabulary NeMo Gym uses to keep them separate.
+
+## Three meanings in the wild
+
+| Context | “Harness” usually means | Agent included? | Example |
+| --- | --- | --- | --- |
+| **SWE-bench docs / `swebench.harness`** | Grading pipeline: Docker, apply patch, run tests, report resolved | No | `python -m swebench.harness.run_evaluation` |
+| **SWE-bench leaderboard / blogs** | Agent orchestration: prompt, tool loop, patch extraction | Yes | “mini-SWE-agent + Claude 4.5 Opus” |
+| **NeMo Gym docs** | Agent server orchestration around the model | Yes | `claude_code_agent`, OpenHands, `simple_agent` |
+| **Generic ML eval** | Benchmark runner infrastructure | Maybe | “evaluation harnesses” in NeMo Evaluator |
+
+The collision is sharpest in SWE-bench: **official docs** call the grader “the harness,” while **leaderboard rows** read like “harness + model” where harness is the agent stack.
+
+## SWE-bench: two halves of one eval
+
+The [SWE-bench harness reference](https://www.swebench.com/SWE-bench/reference/harness/) documents **`swebench.harness`** — the module that:
+
+1. Prepares per-instance Docker images
+2. Applies a `model_patch` from a predictions file
+3. Runs the repository test suite
+4. Grades pass/fail and aggregates `% resolved`
+
+The submission contract is intentionally narrow: produce JSONL with `instance_id` and `model_patch`; the harness scores it. Community tutorials often describe this as a unit-test-shaped split:
+
+- **Arrange** — harness prepares the instance environment (images, checkout, deps)
+- **Act** — *your* agent edits the repo and emits a patch (not part of `swebench.harness`)
+- **Assert** — harness applies the patch, runs hidden tests, reports resolved/unresolved
+
+So in SWE-bench **technical** vocabulary, harness ≈ **Environment + grading authority**. The agent is external.
+
+What upstream bundles (without always naming it cleanly) is **task world + grading** inside one pipeline. What it does **not** model is **how** the agent produced the patch — but leaderboard prose often treats “harness + model” as the evaluated product anyway.
+
+## Leaderboard and product language
+
+The [SWE-bench leaderboard](https://www.swebench.com/) reports results as combinations like:
+
+- **“bash only”** — a specific agent-side setup across models
+- **“mini-SWE-agent + Claude 4.5 Opus”** — harness (orchestration) + model
+
+That usage matches NeMo Gym’s [SWE RL case study](/infrastructure/engineering-notes/swe-rl-case-study): *a harness is a system prompt plus orchestration to execute one attempt at the task.* Here harness ≈ **agent harness**, not `run_evaluation`.
+
+When reading papers, blog posts, or vendor announcements, assume **harness = agent-side** unless the text explicitly points at Docker grading or `swebench.harness`.
+
+## NeMo Gym vocabulary (intentional split)
+
+Gym separates roles that colloquial “harness” often merges:
+
+| Gym term | Role | SWE-bench analogue |
+| --- | --- | --- |
+| **Task** | One dataset row / instance (`SweTask`, `TaskPublic`) | `django__django-13741` |
+| **Benchmark** | Fixed eval product: split, metric, protocol, baselines | SWE-bench Verified |
+| **Environment** | Resources server: `seed_session`, `verify`, state, tools | `swe_bench` RS |
+| **Agent harness** | Agent server: multi-step loop, tools, when to stop | Claude Code, OpenHands, mini-SWE-agent |
+| **Model** | Stateless inference | vLLM / OpenAI endpoint |
+
+See [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks) and the [SWE-bench Environment Server](/infrastructure/engineering-notes/swe-bench-environment-server) note for how `SessionDescriptor`, topology C, and hermetic `verify` fit in.
+
+### The awkward `harnesses/` directory
+
+Under [`resources_servers/swe_bench/harnesses/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swe_bench/harnesses), **`harness` means something else again**: benchmark-**family eval plugins** owned by the Environment — provision recipes and grading adapters keyed by dataset family (e.g. SWE-bench vs multilingual). They wrap pieces of upstream `swebench.harness`; they are **not** agent orchestration.
+
+| Name in repo | Meaning | Prefer saying |
+| --- | --- | --- |
+| Agent server / `responses_api_agents/` | Agent harness | **agent harness** or **agent server** |
+| `swebench.harness` (upstream) | Official grading pipeline | **SWE-bench eval harness** or **grading pipeline** |
+| `swe_bench/harnesses/` | Environment eval plugins | **benchmark-family plugin** or **eval plugin** (when disambiguation matters) |
+| `swe_bench` RS overall | MDP authority for SWE tasks | **Environment** or **resources server** |
+
+We keep `harness.py` / `harnesses/` in `swe_bench` to align with upstream module naming (`swebench.harness`) and prior `swe_env` convention — not because Gym equates “harness” with agent orchestration.
+
+## Practical guidance
+
+**When writing docs or PRs**
+
+- Say **agent harness** (or **agent server**) for orchestration in `responses_api_agents/`.
+- Say **SWE-bench eval harness** or **grading pipeline** for `swebench.harness.run_evaluation`.
+- Say **Environment** / **`swe_bench` resources server** for `seed_session` + `verify` + hermetic grading.
+- Say **benchmark** for published eval products (Verified, Lite), not for the server binary.
+- Say **task** / **instance** for one problem row — not “environment” and not “harness.”
+
+**When comparing to leaderboard numbers**
+
+- Identify both **model** and **agent harness** (leaderboard row).
+- Confirm **benchmark split** and **grading protocol** (Environment config, `verified:` marker).
+- Do not conflate upstream `swebench.harness` with the agent named on the leaderboard.
+
+**When designing new environments**
+
+- Keep **grading authority** on the resources server (Environment).
+- Keep **orchestration** on the agent server (agent harness).
+- Use **benchmark-family plugins** only for dataset-specific provision/grade logic — not for agent loops.
+
+## Related reading
+
+- [Evaluation — agent harness](/evaluation#agent-harness) — Gym’s primary “harness” definition
+- [Key Terminology — Agent Server](/about/concepts/key-terminology#architecture-terms) — architecture glossary
+- [SWE-bench Environment Server](/infrastructure/engineering-notes/swe-bench-environment-server) — Task / Benchmark / Environment split for SWE
+- [SWE RL Case Study](/infrastructure/engineering-notes/swe-rl-case-study) — harness + model on the leaderboard
+- [SWE-bench harness reference](https://www.swebench.com/SWE-bench/reference/harness/) — upstream grading pipeline
