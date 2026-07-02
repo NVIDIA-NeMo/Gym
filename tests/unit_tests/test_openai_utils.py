@@ -15,7 +15,27 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseMcpApprovalRequest,
+    NeMoGymResponseMcpCall,
+    NeMoGymResponseMcpListTools,
+)
+
+
+def _response_with_output(output: list) -> dict:
+    return {
+        "id": "resp_1",
+        "created_at": 0.0,
+        "model": "gpt-oss-120b",
+        "object": "response",
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": output,
+    }
 
 
 class TestOpenAIUtils:
@@ -37,3 +57,57 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+
+class TestNeMoGymResponseHostedMcpItems:
+    """Hosted-MCP output items (``mcp_call`` etc.) must validate rather than 500.
+
+    Endpoints that run tools server-side (e.g. NVIDIA-hosted gpt-oss surfacing
+    its built-in python tool as MCP) emit these in ``response.output``; before
+    they were in the union, ``NeMoGymResponse.model_validate`` raised and the
+    model server returned a 500 that aborted the whole rollout collection.
+    """
+
+    def test_mcp_call_in_response_output_validates(self) -> None:
+        mcp_call = {
+            "type": "mcp_call",
+            "id": "mcp_1",
+            "name": "python",
+            "server_label": "exec",
+            "arguments": '{"code": "print(42)"}',
+            "output": "42\n",
+            "status": "completed",
+        }
+        response = NeMoGymResponse.model_validate(
+            _response_with_output(
+                [
+                    {"type": "reasoning", "id": "r1", "summary": []},
+                    mcp_call,
+                    {
+                        "type": "message",
+                        "id": "m1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "(Answer: 42)", "annotations": []}],
+                    },
+                ]
+            )
+        )
+        call = response.output[1]
+        assert isinstance(call, NeMoGymResponseMcpCall)
+        assert call.type == "mcp_call"
+        assert call.output == "42\n"
+
+    def test_mcp_call_tolerates_missing_optional_fields(self) -> None:
+        call = NeMoGymResponseMcpCall.model_validate({"type": "mcp_call", "name": "python", "arguments": "{}"})
+        assert call.id is None and call.server_label is None and call.output is None
+
+    def test_mcp_list_tools_and_approval_request_validate(self) -> None:
+        listing = NeMoGymResponseMcpListTools.model_validate(
+            {"type": "mcp_list_tools", "id": "l1", "server_label": "s", "tools": [{"name": "python"}]}
+        )
+        approval = NeMoGymResponseMcpApprovalRequest.model_validate(
+            {"type": "mcp_approval_request", "id": "a1", "name": "python", "arguments": "{}", "server_label": "s"}
+        )
+        assert listing.tools == [{"name": "python"}]
+        assert approval.name == "python"
