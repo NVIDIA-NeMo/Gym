@@ -120,8 +120,17 @@ class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
+    if not job_dir.exists():
+        return None
+    for trial_dir in job_dir.iterdir():
+        if trial_dir.is_dir() and (trial_dir / "result.json").exists():
+            return trial_dir
+    return None
+
+
 async def run_harbor_job(job_config_dict: dict) -> str:
-    """Runs a single Harbor Job and returns the trial directory path.
+    """Runs a single Harbor Job and returns the *absolute* trial directory path.
 
     The trial directory contains:
     - result.json: Summary result with reward, agent_result, verifier_result, etc.
@@ -132,6 +141,18 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     fails (e.g. verifier timeout, reward file not found, OOM).  We recover the
     trial directory after an exception so the caller can still use the partial
     trajectory for training.
+
+    This runs inside a Ray remote worker (see ``runner_ray_remote``), whose cwd
+    is inherited from wherever the Ray cluster was started (the Gym repo root,
+    via ``ng_run``) -- NOT the `harbor_agent` server process's own cwd (which
+    `ng_run` `cd`s into `responses_api_agents/harbor_agent/` before launching).
+    `config.jobs_dir` is a relative path (e.g. `responses_api_agents/harbor_agent/
+    jobs/...`), so it only resolves correctly from the *former*. We therefore
+    MUST resolve to an absolute path before returning, since the caller
+    (`HarborAgent.run()`) re-opens `result.json` from the server process's own
+    cwd -- a relative path here silently resolves to the wrong (nonexistent,
+    doubled) location there, and every trial looks like it failed even though
+    it ran and wrote everything correctly to disk.
     """
     from harbor.job import Job
     from harbor.models.job.config import JobConfig
@@ -145,23 +166,19 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     except Exception as e:
         job_error = e
 
-    # Find the trial directory from the job output directory.  Harbor writes
+    # Find the trial directory from the job output directory. Harbor writes
     # result.json before propagating most exceptions, so we can usually
     # recover the trial even when job.run() raised.
     job_dir = config.jobs_dir / config.job_name
-    if job_dir.exists():
-        for trial_dir in job_dir.iterdir():
-            if not trial_dir.is_dir():
-                continue
-            result_path = trial_dir / "result.json"
-            if result_path.exists():
-                return str(trial_dir)
+    trial_dir = _find_trial_dir_with_result(job_dir)
+    if trial_dir is not None:
+        return str(trial_dir.resolve())
 
     # No trial directory found — re-raise the original error if there was one,
     # otherwise raise FileNotFoundError.
     if job_error is not None:
         raise job_error
-    raise FileNotFoundError(f"No trial result found in {job_dir}")
+    raise FileNotFoundError(f"No trial result found in {job_dir.resolve()}")
 
 
 _RAY_WORKER_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None

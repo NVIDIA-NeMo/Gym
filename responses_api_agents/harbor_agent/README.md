@@ -212,11 +212,33 @@ gym env start \
 python responses_api_agents/harbor_agent/client.py
 ```
 
-After a test run, inspect NeMo Gym rollout outputs under `results/`. For Harbor-
-specific trial artifacts, use `harbor_jobs_dir` (configured in
-`configs/harbor_agent.yaml`, default `jobs/`), where each Harbor run writes a
-timestamped job directory containing per-trial outputs and a top-level
-`result.json` summary.
+### Where rollouts are stored
+
+Each `/run` call writes to **two** places, for two different audiences:
+
+- **`results/runs/<YYYYMMDD>/<dataset_alias>/<model_name>/<run_id>/<instance_id>.json`**
+  — the NeMo Gym-facing `HarborVerifyResponse` (`app.py:run`), i.e. what
+  `ng_collect_rollouts`/`gym eval run` actually consume: `reward`,
+  `response.output` (converted from the ATIF trajectory), `usage`, and
+  `responses_create_params`. This is derived/recomputed from the Harbor job
+  below — it is not the source of truth. If this file has an empty `output`,
+  `reward: 0.0`, and `metadata: {}` even though the trial clearly succeeded, that
+  means the `try` block in `HarborAgent.run()` hit an exception and fell through
+  to the `except` fallback — check the server logs for `Error running Harbor
+  job: ...` to find the real cause.
+- **`harbor_jobs_dir`** (set via `configs/harbor_agent*.yaml`, default `jobs/`,
+  grouped the same way: `<YYYYMMDD>/<dataset_alias>/<model_name>/<job_id>/`) —
+  Harbor's own raw trial artifacts and the actual source of truth: per-trial
+  `result.json` (reward, token counts, timing), `agent/trajectory.json` (full
+  ATIF conversation), and `verifier/{reward.txt,reward.json,test-stdout.txt}`.
+
+When debugging a suspicious `results/runs/...` file, always cross-check the
+corresponding `harbor_jobs_dir/.../<trial_name>/result.json` and
+`verifier/reward.txt` first — if those show the real reward/trajectory, the bug
+is in the `run()` bridge (`app.py`/`utils.py`), not in Harbor or the task itself.
+`run_harbor_job()` has a known-fixed race here: `job.run()` can return before the
+trial's `result.json` is visible on disk, so it retries for up to 5s before
+giving up.
 
 ### 7) Collect rollouts
 
@@ -237,32 +259,79 @@ jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 
 BiomniBench-DA runs through the same Harbor agent flow as Nemotron Terminal, with
 materialized task trees under `data/biomnibench_da/` (gitignored). Use Gym's venv
-from the repo root:
+from the repo root.
+
+
+### 1) Download the source dataset
 
 ```bash
 cd /path/to/Gym
 source .venv/bin/activate
 
-# Download HF data + materialize smoke tasks (docker + singularity profiles)
-python responses_api_agents/harbor_agent/scripts/prepare_biomnibench_da.py --smoke
-
-# Build shared runtime image (required for docker bind mode)
-responses_api_agents/harbor_agent/docker/build_biomnibench_runtime_image.sh
+hf download phylobio/BiomniBench-DA --repo-type dataset \
+  --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source
 ```
 
-Export judge credentials before rollouts (substituted into each task's verifier env):
+### 2) Materialize the smoke task tree (docker profile)
+
+`da-1-3`/`da-1-4` each belong to a `task_type` with too few tasks to pass the
+default train/test coverage filter, so a bare smoke materialization selects
+**zero** tasks. Pass `--include-singletons --include-uncovered` to keep them:
 
 ```bash
-export JUDGE_API_KEY=...
-export JUDGE_BASE_URL=...
-export JUDGE_MODEL=...
+python responses_api_agents/harbor_agent/scripts/materialize_biomnibench_da.py \
+  --local-dir responses_api_agents/harbor_agent/data/biomnibench_da/source \
+  --environment-type docker \
+  --tasks da-1-3 da-1-4 \
+  --include-singletons --include-uncovered \
+  --output-dir responses_api_agents/harbor_agent/data/biomnibench_da/tasks_smoke_docker \
+  --overwrite
 ```
 
-Smoke rollouts (Docker profile + token-aware vLLM):
+For HPC, use `--environment-type singularity` and
+`--output-dir .../tasks_smoke_singularity` instead.
+
+### 3) Build (or verify) the shared runtime image
+
+Docker profile tasks reference a prebuilt image
+(`[environment].docker_image` in each `task.toml`), not a per-task Dockerfile build.
+The generated `environment/docker-compose.yaml` will fail immediately if this image
+isn't present locally, so build/pull it once up front:
+
+```bash
+responses_api_agents/harbor_agent/docker/build_biomnibench_runtime_image.sh
+# Sanity check:
+docker image inspect biomnibench-da-runtime:smoke
+```
+
+### 4) Export judge credentials
+
+Each task's `[verifier.env]` in `task.toml` is resolved by **Harbor itself**
+(`harbor.utils.env.resolve_env_vars`) against literal OS environment variables —
+this is a separate mechanism from NeMo Gym's own `${...}` config interpolation in
+`env.yaml`/config YAMLs, so these must be `export`ed in the shell that launches
+`ng_run` (uppercase names, matching what's baked into `task.toml`):
+
+```bash
+export JUDGE_API_KEY=...     # same value as env.yaml's judge_api_key
+export JUDGE_BASE_URL=...    # same value as env.yaml's judge_base_url
+export JUDGE_MODEL=...       # same value as env.yaml's judge_model_name
+```
+
+### 5) Configure the policy model server
+
+Use `configs/vllm_model.yaml`, **not** `configs/vllm_model_for_training.yaml`,
+unless the policy model is a real self-hosted vLLM server. `vllm_model_for_training.yaml`
+sets `return_token_id_information: true`, which makes `app.py` inject a
+vLLM-specific `return_tokens_as_token_ids` sampling param — remote gateway models
+(e.g. `azure/openai/gpt-5.5` via `https://inference-api.nvidia.com/v1`) reject that
+param and the request fails with an opaque `500`.
+
+### 6) Launch Gym and collect rollouts
 
 ```bash
 CONFIG_PATHS="responses_api_agents/harbor_agent/configs/harbor_agent_biomnibench_da_docker.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
+responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 ng_run "+config_paths=[${CONFIG_PATHS}]" &
 ./scripts/wait_for_servers.sh $!
@@ -276,6 +345,21 @@ Rollout JSONL uses `instance_id` in the form `biomnibench_da::<task_name>` (for
 example `biomnibench_da::da-1-3-r001`). For HPC/Singularity, switch to
 `configs/harbor_agent_biomnibench_da_singularity.yaml` and the
 `tasks_smoke_singularity` dataset path.
+
+### Troubleshooting
+
+- **`service "main" has neither an image nor a build context specified`**: the
+  materialized `environment/docker-compose.yaml` is stale (missing `image:`/mount
+  overrides) — re-run step 2 to regenerate it, and confirm the runtime image exists
+  (step 3).
+- **`No such file or directory` from `tee .../logs/verifier/...` / trial fails with
+  `RewardFileNotFoundError` despite the judge printing a score**: same cause —
+  Harbor's Docker environment assumes `/logs/agent` and `/logs/verifier` are
+  bind-mounted from the trial dir (`harbor.models.trial.paths.EnvironmentPaths`);
+  regenerate the compose file (step 2) rather than hand-editing it.
+- **`Error response from daemon: all predefined address pools have been fully
+  subnetted`** when a trial's `docker compose up -d` tries to create a network:
+  
 
 ## Daytona execution path
 

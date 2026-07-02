@@ -209,11 +209,42 @@ def _yaml_quote(value: str) -> str:
 def write_docker_compose_yaml(
     path: Path,
     *,
+    image: str,
     data_mount: tuple[Path, str] | None = None,
     skills_mount: tuple[Path, str] | None = None,
     read_only: bool = True,
 ) -> None:
-    volume_lines: list[str] = []
+    """Write a self-contained compose override for the shared prebuilt runtime image.
+
+    Harbor's ``DockerEnvironment`` picks ``environment/docker-compose.yaml`` over its
+    own built-in prebuilt-image template whenever the file exists (see
+    ``harbor.environments.docker.docker.DockerEnvironment._docker_compose_path``), so
+    this file must declare everything Harbor's own templates would otherwise provide:
+
+    - ``image``/``command``: mirrors ``docker-compose-prebuilt.yaml`` (long-running
+      container for the shared prebuilt image, since Harbor never merges the two
+      files).
+    - ``${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}`` and the agent-logs
+      equivalent: Harbor's ``DockerEnvironment.is_mounted`` is ``True``, so
+      ``Verifier.verify()`` skips downloading ``/logs/verifier`` after running
+      ``tests/test.sh`` and instead assumes it is already bind-mounted to
+      ``trial_dir/verifier`` on the host (see
+      ``harbor.models.trial.paths.EnvironmentPaths``). Without this mount, the judge
+      still runs and scores the trial, but ``reward.txt``/``reward.json`` never reach
+      the host and the trial fails with ``RewardFileNotFoundError``.
+    - ``TEST_DIR`` env var, ``network_mode``, and CPU/memory limits: passed through by
+      Harbor as compose-file env vars (``DockerEnvironmentEnvVars.to_env_dict()``), not
+      OS env vars, so they only take effect if the compose file references them.
+
+    These come from ``DockerEnvironmentEnvVars`` (see ``harbor/environments/docker/
+    docker.py``) and are injected into the ``docker compose`` subprocess env by Harbor
+    itself, so referencing them here as ``${...}`` is resolved the same way Harbor's
+    own templates resolve them -- no extra plumbing needed on our side.
+    """
+    volume_lines: list[str] = [
+        "      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}",
+        "      - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}",
+    ]
     for mount in (data_mount, skills_mount):
         if mount is None:
             continue
@@ -226,9 +257,25 @@ def write_docker_compose_yaml(
                 f"        read_only: {'true' if read_only else 'false'}",
             ]
         )
-    if not volume_lines:
+    if data_mount is None and skills_mount is None:
         return
-    text = "services:\n  main:\n    volumes:\n" + "\n".join(volume_lines) + "\n"
+    lines = [
+        "services:",
+        "  main:",
+        f"    image: {_yaml_quote(image)}",
+        '    command: ["sh", "-c", "sleep infinity"]',
+        "    network_mode: ${NETWORK_MODE:-bridge}",
+        "    environment:",
+        "      - TEST_DIR=${TEST_DIR}",
+        "    volumes:",
+        *volume_lines,
+        "    deploy:",
+        "      resources:",
+        "        limits:",
+        "          cpus: ${CPUS}",
+        "          memory: ${MEMORY}",
+    ]
+    text = "\n".join(lines) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
@@ -290,6 +337,7 @@ def materialize_environment(
         if data_mount:
             write_docker_compose_yaml(
                 compose_path,
+                image=args.docker_image,
                 data_mount=data_mount,
                 skills_mount=None,
                 read_only=True,
