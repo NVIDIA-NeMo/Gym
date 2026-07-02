@@ -17,9 +17,13 @@ over the older Docker/Singularity mini-SWE integration.
   - [Configuration](#configuration)
     - [Agent Configuration](#agent-configuration)
     - [Model Parameters](#model-parameters)
-  - [Usage](#usage)
-    - [Server](#server)
-    - [Collect Rollouts](#collect-rollouts)
+  - [Quick Start](#quick-start)
+    - [Prerequisites](#prerequisites)
+    - [Environment Variables](#environment-variables)
+    - [Start Servers](#start-servers)
+    - [Run One-Example Smoke](#run-one-example-smoke)
+    - [Expected Outputs](#expected-outputs)
+    - [Repeated Rollouts](#repeated-rollouts)
   - [Sandbox Environment Adapter](#sandbox-environment-adapter)
     - [Environment Lifecycle](#environment-lifecycle)
   - [Contributing](#contributing)
@@ -60,6 +64,12 @@ supported eval path is `/run`, typically via `gym eval run --no-serve`.
 - Each row must also include `responses_create_params`. Extra top-level
   SWE-bench fields are accepted by the agent request model and passed into
   mini-swe-agent as the instance dictionary.
+- A committed smoke input of five SWE-bench Verified rows (`subset: verified`)
+  is available at `responses_api_agents/mini_swe_agent_2/data/example.jsonl`,
+  with pre-generated rollouts at
+  `responses_api_agents/mini_swe_agent_2/data/example_rollouts.jsonl`. Those
+  rollouts were generated with `Qwen/Qwen3-30B-A3B` (recorded per row under
+  `response.model`).
 
 Example row shape:
 
@@ -253,9 +263,9 @@ data.
 
 The default convention (every provider file binds the name `sandbox`) is optimized
 for the single-sandbox case and path-only swapping. To run more than one sandbox
-in the same `ng_run`, give each block a **distinct instance name** and reference it
-explicitly. Because names are arbitrary, this covers every multi-sandbox case
-without any framework change:
+in the same merged config, give each block a **distinct instance name** and
+reference it explicitly. Because names are arbitrary, this covers every
+multi-sandbox case without any framework change:
 
 - **Different providers at once** (e.g. one agent on OpenSandbox, a grader on
   another provider):
@@ -313,11 +323,46 @@ That symptom was not a sandbox failure and was not a reason to force the `bash`
 tool. The successful smoke kept `tool_choice=auto` and lowered
 `max_output_tokens` to `16384`.
 
-## Usage
+## Quick Start
 
-### Server
+### Prerequisites
 
-Set the policy model endpoint in `env.yaml` or with equivalent Hydra overrides:
+- A NeMo Gym development environment with this agent's requirements installed.
+  From the repo root:
+
+```bash
+uv sync --extra dev --extra sandbox
+uv pip install mini-swe-agent==2.1.0 swebench==4.1.0
+```
+
+  `uv sync --extra dev --extra sandbox` installs `nemo-gym[dev,sandbox]`
+  (including the OpenSandbox SDK) into the root venv, so the manual step only
+  adds this agent's extra runtime dependencies. Do **not** run
+  `uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt`
+  from the repo root: that file pins `nemo-gym` via a `../../` editable path
+  that pip/uv resolve relative to the current working directory, so from the
+  repo root it points one level above the repo and fails with
+  `... does not appear to be a Python project`. That requirements file is meant
+  to be installed with the agent directory as the working directory, which is
+  exactly what `gym env start` does automatically when it builds the agent's
+  per-server virtual environment.
+
+- Access to an OpenSandbox deployment reachable from the server process.
+- A policy model endpoint compatible with `responses_api_models/vllm_model`.
+- SWE-bench task images available to OpenSandbox. The committed smoke rows are
+  `subset: verified`, so they resolve to
+  `docker.io/swebench/sweb.eval.x86_64.<id>:latest` images derived from
+  `instance_id` (see the image-naming note above).
+
+### Environment Variables
+
+Set the OpenSandbox API key:
+
+```bash
+export OPENSANDBOX_API_KEY=<opensandbox-api-key>
+```
+
+Set the policy model endpoint in `env.yaml` or with equivalent CLI overrides:
 
 ```yaml
 policy_base_url: http://<vllm-service>.<namespace>.svc.cluster.local:8000/v1
@@ -325,70 +370,111 @@ policy_api_key: dummy-key
 policy_model_name: <served-model-name>
 ```
 
+### Start Servers
+
 Start the mini-swe-agent 2 server by composing three config paths: the
 provider-neutral agent config, a sandbox provider config, and a policy model
-server config. To swap providers, change only the sandbox provider path. The
-values below show a representative SWE-bench eval setup with OpenSandbox:
+server config. To swap providers, change only the sandbox provider path:
 
 ```bash
 gym env start \
     --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-    --model-type vllm_model \
-    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.concurrency=64 \
-    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_timeout=600 \
-    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.eval_timeout=1800 \
-    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.step_limit=50 \
-    +mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=false \
-    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.resources={cpu: 0.5, memory_mib: 4096, disk_gib: 8}' \
-    '+mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.sandbox_spec.metadata={benchmark: swebench-verified, harness: mini_swe_agent_2, endpoint_label: hosted-vllm, run_family: mini-swe-agent-2-pass8}'
+    --model-type vllm_model
 ```
 
 Use a model server config that matches the policy endpoint you are serving. The
-example above uses `vllm_model`, which is the common path for hosted vLLM
-`/v1/chat/completions` endpoints.
+example above uses `vllm_model`, the common path for hosted vLLM
+`/v1/chat/completions` endpoints. The checked-in agent config starts with
+`cpu: 2`, `memory_mib: 8192`, `disk_gib: 20`, and `step_limit: 250`; the
+quickstart intentionally uses those defaults.
 
-### Collect Rollouts
+### Run One-Example Smoke
 
-Collect eval rollouts from a SWE-bench-style JSONL file:
+In a second terminal, run a single row from the committed smoke input
+(`--limit 1`):
 
 ```bash
 gym eval run --no-serve \
     --agent mini_swe_agent_2 \
-    --input data/mini_swe_verified_smoke8.jsonl \
-    --output results/mini_swe_agent_2_pass8.jsonl \
-    --limit 8 \
-    --num-repeats 8 \
-    --concurrency 64 \
-    --max-output-tokens 32768 \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
+    --output results/mini_swe_agent_2_smoke.jsonl \
+    --limit 1 \
+    --num-repeats 1 \
+    --concurrency 1 \
     --temperature 0.6 \
     --top-p 0.95 \
-    "++responses_create_params.metadata.chat_template_kwargs='{\"enable_thinking\": true}'"
+    --max-output-tokens 16384 \
+    '+responses_create_params.metadata.chat_template_kwargs="{\"enable_thinking\": true}"'
 ```
 
-`gym eval run --no-serve` also writes
-`results/mini_swe_agent_2_pass8_aggregate_metrics.json`
-with per-task eval status, pass@k, resolved task counts, and eval error rates.
-After collecting repeated rollouts, run `gym eval profile` on the collected
-output when you want the standalone profiler JSONL as well:
+### Expected Outputs
+
+The smoke command writes one rollout row plus sidecar files:
+
+- `results/mini_swe_agent_2_smoke.jsonl`
+- `results/mini_swe_agent_2_smoke_materialized_inputs.jsonl`
+- `results/mini_swe_agent_2_smoke_aggregate_metrics.json`
+- per-instance mini-swe-agent configs and result artifacts under
+  `results/<subset>/<policy_model_name>/`
+
+The rollout row includes `reward`, `response`, `responses_create_params`, and a
+`metadata` object holding `eval_report`, `model_patch`, and `instance_id`. The
+full SWE-bench instance fields (`repo`, `base_commit`, `patch`, ...) are not
+copied onto the rollout row; they remain in the materialized inputs. A smoke run
+may receive reward `0.0` or `1.0` depending on the model output and verification
+result; infrastructure failures appear in `metadata.eval_report`. Note that an
+empty `model_patch` still counts as `patch_successfully_applied` in SWE-bench
+(an empty diff applies as a no-op), so a high `patch_applied_rate` in the
+aggregate metrics does not imply every rollout attempted a fix.
+
+Inspect the first row and aggregate metrics:
+
+```bash
+head -1 results/mini_swe_agent_2_smoke.jsonl
+cat results/mini_swe_agent_2_smoke_aggregate_metrics.json
+```
+
+### Repeated Rollouts
+
+After the one-example smoke succeeds, increase `--num-repeats` and
+`--concurrency` for pass@k style runs. The command below is pass@8 on a single
+task (`--limit 1`); raise `--limit` to cover more rows of `example.jsonl`:
+
+```bash
+gym eval run --no-serve \
+    --agent mini_swe_agent_2 \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
+    --output results/mini_swe_agent_2_pass8.jsonl \
+    --limit 1 \
+    --num-repeats 8 \
+    --concurrency 8 \
+    --temperature 0.6 \
+    --top-p 0.95 \
+    --max-output-tokens 16384 \
+    '+responses_create_params.metadata.chat_template_kwargs="{\"enable_thinking\": true}"'
+```
+
+`gym eval run` also writes
+`results/mini_swe_agent_2_pass8_aggregate_metrics.json` with per-task eval
+status, pass@k, resolved task counts, and eval error rates. To write the
+standalone profiler JSONL as well, run:
 
 ```bash
 gym eval profile \
-    --input data/mini_swe_verified_smoke8.jsonl \
-    +materialized_inputs_jsonl_fpath=results/mini_swe_agent_2_pass8_materialized_inputs.jsonl \
-    +rollouts_jsonl_fpath=results/mini_swe_agent_2_pass8.jsonl \
-    +pass_threshold=1.0
+    --inputs results/mini_swe_agent_2_pass8_materialized_inputs.jsonl \
+    --rollouts results/mini_swe_agent_2_pass8.jsonl
 ```
 
-The profiler writes `*_reward_profiling.jsonl` and `*_agent_metrics.json`
-next to the rollouts file.
+The profiler writes `*_reward_profiling.jsonl` and `*_agent_metrics.json` next
+to the rollouts file.
 
 The agent writes per-instance mini-swe-agent configs and result artifacts under
 `results/<subset>/<policy_model_name>/`.
 
-Use the agent's `step_timeout` and `eval_timeout` overrides above to bound tool
-and verifier execution. If you launch from a custom Kubernetes wrapper, add any
-outer per-sample guard there.
+Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
+to bound tool and verification execution. If you launch from a custom
+Kubernetes wrapper, add any outer per-sample guard there.
 
 ## Sandbox Environment Adapter
 
