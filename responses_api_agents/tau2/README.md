@@ -15,6 +15,31 @@ configuration in the prepared rows:
 
 ```bash
 gym env start \
+    --config benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml \
+    --model-type openai_model \
+    ++nemo_gym_log_dir=results/tau2_banking_bm25_grep_artificial_analysis \
+    '++nvi-gpt-5_4-mini.responses_api_models.openai_model.openai_api_key=${oc.env:NVI_KEY_EVALUATOR}'
+```
+
+This defaults to `openai/openai/gpt-5.4-mini`. To use the verified Azure-backed
+deployment, add:
+
+```bash
+'++nvi-gpt-5_4-mini.responses_api_models.openai_model.openai_model=azure/openai/gpt-5.4-mini'
+```
+
+For an endpoint-compatible score check, use GPT-5.2 from NVIDIA inference:
+
+```bash
+gym env start \
+    --config benchmarks/tau2/configs/banking_bm25_grep_gpt5_2.yaml \
+    --model-type openai_model \
+    ++nemo_gym_log_dir=results/tau2_banking_bm25_grep_gpt5_2 \
+    '++nvi-gpt-5_2.responses_api_models.openai_model.openai_api_key=${oc.env:NVI_KEY_EVALUATOR}'
+```
+
+```bash
+gym env start \
     --config benchmarks/tau2/configs/banking_terminal_use.yaml \
     --model-type openai_model \
     ++nemo_gym_log_dir=results/tau2_banking_terminal_use \
@@ -29,12 +54,17 @@ gym env start \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.openai_api_key=${openai_api_key}'
 ```
 
-`terminal_use` requires local sandbox tooling: `srt`, `rg`, `bwrap`, and
-`socat`. `alltools` uses the same sandbox tooling and also requires
-`OPENAI_API_KEY` for dense retrieval at rollout time. You can check either mode
-with:
+`banking_bm25_grep_artificial_analysis` uses NVIDIA-hosted GPT-5.4 Mini with
+medium reasoning as the user simulator and runs five repeats over all 97 tasks.
+BM25+grep retrieval itself is offline and needs no sandbox tooling or retrieval
+API key. The GPT-5.2 variant uses `openai/openai/gpt-5.2` with low reasoning and
+the same prepared rows and repeat count. `terminal_use`
+requires local sandbox tooling: `srt`, `rg`, `bwrap`, and `socat`. `alltools`
+uses the same sandbox tooling and also requires `OPENAI_API_KEY` for dense
+retrieval at rollout time. You can check a mode with:
 
 ```bash
+python -m benchmarks.tau2.prepare_utils.runtime bm25_grep
 python -m benchmarks.tau2.prepare_utils.runtime terminal_use
 python -m benchmarks.tau2.prepare_utils.runtime alltools
 ```

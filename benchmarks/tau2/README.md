@@ -12,6 +12,7 @@ With no arguments it prepares the original Tau2 benchmark domains: `airline`,
 Tau3 `banking_knowledge` is opt-in through prepare arguments:
 
 ```bash
+python benchmarks/tau2/prepare.py banking_knowledge --retrieval-config bm25_grep
 python benchmarks/tau2/prepare.py banking_knowledge --retrieval-config terminal_use
 python benchmarks/tau2/prepare.py banking_knowledge --retrieval-config alltools
 python benchmarks/tau2/prepare.py banking_knowledge --all
@@ -20,6 +21,11 @@ python benchmarks/tau2/prepare.py banking_knowledge --all
 Gym config files live under `benchmarks/tau2/configs/`:
 
 - `tau2.yaml`: original Tau2 `airline`, `retail`, and `telecom`.
+- `banking_bm25_grep_artificial_analysis.yaml`: Tau3 `banking_knowledge` with
+  BM25 lexical retrieval plus grep, a GPT-5.4 Mini user simulator, and five
+  repeats following the Artificial Analysis run shape.
+- `banking_bm25_grep_gpt5_2.yaml`: the same prepared benchmark with the
+  NVIDIA inference endpoint's GPT-5.2 user simulator for compatibility tests.
 - `banking_terminal_use.yaml`: Tau3 `banking_knowledge` with `terminal_use`.
 - `banking_alltools.yaml`: Tau3 `banking_knowledge` with `alltools`.
 
@@ -60,18 +66,37 @@ keeps the branch smaller while preserving the generated row contract.
 
 ## Evaluation Semantics
 
+`banking_bm25_grep_artificial_analysis.yaml` follows the
+[Artificial Analysis Tau3-Banking methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking#tau3-banking)
+run shape: all 97 tasks, five repeats, `bm25_grep` retrieval, a GPT-5.4 Mini
+user simulator with medium reasoning, at most 200 steps, and at most 10
+tool-execution errors per task repeat. The error limit comes from the pinned Tau
+task rows. The user simulator defaults to `openai/openai/gpt-5.4-mini` through
+`https://inference-api.nvidia.com/v1`; the verified
+`azure/openai/gpt-5.4-mini` deployment can be selected with a model-name
+override.
+
 Prepared Gym rows remove `NL_ASSERTION` from each task's `reward_basis`, so Gym
 does not call the external LLM judge. In the current `banking_knowledge` task
 set, this changes only `task_102`; the other 96 banking tasks do not use an NL
 assertion reward. Banking scores produced through this Gym integration are
-therefore no-judge scores and are not strictly leaderboard-identical.
+therefore no-judge scores and are not strictly identical to Artificial
+Analysis, which uses GPT-5.4 Mini as the NL-assertion judge.
+
+The GPT-5.2 compatibility config uses `openai/openai/gpt-5.2` from
+`https://inference-api.nvidia.com/v1` with low reasoning, matching the existing
+Tau score-check setup. It reuses the exact same 97-row `bm25_grep` dataset and
+five-repeat run shape, but it is not the Artificial Analysis user-simulator
+configuration.
 
 ## Runtime Checks
 
-`terminal_use` and `alltools` need sandbox tooling at rollout time. `alltools`
-also needs `OPENAI_API_KEY` for dense retrieval. Check a retrieval config with:
+`bm25_grep` needs no retrieval API key or sandbox tooling. `terminal_use` and
+`alltools` need sandbox tooling at rollout time, and `alltools` also needs
+`OPENAI_API_KEY` for dense retrieval. Check a retrieval config with:
 
 ```bash
+python -m benchmarks.tau2.prepare_utils.runtime bm25_grep
 python -m benchmarks.tau2.prepare_utils.runtime terminal_use
 python -m benchmarks.tau2.prepare_utils.runtime alltools
 ```

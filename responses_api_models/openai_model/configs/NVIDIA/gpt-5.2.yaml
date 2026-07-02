@@ -1,0 +1,10 @@
+nvi-gpt-5_2:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ???
+      openai_model: openai/openai/gpt-5.2
+
+      extra_body:
+        reasoning_effort: low
