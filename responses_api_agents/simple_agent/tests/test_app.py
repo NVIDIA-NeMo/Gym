@@ -20,9 +20,7 @@ from pytest import MonkeyPatch
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
@@ -164,12 +162,12 @@ class TestApp:
         }
         assert expected_responses_dict == actual_responses_dict
 
-    async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_responses_stops_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
 
-        The agent should surface the parse error back to the model as a
-        function_call_output and let the loop continue (ultimately terminating
-        on a normal assistant message).
+        The agent must not send malformed function_call items back in the next
+        model-call history, since chat templates may reject them. Instead it
+        should terminate the response with an assistant-visible error message.
         """
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -210,24 +208,62 @@ class TestApp:
             "tools": [],
         }
 
-        mock_response_chat_data = {
-            "id": "resp_final",
-            "created_at": 1753983921.0,
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_call)
+        dotjson_mock.cookies = MagicMock()
+        server.server_client.post.return_value = dotjson_mock
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        assert res.status_code == 200
+
+        # The resources server must not be called for a malformed tool call —
+        # only the first model call should hit server_client.post.
+        post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
+        server_names_called = [kw["server_name"] for kw in post_call_kwargs]
+        assert server_names_called == ["my server name"]
+
+        actual_output = res.json()["output"]
+        assert len(actual_output) == 1
+        assert actual_output[0]["type"] == "message"
+        error_payload = json.loads(actual_output[0]["content"][0]["text"])
+        assert "error" in error_payload
+        assert "Invalid tool call arguments" in error_payload["error"]
+        # The exception type must be visible to the model — repr(e) on a
+        # JSONDecodeError starts with the class name.
+        assert "JSONDecodeError" in error_payload["error"]
+
+    async def test_responses_stops_on_non_object_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my server name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources server",
+            ),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_bad_tool_call = {
+            "id": "resp_bad_tool_call",
+            "created_at": 1753983920.0,
             "model": "dummy_model",
             "object": "response",
             "output": [
                 {
-                    "id": "msg_final",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Sorry, I'll stop calling that tool.",
-                            "type": "output_text",
-                        }
-                    ],
-                    "role": "assistant",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "my_tool",
+                    "arguments": '"not an object"',
+                    "type": "function_call",
                     "status": "completed",
-                    "type": "message",
                 }
             ],
             "parallel_tool_calls": True,
@@ -236,41 +272,117 @@ class TestApp:
         }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.side_effect = [
-            json.dumps(mock_response_bad_tool_call),
-            json.dumps(mock_response_chat_data),
-        ]
+        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_call)
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
-        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        res = client.post(
+            "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "my_tool",
+                        "description": "Test tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
+            },
+        )
         assert res.status_code == 200
 
-        # The resources server must not be called for a malformed tool call —
-        # only the two model calls should hit server_client.post.
         post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
         server_names_called = [kw["server_name"] for kw in post_call_kwargs]
-        assert server_names_called == ["my server name", "my server name"]
+        assert server_names_called == ["my server name"]
 
-        # The second model call's input must include the original function_call
-        # plus a function_call_output describing the parse error.
-        second_call_input = post_call_kwargs[1]["json"].input
-        assert any(
-            isinstance(item, NeMoGymResponseFunctionToolCall) and item.call_id == "call_1"
-            for item in second_call_input
+        actual_output = res.json()["output"]
+        assert len(actual_output) == 1
+        assert actual_output[0]["type"] == "message"
+        error_payload = json.loads(actual_output[0]["content"][0]["text"])
+        assert error_payload == {"error": "Invalid tool call arguments: expected object, got str"}
+
+    async def test_responses_stops_on_unknown_tool_name(self, monkeypatch: MonkeyPatch) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my server name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources server",
+            ),
         )
-        error_outputs = [
-            item
-            for item in second_call_input
-            if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call_1"
-        ]
-        assert len(error_outputs) == 1
-        error_payload = json.loads(error_outputs[0].output)
-        assert "error" in error_payload
-        assert "Invalid tool call arguments" in error_payload["error"]
-        # The exception type must be visible to the model — repr(e) on a
-        # JSONDecodeError starts with the class name.
-        assert "JSONDecodeError" in error_payload["error"]
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_bad_tool_name = {
+            "id": "resp_bad_tool_name",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "web_search]",
+                    "arguments": '{"query": "foo"}',
+                    "type": "function_call",
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_name)
+        dotjson_mock.cookies = MagicMock()
+        server.server_client.post.return_value = dotjson_mock
+
+        res = client.post(
+            "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "web_search",
+                        "description": "Search.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
+            },
+        )
+        assert res.status_code == 200
+
+        post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
+        server_names_called = [kw["server_name"] for kw in post_call_kwargs]
+        assert server_names_called == ["my server name"]
+
+        actual_output = res.json()["output"]
+        assert len(actual_output) == 1
+        assert actual_output[0]["type"] == "message"
+        error_payload = json.loads(actual_output[0]["content"][0]["text"])
+        assert error_payload == {"error": "Invalid tool call name: 'web_search]'"}
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
