@@ -64,8 +64,10 @@ supported eval path is `/run`, typically via `gym eval run --no-serve`.
 - Each row must also include `responses_create_params`. Extra top-level
   SWE-bench fields are accepted by the agent request model and passed into
   mini-swe-agent as the instance dictionary.
-- A one-row committed smoke input is available at
-  `responses_api_agents/mini_swe_agent_2/data/example.jsonl`.
+- A committed smoke input of five SWE-bench Verified rows (`subset: verified`)
+  is available at `responses_api_agents/mini_swe_agent_2/data/example.jsonl`,
+  with pre-generated rollouts at
+  `responses_api_agents/mini_swe_agent_2/data/example_rollouts.jsonl`.
 
 Example row shape:
 
@@ -328,13 +330,27 @@ tool. The successful smoke kept `tool_choice=auto` and lowered
 
 ```bash
 uv sync --extra dev --extra sandbox
-uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt
+uv pip install mini-swe-agent==2.1.0 swebench==4.1.0
 ```
+
+  `uv sync --extra dev --extra sandbox` installs `nemo-gym[dev,sandbox]`
+  (including the OpenSandbox SDK) into the root venv, so the manual step only
+  adds this agent's extra runtime dependencies. Do **not** run
+  `uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt`
+  from the repo root: that file pins `nemo-gym` via a `../../` editable path
+  that pip/uv resolve relative to the current working directory, so from the
+  repo root it points one level above the repo and fails with
+  `... does not appear to be a Python project`. That requirements file is meant
+  to be installed with the agent directory as the working directory, which is
+  exactly what `gym env start` does automatically when it builds the agent's
+  per-server virtual environment.
 
 - Access to an OpenSandbox deployment reachable from the server process.
 - A policy model endpoint compatible with `responses_api_models/vllm_model`.
-- SWE-bench task images available to OpenSandbox. The smoke row uses the
-  standard SWE-Gym image naming path derived from `instance_id`.
+- SWE-bench task images available to OpenSandbox. The committed smoke rows are
+  `subset: verified`, so they resolve to
+  `docker.io/swebench/sweb.eval.x86_64.<id>:latest` images derived from
+  `instance_id` (see the image-naming note above).
 
 ### Environment Variables
 
@@ -373,7 +389,8 @@ quickstart intentionally uses those defaults.
 
 ### Run One-Example Smoke
 
-In a second terminal, run the committed one-row smoke input:
+In a second terminal, run a single row from the committed smoke input
+(`--limit 1`):
 
 ```bash
 gym eval run --no-serve \
