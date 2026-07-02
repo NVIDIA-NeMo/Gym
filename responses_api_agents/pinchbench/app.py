@@ -40,6 +40,7 @@ import glob
 import json
 import shutil
 import tarfile
+import textwrap
 import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -113,8 +114,7 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 131072
     work_root: str = "/tmp/pinchbench_gym"
     # Where per-task transcripts are archived (kept on disk for inspection, like
-    # swe_agents' persistent_dir). The full transcript is also returned in the
-    # response's `raw_rollout`, which ng_collect_rollouts persists.
+    # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
 
 
@@ -130,7 +130,7 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
     grading_breakdown: dict
     grading_notes: str
     status: str
-    raw_rollout: dict  # full transcript + archive location (see swe_agents/ext-taubench)
+    raw_rollout: dict  # transcript archive location + compact metadata
 
 
 class PinchBenchAgent(SimpleResponsesAPIAgent):
@@ -190,12 +190,13 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         )
 
     async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> None:
-        """Run one PinchBench task in a fresh sandbox and pull its /out back.
+        """Run one PinchBench task and pull its /out archive back."""
+        provider = self.config.sandbox_provider or {}
+        apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
+        if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
+            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
+            return
 
-        run_task.sh writes the result + transcript under the per-sandbox working mount and
-        tars them to <work_base>/out/out.tgz; we download + extract that into out_dir so the
-        existing parsers (_parse_result / _read_transcript_events / ...) read it unchanged.
-        No host bind-mount — the provider (apptainer/opensandbox) is config-selected (#1377)."""
         if not self.config.sandbox_provider:
             raise ValueError("pinchbench requires sandbox_provider (see configs/pinchbench.yaml)")
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
@@ -206,6 +207,162 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             await sb.download(archive, out_dir / "out.tgz")
         finally:
             await sb.stop()
+        with tarfile.open(out_dir / "out.tgz") as tf:
+            tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+
+    def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
+        wrapper_path = staging_dir / "run_task_efb.sh"
+        wrapper = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            BASE="${PINCHBENCH_WORK_BASE:-/sandbox}"
+            HOME_DIR="$BASE/home"
+            mkdir -p "$HOME_DIR/.openclaw" "$BASE/out"
+
+            python3 - <<'PYCFG'
+            import json
+            import os
+            from pathlib import Path
+
+            base = os.environ.get("PINCHBENCH_WORK_BASE", "/sandbox")
+            home = Path(base) / "home"
+            cfg_path = home / ".openclaw" / "openclaw.json"
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                cfg = json.loads(cfg_path.read_text("utf-8-sig")) if cfg_path.exists() else {}
+            except Exception:
+                cfg = {}
+
+            model_id = os.environ["MODEL_NAME"]
+            base_url = os.environ["MODEL_BASE_URL"].rstrip("/")
+            api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+            max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
+            context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            runtime_params = {
+                "temperature": 1,
+                "top_p": 0.95,
+                "seed": 0,
+                "skip_special_tokens": False,
+                "chat_template_kwargs": {"enable_thinking": True},
+                "maxTokens": max_tokens,
+                "max_tokens": max_tokens,
+                "max_completion_tokens": max_tokens,
+            }
+            custom_provider = {
+                "baseUrl": base_url,
+                "apiKey": api_key,
+                "api": "openai-completions",
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": model_id,
+                        "input": ["text"],
+                        "reasoning": False,
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                        "contextWindow": context_window,
+                        "contextTokens": context_window,
+                        "maxTokens": max_tokens,
+                        "params": runtime_params,
+                        "compat": {
+                            "requiresStringContent": True,
+                            "supportsUsageInStreaming": True,
+                            "maxTokensField": "max_tokens",
+                        },
+                    }
+                ],
+            }
+            models = cfg.setdefault("models", {})
+            models["mode"] = "merge"
+            models.setdefault("providers", {})["custom"] = custom_provider
+            agents = cfg.setdefault("agents", {})
+            defaults = agents.setdefault("defaults", {})
+            agent_model = f"custom/{model_id}"
+            defaults.setdefault("models", {})[agent_model] = {"params": runtime_params}
+            defaults.setdefault("model", {})["primary"] = agent_model
+            cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
+            PYCFG
+
+            PATCHED_RUN_TASK="$BASE/run_task_patched.sh"
+            python3 - <<'PYSCRIPT'
+            import os
+            from pathlib import Path
+
+            base = Path(os.environ.get("PINCHBENCH_WORK_BASE", "/sandbox"))
+            src = Path("/opt/run_task.sh")
+            dst = base / "run_task_patched.sh"
+            text = src.read_text()
+            text = text.replace(
+                "pkill -9 -f openclaw 2>/dev/null || true",
+                'kill -9 "$GW_PID" 2>/dev/null || true',
+            )
+            dst.write_text(text)
+            dst.chmod(0o755)
+            PYSCRIPT
+
+            set +e
+            bash "$PATCHED_RUN_TASK"
+            RC=$?
+            set -e
+            exit "$RC"
+            """
+        )
+        wrapper_path.write_text(wrapper)
+        wrapper_path.chmod(0o755)
+        return wrapper_path
+
+    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> None:
+        image = self.config.sandbox_spec.get("image")
+        if not image:
+            raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
+
+        work_base = self.config.sandbox_work_base.rstrip("/") or "/sandbox"
+        if not work_base.startswith("/"):
+            raise ValueError("pinchbench sandbox_work_base must be an absolute path")
+
+        staging_dir = out_dir / "sandbox"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        wrapper_path = self._write_direct_exec_wrapper(staging_dir)
+        archive = staging_dir / "out" / "out.tgz"
+
+        direct_args = apptainer_cfg.get("direct_exec_args")
+        if direct_args is None:
+            direct_args = ["--cleanenv", "--no-home"]
+        elif isinstance(direct_args, str):
+            direct_args = direct_args.split()
+
+        task_env = self._task_env(task_id)
+        argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
+        argv += ["--bind", f"{staging_dir}:{work_base}"]
+        for key, value in task_env.items():
+            argv += ["--env", f"{key}={value}"]
+        argv += [str(image), "bash", f"{work_base}/{wrapper_path.name}"]
+
+        stdout_path = staging_dir / "apptainer.stdout.log"
+        stderr_path = staging_dir / "apptainer.stderr.log"
+        with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
+            proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout_f, stderr=stderr_f)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=self.config.task_timeout_s)
+            except asyncio.TimeoutError as exc:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                raise TimeoutError(f"direct apptainer exec timed out for task {task_id}") from exc
+
+        stdout = stdout_path.read_text(errors="replace")[-4000:] if stdout_path.exists() else ""
+        stderr = stderr_path.read_text(errors="replace")[-4000:] if stderr_path.exists() else ""
+        if proc.returncode != 0 and not archive.exists():
+            run_log = staging_dir / "out" / "run.log"
+            run_tail = run_log.read_text(errors="replace")[-4000:] if run_log.exists() else ""
+            detail = (stderr or stdout or run_tail or "no output").strip()
+            raise RuntimeError(f"direct apptainer exec failed for task {task_id}: {detail[:4000]}")
+        if not archive.exists():
+            raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
+
+        shutil.copy2(archive, out_dir / "out.tgz")
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
 
@@ -506,7 +663,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             grading_breakdown=result["breakdown"],
             grading_notes=result["notes"],
             status=result["status"],
-            raw_rollout={"transcript": transcript_events, "archived_to": archive_path, "run_id": run_id},
+            raw_rollout={
+                "transcript_event_count": len(transcript_events),
+                "archived_to": archive_path,
+                "run_id": run_id,
+            },
         )
 
 

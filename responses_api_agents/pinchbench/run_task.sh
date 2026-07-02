@@ -78,7 +78,7 @@ rc=$?
 # benchmark.py is done; stop the gateway (and its tool subprocesses). The per-task
 # instance is torn down right after, so a hard kill is safe, and it keeps teardown fast.
 kill "$GW_PID" 2>/dev/null || true
-pkill -9 -f openclaw 2>/dev/null || true
+kill -9 "$GW_PID" 2>/dev/null || true
 
 # Package $OUT so the host can download it (Sandbox API pulls one file). Tar to a temp
 # path then move in, so the archive never tries to include itself.
