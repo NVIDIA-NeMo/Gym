@@ -202,7 +202,6 @@ def _multiprocess_benchmark_prepare_fn(args):
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
-    output_fpath = module.prepare()
     if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
         raise ConfigError(
             f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
