@@ -270,6 +270,26 @@ class TestPrepareBenchmark:
         out = " ".join(capsys.readouterr().out.split())
         assert "Inspected server instances ['dummy_agent']" in out
 
+    def test_no_prepare_script_args_does_not_error(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
+            ),
+            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with()
+
     def test_caching_sanity(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
         (tmp_path / "output.jsonl").write_text("blah blah text for file")
