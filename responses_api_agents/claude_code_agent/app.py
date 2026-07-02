@@ -90,6 +90,7 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     total_input = 0
     total_output = 0
     num_turns: Optional[int] = None
+    incomplete = False
 
     for event in raw_events:
         etype = event.get("type")
@@ -101,6 +102,13 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
+            # The result subtype distinguishes a clean finish ("success") from an internal cutoff
+            # ("error_max_turns") or a mid-run error ("error_during_execution"); a non-success
+            # result means the agent did not finish cleanly. (Subprocess timeouts are masked
+            # upstream by anyswe's agent_timed_out, separately from this.)
+            subtype = event.get("subtype")
+            if event.get("is_error") or (subtype is not None and subtype != "success"):
+                incomplete = True
 
         elif etype == "assistant":
             message = event.get("message", {})
@@ -175,7 +183,7 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
-    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output, "incomplete": incomplete}
     if num_turns is not None:
         metadata["num_turns"] = num_turns
     return output_items, metadata
@@ -419,7 +427,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 proc.kill()
                 await proc.communicate()
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                return "", model
+                # An internal timeout produces no real `result` event; emit a synthetic one so
+                # parse_stream_json marks the response incomplete. This truncation can fire before
+                # anyswe's outer agent timeout (inner timeout < swebench_agent_timeout), so the
+                # agent must self-report it rather than relying on the outer agent_timed_out guard.
+                return json.dumps({"type": "result", "subtype": "error_timeout", "is_error": True}) + "\n", model
 
             if proc.returncode not in (0, None):
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -536,6 +548,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             model=model_name,
             object="response",
             output=output_items,
+            status="incomplete" if usage.get("incomplete") else "completed",
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

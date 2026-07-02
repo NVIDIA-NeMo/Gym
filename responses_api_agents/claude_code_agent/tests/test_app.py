@@ -390,7 +390,7 @@ class TestRunClaudeCode:
         leaked = home / ".claude_code_agent"
         assert not leaked.exists() or not any(leaked.iterdir())
 
-    def test_timeout_returns_empty(self, tmp_path: Path) -> None:
+    def test_timeout_emits_incomplete_result(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
         killed = {"called": False}
 
@@ -417,9 +417,12 @@ class TestRunClaudeCode:
         ):
             stdout, model = asyncio.run(agent._run_claude_code("hello"))
 
-        assert stdout == ""
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
+        # An internal timeout self-reports as an incomplete run via a synthetic result event, so a
+        # truncation that fires before anyswe's outer agent timeout is still masked downstream.
+        _, usage = parse_stream_json(stdout)
+        assert usage["incomplete"] is True
 
 
 class TestRolloutMCPConfig:
@@ -638,7 +641,19 @@ class TestParseStreamJson:
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "incomplete": False}
+
+    def test_result_success_is_not_incomplete(self) -> None:
+        line = _event("result", subtype="success", is_error=False, num_turns=3)
+        _, usage = parse_stream_json(line)
+        assert usage["incomplete"] is False
+
+    def test_result_error_subtype_marks_incomplete(self) -> None:
+        # An internal cutoff (max-turns) or mid-run error means the agent did not finish cleanly.
+        for sub in ("error_max_turns", "error_during_execution"):
+            line = _event("result", subtype=sub, is_error=True, num_turns=90)
+            _, usage = parse_stream_json(line)
+            assert usage["incomplete"] is True, sub
 
     def test_text_message(self) -> None:
         line = self._assistant([{"type": "text", "text": "hello"}])

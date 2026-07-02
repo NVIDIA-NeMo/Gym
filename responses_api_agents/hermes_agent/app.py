@@ -362,12 +362,17 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        # The agent ran out of turns / blew its context window if run_conversation reports it did
+        # not complete (api_call_count >= max_iterations). Mark the response incomplete so a
+        # downstream consumer (e.g. anyswe) can mask an accidental pass instead of scoring it 1.0.
+        agent_completed = bool(result.get("completed", True))
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
             object="response",
             output=output_items,
+            status="completed" if agent_completed else "incomplete",
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

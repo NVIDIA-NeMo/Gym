@@ -1,0 +1,70 @@
+---
+title: "SWE Environment"
+description: "Run any Gym agent inside a SWE-bench task container and grade its patch, on docker or apptainer."
+position: 3
+---
+
+# SWE Environment
+
+The **SWE environment** lets you evaluate any Gym agent on software-engineering benchmarks
+(SWE-bench Verified / Multilingual, SWE-bench-ext, R2E-Gym, SWE-rebench) by dropping the agent
+*inside* the task's container, extracting its `git diff`, and grading that patch against the
+instance's tests. It is harness-agnostic (the same flow runs hermes, claude_code, or openclaw)
+and sandbox-agnostic (docker or apptainer).
+
+It has two pieces:
+
+- **`responses_api_agents/anyswe_agent`** — the thin runner (an Agent Server). It provisions one
+  sandbox from the task image, runs the configured inner agent inside it via a generic
+  dynamic-loader runner, extracts the patch (`git add -A && git diff --cached`), and grades it.
+- **`responses_api_agents/swe_env`** — the shared library the runner builds on (not a server):
+  - **`harnesses/`** — per-dataset-family recipes: build the sandbox spec, materialize the patch,
+    run the evaluation, and grade the log host-side with the official per-repo parser.
+  - **`sandbox.py`** — async sandbox lifecycle (`AsyncSweEnvironment`, `acquire_sandbox`) over a
+    `nemo_gym.sandbox` provider, with always-teardown.
+  - **`self_drive.py`** — provision a writable sandbox, inject a sandbox-reachable model endpoint,
+    run the agent, and extract the diff.
+  - **`verify_task.py`** — grade a patch **inline** in a fresh sandbox (no separate verifier
+    server), returning a mask-aware reward.
+
+## Selecting the sandbox provider
+
+The same task runs on either backend via `sandbox_provider`. **docker** pulls the per-instance
+image on demand (no pre-build); **apptainer** runs a pre-built local `.sif`.
+
+```yaml
+# docker (default): images pull on demand from the registry
+anyswe_hermes:
+  responses_api_agents:
+    anyswe_agent:
+      container_formatter: "docker://swebench/sweb.eval.x86_64.{instance_id}"
+      sandbox_provider: {docker: {}}
+
+# apptainer: point the formatter at a local .sif and select the provider
+      container_formatter: "data/sifs/{instance_id}.sif"
+      sandbox_provider: {apptainer: {}}
+```
+
+<Note>
+Grading is host-side (flat): the eval log is parsed with swebench's official per-repo parser, so
+it runs on any exec-capable provider — docker, apptainer, or opensandbox. The provider only changes
+*where* the eval script runs, never the verdict: docker and apptainer resolve the **identical**
+SWE-bench Verified gold set (493/500 each, verified). See the in-tree
+`responses_api_agents/swe_env/README.md` for the gold-patch baseline and how to reproduce it.
+</Note>
+
+## Running it
+
+```bash
+# Prepare a dataset of tasks (optionally pre-build .sif images for apptainer)
+python responses_api_agents/anyswe_agent/prepare.py --limit 100
+
+# Start the servers, then collect rollouts
+ng_run "+config_paths=[responses_api_agents/anyswe_agent/configs/anyswe_hermes.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+ng_collect_rollouts +agent_name=anyswe_hermes \
+  +input_jsonl_fpath=responses_api_agents/anyswe_agent/data/swebench_verified.jsonl \
+  +output_jsonl_fpath=results/hermes.jsonl +num_samples_in_parallel=16
+```
+
+The resolve rate is `mean/reward` in the run's `aggregate_metrics.json`; a clean run has
+`mean/mask_sample == 0` (infra failures and timeouts are masked out, not scored 0).

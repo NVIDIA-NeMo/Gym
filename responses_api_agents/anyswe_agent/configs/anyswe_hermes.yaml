@@ -1,0 +1,31 @@
+anyswe_hermes:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by the hermes agent natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.hermes_agent.app
+      agent_server_class: HermesAgent
+      agent_config_class: HermesAgentConfig
+      agent_kwargs:
+        max_turns: 30
+        temperature: 1.0
+        terminal_backend: local
+        enabled_toolsets: null
+        system_prompt: "You are an expert software engineer. The source code repository is at /testbed. Explore the code, reproduce the bug, fix the root cause, and verify the fix. You MUST actually use terminal and file tools to explore, edit, and test the code; do not just describe what to do."
+
+      container_formatter: docker://swebench/sweb.eval.x86_64.{instance_id}
+      swebench_agent_timeout: 2700
+      swebench_tests_timeout: 1800
+      concurrency: 18
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
