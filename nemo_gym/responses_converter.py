@@ -177,6 +177,11 @@ class ResponsesConverter(BaseModel):
                 responses_create_params["tools"].append(
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
+        else:
+            # No real tools: a dangling `tool_choice` would make vLLM reject the request
+            # ("When using `tool_choice`, `tools` must be set."). Emit a clean no-tool request.
+            responses_create_params.pop("tool_choice", None)
+            responses_create_params.pop("parallel_tool_calls", None)
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
             messages=state.messages,
