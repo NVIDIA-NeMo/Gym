@@ -1,0 +1,271 @@
+#!/bin/bash
+#SBATCH --job-name=coreai_mlperf_training-grpo.eval.r2e_gym_easy_large.openhands.qwen3-235b
+#SBATCH --account=coreai_mlperf_training
+#SBATCH --partition=batch
+#SBATCH --nodes=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --segment=1
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm-%j.out
+
+set -Eeuo pipefail
+
+MODEL=/lustre/share/coreai_dlalgo_ci/artifacts/model/qwen_qwen3-235b-a22b-instruct-2507/hf/hf-ac9c66cc_orig
+IMAGE=nvcr.io/nvidia/vllm:26.06-py3
+if [ -f "${LUSTRE_HOME}/containers/nvidia+vllm+26.06-py3.sqsh" ]; then
+  IMAGE="${LUSTRE_HOME}/containers/nvidia+vllm+26.06-py3.sqsh"
+fi
+API_PORT=8000
+ENGINE_PORT=8001
+STARTUP_TIMEOUT=600
+VLLM_LOG_STATS_INTERVAL=30
+MAX_TURNS=${MAX_TURNS:-30}
+TIMEOUT=${TIMEOUT:-300}
+EXP_NAME=${EXP_NAME:-r2e_gym_easy_large.openhands.qwen3-235b-mt${MAX_TURNS}-timeout${TIMEOUT}-try5}
+
+RESULTS_DIR=${SLURM_SUBMIT_DIR}/results/${EXP_NAME}
+OUTPUT_JSONL=${RESULTS_DIR}/${EXP_NAME}.${SLURM_JOB_ID}.jsonl
+SLURM_LOG=${SLURM_SUBMIT_DIR}/slurm-${SLURM_JOB_ID}.out
+mkdir -p "$RESULTS_DIR"
+scontrol update JobId="$SLURM_JOB_ID" JobName="coreai_mlperf_training-grpo.eval.${EXP_NAME}"
+export MODEL VLLM_LOG_STATS_INTERVAL EXP_NAME MAX_TURNS TIMEOUT RESULTS_DIR OUTPUT_JSONL
+
+mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+NODE_COUNT=${#NODES[@]}
+if (( NODE_COUNT == 0 )); then
+    echo "No allocated nodes found" >&2
+    exit 1
+fi
+HEAD_NODE=${NODES[0]}
+SWE_CONCURRENCY=32
+POLICY_BASE_URL=http://${HEAD_NODE}:${API_PORT}/v1
+export HEAD_NODE SWE_CONCURRENCY POLICY_BASE_URL
+
+MULTIPROG_CONF=${SLURM_SUBMIT_DIR}/vllm-${SLURM_JOB_ID}.conf
+: >"$MULTIPROG_CONF"
+for ((rank = 0; rank < NODE_COUNT; rank++)); do
+    printf "%d vllm serve %s --distributed-executor-backend mp --tensor-parallel-size 4 --host 0.0.0.0 --port %s --max-model-len 65536 --enable-auto-tool-choice --tool-call-parser hermes --default-chat-template-kwargs '{\"enable_thinking\": false}' --gpu-memory-utilization 0.85 --disable-uvicorn-access-log\\n" \
+        "$rank" "$MODEL" "$ENGINE_PORT" >>"$MULTIPROG_CONF"
+done
+
+VLLM_STEP_PID=
+ROUTER_STEP_PID=
+GYM_STEP_PID=
+
+cleanup() {
+    trap - EXIT INT TERM
+    if [[ -n "$GYM_STEP_PID" ]]; then
+        kill "$GYM_STEP_PID" 2>/dev/null || true
+        wait "$GYM_STEP_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$ROUTER_STEP_PID" ]]; then
+        kill "$ROUTER_STEP_PID" 2>/dev/null || true
+        wait "$ROUTER_STEP_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$VLLM_STEP_PID" ]]; then
+        kill "$VLLM_STEP_PID" 2>/dev/null || true
+        wait "$VLLM_STEP_PID" 2>/dev/null || true
+    fi
+    rm -f "$MULTIPROG_CONF"
+    if [[ -f "$SLURM_LOG" ]]; then
+        mv -f "$SLURM_LOG" "$RESULTS_DIR/"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+CONT_ARGS=(
+  --container-writable
+  --container-name=image
+  "--container-mounts=/lustre:/lustre,/dev/fuse:/dev/fuse"
+  --container-remap-root
+  "--container-env=UV_CACHE_DIR,MODEL,HEAD_NODE,SWE_CONCURRENCY,VLLM_LOG_STATS_INTERVAL,EXP_NAME,MAX_TURNS,TIMEOUT,RESULTS_DIR,OUTPUT_JSONL,POLICY_BASE_URL"
+  --container-workdir="$PWD"
+)
+
+# 1: container
+srun --overlap --ntasks-per-node=1 --container-image="$IMAGE" "${CONT_ARGS[@]}" true
+
+# 2: setup
+srun --ntasks-per-node=1 --label --overlap "${CONT_ARGS[@]}" \
+bash <<EOF
+set -Eeuo pipefail
+python -m pip install --no-cache-dir 'fastapi<0.137' || true
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y software-properties-common
+add-apt-repository -y ppa:apptainer/ppa
+apt-get install -y --no-install-recommends apptainer
+ln -sf /usr/bin/apptainer /usr/bin/singularity
+curl -LsSf https://astral.sh/uv/install.sh | sh
+EOF
+
+# 3: independent TP=4 vLLM engines
+srun \
+    --nodes="$NODE_COUNT" \
+    --ntasks="$NODE_COUNT" \
+    --ntasks-per-node=1 \
+    --overlap \
+    --label \
+    --kill-on-bad-exit=1 \
+    "${CONT_ARGS[@]}" \
+    --multi-prog "$MULTIPROG_CONF" &
+VLLM_STEP_PID=$!
+
+engines_ready() {
+    local node
+    for node in "${NODES[@]}"; do
+        curl --fail --silent --max-time 2 \
+            "http://${node}:${ENGINE_PORT}/health" >/dev/null || return 1
+    done
+}
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until engines_ready; do
+    if ! kill -0 "$VLLM_STEP_PID" 2>/dev/null; then
+        echo "A vLLM engine exited during startup" >&2
+        wait "$VLLM_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for the vLLM engines" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "All ${NODE_COUNT} TP=4 vLLM engines are ready"
+
+# Send exactly one warmup completion directly to each engine.
+echo "Warming all engines with one request each"
+srun \
+    --nodes="$NODE_COUNT" \
+    --ntasks="$NODE_COUNT" \
+    --ntasks-per-node=1 \
+    --label \
+    --overlap \
+    "${CONT_ARGS[@]}" \
+    curl --fail --silent --show-error --max-time "$STARTUP_TIMEOUT" \
+    --header 'Content-Type: application/json' \
+    --data "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK.\"}],\"max_tokens\":8,\"temperature\":0}" \
+    --write-out '\n' \
+    "http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions"
+
+ROUTER_WORKERS=()
+for node in "${NODES[@]}"; do
+    ROUTER_WORKERS+=("http://${node}:${ENGINE_PORT}")
+done
+
+# Route client traffic to all independent engines from the head node.
+# HOME and "$@" intentionally expand in the container shell.
+# shellcheck disable=SC2016
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" \
+    /bin/bash -c 'export PATH="$HOME/.local/bin:$PATH" RUST_LOG=warn; exec uvx --from vllm-router vllm-router "$@"' router \
+    --host 0.0.0.0 \
+    --port "$API_PORT" \
+    --worker-urls \
+        "${ROUTER_WORKERS[@]}" \
+    --policy cache_aware \
+    --log-level warning \
+    --intra-node-data-parallel-size 1 &
+ROUTER_STEP_PID=$!
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until curl --fail --silent --max-time 2 \
+    "http://${HEAD_NODE}:${API_PORT}/v1/models" >/dev/null; do
+    if ! kill -0 "$ROUTER_STEP_PID" 2>/dev/null; then
+        echo "vllm-router exited during startup" >&2
+        wait "$ROUTER_STEP_PID"
+        exit 1
+    fi
+    if ! kill -0 "$VLLM_STEP_PID" 2>/dev/null; then
+        echo "A vLLM engine exited while starting vllm-router" >&2
+        wait "$VLLM_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for vllm-router" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "vllm-router is ready at http://${HEAD_NODE}:${API_PORT}/v1"
+
+
+# Run other job steps here. Use --overlap so they can run while vLLM owns the
+# long-running step. Do not run another GPU workload on these same GPUs.
+# srun --overlap --nodes=1 --ntasks=1 your-command
+
+
+# Gym Server
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" \
+/bin/bash <<"EOF" &
+set -Eeuxo pipefail
+VAL_DATA="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data/Benchmark-R2E-Gym-Easy-Large/benchmark_r2e_gym_easy_val.jsonl"
+SIF_DIR="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data"
+export PATH="$HOME/.local/bin:$PATH"
+
+config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+uv sync
+. .venv/bin/activate
+ng_run "+config_paths=[$config_paths]" \
+  +sif_dir=${SIF_DIR} \
+  +swe_agents_val.responses_api_agents.swe_agents.dataset_path=${VAL_DATA} \
+  ++swe_agents_val.responses_api_agents.swe_agents.concurrency=${SWE_CONCURRENCY} \
+  ++swe_agents_val.responses_api_agents.swe_agents.agent_max_turns=${MAX_TURNS} \
+  ++swe_agents_val.responses_api_agents.swe_agents.swebench_agent_timeout=${TIMEOUT} \
+  ++policy_base_url=${POLICY_BASE_URL} \
+  ++policy_api_key=dummy \
+  ++policy_model_name=${MODEL} \
+  +use_absolute_ip=true \
+EOF
+GYM_STEP_PID=$!
+
+gym_servers_ready() {
+    local instances url
+    local -a urls=()
+
+    instances=$(curl --fail --silent --max-time 2 \
+        "http://${HEAD_NODE}:11000/server_instances") || return 1
+    mapfile -t urls < <(grep -oE 'https?://[^" ]+' <<<"$instances")
+    (( ${#urls[@]} > 0 )) || return 1
+
+    for url in "${urls[@]}"; do
+        curl --silent --output /dev/null --max-time 2 "$url" || return 1
+    done
+}
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until gym_servers_ready; do
+    if ! kill -0 "$GYM_STEP_PID" 2>/dev/null; then
+        echo "The Gym server step exited during startup" >&2
+        wait "$GYM_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for Gym servers" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "Gym servers are ready"
+
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" --pty \
+/bin/bash <<"EOF"
+set -Eeuxo pipefail
+
+VAL_DATA="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data/Benchmark-R2E-Gym-Easy-Large/benchmark_r2e_gym_easy_val.jsonl"
+export PATH="$HOME/.local/bin:$PATH"
+
+. .venv/bin/activate
+ng_collect_rollouts +agent_name=swe_agents_val \
+    +input_jsonl_fpath=${VAL_DATA} \
+    +output_jsonl_fpath=${OUTPUT_JSONL} \
+    +model=${MODEL} \
+    +responses_create_params.temperature=0.0 \
+    +responses_create_params.top_p=1.0 \
+    ++head_server="{host:${HEAD_NODE},port:11000}"
+EOF
