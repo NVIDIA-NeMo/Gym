@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 from pytest import fixture
@@ -33,6 +34,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import (
     BrowsecompAgent,
     BrowsecompAgentConfig,
+    BrowsecompAgentRunRequest,
 )
 
 
@@ -381,3 +383,98 @@ class TestApp:
         lines = traj.read_text().strip().split("\n")
         assert json.loads(lines[0])["reset_steps"] == [2]
         assert len(lines) == 1 + len(body.input) + len(result.output)
+
+    # ---- _last_message_text (bc_frankie last-message retry parity) ----
+
+    def test_last_message_text_returns_final_answer(self) -> None:
+        resp = NeMoGymResponse.model_validate(_make_model_response([_make_msg("Exact Answer: Paris")]))
+        assert BrowsecompAgent._last_message_text(resp) == "Exact Answer: Paris"
+
+    def test_last_message_text_last_content_bearing_wins_over_earlier(self) -> None:
+        """The empty-answer retry keys on the LAST content-bearing assistant message, not the
+        concatenation of every assistant turn. A trailing think-only turn -> empty after
+        <think>-strip -> retry, even though an earlier turn emitted a real answer (where the old
+        aggregated output_text check would NOT have retried)."""
+        resp = NeMoGymResponse.model_validate(
+            _make_model_response(
+                [
+                    _make_msg("Exact Answer: Paris", msg_id="m1"),
+                    _make_fn_call("search", call_id="c1"),
+                    _make_msg("<think>still reasoning</think>", msg_id="m2"),
+                ]
+            )
+        )
+        last = BrowsecompAgent._last_message_text(resp)
+        assert last == "<think>still reasoning</think>"
+        # last-message semantics -> empty after strip -> WOULD retry
+        assert re.sub(r"<think>.*?</think>", "", last, flags=re.DOTALL).strip() == ""
+        # contrast: the OLD aggregated output_text is non-empty -> would NOT have retried
+        assert re.sub(r"<think>.*?</think>", "", resp.output_text, flags=re.DOTALL).strip() == "Exact Answer: Paris"
+
+    def test_last_message_text_walks_past_trailing_tool_call(self) -> None:
+        resp = NeMoGymResponse.model_validate(
+            _make_model_response(
+                [_make_msg("Exact Answer: Paris", msg_id="m1"), _make_fn_call("search", call_id="c1")]
+            )
+        )
+        assert BrowsecompAgent._last_message_text(resp) == "Exact Answer: Paris"
+
+    def test_last_message_text_skips_empty_message(self) -> None:
+        """An empty-content trailing message is skipped (mirrors bc_frankie's truthy-content check)."""
+        resp = NeMoGymResponse.model_validate(
+            _make_model_response([_make_msg("real answer", msg_id="m1"), _make_msg("", msg_id="m2")])
+        )
+        assert BrowsecompAgent._last_message_text(resp) == "real answer"
+
+    def test_last_message_text_empty_when_no_message(self) -> None:
+        resp = NeMoGymResponse.model_validate(_make_model_response([_make_fn_call("search", call_id="c1")]))
+        assert BrowsecompAgent._last_message_text(resp) == ""
+
+    def test_last_message_text_empty_output(self) -> None:
+        assert BrowsecompAgent._last_message_text(NeMoGymResponse.model_validate(_make_model_response([]))) == ""
+
+    # ---- run() retry wiring ----
+
+    async def test_run_retries_on_think_only_last_message(self) -> None:
+        """run() retries the whole trajectory when the last content-bearing turn is think-only,
+        even though an earlier turn emitted a real answer. Under the old aggregated output_text
+        check this would NOT retry (attempt 0 would be verified), so post.call_count would differ."""
+        agent = BrowsecompAgent(config=_make_config(max_run_retries=2), server_client=MagicMock(spec=ServerClient))
+
+        attempt0 = _make_model_response(
+            [_make_msg("Exact Answer: EARLY", msg_id="m1"), _make_msg("<think>no answer</think>", msg_id="m2")]
+        )
+        attempt1 = _make_model_response([_make_msg("Exact Answer: FINAL", msg_id="m3")])
+        verify_json = {
+            "reward": 1.0,
+            "response": attempt1,
+            "responses_create_params": {"input": [{"role": "user", "content": "q"}]},
+        }
+
+        def _http(read_bytes: bytes | None = None) -> MagicMock:
+            m = MagicMock()
+            m.ok = True
+            m.cookies = {}
+            if read_bytes is not None:
+                m.read = AsyncMock(return_value=read_bytes)
+            return m
+
+        # seed_session, /v1/responses (attempt 0), /v1/responses (attempt 1 after retry), /verify
+        agent.server_client.post = AsyncMock(
+            side_effect=[
+                _http(),
+                _http(json.dumps(attempt0).encode()),
+                _http(json.dumps(attempt1).encode()),
+                _http(json.dumps(verify_json).encode()),
+            ]
+        )
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = BrowsecompAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+        )
+        result = await agent.run(request_mock, body)
+
+        assert agent.server_client.post.call_count == 4  # retry fired -> attempt 1 + verify
+        assert result.reward == 1.0

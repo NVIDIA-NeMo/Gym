@@ -122,6 +122,21 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             return int(config.max_context_tokens * config.context_reset_pct)
         return 0
 
+    @staticmethod
+    def _last_message_text(response: NeMoGymResponse) -> str:
+        """Text of the most-recent assistant message item that has non-empty content, walking
+        back from the end of the trajectory. Mirrors bc_frankie (browsecomp_agent.py:1054-1059):
+        the empty-answer retry keys on the LAST content-bearing assistant turn, NOT the
+        concatenation of every assistant turn (NeMoGymResponse.output_text). So a final
+        think-only turn triggers a retry even when an earlier turn emitted a real answer.
+        Empty string if no assistant message produced content."""
+        for item in reversed(response.output):
+            if getattr(item, "type", None) == "message":
+                text = "".join(c.text for c in item.content if getattr(c, "type", None) == "output_text")
+                if text:
+                    return text
+        return ""
+
     async def responses(
         self,
         request: Request,
@@ -408,9 +423,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(response)
                 cookies = response.cookies
 
-                # Retry if the model only produced <think> content with no final answer.
+                # Retry if the model's LAST content-bearing turn was empty after <think>-strip.
+                # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
+                # output_text — a final think-only turn retries even if an earlier turn had text.)
                 response_json = await get_response_json(response)
-                raw_output_text = NeMoGymResponse.model_validate(response_json).output_text
+                raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
                 if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
