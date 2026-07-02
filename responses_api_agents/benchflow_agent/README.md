@@ -39,7 +39,6 @@ Upstream BenchFlow supports Docker, Daytona and Modal environments. We use a [fo
         --model <VLLM_SERVED_MODEL_NAME> \
         --benchmark skillsbench \
         --split benchmark \
-        --input benchmarks/skillsbench/data/skillsbench_benchmark.jsonl \
         --output results/skillsbench.jsonl \
         "++skillsbench_benchflow_agent.responses_api_agents.benchflow_agent.container_formatter='/path/to/containers/{task_name}.sif'"
     ```
