@@ -65,15 +65,69 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.94.1
 
+  drop-rc:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      release-ref: ${{ steps.commit.outputs.sha || inputs.release-ref }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.BOT_ID }}
+          private-key: ${{ secrets.BOT_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release-ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Drop RC suffix and push to release branch
+        id: commit
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          FILE="nemo_gym/package_info.py"
+          PRERELEASE=$(awk '/^PRE_RELEASE = /' "$FILE" | awk -F'= ' '{print $2}' | tr -d "\"' ")
+
+          if [[ -z "$PRERELEASE" ]]; then
+            echo "PRE_RELEASE is already empty — no drop needed"
+            exit 0
+          fi
+
+          echo "Dropping PRE_RELEASE='$PRERELEASE' from $FILE"
+          sed -i '/^PRE_RELEASE/c\PRE_RELEASE = ""' "$FILE"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "dry-run: would commit drop-rc to release branch and use new SHA"
+            exit 0
+          fi
+
+          RELEASE_BRANCH=$(git branch -r --contains HEAD \
+            | grep -oP 'origin/r\d+\.\d+\.\d+$' | head -1 | sed 's|origin/||')
+          if [[ -z "$RELEASE_BRANCH" ]]; then
+            echo "::error::No r*.*.* release branch found containing ${{ inputs.release-ref }}"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout "$RELEASE_BRANCH"
+          git add "$FILE"
+          git commit -s -m "chore: drop rc pre-release tag for ${RELEASE_BRANCH} release"
+          git push origin "$RELEASE_BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   release:
-    needs: [pre-flight]
+    needs: [pre-flight, drop-rc]
     if: |
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v1.4.3
     with:
-      release-ref: ${{ inputs.release-ref || github.sha }}
+      release-ref: ${{ needs.drop-rc.outputs.release-ref || inputs.release-ref || github.sha }}
       python-package: nemo_gym
       library-name: NeMo-Gym
       validate-only: ${{ github.event_name != 'workflow_dispatch' }}
@@ -91,7 +145,7 @@ jobs:
     secrets: inherit  # pragma: allowlist secret
 
   release-summary:
-    needs: [pre-flight, release]
+    needs: [pre-flight, drop-rc, release]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
