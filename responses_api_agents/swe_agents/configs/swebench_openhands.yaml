@@ -12,7 +12,7 @@ swe_agents:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 8b77317eb6e485fc1f3b3a65902aa874484d5956  # pragma: allowlist secret
+      agent_framework_commit: a9fbc79593782104ff24d7350f462ee6e87faef0  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???
