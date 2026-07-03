@@ -295,7 +295,7 @@ class TestRunBenchflowTask:
         captured: Dict[str, Any] = {}
         fake_result = _fake_result()
         fake_module = _fake_benchflow_module(_fake_evaluation_cls(captured, fake_result), captured)
-        gc = {**_GLOBAL_CONFIG, "policy_api_key": "EMPTY"}
+        gc = {**_GLOBAL_CONFIG, "policy_api_key": "EMPTY"}  # pragma: allowlist secret
 
         with (
             patch.dict("sys.modules", {"benchflow": MagicMock(), "benchflow.evaluation": fake_module}),
@@ -364,14 +364,14 @@ class TestHelpers:
         with patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=gc):
             env = server._build_agent_env()
         assert env["BENCHFLOW_PROVIDER_BASE_URL"] == "http://policy-host:9000/v1"
-        assert env["BENCHFLOW_PROVIDER_API_KEY"] == "KEY"
+        assert env["BENCHFLOW_PROVIDER_API_KEY"] == "KEY"  # pragma: allowlist secret
         assert env["DEBUG"] == "1"
 
     def test_build_agent_env_default_api_key(self):
         server = _make_server()
         with patch("responses_api_agents.benchflow_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG):
             env = server._build_agent_env()
-        assert env["BENCHFLOW_PROVIDER_API_KEY"] == "EMPTY"
+        assert env["BENCHFLOW_PROVIDER_API_KEY"] == "EMPTY"  # pragma: allowlist secret
 
     def test_resolve_model_base_url(self):
         server = _make_server()
