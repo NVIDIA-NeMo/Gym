@@ -140,7 +140,12 @@ class TestGlobalConfig:
         agent_config = global_config_dict["hle_equivalence_llm_judge_simple_agent"]["responses_api_agents"][
             "simple_agent"
         ]
+        raw_equivalence_config = OmegaConf.load("resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml")
+        base_agent_config = raw_equivalence_config["equivalence_llm_judge_simple_agent"]["responses_api_agents"][
+            "simple_agent"
+        ]
         assert agent_config["skip_invalid_tool_calls"] is True
+        assert base_agent_config["skip_invalid_tool_calls"] is False
         assert agent_config["resources_server"]["name"] == "ns_tools"
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
