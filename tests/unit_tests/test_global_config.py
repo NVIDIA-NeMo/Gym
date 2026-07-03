@@ -88,6 +88,61 @@ class TestGlobalConfig:
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
 
+    def test_simple_agent_skip_invalid_tool_calls_override_survives_inheritance(self) -> None:
+        config = OmegaConf.create(
+            {
+                "config_paths": [
+                    "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                    "resources_servers/labbench2_vlm/configs/judge_model_openai.yaml",
+                    "resources_servers/ns_tools/configs/ns_tools.yaml",
+                    "benchmarks/hle/config.yaml",
+                ],
+                "policy_base_url": "http://localhost:3825",
+                "policy_api_key": "dummy",
+                "policy_model_name": "openai/gpt-oss-20b",
+                "judge_base_url": "http://judge.local/v1",
+                "judge_api_key": "dummy",
+                "judge_model_name": "judge",
+                "hle_equivalence_llm_judge_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "resources_server": {"name": "ns_tools"},
+                            "skip_invalid_tool_calls": True,
+                        }
+                    }
+                },
+                "ns_tools": {
+                    "resources_servers": {
+                        "ns_tools": {
+                            "default_verifier": "hle",
+                            "entrypoint": "app_cleanup.py",
+                            "verifiers": {
+                                "hle": {
+                                    "type": "resources_servers",
+                                    "name": "hle_equivalence_llm_judge_resources_server",
+                                }
+                            },
+                        }
+                    }
+                },
+                "error_on_almost_servers": False,
+            }
+        )
+
+        global_config_dict = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+            )
+        )
+
+        agent_config = global_config_dict["hle_equivalence_llm_judge_simple_agent"]["responses_api_agents"][
+            "simple_agent"
+        ]
+        assert agent_config["skip_invalid_tool_calls"] is True
+        assert agent_config["resources_server"]["name"] == "ns_tools"
+
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
