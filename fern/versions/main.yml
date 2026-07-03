@@ -56,6 +56,9 @@ navigation:
       - folder: ./latest/pages/contribute
         title: "Contribute"
         title-source: frontmatter
+      - folder: ./latest/pages/research_notes
+        title: "Research Notes"
+        title-source: frontmatter
   - tab: api
     layout:
       - section: API Reference

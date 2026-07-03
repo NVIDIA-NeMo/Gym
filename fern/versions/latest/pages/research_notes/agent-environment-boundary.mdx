@@ -1,0 +1,106 @@
+---
+title: "The Agent–Environment Boundary"
+description: "Where does the agent end and the environment begin? Competing views in the literature, the systems that embody each, and the trade-offs for agentic RL."
+position: 1
+---
+
+*Research note, 2026-07-03. On the agent–environment boundary in agentic RL: the competing views in the literature, the systems that embody each, and the trade-offs. Relevant to NeMo Gym because every environment API we ship implicitly commits to one of these boundaries.*
+
+## The question
+
+An LLM agent system is a composite: a **model** (a token distribution), a **harness** (the orchestration program — prompt construction, tool parsing/execution, context compaction, retries, subagents), and a **world** (repo, browser, OS, user). RL needs an agent–environment boundary to define the policy, the actions, and the transition dynamics — but the composite admits more than one cut:
+
+- policy-level: agent = model; actions = tokens; harness + world = environment
+- system-level: agent = harness + model; actions = tool calls; world = environment
+
+Both cuts claim the RL formalism. The disagreement is real, consequential, and largely unstated in the systems papers that embody it.
+
+## Three views
+
+### 1. The gradient boundary (policy-level): agent = model
+
+Everything downstream of token emission — tool parsing/execution, context compaction, subagent spawning, retries — is transition dynamics `p(s'|s,a)`.
+
+**Formal support — Sutton & Barto (§3.1, 2nd ed.):**
+
+> "The motors and mechanical linkages of a robot and its sensing hardware should usually be considered parts of the environment rather than parts of the agent... The general rule we follow is that anything that cannot be changed *arbitrarily* by the agent is considered to be outside of it."
+
+The criterion is *arbitrary control*, not influence or ownership: the model can set its sampled tokens to anything (the action), but only *influences* what the harness does with them — the same relationship as torque command → limb trajectory. Reliable influence through the transition kernel is exactly what being "environment" means.
+
+**Examples:**
+
+- **OpenAI Gym / MuJoCo** canonized this long before LLMs: HalfCheetah's *own body* lives inside `env.step()`; the agent is a function emitting joint torques.
+- **Polar** ([2605.24220](https://arxiv.org/abs/2605.24220), [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server)) is the purest LLM-era instance: the RL boundary is the model API itself. A proxy captures token IDs + logprobs at the inference server; the *entire harness* — even a closed-source binary — is declared environment and run unchanged.
+- **Framework-owned rollout systems** — **SkyRL** ([2511.16108](https://arxiv.org/abs/2511.16108)), **PRIME-RL** ([Prime Intellect](https://github.com/PrimeIntellect-ai/prime-rl)) with its `verifiers` environments — also train the token policy, but reconstruct the harness logic *inside* the framework's environment/agent abstractions. The gradient boundary is the same; the difference is that the harness is reimplemented rather than proxied, so the training-time "body" is the framework's copy, not the shipped one.
+
+**Why systems pick this boundary (engineering, not ontology):**
+
+- **Universality** — every LLM agent, however complex or closed, has a model-API call; no other interface exists across all harnesses.
+- **Signal fidelity** — token IDs and log-probabilities exist only at the inference server. Any boundary that handles text must retokenize, and retokenization drift silently corrupts the gradient (vLLM/Agent Lightning [post](https://blog.vllm.ai/2025/10/22/agent-lightning.html)). The harness-side data contract is message-level text/JSON — informationally poorer, and free to "lie" between calls via compaction/rewrites; the engine-side contract is a log of what was actually computed. Only the latter is trainable.
+- **Train/deploy parity** (proxy variant only) — the policy is optimized inside the literal production harness rather than a clean-room reimplementation.
+
+### 2. The agent boundary (system-level): agent = harness + model
+
+The classical and, outside RL infrastructure, dominant view — the environment begins at the world.
+
+**Positions and examples:**
+
+- **Russell & Norvig (AIMA):** *agent = architecture + program.* Sensors, actuators, orchestration are part of the agent.
+- **Options / hierarchical RL (Sutton, Precup & Singh 1999):** temporally extended sub-policies and their termination logic live inside the agent. A harness is an option machine ("run tests," "compact context," "spawn subagent").
+- **The agent-state argument (Silver's UCL formulation):** the agent contains its state-construction function `S_t^a = f(H_t)`. A harness's context management — what to keep, compact, inject — *is* `f`. Calling the agent's memory "environment dynamics" is, on this view, a category error.
+- **AlphaZero — the decisive precedent:** gradients flow only through the network, yet nobody calls MCTS "environment." The **agent is network + search**; training *distills the search into the network* — a scheme that only makes sense because the trainable object and the agent are different things. A harness is structurally MCTS: orchestration logic making many network calls per action.
+- **Industry framings:** Anthropic's [Building Effective Agents](https://www.anthropic.com/research/building-effective-agents) — agents are "systems where LLMs dynamically direct their own processes and tool usage"; the augmented LLM (model+tools+memory) is the building block, the agent is the loop around it. OpenAI's [governance white paper](https://openai.com/index/practices-for-governing-agentic-ai-systems/) defines agenticness as a *system-level* property.
+- **Embodied AI (the strongest version):** Smith's embodiment hypothesis — intelligence *emerges from* sensorimotor interaction; the body partially constitutes cognition. Translated: the harness (the model's sensorimotor apparatus) constitutes part of the agent's intelligence, and severing it into "environment" discards where much of the intelligence lives. Polar's own headline result nearly demos this: SWE-Bench performance was substantially in the model–harness *fit* (Codex 3.8→26.4 by learning the harness's dialect; +0.6 where the dialect was already native).
+
+### 3. The hierarchical boundary (both at once) — the reconciliation
+
+**Examples:** [ArCHer](https://arxiv.org/abs/2402.19446) (Zhou, Zanette, Pan, Levine, Kumar, ICML 2024) and [SWEET-RL](https://arxiv.org/abs/2503.15478) formalize a **two-level MDP**: an outer utterance/turn-level MDP at the agent boundary (where long-horizon value and credit assignment live) with a token-level MDP nested inside each turn (where the policy gradient flows). Neither boundary is "the" boundary; the algorithm needs both. **Agent Lightning** ([2508.03680](https://arxiv.org/abs/2508.03680)) similarly casts the *whole program execution* as the MDP and assigns credit across all LLM calls within it — program structure inside the agent, selectively trainable.
+
+Sutton & Barto themselves license this: *"the agent–environment boundary can be located at different places for different purposes."* The boundary tracks the **decision variables you make learnable** — make the harness's choices trainable (learned compaction policy, tuned prompts, multiple trained LLM components) and they cross into the agent.
+
+## Terminology discipline
+
+Much of the confusion is one overloaded word. Keep three terms distinct:
+
+| Term | Meaning | In an LLM agent system |
+|---|---|---|
+| **Policy** | The parameterized distribution being differentiated | The model (token distribution) |
+| **Agent** | The system that acts; architecture + program | Harness + model |
+| **Environment** | What pushes back with observations and reward | The repo / browser / world (+ the harness, *only* relative to the policy) |
+
+"Training the agent" almost always means "training the policy." Papers that say "treat the agent as a black-box environment" (Polar) mean "treat the *harness* as environment *relative to the policy*." Replacing "agent" with "policy" on the training side dissolves most of the conceptual objection — NeMo Gym docs should adopt this discipline.
+
+## The trade-offs
+
+| | Gradient boundary — proxied (Polar) | Gradient boundary — framework-owned (SkyRL, PRIME-RL) | Agent boundary (Agent Lightning, ArCHer-outer) |
+|---|---|---|---|
+| **Integration cost** | ~Zero: point the harness's base URL at a proxy | Reimplement harness behind the framework's env/agent API | Instrument the agent's code; credit-assignment machinery |
+| **Coverage** | Any harness incl. closed binaries — if it speaks a supported provider API to a token-ID/logprob-exposing inference server | Only harnesses you can reimplement | Only code you can instrument |
+| **Signal fidelity** | Exact sampled token IDs + logprobs; no retokenization drift | Framework-dependent; reconstruction risk unless token-level capture is built in | Framework-dependent (Agent Lightning captures token IDs via tracing) |
+| **Train/deploy parity** | Trains inside the literal production harness | Training "body" is the framework's copy — clean-room drift vs prod | Depends on how invasive the instrumentation is |
+| **Learnable surface** | Token policy only; harness decisions frozen into dynamics | Token policy only (harness copy is fixed code) | Harness decisions (compaction, retries, routing, prompts, multiple LLM components) optimizable in principle |
+| **What RL learns** | Model compensates for its body — middleware quirks entrenched into weights; checkpoint coupled to a harness version (harness update ⇒ distribution shift ⇒ retrain) | Same, plus possible train/deploy mismatch | System-level improvement; credit can flow to the component that deserves it |
+| **Credit assignment** | Session reward smeared across traces the harness shaped; harness stochasticity contaminates group-relative advantage | Similar at token level; env abstraction can expose per-step reward | Outer-MDP value functions localize credit per turn/call |
+| **Failure mode** | Reward hacking at wrong granularity (observed in Polar §4.1); dialect-fitting mistaken for capability gain | Integration bugs; behavioral divergence from prod harness | Complexity; credit-assignment machinery itself must be validated |
+
+## Implications for NeMo Gym
+
+1. **Be explicit about which boundary an environment implements.** A proxied harness (Polar-style), a framework-owned tool environment (SkyRL/PRIME-RL-style `env.step`), and an instrumented whole-program MDP (Agent Lightning-style) are *different decompositions*, not three implementations of one thing. Docs and interfaces should name the boundary: "policy boundary at the model API" vs "agent boundary at the tool interface."
+2. **The gradient boundary is an instrumentation argument, not an ontology.** Its hard prerequisite is a cooperative inference server (token IDs + logprobs); it cannot be pushed through third-party closed APIs. Text-level (SFT-grade) collection degrades gracefully; RL-grade does not.
+3. **The hierarchical view is the likely end-state.** For teams that own both harness and model — our situation — the frozen-harness assumption is the weak position: the highest-leverage decisions (compaction, retry, routing, subagent policies) live in the harness and are unoptimizable under a pure gradient boundary. An outer turn-level MDP over harness decisions with an inner token-level MDP (ArCHer-style), or selective multi-component training (Agent Lightning-style), recovers that surface while keeping token-faithful capture at the inner boundary.
+4. **Watch for dialect-fitting masquerading as capability.** Under the gradient boundary, large RL gains on a foreign harness (Polar's Codex +22.6 from a 3.8% baseline) are substantially the model learning the harness's action protocol. A format-only SFT control isolates this; without it, treat such numbers as existence-proofs of the plumbing, not measurements of learning.
+
+## Sources
+
+- Sutton & Barto, *Reinforcement Learning: An Introduction* (2nd ed.), §3.1 — the arbitrary-control rule; boundary as purpose-relative
+- Russell & Norvig, *AIMA* — agent = architecture + program
+- Sutton, Precup & Singh, "Between MDPs and semi-MDPs" (options), 1999
+- Silver, UCL RL course Lecture 1 — agent state `S_t^a = f(H_t)`; Silver & Sutton, "The Era of Experience," 2025
+- AlphaZero (Silver et al.) — agent = network + search; training distills search into network
+- [ArCHer](https://arxiv.org/abs/2402.19446), [SWEET-RL](https://arxiv.org/abs/2503.15478) — hierarchical two-level MDPs for LLM agents
+- [Agent Lightning](https://arxiv.org/abs/2508.03680) — whole-execution MDP, cross-call credit assignment
+- [Polar](https://arxiv.org/abs/2605.24220) / [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) — gradient boundary at the provider API, token-faithful reconstruction
+- [SkyRL-Agent](https://arxiv.org/abs/2511.16108); [PRIME-RL](https://github.com/PrimeIntellect-ai/prime-rl) (Prime Intellect) — framework-owned rollout with async trainer–inference separation
+- [Anthropic, Building Effective Agents](https://www.anthropic.com/research/building-effective-agents); [OpenAI, Practices for Governing Agentic AI Systems](https://openai.com/index/practices-for-governing-agentic-ai-systems/)
+- Smith & Gasser, the embodiment hypothesis (2005); [Toward Enactive AI](https://arxiv.org/abs/2605.24238)
+- vLLM/Agent Lightning [retokenization-drift post](https://blog.vllm.ai/2025/10/22/agent-lightning.html) — why the token truth only exists at the inference server
