@@ -261,19 +261,19 @@ class TestApp:
         assert "Invalid tool call arguments" in error_payload["error"]
         assert "JSONDecodeError" in error_payload["error"]
 
-    async def test_responses_stops_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_responses_skips_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
 
-        The agent must not send malformed function_call items back in the next
-        model-call history, since chat templates may reject them. Instead it
-        should terminate the response with an assistant-visible error message.
+        When enabled, the agent must not send malformed function_call items
+        back in the next model-call history, since chat templates may reject
+        them. It should keep valid/non-call outputs and continue.
         """
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
-            stop_on_invalid_tool_call=True,
+            skip_invalid_tool_calls=True,
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="my server name",
@@ -293,6 +293,12 @@ class TestApp:
             "model": "dummy_model",
             "object": "response",
             "output": [
+                {
+                    "id": "rs_1",
+                    "summary": [{"text": "thinking", "type": "summary_text"}],
+                    "type": "reasoning",
+                    "status": "completed",
+                },
                 {
                     "id": "fc_1",
                     "call_id": "call_1",
@@ -307,9 +313,36 @@ class TestApp:
             "tool_choice": "auto",
             "tools": [],
         }
+        mock_response_chat_data = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Done.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_call)
+        dotjson_mock.read.side_effect = [
+            json.dumps(mock_response_bad_tool_call),
+            json.dumps(mock_response_chat_data),
+        ]
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
@@ -317,28 +350,25 @@ class TestApp:
         assert res.status_code == 200
 
         # The resources server must not be called for a malformed tool call —
-        # only the first model call should hit server_client.post.
+        # only model calls should hit server_client.post.
         post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
         server_names_called = [kw["server_name"] for kw in post_call_kwargs]
-        assert server_names_called == ["my server name"]
+        assert server_names_called == ["my server name", "my server name"]
+
+        second_call_input = post_call_kwargs[1]["json"].input
+        assert not any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in second_call_input)
+        assert not any(isinstance(item, NeMoGymFunctionCallOutput) for item in second_call_input)
 
         actual_output = res.json()["output"]
-        assert len(actual_output) == 1
-        assert actual_output[0]["type"] == "message"
-        error_payload = json.loads(actual_output[0]["content"][0]["text"])
-        assert "error" in error_payload
-        assert "Invalid tool call arguments" in error_payload["error"]
-        # The exception type must be visible to the model — repr(e) on a
-        # JSONDecodeError starts with the class name.
-        assert "JSONDecodeError" in error_payload["error"]
+        assert [item["type"] for item in actual_output] == ["reasoning", "message"]
 
-    async def test_responses_stops_on_non_object_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_responses_skips_non_object_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
-            stop_on_invalid_tool_call=True,
+            skip_invalid_tool_calls=True,
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="my server name",
@@ -359,6 +389,12 @@ class TestApp:
             "object": "response",
             "output": [
                 {
+                    "id": "rs_1",
+                    "summary": [{"text": "thinking", "type": "summary_text"}],
+                    "type": "reasoning",
+                    "status": "completed",
+                },
+                {
                     "id": "fc_1",
                     "call_id": "call_1",
                     "name": "my_tool",
@@ -371,9 +407,36 @@ class TestApp:
             "tool_choice": "auto",
             "tools": [],
         }
+        mock_response_chat_data = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Done.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_call)
+        dotjson_mock.read.side_effect = [
+            json.dumps(mock_response_bad_tool_call),
+            json.dumps(mock_response_chat_data),
+        ]
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
@@ -401,21 +464,22 @@ class TestApp:
 
         post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
         server_names_called = [kw["server_name"] for kw in post_call_kwargs]
-        assert server_names_called == ["my server name"]
+        assert server_names_called == ["my server name", "my server name"]
+
+        second_call_input = post_call_kwargs[1]["json"].input
+        assert not any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in second_call_input)
+        assert not any(isinstance(item, NeMoGymFunctionCallOutput) for item in second_call_input)
 
         actual_output = res.json()["output"]
-        assert len(actual_output) == 1
-        assert actual_output[0]["type"] == "message"
-        error_payload = json.loads(actual_output[0]["content"][0]["text"])
-        assert error_payload == {"error": "Invalid tool call arguments: expected object, got str"}
+        assert [item["type"] for item in actual_output] == ["reasoning", "message"]
 
-    async def test_responses_stops_on_unknown_tool_name(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_responses_skips_unknown_tool_name(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="",
-            stop_on_invalid_tool_call=True,
+            skip_invalid_tool_calls=True,
             model_server=ModelServerRef(
                 type="responses_api_models",
                 name="my server name",
@@ -436,6 +500,12 @@ class TestApp:
             "object": "response",
             "output": [
                 {
+                    "id": "rs_1",
+                    "summary": [{"text": "thinking", "type": "summary_text"}],
+                    "type": "reasoning",
+                    "status": "completed",
+                },
+                {
                     "id": "fc_1",
                     "call_id": "call_1",
                     "name": "web_search]",
@@ -448,9 +518,36 @@ class TestApp:
             "tool_choice": "auto",
             "tools": [],
         }
+        mock_response_chat_data = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Done.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
 
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.return_value = json.dumps(mock_response_bad_tool_name)
+        dotjson_mock.read.side_effect = [
+            json.dumps(mock_response_bad_tool_name),
+            json.dumps(mock_response_chat_data),
+        ]
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
@@ -478,13 +575,148 @@ class TestApp:
 
         post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
         server_names_called = [kw["server_name"] for kw in post_call_kwargs]
-        assert server_names_called == ["my server name"]
+        assert server_names_called == ["my server name", "my server name"]
+
+        second_call_input = post_call_kwargs[1]["json"].input
+        assert not any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in second_call_input)
+        assert not any(isinstance(item, NeMoGymFunctionCallOutput) for item in second_call_input)
 
         actual_output = res.json()["output"]
-        assert len(actual_output) == 1
-        assert actual_output[0]["type"] == "message"
-        error_payload = json.loads(actual_output[0]["content"][0]["text"])
-        assert error_payload == {"error": "Invalid tool call name: 'web_search]'"}
+        assert [item["type"] for item in actual_output] == ["reasoning", "message"]
+
+    async def test_responses_skips_invalid_tool_call_and_runs_valid_tool_call(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            skip_invalid_tool_calls=True,
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my server name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources server",
+            ),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_tool_calls = {
+            "id": "resp_tool_calls",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "fc_good",
+                    "call_id": "call_good",
+                    "name": "my_tool",
+                    "arguments": '{"query": "foo"}',
+                    "type": "function_call",
+                    "status": "completed",
+                },
+                {
+                    "id": "fc_bad",
+                    "call_id": "call_bad",
+                    "name": "web_search]",
+                    "arguments": '{"query": "bar"}',
+                    "type": "function_call",
+                    "status": "completed",
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        mock_response_chat_data = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Done.",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        first_model_response = AsyncMock()
+        first_model_response.read.return_value = json.dumps(mock_response_tool_calls)
+        first_model_response.cookies = MagicMock()
+        tool_response = MagicMock()
+        tool_response.cookies = MagicMock()
+        tool_response.content.read = AsyncMock(return_value=b'{"result": "ok"}')
+        second_model_response = AsyncMock()
+        second_model_response.read.return_value = json.dumps(mock_response_chat_data)
+        second_model_response.cookies = MagicMock()
+        server.server_client.post.side_effect = [first_model_response, tool_response, second_model_response]
+
+        res = client.post(
+            "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "my_tool",
+                        "description": "Test tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
+            },
+        )
+        assert res.status_code == 200
+
+        post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
+        server_names_called = [kw["server_name"] for kw in post_call_kwargs]
+        assert server_names_called == ["my server name", "my resources server", "my server name"]
+        assert post_call_kwargs[1]["url_path"] == "/my_tool"
+        assert post_call_kwargs[1]["json"] == {"query": "foo"}
+
+        second_call_input = post_call_kwargs[2]["json"].input
+        assert any(
+            isinstance(item, NeMoGymResponseFunctionToolCall) and item.call_id == "call_good"
+            for item in second_call_input
+        )
+        assert not any(
+            isinstance(item, NeMoGymResponseFunctionToolCall) and item.call_id == "call_bad"
+            for item in second_call_input
+        )
+        assert any(
+            isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call_good"
+            for item in second_call_input
+        )
+        assert not any(
+            isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call_bad"
+            for item in second_call_input
+        )
+
+        actual_output = res.json()["output"]
+        assert [item.get("call_id") for item in actual_output if item["type"] == "function_call"] == ["call_good"]
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(

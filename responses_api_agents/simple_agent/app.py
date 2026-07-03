@@ -38,7 +38,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -47,7 +46,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    stop_on_invalid_tool_call: bool = False
+    skip_invalid_tool_calls: bool = False
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -80,22 +79,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_names.add(name)
         return tool_names
 
-    @staticmethod
-    def _invalid_tool_call_message(call_id: str, error: str) -> NeMoGymResponseOutputMessage:
-        return NeMoGymResponseOutputMessage(
-            id=f"msg_invalid_tool_call_{call_id}",
-            content=[
-                NeMoGymResponseOutputText(
-                    annotations=[],
-                    text=json.dumps({"error": error}),
-                    type="output_text",
-                )
-            ],
-            role="assistant",
-            status="completed",
-            type="message",
-        )
-
     async def responses(
         self,
         request: Request,
@@ -116,7 +99,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         while True:
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
-            allowed_tool_names = self._tool_names(body) if self.config.stop_on_invalid_tool_call else set()
+            allowed_tool_names = self._tool_names(body) if self.config.skip_invalid_tool_calls else set()
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -163,52 +146,41 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             parsed_fn_calls = []
-            invalid_tool_call_message = None
-            if not self.config.stop_on_invalid_tool_call:
+            if not self.config.skip_invalid_tool_calls:
                 new_outputs.extend(output)
 
             for output_function_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as e:
-                    if not self.config.stop_on_invalid_tool_call:
-                        tool_response = NeMoGymFunctionCallOutput(
-                            type="function_call_output",
-                            call_id=output_function_call.call_id,
-                            output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
-                        )
-                        new_outputs.append(tool_response)
+                    if self.config.skip_invalid_tool_calls:
                         continue
 
-                    invalid_tool_call_message = self._invalid_tool_call_message(
+                    tool_response = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
                         call_id=output_function_call.call_id,
-                        error=f"Invalid tool call arguments: {e!r}",
+                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
                     )
-                    break
+                    new_outputs.append(tool_response)
+                    continue
 
-                if self.config.stop_on_invalid_tool_call and not isinstance(parsed_arguments, dict):
-                    invalid_tool_call_message = self._invalid_tool_call_message(
-                        call_id=output_function_call.call_id,
-                        error=f"Invalid tool call arguments: expected object, got {type(parsed_arguments).__name__}",
-                    )
-                    break
+                if self.config.skip_invalid_tool_calls:
+                    if not isinstance(parsed_arguments, dict):
+                        continue
 
-                if self.config.stop_on_invalid_tool_call and output_function_call.name not in allowed_tool_names:
-                    invalid_tool_call_message = self._invalid_tool_call_message(
-                        call_id=output_function_call.call_id,
-                        error=f"Invalid tool call name: {output_function_call.name!r}",
-                    )
-                    break
+                    if output_function_call.name not in allowed_tool_names:
+                        continue
 
                 parsed_fn_calls.append((output_function_call, parsed_arguments))
 
-            if invalid_tool_call_message:
-                new_outputs.extend(o for o in output if o.type != "function_call")
-                new_outputs.append(invalid_tool_call_message)
-                break
-
-            if self.config.stop_on_invalid_tool_call:
-                new_outputs.extend(output)
+            if self.config.skip_invalid_tool_calls:
+                valid_call_ids = {output_function_call.call_id for output_function_call, _ in parsed_fn_calls}
+                filtered_output = [
+                    o for o in output if o.type != "function_call" or o.call_id in valid_call_ids
+                ]
+                new_outputs.extend(filtered_output)
+                if not parsed_fn_calls and not filtered_output:
+                    break
 
             for output_function_call, parsed_arguments in parsed_fn_calls:
                 api_response = await self.server_client.post(
