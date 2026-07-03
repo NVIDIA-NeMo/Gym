@@ -21,14 +21,15 @@ STARTUP_TIMEOUT=600
 VLLM_LOG_STATS_INTERVAL=30
 MAX_TURNS=${MAX_TURNS:-30}
 TIMEOUT=${TIMEOUT:-300}
-EXP_NAME=${EXP_NAME:-r2e_gym_easy_large.openhands.qwen3-235b-mt${MAX_TURNS}-timeout${TIMEOUT}-try5}
+EXP_NAME=${EXP_NAME:-r2e_gym_easy_large.openhands.qwen3-235b-mt${MAX_TURNS}-timeout${TIMEOUT}}
 
 RESULTS_DIR=${SLURM_SUBMIT_DIR}/results/${EXP_NAME}
+SWE_RESULTS_DIR=${RESULTS_DIR}/slurm-${SLURM_JOB_ID}
 OUTPUT_JSONL=${RESULTS_DIR}/${EXP_NAME}.${SLURM_JOB_ID}.jsonl
 SLURM_LOG=${SLURM_SUBMIT_DIR}/slurm-${SLURM_JOB_ID}.out
-mkdir -p "$RESULTS_DIR"
+mkdir -p "$SWE_RESULTS_DIR"
 scontrol update JobId="$SLURM_JOB_ID" JobName="coreai_mlperf_training-grpo.eval.${EXP_NAME}"
-export MODEL VLLM_LOG_STATS_INTERVAL EXP_NAME MAX_TURNS TIMEOUT RESULTS_DIR OUTPUT_JSONL
+export MODEL VLLM_LOG_STATS_INTERVAL EXP_NAME MAX_TURNS TIMEOUT RESULTS_DIR SWE_RESULTS_DIR OUTPUT_JSONL
 
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 NODE_COUNT=${#NODES[@]}
@@ -53,6 +54,8 @@ ROUTER_STEP_PID=
 GYM_STEP_PID=
 
 cleanup() {
+    local run_status=$?
+    local jet_status=0
     trap - EXIT INT TERM
     if [[ -n "$GYM_STEP_PID" ]]; then
         kill "$GYM_STEP_PID" 2>/dev/null || true
@@ -70,6 +73,21 @@ cleanup() {
     if [[ -f "$SLURM_LOG" ]]; then
         mv -f "$SLURM_LOG" "$RESULTS_DIR/"
     fi
+    if [[ ${JET:-0} == 1 ]]; then
+        JET_WORKLOAD_SCRIPT=eval.sub \
+        JET_EXIT_CODE="$run_status" \
+        JET_DURATION="$SECONDS" \
+        JET_NODE_COUNT="$NODE_COUNT" \
+        JET_SOURCE_IMAGE="$IMAGE" \
+            "$SLURM_SUBMIT_DIR/scripts/submit_jet_log.sh" \
+            --job-id "$SLURM_JOB_ID" "$RESULTS_DIR" || jet_status=$?
+    fi
+    if (( run_status != 0 )); then
+        exit "$run_status"
+    fi
+    if (( jet_status != 0 )); then
+        exit "$jet_status"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -78,7 +96,7 @@ CONT_ARGS=(
   --container-name=image
   "--container-mounts=/lustre:/lustre,/dev/fuse:/dev/fuse"
   --container-remap-root
-  "--container-env=UV_CACHE_DIR,MODEL,HEAD_NODE,SWE_CONCURRENCY,VLLM_LOG_STATS_INTERVAL,EXP_NAME,MAX_TURNS,TIMEOUT,RESULTS_DIR,OUTPUT_JSONL,POLICY_BASE_URL"
+  "--container-env=UV_CACHE_DIR,MODEL,HEAD_NODE,SWE_CONCURRENCY,VLLM_LOG_STATS_INTERVAL,EXP_NAME,MAX_TURNS,TIMEOUT,RESULTS_DIR,SWE_RESULTS_DIR,OUTPUT_JSONL,POLICY_BASE_URL"
   --container-workdir="$PWD"
 )
 
@@ -216,7 +234,7 @@ ng_run "+config_paths=[$config_paths]" \
   ++swe_agents_val.responses_api_agents.swe_agents.concurrency=${SWE_CONCURRENCY} \
   ++swe_agents_val.responses_api_agents.swe_agents.agent_max_turns=${MAX_TURNS} \
   ++swe_agents_val.responses_api_agents.swe_agents.swebench_agent_timeout=${TIMEOUT} \
-  ++swe_agents_val.responses_api_agents.swe_agents.base_results_dir=${RESULTS_DIR} \
+  ++swe_agents_val.responses_api_agents.swe_agents.base_results_dir=${SWE_RESULTS_DIR} \
   ++policy_base_url=${POLICY_BASE_URL} \
   ++policy_api_key=dummy \
   ++policy_model_name=${MODEL} \
