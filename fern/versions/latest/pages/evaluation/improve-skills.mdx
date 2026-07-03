@@ -1,0 +1,144 @@
+---
+title: "Improve Skills"
+description: "Iterate on agent skills with a structured measure → improve → keep/revert loop built on gym eval run."
+position: 6
+---
+
+Once you can [evaluate a skill variant](/agent-server/agent-skills) and [diagnose the results](/evaluation/diagnose-results), the next need is to *improve* skills over several rounds — edit, re-measure, and keep what helps — without hand-orchestrating each round or losing track of what you tried.
+
+`gym eval improve-*` adds that loop on top of the existing evaluation machinery. It does not run rollouts itself or edit your skills; it snapshots skill directories, records the aggregate metrics from `gym eval run`, shows before/after deltas, and lets you keep or revert a round.
+
+<Info>
+Skills are a run-level variable, not a dataset field. See [Agent Skills](/agent-server/agent-skills) for how `skills.path` and the content-hashed `skills_ref` work — the improve loop keys rounds on that same `skills_ref.hash`.
+</Info>
+
+## The loop
+
+1. **Measure a baseline** with `gym eval run` and note its `*_aggregate_metrics.json`.
+2. **Init** a workspace that snapshots the baseline skills and metrics.
+3. **Edit** skills in your own editor (or with a coding agent).
+4. **Round** — snapshot the edited skills as a candidate.
+5. **Run** the same eval against the round's staged skills.
+6. **Record** the round's metrics and see before/after.
+7. **Analyze** the round's artifacts with [BLADE](/evaluation/diagnose-results) when a change is unexpected.
+8. **Keep or revert** based on the result, then repeat from step 3.
+
+## Commands
+
+### Initialize a workspace
+
+Start from a measured baseline (the `*_aggregate_metrics.json` produced by `gym eval run`):
+
+```bash
+gym eval improve-init \
+  --workspace .gym/improve/my-skills \
+  --skills .claude/skills \
+  --baseline-metrics results/baseline_aggregate_metrics.json \
+  --eval-command-hint "gym eval run --no-serve --agent my_agent --input data/tasks.jsonl --output results/rollouts.jsonl"
+```
+
+This creates the workspace, copies the current skills tree as the accepted baseline, and records its content hash. `--eval-command-hint` is optional; when set, `improve-round` echoes it back with the round's `+skills.path` appended.
+
+### Start a round
+
+After editing your skills, snapshot them as a candidate:
+
+```bash
+gym eval improve-round --workspace .gym/improve/my-skills
+```
+
+This prints the `+skills.path=<workspace>/rounds/0001/candidate_skills` override to use for the round's eval, so the snapshot — not your still-mutating working copy — is what gets evaluated.
+
+### Run the eval
+
+Collect rollouts against the round snapshot with your normal command:
+
+```bash
+gym eval run --no-serve \
+  --agent my_agent \
+  --input data/tasks.jsonl \
+  --output results/round0001_rollouts.jsonl \
+  +skills.path=.gym/improve/my-skills/rounds/0001/candidate_skills
+```
+
+### Record and compare
+
+Ingest the round's aggregate metrics and print a before/after table against the accepted baseline:
+
+```bash
+gym eval improve-record \
+  --workspace .gym/improve/my-skills \
+  --aggregate-metrics results/round0001_rollouts_aggregate_metrics.json
+```
+
+Cost lives in the rollout output as token usage; run [`gym eval profile`](/reference/cli-commands#eval-profile) on the round's rollouts for per-task pass rates and token summaries.
+
+### Keep or revert
+
+Accept a round (updates the accepted baseline and, by default, copies the skills back to your live `skills.path`):
+
+```bash
+gym eval improve-keep --workspace .gym/improve/my-skills --round 0001
+```
+
+Restore the accepted snapshot to your live skills directory if a round regressed:
+
+```bash
+gym eval improve-revert --workspace .gym/improve/my-skills
+```
+
+Both commands refuse to overwrite a live skills directory that changed since the round unless you pass `--force`, so an in-progress edit is never clobbered silently.
+
+### Review history
+
+```bash
+gym eval improve-history --workspace .gym/improve/my-skills
+```
+
+Lists each round, its status (`pending`, `kept`, `reverted`, `superseded`), skill hash, and the primary-metric delta. Add `--json` for machine-readable output.
+
+## Workspace layout
+
+```
+.gym/improve/my-skills/
+├── improve.yaml              # frozen workspace config
+├── accepted/
+│   ├── skills/               # last kept skill tree
+│   ├── skills_ref.json
+│   └── aggregate_metrics.json
+├── rounds/
+│   └── 0001/
+│       ├── manifest.json     # status, skills_ref, comparison
+│       ├── candidate_skills/
+│       ├── aggregate_metrics.json
+│       └── comparison.json
+└── history.jsonl             # append-only event log
+```
+
+Round identity is the `skills_ref.hash` content digest, so reverting to a prior skill state re-pools with its earlier evaluation automatically.
+
+## Scope
+
+The loop is deliberately thin and reuses existing evaluation primitives — it adds no new metrics, verifier, or rollout collector.
+
+- It does **not** run `gym eval run` for you (servers, models, and benchmark configs vary); it prints the command and ingests the result.
+- It does **not** edit skills — you use your own editor or a coding agent.
+- Latency is not a first-class metric until agents emit timing fields; accuracy and token cost come from existing artifacts.
+
+Automated optimizer backends (e.g. GEPA, ACE) can later drive the same loop through the `rollout_collection_driver` seam without changing this workflow.
+
+<Cards>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+How <code>skills.path</code> and <code>skills_ref</code> work.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use BLADE to explain why a round's score changed.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+The scorecard the before/after comparison reads from.
+</Card>
+
+</Cards>

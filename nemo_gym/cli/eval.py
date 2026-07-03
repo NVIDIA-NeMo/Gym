@@ -467,3 +467,53 @@ Reward profile completion: {completion_summary["completed_rollout_rows"]}/{compl
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
+
+
+@exit_cleanly_on_config_error
+def improve_init() -> None:
+    from nemo_gym.skill_improvement import ImproveInitConfig, init_workspace
+
+    config = ImproveInitConfig.model_validate(get_global_config_dict())
+    init_workspace(config)
+
+
+@exit_cleanly_on_config_error
+def improve_round() -> None:
+    from nemo_gym.skill_improvement import ImproveRoundConfig, start_round
+
+    config = ImproveRoundConfig.model_validate(get_global_config_dict())
+    start_round(config)
+
+
+@exit_cleanly_on_config_error
+def improve_record() -> None:
+    from nemo_gym.skill_improvement import ImproveRecordConfig, record_round
+
+    config = ImproveRecordConfig.model_validate(get_global_config_dict())
+    record_round(config)
+
+
+@exit_cleanly_on_config_error
+def improve_keep() -> None:
+    from nemo_gym.skill_improvement import ImproveKeepConfig, keep_round
+
+    config = ImproveKeepConfig.model_validate(get_global_config_dict())
+    keep_round(config)
+
+
+@exit_cleanly_on_config_error
+def improve_revert() -> None:
+    from nemo_gym.skill_improvement import ImproveRevertConfig, revert_live_skills
+
+    config = ImproveRevertConfig.model_validate(get_global_config_dict())
+    revert_live_skills(config)
+
+
+@exit_cleanly_on_config_error
+def improve_history() -> None:
+    from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME
+    from nemo_gym.skill_improvement import ImproveHistoryConfig, list_history
+
+    global_config_dict = get_global_config_dict()
+    config = ImproveHistoryConfig.model_validate(global_config_dict)
+    list_history(config, json_output=bool(global_config_dict.get(JSON_OUTPUT_KEY_NAME, False)))

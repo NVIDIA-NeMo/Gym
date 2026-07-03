@@ -536,6 +536,83 @@ COMMANDS = {
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
     ),
+    "eval improve-init": Command(
+        target="nemo_gym.cli.eval:improve_init",
+        summary="Initialize a skill-improvement workspace from a baseline eval.",
+        flags=(
+            _value_flag("workspace", "workspace", "Directory for the improvement session."),
+            _value_flag("skills", "skills", "Live skills directory (Agent Skills layout)."),
+            _value_flag(
+                "baseline-metrics",
+                "baseline_metrics",
+                "Baseline *_aggregate_metrics.json from gym eval run.",
+            ),
+            _value_flag("name", "name", "Workspace name (default: skill-improvement)."),
+            _value_flag("baseline-skills", "baseline_skills", "Baseline skills tree; defaults to --skills."),
+            _value_flag(
+                "eval-command-hint",
+                "eval_command_hint",
+                "Template gym eval run command printed by improve-round.",
+            ),
+            _value_flag("primary-metric", "primary_metric", "Headline metric key (default: mean/reward)."),
+        ),
+    ),
+    "eval improve-round": Command(
+        target="nemo_gym.cli.eval:improve_round",
+        summary="Start a new round: snapshot live skills and print eval command.",
+        flags=(
+            _value_flag("workspace", "workspace", "Improvement workspace directory."),
+            _value_flag("notes", "notes", "Optional note stored on the round manifest."),
+        ),
+    ),
+    "eval improve-record": Command(
+        target="nemo_gym.cli.eval:improve_record",
+        summary="Record round eval results and compare to accepted baseline.",
+        flags=(
+            _value_flag("workspace", "workspace", "Improvement workspace directory."),
+            _value_flag(
+                "aggregate-metrics",
+                "aggregate_metrics",
+                "Aggregate metrics JSON for this round.",
+            ),
+            _value_flag("round", "round_id", "Round id; default: latest pending round."),
+            _value_flag("rollouts", "rollouts", "Rollouts JSONL for this round."),
+            _value_flag("materialized-inputs", "materialized_inputs", "Materialized inputs JSONL."),
+        ),
+    ),
+    "eval improve-keep": Command(
+        target="nemo_gym.cli.eval:improve_keep",
+        summary="Accept a round and update the accepted skills baseline.",
+        flags=(
+            _value_flag("workspace", "workspace", "Improvement workspace directory."),
+            _value_flag("round", "round_id", "Round id to keep (e.g. 0003)."),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--no-copy-live",
+                    action="store_true",
+                    help="Do not copy accepted skills back to the live skills.path directory.",
+                ),
+                translate_to_hydra=lambda args: ["+copy_live=false"] if args.no_copy_live else [],
+            ),
+            _bool_flag("force", "force", "Overwrite live skills even if they changed since the round."),
+        ),
+    ),
+    "eval improve-revert": Command(
+        target="nemo_gym.cli.eval:improve_revert",
+        summary="Restore accepted skills snapshot to the live skills directory.",
+        flags=(
+            _value_flag("workspace", "workspace", "Improvement workspace directory."),
+            _bool_flag("force", "force", "Overwrite live skills even if they differ from accepted."),
+        ),
+    ),
+    "eval improve-history": Command(
+        target="nemo_gym.cli.eval:improve_history",
+        summary="List improvement rounds and metric deltas.",
+        flags=(
+            _value_flag("workspace", "workspace", "Improvement workspace directory."),
+            JSON,
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
 }
 
