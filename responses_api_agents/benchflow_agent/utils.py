@@ -134,9 +134,7 @@ class BenchFlowAgentUtils:
 
         md_path = Path(task_dir) / "task.md"
         if not md_path.is_file():
-            raise FileNotFoundError(
-                f"apply_task_config_overrides supports only task.md, none found in {task_dir}"
-            )
+            raise FileNotFoundError(f"apply_task_config_overrides supports only task.md, none found in {task_dir}")
 
         frontmatter, body = BenchFlowAgentUtils._split_frontmatter(md_path.read_text())
         merged = BenchFlowAgentUtils._deep_merge(yaml.safe_load(frontmatter) or {}, overrides)

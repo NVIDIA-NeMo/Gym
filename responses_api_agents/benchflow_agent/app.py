@@ -148,8 +148,17 @@ class BenchFlowAgent(SimpleResponsesAPIAgent):
 
                 metadata["rollout_dir"] = str(rollout_dir)
                 for key in [
-                    "agent", "rewards", "error", "error_category", "verifier_error", "verifier_error_category",
-                    "n_tool_calls", "n_skill_invocations", "n_prompts", "started_at", "finished_at",
+                    "agent",
+                    "rewards",
+                    "error",
+                    "error_category",
+                    "verifier_error",
+                    "verifier_error_category",
+                    "n_tool_calls",
+                    "n_skill_invocations",
+                    "n_prompts",
+                    "started_at",
+                    "finished_at",
                 ]:
                     metadata[key] = getattr(result, key, None)
             else:

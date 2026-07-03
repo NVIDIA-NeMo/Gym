@@ -64,11 +64,7 @@ def _discover_task_names(repo_dir: Path) -> list[str]:
     tasks_root = repo_dir / "tasks"
     if not tasks_root.is_dir():
         raise FileNotFoundError(f"No tasks/ directory found in SkillsBench checkout at {tasks_root}")
-    return sorted(
-        task_dir.name
-        for task_dir in tasks_root.iterdir()
-        if task_dir.is_dir()
-    )
+    return sorted(task_dir.name for task_dir in tasks_root.iterdir() if task_dir.is_dir())
 
 
 def prepare(

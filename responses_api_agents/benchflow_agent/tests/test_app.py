@@ -30,6 +30,7 @@ from responses_api_agents.benchflow_agent.app import (
 )
 from responses_api_agents.benchflow_agent.utils import BenchFlowAgentUtils
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -439,9 +440,11 @@ class TestExtractTrajectory:
         # Multi-part (list) content is joined; null content becomes "" — neither should raise.
         request_messages = [
             {"role": "user", "content": [{"text": "part-a"}, {"text": "part-b"}]},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
-            ]},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            },
             {"role": "tool", "tool_call_id": "c1", "content": "ok"},
         ]
         final_message = {"role": "assistant", "content": "final answer"}
@@ -552,7 +555,9 @@ class TestExtractUsage:
         assert usage["input_tokens_details"]["cached_tokens"] == 5
 
     def test_with_none_tokens(self):
-        result = SimpleNamespace(n_input_tokens=None, n_output_tokens=None, n_cache_read_tokens=None, total_tokens=None)
+        result = SimpleNamespace(
+            n_input_tokens=None, n_output_tokens=None, n_cache_read_tokens=None, total_tokens=None
+        )
         usage = BenchFlowAgentUtils.extract_usage(result)
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
