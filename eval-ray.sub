@@ -378,6 +378,7 @@ ng_run "+config_paths=[$config_paths]" \
   ++swe_agents_val.responses_api_agents.swe_agents.concurrency=${SWE_CONCURRENCY} \
   ++swe_agents_val.responses_api_agents.swe_agents.agent_max_turns=${MAX_TURNS} \
   ++swe_agents_val.responses_api_agents.swe_agents.swebench_agent_timeout=${TIMEOUT} \
+  ++swe_agents_val.responses_api_agents.swe_agents.base_results_dir=${RESULTS_DIR} \
   ++policy_base_url=${POLICY_BASE_URL} \
   ++policy_api_key=dummy \
   ++policy_model_name=${MODEL} \
