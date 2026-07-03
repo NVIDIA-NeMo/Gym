@@ -1,0 +1,206 @@
+---
+title: "Onboard a Benchmark or Environment"
+description: "A guided contribution workflow for NeMo Gym benchmarks, environments, and resource servers."
+position: 2
+---
+
+# Onboard a Benchmark or Environment
+
+Use this page as the starting point for a NeMo Gym benchmark or environment contribution. It turns the existing tutorials, examples, and contribution requirements into one workflow, then routes you to the right specialist guide when your implementation needs more detail.
+
+<Info>
+This guide covers the supported **in-tree contribution path**: source that lives in the Gym checkout and is submitted through a pull request. External benchmark package discovery is being designed in [issue #1520](https://github.com/NVIDIA-NeMo/Gym/issues/1520); do not assume that an installed external package will appear in `gym list benchmarks` until that work lands.
+</Info>
+
+## Choose your path
+
+| You are adding... | Start with | Use this reference implementation |
+| --- | --- | --- |
+| A single-turn benchmark that reuses an existing verifier | A benchmark config and prepare script | [`benchmarks/hotpotqa_closedbook`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/hotpotqa_closedbook) with [`resources_servers/hotpotqa_qa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/hotpotqa_qa) |
+| A benchmark that needs a custom verifier | A benchmark and resources server together | [`benchmarks/bunsenbench_chemistry_mcq`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/bunsenbench_chemistry_mcq) with [`resources_servers/bunsenbench_chemistry_mcq`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bunsenbench_chemistry_mcq) |
+| A new single-step tool or verifier | A resources server | [`resources_servers/example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call) |
+| A sequential tool-use environment | A resources server with custom request and verification models | [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step) |
+| A stateful environment | A resources server with session initialization and isolation | [`resources_servers/example_session_state_mgmt`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt) |
+| A turn-based Gymnasium environment | A Gymnasium server and matching agent | [`resources_servers/blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) |
+| A benchmark that wraps another library's orchestration | An agent-server integration | [Integrate External Libraries](/main/environment-tutorials/integrate-external-environments) |
+
+<Tip>
+Start from the closest existing implementation. Reuse its layout and command sequence before introducing a new pattern.
+</Tip>
+
+## Before you write code
+
+1. Complete [Development Setup](/main/contribute/development-setup), including the development dependencies and pre-commit hooks.
+2. Decide whether the contribution is a **benchmark**, a **training environment**, or both:
+   - A benchmark is a repeatable evaluation configuration: dataset, verifier, agent, model configuration, and expected metrics.
+   - A training environment additionally needs evidence that it produces a meaningful training signal.
+3. Choose the closest reference implementation from the table above.
+4. For an existing external benchmark, reproduce its published result outside Gym before integrating it. Then reproduce the comparable result through Gym.
+
+## The guided onboarding script
+
+### 1. Define the task and contribution boundary
+
+Write down the task source, target capability, verifier behavior, dependencies, data license, and whether the interaction is single-step, multi-step, stateful, or turn-based.
+
+Use a **benchmark** when you primarily need a repeatable evaluation. Use a **resources server** when you need new tools, state, or verification behavior. A benchmark can reuse an existing resources server; HotpotQA Closed-Book does this by composing its benchmark configuration with the HotpotQA server and adding only its benchmark-specific data and prompt configuration.
+
+### 2. Create the right layout
+
+For a benchmark, use this layout:
+
+```text
+benchmarks/<name>/
+├── config.yaml
+├── prepare.py
+├── README.md
+└── data/
+```
+
+`config.yaml` must resolve to exactly one dataset whose `type` is `benchmark`. Its `jsonl_fpath`, `prompt_config`, and `prepare_script` must point at the assets required to run the benchmark. See the [HotpotQA Closed-Book configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/hotpotqa_closedbook/config.yaml) and [prepare script](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/hotpotqa_closedbook/prepare.py).
+
+For a new resources server, scaffold first:
+
+```bash
+gym env init --resources-server <name>
+```
+
+Complete the generated structure:
+
+```text
+resources_servers/<name>/
+├── app.py
+├── configs/<name>.yaml
+├── data/example.jsonl
+├── data/example_metrics.json
+├── data/example_rollouts.jsonl
+├── tests/test_app.py
+├── requirements.txt
+└── README.md
+```
+
+The scaffold creates the code and directory skeleton. You must provide the task-specific examples, metrics, rollouts, license information, verification logic, and meaningful tests.
+
+### 3. Prepare data and wire configuration
+
+Convert source data into Gym JSONL. Each task needs Responses API input data; task-specific fields needed by the verifier belong in the row metadata or the request model used by the resources server.
+
+For a resources server, define the server instance, its `domain`, and an agent pairing in `configs/<name>.yaml`. The instance name in configuration is what agents reference; it can differ from the implementation directory name.
+
+For a benchmark, compose the benchmark configuration with the required resources-server and agent configuration. Prefer an existing server when its verifier already matches your task. If it does not, complete the resources-server path in this guide too.
+
+### 4. Implement the smallest correct verifier or environment
+
+For the usual resources-server path:
+
+- define request and response models for the task-specific fields;
+- register the tools your agent needs in `setup_webserver()`;
+- implement asynchronous `verify()` logic that returns a reward and useful diagnostic fields;
+- return tool and model errors as responses instead of crashing the server;
+- pass configuration through YAML rather than environment variables.
+
+Use [Single-Step Environment](/main/environment-tutorials/single-step-environment) for the minimal pattern. For sequential tools, follow the [multi-step example](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_multi_step/app.py): carry ground truth in the request model, inspect the completed tool interaction, and return diagnostic metrics alongside the reward. For per-episode state, follow the [stateful example](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_session_state_mgmt/app.py) and the [Stateful Environment](/main/environment-tutorials/stateful-environment) tutorial.
+
+<Note>
+`GymnasiumServer` implementations such as [Blackjack](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) use `reset()` and `step()` instead of the standard `verify()`-centric path. Use that pattern only when the environment is inherently turn-based.
+</Note>
+
+### 5. Add tests and validate the configuration
+
+Run a fast configuration check before starting servers:
+
+```bash
+gym env validate --config resources_servers/<name>/configs/<name>.yaml
+# or, for an in-tree benchmark
+gym env validate --benchmark <name>
+```
+
+Add tests that cover correct and incorrect outputs, empty or malformed model output, task-specific failure modes, and state isolation where relevant. Run the server tests and validate the committed evidence bundle:
+
+```bash
+gym env test --resources-server <name>
+gym env test +entrypoint=resources_servers/<name> +should_validate_data=true
+```
+
+The second command validates the contribution artifacts: five rows in `data/example.jsonl`, matching example metrics, and five rows in `data/example_rollouts.jsonl`. If the benchmark has a `tests/test_prepare.py`, run it directly with `pytest` as well.
+
+### 6. Generate and inspect example rollouts
+
+Start the required servers, collect rollouts for the five committed examples, and save the output to `data/example_rollouts.jsonl`. Document the exact start and rollout commands in the README.
+
+For example, after starting the servers, a no-serve rollout collection command follows this shape:
+
+```bash
+gym eval run --no-serve \
+  --agent <agent-instance> \
+  --input resources_servers/<name>/data/example.jsonl \
+  --output results/<name>-example-rollouts.jsonl
+```
+
+Read the actual rollouts, not only aggregate metrics. Confirm that the prompt, tool calls, verifier input, reward, and error paths agree with the task design.
+
+### 7. Reward-profile a benchmark or environment
+
+Run representative inference across an open instruct model, an open thinking model, and an appropriate closed model when available. Report the reward distribution and inspect failure cases. For tool-use tasks, also report tool-call metrics and their relationship to reward.
+
+For an existing public benchmark, compare the Gym result with the original implementation's published number. Re-run the highest-scoring open model enough times to understand variance; increase repeats until the result is stable enough for the intended comparison.
+
+See [Add a Benchmark](/main/contribute/environments/adding-a-benchmark) for the benchmark-specific baselining requirements and [Aggregate Metrics](/main/evaluation/aggregate-metrics) for metrics guidance.
+
+### 8. Validate training environments through training
+
+For a training environment, run an isolated training experiment and include the training and validation curves in the pull request. Use an instruct and a thinking model where practical to confirm that the implementation is not accidentally model-specific. Include target-benchmark evidence when applicable.
+
+This training-validation step is required for a new training environment; it is not a replacement for benchmark reward profiling.
+
+### 9. Submit a reviewable pull request
+
+Before opening the pull request:
+
+- run the relevant tests, data validation, and `pre-commit run --all-files`;
+- include the task and data source, domain, verifier description, dependency and license information, and any synthetic-data provenance;
+- include example-rollout, reward-profile, and training-validation evidence as applicable;
+- make the README sufficient for a reviewer to reproduce the setup.
+
+The reviewer should be able to rerun the contribution and verify the five committed example rollouts. See [Development Setup](/main/contribute/development-setup) for required CI, copyright, DCO, and signed-commit checks.
+
+## Learn from previously onboarded contributions
+
+| Pattern | Reference | What to copy |
+| --- | --- | --- |
+| Benchmark reusing a verifier | [HotpotQA Closed-Book + HotpotQA QA](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/hotpotqa_closedbook) | A benchmark config composes an existing server, the prepare script produces the expected JSONL, and the benchmark adds only its task-specific data and prompt settings. |
+| Benchmark with a custom verifier | [BunsenBench Chemistry MCQ](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/bunsenbench_chemistry_mcq) | Pinned upstream data, benchmark preparation tests, a custom deterministic verifier, and committed example data and rollouts. |
+| Minimal resources server | [example_single_tool_call](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call) | Directory layout, Pydantic tool models, `verify()`, examples, metrics, rollouts, tests, and README. |
+| Sequential tool use | [example_multi_step](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step) | Custom request models, multiple tool routes, final-action parsing, and useful failure-bucket metrics. |
+| Session state | [example_session_state_mgmt](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt) | `SESSION_ID_KEY`, session initialization, per-session isolation, and stateful tests. |
+| Complex deterministic verification | [Calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | A broad verifier test matrix covering valid and invalid task outcomes. |
+| Custom multimodal agent | [LabBench2-VLM](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/labbench2_vlm) | A benchmark that needs dedicated agent and resources-server components. |
+
+## Pull request checklist
+
+- [ ] I chose the closest reference implementation and followed its layout.
+- [ ] My configuration validates and identifies the correct agent and resources server.
+- [ ] My contribution includes the required source, configuration, test, example-data, metrics, rollout, dependency, and README artifacts.
+- [ ] I inspected the saved example rollouts and covered important verifier failures in tests.
+- [ ] I included reward-profiling evidence; for a training environment, I included training-validation evidence.
+- [ ] I documented task/data provenance, dependencies, and licenses.
+- [ ] I ran pre-commit and the required test and documentation checks.
+
+## FAQ and troubleshooting
+
+**Should I start with a benchmark or a resources server?** Start with a benchmark when an existing server can verify the task. Start with a resources server when you need new tools, state, or verifier behavior.
+
+**Which example should I copy?** Start with `example_single_tool_call`; move to `example_multi_step` only for sequential tool use, and to `example_session_state_mgmt` only when tasks need per-episode state.
+
+**My configuration validates but rollout collection fails.** Use `gym env resolve` to inspect the merged configuration, then check the server start command, agent instance name, and the task-specific fields passed to the verifier. See [Configuration Errors](/main/troubleshooting/configuration).
+
+**My reward profile is surprising.** Inspect rollout JSONL and the verifier inputs before changing thresholds or prompts. Compare instruct and thinking models, and verify any public benchmark result outside Gym first.
+
+**Can I bring an installed benchmark package from another repository?** Not as a documented self-service package-discovery contract yet. Follow [issue #1520](https://github.com/NVIDIA-NeMo/Gym/issues/1520) for that work; this guide will be updated when the supported external-authoring path is available.
+
+## Related guides
+
+- [New Environment](/main/contribute/environments/new-environment) — detailed contribution and training-validation requirements.
+- [Add a Benchmark](/main/contribute/environments/adding-a-benchmark) — benchmark fidelity and reward-profiling guidance.
+- [Single-Step Environment](/main/environment-tutorials/single-step-environment), [Multi-Step Environment](/main/environment-tutorials/multi-step-environment), and [Stateful Environment](/main/environment-tutorials/stateful-environment) — implementation tutorials.
+- [Development Setup](/main/contribute/development-setup) — local setup, tests, CI, and signed commits.
