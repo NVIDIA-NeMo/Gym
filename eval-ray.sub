@@ -1,0 +1,433 @@
+#!/bin/bash
+#SBATCH --job-name=coreai_mlperf_training-grpo.eval-ray.r2e_gym_easy_large.openhands.qwen3.5-397b-tp8
+#SBATCH --account=coreai_mlperf_training
+#SBATCH --partition=batch
+#SBATCH --nodes=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
+#SBATCH --segment=2
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm-%j.out
+
+set -Eeuo pipefail
+
+MODEL=/lustre/share/coreai_dlalgo_ci/artifacts/model/qwen_qwen3.5-397b-a17b/hf/hf-98d1a50_orig
+IMAGE=nvcr.io/nvidia/vllm:26.06-py3
+if [ -f "${LUSTRE_HOME}/containers/nvidia+vllm+26.06-py3.sqsh" ]; then
+  IMAGE="${LUSTRE_HOME}/containers/nvidia+vllm+26.06-py3.sqsh"
+fi
+API_PORT=8000
+ENGINE_PORT=8001
+STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-1200}
+VLLM_LOG_STATS_INTERVAL=30
+RAY_VERSION=2.52.1
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+TP_SIZE=8
+RAY_CPUS_PER_NODE=${RAY_CPUS_PER_NODE:-128}
+RAY_PORT=16379
+RAY_NODE_MANAGER_PORT=16002
+RAY_OBJECT_MANAGER_PORT=16003
+RAY_MIN_WORKER_PORT=17000
+RAY_MAX_WORKER_PORT=17999
+RAY_TMPDIR=/tmp/ray-${SLURM_JOB_ID}
+MAX_TURNS=${MAX_TURNS:-30}
+TIMEOUT=${TIMEOUT:-300}
+EXP_NAME=${EXP_NAME:-r2e_gym_easy_large.openhands.qwen3.5-397b-ray-tp8-mt${MAX_TURNS}-timeout${TIMEOUT}}-try3
+
+RESULTS_DIR=${SLURM_SUBMIT_DIR}/results/${EXP_NAME}
+OUTPUT_JSONL=${RESULTS_DIR}/${EXP_NAME}.${SLURM_JOB_ID}.jsonl
+SLURM_LOG=${SLURM_SUBMIT_DIR}/slurm-${SLURM_JOB_ID}.out
+mkdir -p "$RESULTS_DIR"
+scontrol update JobId="$SLURM_JOB_ID" JobName="coreai_mlperf_training-grpo.eval-ray.${EXP_NAME}"
+export MODEL VLLM_LOG_STATS_INTERVAL EXP_NAME MAX_TURNS TIMEOUT RESULTS_DIR OUTPUT_JSONL
+export RAY_VERSION GPUS_PER_NODE TP_SIZE RAY_CPUS_PER_NODE RAY_TMPDIR
+export RAY_PORT RAY_NODE_MANAGER_PORT RAY_OBJECT_MANAGER_PORT RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT
+
+mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+NODE_COUNT=${#NODES[@]}
+if (( NODE_COUNT == 0 )); then
+    echo "No allocated nodes found" >&2
+    exit 1
+fi
+HEAD_NODE=${NODES[0]}
+HEAD_NODE_IP=$(getent ahostsv4 "$HEAD_NODE" | awk 'NR == 1 {print $1}')
+if [[ -z "$HEAD_NODE_IP" ]]; then
+    echo "Could not resolve Ray head node $HEAD_NODE" >&2
+    exit 1
+fi
+RAY_ADDRESS=${HEAD_NODE_IP}:${RAY_PORT}
+if (( TP_SIZE % GPUS_PER_NODE != 0 )); then
+    echo "TP_SIZE=${TP_SIZE} must be divisible by GPUS_PER_NODE=${GPUS_PER_NODE}" >&2
+    exit 1
+fi
+NODES_PER_ENGINE=$((TP_SIZE / GPUS_PER_NODE))
+if (( NODE_COUNT % NODES_PER_ENGINE != 0 )); then
+    echo "NODE_COUNT=${NODE_COUNT} must be divisible by NODES_PER_ENGINE=${NODES_PER_ENGINE}" >&2
+    exit 1
+fi
+ENGINE_COUNT=$((NODE_COUNT / NODES_PER_ENGINE))
+
+NODE_IPS=()
+ENGINE_HOSTS=()
+for ((node_index = 0; node_index < NODE_COUNT; node_index++)); do
+    node_ip=$(getent ahostsv4 "${NODES[node_index]}" | awk 'NR == 1 {print $1}')
+    if [[ -z "$node_ip" ]]; then
+        echo "Could not resolve node ${NODES[node_index]}" >&2
+        exit 1
+    fi
+    NODE_IPS+=("$node_ip")
+    if (( node_index % NODES_PER_ENGINE == 0 )); then
+        ENGINE_HOSTS+=("${NODES[node_index]}")
+    fi
+done
+
+ENGINE_NODE_GROUPS=()
+for ((engine_index = 0; engine_index < ENGINE_COUNT; engine_index++)); do
+    first_node=$((engine_index * NODES_PER_ENGINE))
+    engine_node_ips=("${NODE_IPS[@]:first_node:NODES_PER_ENGINE}")
+    ENGINE_NODE_GROUPS+=("$(IFS=,; echo "${engine_node_ips[*]}")")
+done
+VLLM_ENGINE_NODE_GROUPS=$(IFS=';'; echo "${ENGINE_NODE_GROUPS[*]}")
+
+SWE_CONCURRENCY=32
+POLICY_BASE_URL=http://${HEAD_NODE}:${API_PORT}/v1
+export HEAD_NODE HEAD_NODE_IP NODE_COUNT NODES_PER_ENGINE ENGINE_COUNT RAY_ADDRESS SWE_CONCURRENCY POLICY_BASE_URL
+export VLLM_ENGINE_NODE_GROUPS
+
+VLLM_STEP_PID=
+ROUTER_STEP_PID=
+GYM_STEP_PID=
+RAY_HEAD_STEP_PID=
+RAY_WORKER_STEP_PIDS=()
+
+cleanup() {
+    trap - EXIT INT TERM
+    if [[ -n "$GYM_STEP_PID" ]]; then
+        kill "$GYM_STEP_PID" 2>/dev/null || true
+        wait "$GYM_STEP_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$ROUTER_STEP_PID" ]]; then
+        kill "$ROUTER_STEP_PID" 2>/dev/null || true
+        wait "$ROUTER_STEP_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$VLLM_STEP_PID" ]]; then
+        kill "$VLLM_STEP_PID" 2>/dev/null || true
+        wait "$VLLM_STEP_PID" 2>/dev/null || true
+    fi
+    for pid in "${RAY_WORKER_STEP_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid in "${RAY_WORKER_STEP_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    if [[ -n "$RAY_HEAD_STEP_PID" ]]; then
+        kill "$RAY_HEAD_STEP_PID" 2>/dev/null || true
+        wait "$RAY_HEAD_STEP_PID" 2>/dev/null || true
+    fi
+    if [[ -f "$SLURM_LOG" ]]; then
+        mv -f "$SLURM_LOG" "$RESULTS_DIR/"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+CONT_ARGS=(
+  --container-writable
+  --container-name=image
+  "--container-mounts=/lustre:/lustre,/dev/fuse:/dev/fuse"
+  --container-remap-root
+  "--container-env=UV_CACHE_DIR,MODEL,HEAD_NODE,HEAD_NODE_IP,NODE_COUNT,NODES_PER_ENGINE,ENGINE_COUNT,SWE_CONCURRENCY,VLLM_LOG_STATS_INTERVAL,EXP_NAME,MAX_TURNS,TIMEOUT,RESULTS_DIR,OUTPUT_JSONL,POLICY_BASE_URL,RAY_ADDRESS,RAY_VERSION,GPUS_PER_NODE,TP_SIZE,RAY_CPUS_PER_NODE,RAY_TMPDIR,RAY_PORT,RAY_NODE_MANAGER_PORT,RAY_OBJECT_MANAGER_PORT,RAY_MIN_WORKER_PORT,RAY_MAX_WORKER_PORT,VLLM_ENGINE_NODE_GROUPS"
+  --container-workdir="$PWD"
+)
+
+# 1: container
+srun --overlap --ntasks-per-node=1 --container-image="$IMAGE" "${CONT_ARGS[@]}" true
+
+# 2: setup
+srun --ntasks-per-node=1 --label --overlap "${CONT_ARGS[@]}" \
+bash <<EOF
+set -Eeuo pipefail
+python -m pip install --no-cache-dir 'fastapi<0.137' || true
+python -m pip install --no-cache-dir "ray[default]==${RAY_VERSION}"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y software-properties-common
+add-apt-repository -y ppa:apptainer/ppa
+apt-get install -y --no-install-recommends apptainer
+ln -sf /usr/bin/apptainer /usr/bin/singularity
+curl -LsSf https://astral.sh/uv/install.sh | sh
+EOF
+
+# 3: shared Ray cluster for vLLM workers and Gym rollouts
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" \
+    ray start --head \
+    --node-ip-address="$HEAD_NODE_IP" \
+    --port="$RAY_PORT" \
+    --node-manager-port="$RAY_NODE_MANAGER_PORT" \
+    --object-manager-port="$RAY_OBJECT_MANAGER_PORT" \
+    --min-worker-port="$RAY_MIN_WORKER_PORT" \
+    --max-worker-port="$RAY_MAX_WORKER_PORT" \
+    --num-cpus="$RAY_CPUS_PER_NODE" \
+    --num-gpus="$GPUS_PER_NODE" \
+    --include-dashboard=false \
+    --labels="slurm_segment=0" \
+    --temp-dir="$RAY_TMPDIR" \
+    --block &
+RAY_HEAD_STEP_PID=$!
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --overlap "${CONT_ARGS[@]}" \
+    ray status --address="$RAY_ADDRESS" >/dev/null 2>&1; do
+    if ! kill -0 "$RAY_HEAD_STEP_PID" 2>/dev/null; then
+        echo "The Ray head exited during startup" >&2
+        wait "$RAY_HEAD_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for the Ray head" >&2
+        exit 1
+    fi
+    sleep 2
+done
+
+for ((node_index = 1; node_index < NODE_COUNT; node_index++)); do
+    node=${NODES[node_index]}
+    node_ip=${NODE_IPS[node_index]}
+    segment_index=$((node_index / NODES_PER_ENGINE))
+    srun --nodes=1 --ntasks=1 --nodelist="$node" --label --overlap "${CONT_ARGS[@]}" \
+        ray start --address="$RAY_ADDRESS" \
+        --node-ip-address="$node_ip" \
+        --node-manager-port="$RAY_NODE_MANAGER_PORT" \
+        --object-manager-port="$RAY_OBJECT_MANAGER_PORT" \
+        --min-worker-port="$RAY_MIN_WORKER_PORT" \
+        --max-worker-port="$RAY_MAX_WORKER_PORT" \
+        --num-cpus="$RAY_CPUS_PER_NODE" \
+        --num-gpus="$GPUS_PER_NODE" \
+        --labels="slurm_segment=${segment_index}" \
+        --block &
+    RAY_WORKER_STEP_PIDS+=("$!")
+done
+
+ray_cluster_ready() {
+    srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --overlap "${CONT_ARGS[@]}" \
+        python -c 'import os, ray; ray.init(address=os.environ["RAY_ADDRESS"], logging_level="ERROR"); alive=sum(node["Alive"] for node in ray.nodes()); gpus=int(ray.cluster_resources().get("GPU", 0)); expected_nodes=int(os.environ["NODE_COUNT"]); expected_gpus=expected_nodes*int(os.environ["GPUS_PER_NODE"]); raise SystemExit(0 if (alive, gpus) == (expected_nodes, expected_gpus) else 1)' \
+        >/dev/null 2>&1
+}
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until ray_cluster_ready; do
+    if ! kill -0 "$RAY_HEAD_STEP_PID" 2>/dev/null; then
+        echo "The Ray head exited while workers were joining" >&2
+        wait "$RAY_HEAD_STEP_PID"
+        exit 1
+    fi
+    for pid in "${RAY_WORKER_STEP_PIDS[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "A Ray worker exited during startup" >&2
+            wait "$pid"
+            exit 1
+        fi
+    done
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for all Ray nodes and GPUs" >&2
+        exit 1
+    fi
+    sleep 2
+done
+
+echo "Ray cluster is ready at ${RAY_ADDRESS}: ${NODE_COUNT} nodes, $((NODE_COUNT * GPUS_PER_NODE)) GPUs"
+
+# 4: topology-pinned TP=8 vLLM engines backed by the shared Ray cluster
+# SegmentSize=2 makes each adjacent NODES_PER_ENGINE group one Slurm segment.
+# One labeled srun starts every launcher concurrently. Each launcher creates an
+# explicit placement group containing only the GPUs in its two-node segment;
+# vLLM discovers and reuses that placement group for its Ray TP workers.
+vllm_steps_alive() {
+    [[ -n "$VLLM_STEP_PID" ]] && kill -0 "$VLLM_STEP_PID" 2>/dev/null
+}
+
+engines_ready() {
+    local engine_host
+    for engine_host in "${ENGINE_HOSTS[@]}"; do
+        curl --fail --silent --max-time 2 \
+            "http://${engine_host}:${ENGINE_PORT}/health" >/dev/null || return 1
+    done
+}
+
+ENGINE_NODELIST=$(IFS=,; echo "${ENGINE_HOSTS[*]}")
+echo "Starting ${ENGINE_COUNT} TP=${TP_SIZE} engines in parallel"
+srun \
+    --nodes="$ENGINE_COUNT" \
+    --ntasks="$ENGINE_COUNT" \
+    --ntasks-per-node=1 \
+    --nodelist="$ENGINE_NODELIST" \
+    --label \
+    --overlap \
+    --kill-on-bad-exit=1 \
+    "${CONT_ARGS[@]}" \
+    python scripts/ray_vllm_server.py --startup-timeout "$STARTUP_TIMEOUT" -- \
+    "$MODEL" \
+    --distributed-executor-backend ray \
+    --tensor-parallel-size "$TP_SIZE" \
+    --host 0.0.0.0 \
+    --port "$ENGINE_PORT" \
+    --max-model-len 65536 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --default-chat-template-kwargs '{"enable_thinking": false}' \
+    --gpu-memory-utilization 0.85 \
+    --enable-prefix-caching \
+    --disable-uvicorn-access-log &
+VLLM_STEP_PID=$!
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until engines_ready; do
+    if ! vllm_steps_alive; then
+        echo "A vLLM engine exited during startup" >&2
+        wait "$VLLM_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for all TP=${TP_SIZE} engines" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "All ${ENGINE_COUNT} TP=${TP_SIZE} vLLM engines are ready"
+
+# Send exactly one warmup completion directly to each engine.
+echo "Warming all engines with one request each"
+ENGINE_NODELIST=$(IFS=,; echo "${ENGINE_HOSTS[*]}")
+srun \
+    --nodes="$ENGINE_COUNT" \
+    --ntasks="$ENGINE_COUNT" \
+    --ntasks-per-node=1 \
+    --nodelist="$ENGINE_NODELIST" \
+    --label \
+    --overlap \
+    "${CONT_ARGS[@]}" \
+    curl --fail --silent --show-error --max-time "$STARTUP_TIMEOUT" \
+    --header 'Content-Type: application/json' \
+    --data "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK.\"}],\"max_tokens\":8,\"temperature\":0}" \
+    --write-out '\n' \
+    "http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions"
+
+ROUTER_WORKERS=()
+for node in "${ENGINE_HOSTS[@]}"; do
+    ROUTER_WORKERS+=("http://${node}:${ENGINE_PORT}")
+done
+
+# Route client traffic to all independent engines from the head node.
+# HOME and "$@" intentionally expand in the container shell.
+# shellcheck disable=SC2016
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" \
+    /bin/bash -c 'export PATH="$HOME/.local/bin:$PATH" RUST_LOG=warn; exec uvx --from vllm-router vllm-router "$@"' router \
+    --host 0.0.0.0 \
+    --port "$API_PORT" \
+    --worker-urls \
+        "${ROUTER_WORKERS[@]}" \
+    --policy cache_aware \
+    --log-level warning \
+    --intra-node-data-parallel-size 1 &
+ROUTER_STEP_PID=$!
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until curl --fail --silent --max-time 2 \
+    "http://${HEAD_NODE}:${API_PORT}/v1/models" >/dev/null; do
+    if ! kill -0 "$ROUTER_STEP_PID" 2>/dev/null; then
+        echo "vllm-router exited during startup" >&2
+        wait "$ROUTER_STEP_PID"
+        exit 1
+    fi
+    if ! vllm_steps_alive; then
+        echo "A vLLM engine exited while starting vllm-router" >&2
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for vllm-router" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "vllm-router is ready at http://${HEAD_NODE}:${API_PORT}/v1"
+
+
+# Run other job steps here. Use --overlap so they can run while vLLM owns the
+# long-running step. Do not run another GPU workload on these same GPUs.
+# srun --overlap --nodes=1 --ntasks=1 your-command
+
+
+# Gym Server
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" \
+/bin/bash <<"EOF" &
+set -Eeuxo pipefail
+VAL_DATA="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data/Benchmark-R2E-Gym-Easy-Large/benchmark_r2e_gym_easy_val.jsonl"
+SIF_DIR="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data"
+export PATH="$HOME/.local/bin:$PATH"
+
+config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+uv sync
+. .venv/bin/activate
+ng_run "+config_paths=[$config_paths]" \
+  ++ray_head_node_address=${RAY_ADDRESS} \
+  +sif_dir=${SIF_DIR} \
+  +swe_agents_val.responses_api_agents.swe_agents.dataset_path=${VAL_DATA} \
+  ++swe_agents_val.responses_api_agents.swe_agents.concurrency=${SWE_CONCURRENCY} \
+  ++swe_agents_val.responses_api_agents.swe_agents.agent_max_turns=${MAX_TURNS} \
+  ++swe_agents_val.responses_api_agents.swe_agents.swebench_agent_timeout=${TIMEOUT} \
+  ++policy_base_url=${POLICY_BASE_URL} \
+  ++policy_api_key=dummy \
+  ++policy_model_name=${MODEL} \
+  +use_absolute_ip=true \
+EOF
+GYM_STEP_PID=$!
+
+gym_servers_ready() {
+    local instances url
+    local -a urls=()
+
+    instances=$(curl --fail --silent --max-time 2 \
+        "http://${HEAD_NODE}:11000/server_instances") || return 1
+    mapfile -t urls < <(grep -oE 'https?://[^" ]+' <<<"$instances")
+    (( ${#urls[@]} > 0 )) || return 1
+
+    for url in "${urls[@]}"; do
+        curl --silent --output /dev/null --max-time 2 "$url" || return 1
+    done
+}
+
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+until gym_servers_ready; do
+    if ! kill -0 "$GYM_STEP_PID" 2>/dev/null; then
+        echo "The Gym server step exited during startup" >&2
+        wait "$GYM_STEP_PID"
+        exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+        echo "Timed out waiting for Gym servers" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+echo "Gym servers are ready"
+
+srun --nodes=1 --ntasks=1 --nodelist="$HEAD_NODE" --label --overlap "${CONT_ARGS[@]}" --pty \
+/bin/bash <<"EOF"
+set -Eeuxo pipefail
+
+VAL_DATA="/lustre/fsw/coreai_mlperf_training/users/hfilaretov/data/Benchmark-R2E-Gym-Easy-Large/benchmark_r2e_gym_easy_val.jsonl"
+export PATH="$HOME/.local/bin:$PATH"
+
+. .venv/bin/activate
+ng_collect_rollouts +agent_name=swe_agents_val \
+    +input_jsonl_fpath=${VAL_DATA} \
+    +output_jsonl_fpath=${OUTPUT_JSONL} \
+    +model=${MODEL} \
+    +responses_create_params.temperature=0.0 \
+    +responses_create_params.top_p=1.0 \
+    ++head_server="{host:${HEAD_NODE},port:11000}"
+EOF
