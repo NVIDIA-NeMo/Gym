@@ -47,6 +47,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    stop_on_invalid_tool_call: bool = False
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -115,7 +116,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         while True:
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
-            allowed_tool_names = self._tool_names(body)
+            allowed_tool_names = self._tool_names(body) if self.config.stop_on_invalid_tool_call else set()
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -163,24 +164,36 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             parsed_fn_calls = []
             invalid_tool_call_message = None
+            if not self.config.stop_on_invalid_tool_call:
+                new_outputs.extend(output)
+
             for output_function_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as e:
+                    if not self.config.stop_on_invalid_tool_call:
+                        tool_response = NeMoGymFunctionCallOutput(
+                            type="function_call_output",
+                            call_id=output_function_call.call_id,
+                            output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
+                        )
+                        new_outputs.append(tool_response)
+                        continue
+
                     invalid_tool_call_message = self._invalid_tool_call_message(
                         call_id=output_function_call.call_id,
                         error=f"Invalid tool call arguments: {e!r}",
                     )
                     break
 
-                if not isinstance(parsed_arguments, dict):
+                if self.config.stop_on_invalid_tool_call and not isinstance(parsed_arguments, dict):
                     invalid_tool_call_message = self._invalid_tool_call_message(
                         call_id=output_function_call.call_id,
                         error=f"Invalid tool call arguments: expected object, got {type(parsed_arguments).__name__}",
                     )
                     break
 
-                if output_function_call.name not in allowed_tool_names:
+                if self.config.stop_on_invalid_tool_call and output_function_call.name not in allowed_tool_names:
                     invalid_tool_call_message = self._invalid_tool_call_message(
                         call_id=output_function_call.call_id,
                         error=f"Invalid tool call name: {output_function_call.name!r}",
@@ -194,7 +207,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 new_outputs.append(invalid_tool_call_message)
                 break
 
-            new_outputs.extend(output)
+            if self.config.stop_on_invalid_tool_call:
+                new_outputs.extend(output)
 
             for output_function_call, parsed_arguments in parsed_fn_calls:
                 api_response = await self.server_client.post(
