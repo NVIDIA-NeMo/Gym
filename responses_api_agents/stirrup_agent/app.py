@@ -715,6 +715,19 @@ async def _run_stirrup_agent(
                 else:
                     shutil.copytree(src, task_dir / "reference_files", dirs_exist_ok=True)
 
+            # Make persisted artifacts group/world-accessible for shared run trees.
+            def _relax_perms(p: str) -> None:
+                try:
+                    os.chmod(p, os.stat(p).st_mode | 0o755)
+                except OSError as chmod_err:
+                    print(f"[stirrup] warning: could not chmod {p}: {chmod_err}", flush=True)
+
+            _relax_perms(str(task_dir.parent))
+            _relax_perms(str(task_dir))
+            for root, dirs, files in os.walk(task_dir):
+                for name in dirs + files:
+                    _relax_perms(os.path.join(root, name))
+
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
