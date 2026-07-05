@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -31,6 +32,7 @@ from nemo_gym.rollout_collection import (
 from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
     StageResume,
+    _prepare_resume,
     build_file_resume,
     build_stage_rows,
     compute_fingerprint,
@@ -851,3 +853,75 @@ class TestFailureRouting:
         assert summaries[0]["eval_elo"] == ref_summaries[0]["eval_elo"]
         assert summaries[1]["reference_ids"] == ref_summaries[1]["reference_ids"]
         assert summaries[1]["eval_elo"] == ref_summaries[1]["eval_elo"]
+
+
+class TestPrepareResume:
+    """The integration wiring: a fresh run must persist so a later resume can read."""
+
+    def _cfg(self, resume_from_cache: bool) -> SimpleNamespace:
+        return SimpleNamespace(resume_from_cache=resume_from_cache)
+
+    def test_fresh_returns_writing_resume_with_empty_state(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        resume = _prepare_resume(self._cfg(True), out, journal, fp)
+        assert isinstance(resume, StageResume)
+        assert resume.plans == {} and resume.outcomes == {} and resume.rows_by_stage == {}
+        resume.on_plan(0, {"stage_index": 0, "status": "planned", "reference_ids": ["a"], "task_ids": ["t0"]})
+        assert journal.exists()
+        plans, _, got_fp = read_journal(journal)
+        assert 0 in plans and got_fp == fp
+
+    def test_resume_disabled_clears_existing_and_empties_state(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        out.write_text('{"x": 1}\n')
+        journal.write_text('{"stage_index": 0, "status": "complete"}\n')
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        resume = _prepare_resume(self._cfg(False), out, journal, fp)
+        assert isinstance(resume, StageResume)
+        assert not out.exists() and not journal.exists()
+        assert resume.outcomes == {}
+
+    def test_stale_fingerprint_clears_and_starts_fresh(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        dist = _distribution(["t0"])
+        out.write_text('{"stage_index": 0}\n')
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        append_journal_record(journal, {"stage_index": 0, "status": "complete"}, "STALEFP")
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, dist)
+        resume = _prepare_resume(self._cfg(True), out, journal, fp)
+        assert not out.exists() and not journal.exists()
+        assert resume.outcomes == {}
+
+    async def test_fresh_run_persists_journal_then_resume_reuses_all(self, tmp_path: Path) -> None:
+        # Regression: a fresh run through _prepare_resume must write the journal +
+        # rows, so a second _prepare_resume resumes without re-dispatching anything.
+        task_ids = [f"t{i}" for i in range(10)]
+        rows = _materialized_rows(task_ids)
+        dist = _distribution(task_ids)
+        run = _fake_run_rollouts_factory()
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, dist)
+        cfg = self._cfg(True)
+
+        r1 = _prepare_resume(cfg, out, journal, fp)
+        _, base = await run_multistage_stages(_two_stage_cfg(), REF_ELOS, dist, rows, run, resume=r1)
+        assert journal.exists() and out.exists()
+        plans, outcomes, _ = read_journal(journal)
+        assert set(plans) == {0, 1} and set(outcomes) == {0, 1}
+
+        r2 = _prepare_resume(cfg, out, journal, fp)
+        assert set(r2.outcomes) == {0, 1}
+
+        async def no_dispatch(rows_in: List[Dict[str, Any]]):
+            raise AssertionError(f"resume re-dispatched {len(rows_in)} rows; expected full cache reuse")
+
+        _, again = await run_multistage_stages(_two_stage_cfg(), REF_ELOS, dist, rows, no_dispatch, resume=r2)
+        assert all(s["cached"] for s in again)
+        assert [s["reference_ids"] for s in again] == [s["reference_ids"] for s in base]
+        assert [s["eval_elo"] for s in again] == [s["eval_elo"] for s in base]

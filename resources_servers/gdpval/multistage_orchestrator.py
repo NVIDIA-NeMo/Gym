@@ -854,47 +854,34 @@ Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
 
 def _prepare_resume(
     rollout_collection_config, output_fpath: Path, journal_fpath: Path, fingerprint: str
-) -> Optional[StageResume]:  # pragma: no cover
-    """Decide resume vs fresh; on fresh, clear stale rollouts, sidecar, journal.
+) -> StageResume:
+    """Build the file-backed :class:`StageResume` for the run.
 
-    Resumes only when ``resume_from_cache`` is requested, both the rollouts file
-    and the journal exist, and the journal's fingerprint matches the current run.
-    Any other case logs exactly why and starts fresh.
+    Always returns a writing StageResume so even a fresh run persists the journal
+    and rows incrementally, giving a later resume state to read. Prior state is
+    reused only when ``resume_from_cache`` is set and both the rollouts file and a
+    fingerprint-matching journal exist; every other case clears stale files and
+    starts fresh (with the reason logged).
     """
     import sys
 
-    def _clear() -> None:
+    resume_requested = bool(getattr(rollout_collection_config, "resume_from_cache", False))
+    if not resume_requested:
+        reason = "resume_from_cache not set"
+    elif not output_fpath.exists() or not journal_fpath.exists():
+        reason = f"no prior cache (rollouts exist={output_fpath.exists()}, journal exists={journal_fpath.exists()})"
+    elif read_journal(journal_fpath)[2] != fingerprint:
+        reason = f"journal STALE (fingerprint {read_journal(journal_fpath)[2]} != {fingerprint})"
+    else:
+        reason = None
+
+    if reason is not None:
+        print(f"[multistage-elo] starting fresh: {reason}", file=sys.stderr, flush=True)
         output_fpath.unlink(missing_ok=True)
         _failures_path_for(output_fpath).unlink(missing_ok=True)
         journal_fpath.unlink(missing_ok=True)
-
-    resume_requested = bool(getattr(rollout_collection_config, "resume_from_cache", False))
-    if not resume_requested:
-        _clear()
-        return None
-
-    if not output_fpath.exists() or not journal_fpath.exists():
-        print(
-            f"[multistage-elo] resume_from_cache requested but starting fresh: "
-            f"rollouts exist={output_fpath.exists()}, journal exists={journal_fpath.exists()}",
-            file=sys.stderr,
-            flush=True,
-        )
-        _clear()
-        return None
-
-    _, _, journal_fingerprint = read_journal(journal_fpath)
-    if journal_fingerprint != fingerprint:
-        print(
-            f"[multistage-elo] resume_from_cache requested but journal is STALE "
-            f"(fingerprint {journal_fingerprint} != {fingerprint}); ignoring cache and starting fresh",
-            file=sys.stderr,
-            flush=True,
-        )
-        _clear()
-        return None
-
-    print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
+    else:
+        print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)
 
 
