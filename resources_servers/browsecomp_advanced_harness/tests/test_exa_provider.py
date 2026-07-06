@@ -235,3 +235,45 @@ class TestExaProvider:
         ]
         assert len(recs) == 1
         assert recs[0].provider == "exa"
+
+    # ---- max_results config ----
+
+    def _server_with_max_results(self, provider: str, max_results: int) -> TavilySearchResourcesServer:
+        kwargs = dict(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            search_provider=provider,
+            exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+            max_results=max_results,
+        )
+        if provider == "exa":
+            kwargs["exa_api_key"] = "test_exa_key"  # pragma: allowlist secret
+        else:
+            kwargs["tavily_api_key"] = "test_tavily_key"  # pragma: allowlist secret
+        config = TavilySearchResourcesServerConfig(**kwargs)
+        return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_max_results_config_default_is_5(self, config: TavilySearchResourcesServerConfig) -> None:
+        assert config.max_results == 5
+
+    async def test_exa_search_uses_configured_max_results(self) -> None:
+        server = self._server_with_max_results("exa", 10)
+        mock = MagicMock()
+        mock.search = AsyncMock(return_value={"results": []})
+        server._exa_clients = [mock]
+
+        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        _, kwargs = mock.search.call_args
+        assert kwargs.get("num_results") == 10
+
+    async def test_tavily_search_uses_configured_max_results(self) -> None:
+        server = self._server_with_max_results("tavily", 10)
+        mock = MagicMock()
+        mock.search = AsyncMock(return_value={"results": []})
+        server._async_tavily_clients = [mock]
+
+        await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+        _, kwargs = mock.search.call_args
+        assert kwargs.get("max_results") == 10

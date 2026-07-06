@@ -72,6 +72,9 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
+    # Results returned per search query (both providers). The bc_frankie Exa
+    # reference uses 10; its Tavily path (and this harness historically) uses 5.
+    max_results: int = 5
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -674,7 +677,6 @@ def _last_assistant_text(response) -> str:
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
-    MAX_RESULTS: int = 5
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
@@ -872,7 +874,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         client = self._select_exa_client()
         call_start = time()
         try:
-            results = await client.search(query, num_results=self.MAX_RESULTS, exclude_domains=self._exclude_domains)
+            results = await client.search(
+                query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
+            )
         except Exception as e:
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
@@ -903,7 +907,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         try:
             results = await client.search(
                 query,
-                max_results=self.MAX_RESULTS,
+                max_results=self.config.max_results,
                 exclude_domains=self._exclude_domains,
                 search_depth="advanced",
                 include_raw_content=True,
@@ -939,7 +943,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         try:
             results = await client.search(
                 query,
-                max_results=self.MAX_RESULTS,
+                max_results=self.config.max_results,
                 exclude_domains=self._exclude_domains,
                 search_depth="advanced",
                 include_raw_content=True,
