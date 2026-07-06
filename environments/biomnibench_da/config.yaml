@@ -8,7 +8,7 @@ harbor_agent:
 
       harbor_datasets:
         biomnibench_da:
-          local_dataset_path: "environments/biomnibench_da/data/tasks_smoke_docker"
+          local_dataset_path: "environments/biomnibench_da/data/example"
           workdir: "/app"
 
       harbor_agent_name: null
