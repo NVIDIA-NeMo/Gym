@@ -81,20 +81,23 @@ def strip_think(text: str) -> str:
     return text.strip()
 
 
-def infer_option(prediction: str, choices: Dict[str, str]) -> Optional[str]:
-    """Extract a single option letter. VLMEvalKit ``can_infer`` first, else local.
+def infer_option_vlmeval(prediction: str, choices: Dict[str, str]) -> Optional[str]:
+    """Extract an option letter via VLMEvalKit's native ``can_infer`` (reuse backend).
 
+    Requires the ``vlmeval`` package to be installed; raises loudly if it is
+    not, so a run configured for the vlmeval backend never silently degrades.
     ``can_infer`` returns a letter, ``"Z"`` (no match), or ``False``.
     """
-    try:
-        from vlmeval.utils.matching_util import can_infer
+    from vlmeval.utils.matching_util import can_infer
 
-        result = can_infer(prediction, choices)
-        if result and result != "Z":
-            return result
-    except Exception:
-        pass  # vlmeval not installed (offline test) → local fallback below
+    result = can_infer(prediction, choices if choices else {k: k for k in "ABCD"})
+    if result and result != "Z":
+        return str(result)
+    return None
 
+
+def infer_option(prediction: str, choices: Dict[str, str]) -> Optional[str]:
+    """Extract a single option letter — dependency-free local implementation."""
     valid = set(choices.keys()) if isinstance(choices, dict) and choices else set("ABCD")
 
     match = re.search(r"(?i)\b(?:answer|option|choice)\b\D{0,12}([A-Z])\b", prediction)
@@ -115,7 +118,10 @@ def infer_option(prediction: str, choices: Dict[str, str]) -> Optional[str]:
 
 
 class VlmEvalKitAudioResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    # Option-letter extraction backend: "local" = dependency-free reimplementation
+    # (default); "vlmeval" = VLMEvalKit's native can_infer (requires the vlmeval
+    # package — fails loudly if missing, never silently falls back).
+    scoring_backend: str = "local"
 
 
 class VlmEvalKitAudioVerifyRequest(BaseVerifyRequest):
@@ -138,11 +144,15 @@ class VlmEvalKitAudioResourcesServer(SimpleResourcesServer):
 
     def _score(self, dataset_type: str, prediction: str, answer: Any, choices: Dict[str, str]) -> Dict[str, Any]:
         dtype = (dataset_type or "QA").upper()
+        backend = self.config.scoring_backend
+        if backend not in ("local", "vlmeval"):
+            raise ValueError(f"Unsupported scoring_backend: {backend!r}. Use 'local' or 'vlmeval'.")
 
         if dtype in _MCQ_TYPES:
-            pred = infer_option(prediction, choices)
+            extract = infer_option_vlmeval if backend == "vlmeval" else infer_option
+            pred = extract(prediction, choices)
             correct = pred is not None and answer is not None and str(pred).upper() == str(answer).strip().upper()
-            return {"reward": 1.0 if correct else 0.0, "extracted": pred}
+            return {"reward": 1.0 if correct else 0.0, "extracted": pred, "scoring_backend": backend}
 
         if dtype in _YORN_TYPES:
             low = prediction.lower()
