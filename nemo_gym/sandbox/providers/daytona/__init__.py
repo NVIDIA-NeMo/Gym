@@ -23,6 +23,7 @@ from nemo_gym.sandbox.providers.daytona.provider import (
     DaytonaOperationConfig,
     DaytonaProbeConfig,
     DaytonaProvider,
+    DaytonaProviderOptions,
 )
 
 
@@ -35,4 +36,5 @@ __all__ = [
     "DaytonaOperationConfig",
     "DaytonaProbeConfig",
     "DaytonaProvider",
+    "DaytonaProviderOptions",
 ]

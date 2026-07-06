@@ -10,29 +10,7 @@ mini_swe_agent_2:
         name: policy_model
       concurrency: 3
       env: sandbox
-      sandbox_provider:
-        daytona:
-          connection:
-            api_key: ${oc.env:DAYTONA_API_KEY}
-          create:
-            timeout_s: 1200
-            retries: 4
-            retry_delay_s: 5.0
-            retry_max_delay_s: 90.0
-            auto_stop_interval: 30
-            auto_delete_interval: 600
-          probe:
-            timeout_s: 60
-            deadline_s: 180
-          operations:
-            retries: 4
-            retry_delay_s: 1.0
-            retry_max_delay_s: 45.0
-            command_retries: 0
-            close_timeout_s: 60
-            file_timeout_s: 1800
-          batch:
-            concurrency: 3
+      sandbox_provider: sandbox
       sandbox_spec:
         ttl_s: 18000
         ready_timeout_s: 1200
@@ -44,7 +22,6 @@ mini_swe_agent_2:
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
-          sandbox-api: daytona-sdk
       sandbox_environment_kwargs:
         cwd: /testbed
         conda_env: testbed

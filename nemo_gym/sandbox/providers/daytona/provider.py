@@ -20,7 +20,7 @@ import math
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -61,11 +61,6 @@ DAYTONA_EXTENSION_PREFIX = "daytona."
 PROVIDER_OPTION_EXTENSIONS = "extensions"
 PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
 PROVIDER_OPTION_VOLUMES = "volumes"
-SUPPORTED_PROVIDER_OPTIONS = {
-    PROVIDER_OPTION_EXTENSIONS,
-    PROVIDER_OPTION_SNAPSHOT_ID,
-    PROVIDER_OPTION_VOLUMES,
-}
 SANDBOX_ID_LABEL = "sandbox_id"
 
 
@@ -311,24 +306,28 @@ def _log_operation_retry(retry_state: Any) -> None:
     )
 
 
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        field_names = {field.name for field in fields(config_cls)}
+class DaytonaConfigBase:
+    """Shared dataclass construction for Daytona provider config blocks."""
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> Any:
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{cls.__name__} must be a mapping or {cls.__name__} instance")
+        field_names = {field.name for field in fields(cls) if field.init}
         unsupported_keys = sorted(str(key) for key in value if key not in field_names)
         if unsupported_keys:
-            raise ValueError(f"Unsupported Daytona {config_cls.__name__} settings: {', '.join(unsupported_keys)}")
-        return config_cls(**{key: val for key, val in value.items() if key in field_names})
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
+            raise ValueError(f"Unsupported Daytona {cls.__name__} settings: {', '.join(unsupported_keys)}")
+        return cls(**{key: val for key, val in value.items() if key in field_names})
 
 
 def _supplied_config_keys(value: Any, config_cls: type[Any]) -> set[str]:
     if not isinstance(value, Mapping):
         return set()
-    field_names = {field.name for field in fields(config_cls)}
+    field_names = {field.name for field in fields(config_cls) if field.init}
     return {str(key) for key in value if key in field_names}
 
 
@@ -336,20 +335,59 @@ def _string_map(values: dict[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()}
 
 
-def _validate_provider_options(spec: SandboxSpec) -> None:
-    if not isinstance(spec.provider_options, Mapping):
-        raise TypeError("Daytona provider_options must be a mapping")
-    unsupported_keys = sorted(str(key) for key in spec.provider_options if key not in SUPPORTED_PROVIDER_OPTIONS)
-    if unsupported_keys:
-        raise ValueError(f"Unsupported Daytona provider_options: {', '.join(unsupported_keys)}")
+@dataclass(frozen=True)
+class DaytonaProviderOptions:
+    """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``."""
+
+    extensions: Mapping[str, str] = field(default_factory=dict)
+    snapshot_id: str | None = None
+    volumes: tuple[Mapping[str, Any], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any] | None) -> "DaytonaProviderOptions":
+        if options is None:
+            return cls()
+        if not isinstance(options, Mapping):
+            raise TypeError("Daytona provider_options must be a mapping")
+
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unknown Daytona provider option(s): {', '.join(sorted(unknown))}. "
+                f"Supported: {', '.join(sorted(allowed))}"
+            )
+
+        extensions = options.get(PROVIDER_OPTION_EXTENSIONS, {})
+        if not isinstance(extensions, Mapping):
+            raise TypeError("Daytona provider option 'extensions' must be a mapping")
+        snapshot_id = options.get(PROVIDER_OPTION_SNAPSHOT_ID)
+        if snapshot_id is not None and not isinstance(snapshot_id, str):
+            raise TypeError("Daytona provider option 'snapshot_id' must be a string")
+        volumes = options.get(PROVIDER_OPTION_VOLUMES)
+        if volumes is None:
+            volumes = ()
+        if not isinstance(volumes, (list, tuple)) or not all(isinstance(volume, Mapping) for volume in volumes):
+            raise TypeError("Daytona provider option 'volumes' must be a list of mappings")
+
+        return cls(
+            extensions=_string_map(dict(extensions)),
+            snapshot_id=snapshot_id,
+            volumes=tuple(dict(volume) for volume in volumes),
+        )
+
+
+def _provider_options(spec: SandboxSpec) -> DaytonaProviderOptions:
+    return DaytonaProviderOptions.from_mapping(spec.provider_options)
 
 
 def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
-    _validate_provider_options(spec)
+    _provider_options(spec)
     return replace(
         spec,
         env=_string_map(spec.env),
         metadata=_string_map(spec.metadata),
+        provider_options={} if spec.provider_options is None else dict(spec.provider_options),
     )
 
 
@@ -400,10 +438,7 @@ def _quantity_to_int(name: str, value: Any) -> int:
 
 
 def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
-    value = spec.provider_options.get(PROVIDER_OPTION_EXTENSIONS, {})
-    if not isinstance(value, Mapping):
-        raise TypeError("Daytona provider option 'extensions' must be a mapping")
-    return _string_map(dict(value))
+    return dict(_provider_options(spec).extensions)
 
 
 def _extension_value(spec: SandboxSpec, key: str) -> str | None:
@@ -469,17 +504,14 @@ def _to_volume_mounts(volumes: list[dict[str, Any]]) -> list[Any]:
 
 
 def _spec_volumes(spec: SandboxSpec) -> list[dict[str, Any]] | None:
-    value = spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
-    if value is None:
+    volumes = _provider_options(spec).volumes
+    if not volumes:
         return None
-    if not isinstance(value, list):
-        raise TypeError("Daytona provider option 'volumes' must be a list")
-    return [dict(volume) for volume in value]
+    return [dict(volume) for volume in volumes]
 
 
 def _spec_snapshot_id(spec: SandboxSpec) -> str | None:
-    value = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
-    return None if value is None else str(value)
+    return _provider_options(spec).snapshot_id
 
 
 def _to_sandbox_status(value: Any) -> SandboxStatus:
@@ -496,7 +528,7 @@ def _to_sandbox_status(value: Any) -> SandboxStatus:
 
 
 @dataclass(frozen=True)
-class DaytonaConnectionConfig:
+class DaytonaConnectionConfig(DaytonaConfigBase):
     """Daytona API client connection settings."""
 
     api_key: str | None = None
@@ -514,7 +546,7 @@ class DaytonaConnectionConfig:
 
 
 @dataclass(frozen=True)
-class DaytonaCreateConfig:
+class DaytonaCreateConfig(DaytonaConfigBase):
     """Daytona sandbox creation settings."""
 
     timeout_s: float = 60.0
@@ -543,7 +575,7 @@ class DaytonaCreateConfig:
 
 
 @dataclass(frozen=True)
-class DaytonaProbeConfig:
+class DaytonaProbeConfig(DaytonaConfigBase):
     """Post-create probe settings."""
 
     command: str | None = "printf nemo-rl-sandbox-ready"
@@ -559,7 +591,7 @@ class DaytonaProbeConfig:
 
 
 @dataclass(frozen=True)
-class DaytonaOperationConfig:
+class DaytonaOperationConfig(DaytonaConfigBase):
     """Retry and timeout settings for Daytona operations after create."""
 
     retries: int = 3
@@ -588,7 +620,7 @@ class DaytonaOperationConfig:
 
 
 @dataclass(frozen=True)
-class DaytonaBatchConfig:
+class DaytonaBatchConfig(DaytonaConfigBase):
     """Client-side batch fanout settings."""
 
     concurrency: int = 4
@@ -612,11 +644,11 @@ class DaytonaProvider:
         operations: DaytonaOperationConfig | Mapping[str, Any] | None = None,
         batch: DaytonaBatchConfig | Mapping[str, Any] | None = None,
     ) -> None:
-        self._connection = _coerce_config(connection, DaytonaConnectionConfig)
-        self._create = _coerce_config(create, DaytonaCreateConfig)
-        self._probe = _coerce_config(probe, DaytonaProbeConfig)
-        self._operations = _coerce_config(operations, DaytonaOperationConfig)
-        self._batch = _coerce_config(batch, DaytonaBatchConfig)
+        self._connection = DaytonaConnectionConfig.from_mapping(connection)
+        self._create = DaytonaCreateConfig.from_mapping(create)
+        self._probe = DaytonaProbeConfig.from_mapping(probe)
+        self._operations = DaytonaOperationConfig.from_mapping(operations)
+        self._batch = DaytonaBatchConfig.from_mapping(batch)
         self._connection_supplied_keys = _supplied_config_keys(connection, DaytonaConnectionConfig)
         self._daytona: Any | None = None
 
@@ -721,7 +753,7 @@ class DaytonaProvider:
 
     def _to_create_params(self, spec: SandboxSpec) -> Any | None:
         _, _, ImageParams, SnapshotParams, _, _ = _require_daytona_sdk()
-        _validate_provider_options(spec)
+        _provider_options(spec)
         snapshot_id = _spec_snapshot_id(spec)
         if spec.image is not None and snapshot_id is not None:
             raise ValueError("Daytona provider does not support both image and snapshot_id")

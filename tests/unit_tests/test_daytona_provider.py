@@ -213,9 +213,9 @@ def test_config_unknown_keys_fail_fast() -> None:
 
 def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> None:
     create_config = daytona_provider.DaytonaCreateConfig(timeout_s=1)
-    assert daytona_provider._coerce_config(create_config, daytona_provider.DaytonaCreateConfig) is create_config
+    assert daytona_provider.DaytonaCreateConfig.from_mapping(create_config) is create_config
     with pytest.raises(TypeError, match="must be a mapping"):
-        daytona_provider._coerce_config(object(), daytona_provider.DaytonaCreateConfig)
+        daytona_provider.DaytonaCreateConfig.from_mapping(object())
 
     with pytest.raises(ValueError, match="must be a boolean"):
         daytona_provider._coerce_bool("daytona.public", "maybe")
@@ -249,14 +249,17 @@ def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> Non
     assert daytona_provider._spec_snapshot_id(spec) == "snapshot-1"
     assert daytona_provider._spec_volumes(spec) == [{"name": "workspace"}]
     assert daytona_provider._to_volume_mounts([{"name": "workspace"}])[0].kwargs == {"name": "workspace"}
+    assert daytona_provider.DaytonaProviderOptions.from_mapping(None) == daytona_provider.DaytonaProviderOptions()
     with pytest.raises(TypeError, match="extensions"):
         daytona_provider._spec_extensions(SandboxSpec(provider_options={"extensions": []}))
     with pytest.raises(TypeError, match="volumes"):
         daytona_provider._spec_volumes(SandboxSpec(provider_options={"volumes": {}}))
+    with pytest.raises(TypeError, match="snapshot_id"):
+        daytona_provider.DaytonaProviderOptions.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="provider_options"):
-        daytona_provider._validate_provider_options(SandboxSpec(provider_options=None))
-    with pytest.raises(ValueError, match="Unsupported Daytona provider_options: platform"):
-        daytona_provider._validate_provider_options(SandboxSpec(provider_options={"platform": {"os": "linux"}}))
+        daytona_provider.DaytonaProviderOptions.from_mapping([])
+    with pytest.raises(ValueError, match="Unknown Daytona provider option.*platform"):
+        daytona_provider.DaytonaProviderOptions.from_mapping({"platform": {"os": "linux"}})
 
     assert daytona_provider._to_resources({}) is None
     assert daytona_provider._to_resources({"gpu": "1"}).kwargs == {"gpu": 1}
