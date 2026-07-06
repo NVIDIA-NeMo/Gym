@@ -15,6 +15,7 @@
 import json
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
@@ -661,7 +662,11 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(
+        self,
+        monkeypatch: MonkeyPatch,
+        return_token_id_information: bool = False,
+    ):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -670,7 +675,7 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
             uses_reasoning_parser=False,
         )
 
@@ -682,6 +687,71 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    async def test_request_id_reaches_training_output(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        request_uuid = UUID("00000000-0000-4000-8000-000000000001")
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model.app.uuid4",
+            lambda: request_uuid,
+        )
+
+        server = self._setup_server(
+            monkeypatch, return_token_id_information=True
+        )
+        chat_completion_mock = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Hello"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "token_id:4",
+                                    "logprob": -0.25,
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+        tokenize_mock = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        model_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        model_client.create_chat_completion = chat_completion_mock
+        model_client.create_tokenize = tokenize_mock
+        server._clients = [model_client]
+
+        request = MagicMock()
+        request.session = {"session_id": "test-session"}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                NeMoGymChatCompletionUserMessageParam(
+                    role="user", content="Hi"
+                )
+            ]
+        )
+
+        chat_completion = await server.chat_completions(request, body)
+
+        expected_request_id = str(request_uuid)
+        assert (
+            chat_completion_mock.await_args.kwargs["request_id"]
+            == expected_request_id
+        )
+        assert chat_completion.choices[0].message.request_id == expected_request_id
+
+        response_output = server._converter.postprocess_chat_response(
+            chat_completion.choices[0]
+        )
+        assert response_output[-1].request_id == expected_request_id
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -2939,6 +3009,7 @@ class TestVLLMConverter:
             prompt_token_ids=[1, 2, 3],
             generation_token_ids=[4, 5, 6],
             generation_log_probs=[7.0, 8.0, 9.0],
+            request_id="00000000-0000-4000-8000-000000000001",
         )
         actual_response_output_items = converter.postprocess_chat_response(
             choice=NeMoGymChoice(
@@ -2948,6 +3019,7 @@ class TestVLLMConverter:
             )
         )
         assert len(actual_response_output_items) == 4
+        assert actual_response_output_items[-1].request_id == message.request_id
 
         chat_completion_create_params = converter.responses_to_chat_completion_create_params(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -2965,6 +3037,7 @@ class TestVLLMConverter:
             )
         )
         actual_messages = chat_completion_create_params.messages
+        assert "request_id" not in actual_messages[-1]
 
         expected_messages = [
             NeMoGymChatCompletionSystemMessageParam(

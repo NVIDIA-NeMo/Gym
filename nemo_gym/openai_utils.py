@@ -25,6 +25,7 @@ from typing import (
     TypeAlias,
     Union,
 )
+from uuid import uuid4
 
 from openai.types.chat import (
     ChatCompletion,
@@ -106,6 +107,7 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    request_id: Optional[str] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -113,6 +115,7 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    request_id: NotRequired[str]
 
 
 ########################################
@@ -488,11 +491,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        headers = self.default_headers | dict(
+            request_kwargs.pop("headers", {}) or {}
+        )
+        headers["Authorization"] = f"Bearer {self.api_key}"
         request_kwargs = request_kwargs | {
-            "headers": self.default_headers
-            | {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": headers,
             "_internal": self.internal,
         }
         return await self._request_with_retry(**request_kwargs)
@@ -536,10 +540,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_chat_completion(self, **kwargs):
+    async def create_chat_completion(
+        self, request_id: Optional[str] = None, **kwargs
+    ):
+        # Generate this once per logical call. `_request_with_retry` reuses the
+        # same headers for every HTTP attempt.
+        request_id = request_id or str(uuid4())
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
+            headers={"X-Request-ID": request_id},
         )
         response = await self._request(method="POST", **request_kwargs)
 

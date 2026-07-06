@@ -365,6 +365,8 @@ class ResponsesConverter(BaseModel):
             extra_training_fields = {}
             if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
                 extra_training_fields["routed_experts"] = message_dict["routed_experts"]
+            if message_dict.get("request_id") is not None:
+                extra_training_fields["request_id"] = str(message_dict["request_id"])
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 prompt_token_ids=message_dict["prompt_token_ids"],

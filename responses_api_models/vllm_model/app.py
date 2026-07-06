@@ -447,8 +447,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "content_filter"
                 return res
 
+        # Link the request observed by the vLLM worker to the training output.
+        # This is created outside the HTTP retry loop so every attempt shares
+        # one logical request ID.
+        request_id = str(uuid4())
         try:
-            chat_completion_dict = await client.create_chat_completion(**body_dict)
+            chat_completion_dict = await client.create_chat_completion(
+                request_id=request_id,
+                **body_dict,
+            )
         except ClientResponseError as e:
             """
             Example messages for out of context length:
@@ -551,6 +558,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+
+        if self.config.return_token_id_information:
+            choice_dict["message"]["request_id"] = request_id
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
