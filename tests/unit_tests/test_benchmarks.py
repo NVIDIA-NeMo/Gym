@@ -109,6 +109,23 @@ class TestBenchmarkDomain:
 
         assert _benchmark_domain(bench) == "agent"
 
+    def test_survives_unresolvable_interpolation(self, tmp_path: Path) -> None:
+        # A benchmark whose config interpolates a key the user hasn't set (e.g. an API key) must
+        # not break listing: _benchmark_domain returns "" instead of raising, so one such benchmark
+        # can't crash `gym list` / `gym search` for every other benchmark (see #1899).
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """my_instance:
+  resources_servers:
+    my_server:
+      domain: ${undefined_api_key}
+"""
+        )
+        bench = MagicMock()
+        bench.path = config_path
+
+        assert _benchmark_domain(bench) == ""
+
 
 class TestSearchBenchmarks:
     # Map each benchmark name to the `domain` its config would resolve to.

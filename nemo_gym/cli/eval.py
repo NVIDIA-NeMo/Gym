@@ -17,6 +17,7 @@ import asyncio
 import difflib
 import importlib
 import json
+import logging
 from copy import deepcopy
 from glob import glob
 from multiprocessing import Pool
@@ -25,6 +26,7 @@ from typing import Any, Dict, List, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf.errors import OmegaConfBaseException
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
@@ -56,6 +58,9 @@ from nemo_gym.rollout_collection import (
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
+LOG = logging.getLogger(__name__)
+
+
 def _fuzzy_matches(query: str, *fields: str) -> bool:
     """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware)."""
     needle = query.lower()
@@ -84,21 +89,30 @@ def _benchmark_domain(bench: BenchmarkConfig) -> str:
         initial_config_dict = OmegaConf.merge(
             initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
         )
-    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
+    # Resolving a benchmark's config for the domain column is best-effort: a benchmark whose
+    # config interpolates a key the user hasn't set (e.g. an API key) should still be listable,
+    # just without a resolved domain, rather than raising and breaking `gym list` / `gym search`
+    # for every other benchmark. Interpolations may resolve lazily on access, so the whole scan
+    # is guarded, not just the parse call.
+    try:
+        resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config_dict)
 
-    for instance_name in resolved:
-        instance = resolved[instance_name]
-        if not isinstance(instance, (dict, DictConfig)):
-            continue
-
-        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
-            servers = instance.get(group_key)
-            if not servers:
+        for instance_name in resolved:
+            instance = resolved[instance_name]
+            if not isinstance(instance, (dict, DictConfig)):
                 continue
-            for server_config in servers.values():
-                found_domain = (server_config or {}).get("domain")
-                if found_domain:
-                    return str(found_domain)
+
+            for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
+                servers = instance.get(group_key)
+                if not servers:
+                    continue
+                for server_config in servers.values():
+                    found_domain = (server_config or {}).get("domain")
+                    if found_domain:
+                        return str(found_domain)
+    except (OmegaConfBaseException, ConfigError) as exc:
+        LOG.warning("Could not resolve domain for benchmark %s: %s", bench.path, exc)
+        return ""
 
     return ""
 
