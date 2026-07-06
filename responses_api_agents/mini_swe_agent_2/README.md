@@ -487,11 +487,11 @@ Kubernetes wrapper, add any outer per-sample guard there.
 
 ## Running SWE-bench on ECS Fargate
 
-Swap OpenSandbox for ECS Fargate by using
-`configs/mini_swe_agent_ecs_fargate.yaml` — the agent loop and SWE-bench
-verifier are unchanged. For provider setup (AWS infra/SSM, credentials, the
-`:52222` network requirement, and automatic image mirroring via `auto_mirror`)
-see the [ECS Fargate provider README](../../nemo_gym/sandbox/providers/ecs_fargate/README.md).
+Swap OpenSandbox for ECS Fargate by adding the ECS provider config to your
+`+config_paths` — the agent config (`configs/mini_swe_agent_2.yaml`), agent loop,
+and SWE-bench verifier are unchanged. For provider setup (AWS infra/SSM,
+credentials, the `:52222` network requirement, and automatic image mirroring via
+`auto_mirror`) see the ECS Fargate provider page under `infrastructure/sandbox`.
 SWE-bench task images are pulled into the ECR mirror on first use, so no manual
 image staging is needed.
 
@@ -503,7 +503,7 @@ Each input row needs the SWE-bench instance fields shown under
 the verifier in-sandbox, so the model is never called:
 
 ```bash
-CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
     ++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=true

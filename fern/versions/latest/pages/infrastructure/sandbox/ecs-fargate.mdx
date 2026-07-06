@@ -20,15 +20,14 @@ uv pip install boto3
 
 ## Provider Configuration
 
-Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins):
+NeMo Gym ships this provider config at `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml`. It defines a top-level `sandbox` block that an agent selects with `sandbox_provider: sandbox`. Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins), and task cpu/memory/disk come from the agent's `sandbox_spec.resources`:
 
 ```yaml
-sandbox_provider:
+sandbox:
+  default_metadata:
+    sandbox-api: ecs-fargate
   ecs_fargate:
     region: ${oc.env:AWS_REGION}
-    cpu: "2048"
-    memory: "8192"
-    ephemeral_storage_gib: 50
 ```
 
 | Field | Default | Purpose |
@@ -106,7 +105,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-For an end-to-end agent run, `mini_swe_agent_2` ships a ready config at `responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_ecs_fargate.yaml` that selects this provider with region-only auto-discovery.
+For an end-to-end agent run, add this provider config to `mini_swe_agent_2`'s config paths — the agent config is unchanged:
+
+```bash
+ng_run "+config_paths=[responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml, nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml, <MODEL_CONFIG>]"
+```
 
 ## Troubleshooting
 
