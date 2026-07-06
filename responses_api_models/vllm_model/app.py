@@ -926,35 +926,6 @@ class VLLMConverter(BaseModel):
                 # vLLM may return None content
                 if message["content"] is None:
                     message["content"] = ""
-                elif isinstance(message["content"], list):
-                    # Normalize Chat-Completions multi-part content (type='text'/'image_url')
-                    # into Responses-API input parts (type='input_text'/'input_image'). Without
-                    # this, a tool-result message carrying multi-part content — e.g. opencode's
-                    # "N image(s) from tool result: ... (truncated output). Inform the user." —
-                    # fails NeMoGymEasyInputMessage validation and 500s the whole /run, which
-                    # crashes ng_collect for the entire shard. Only list content is touched;
-                    # plain-string content (the common case) is left unchanged.
-                    normalized = []
-                    for part in message["content"]:
-                        if not isinstance(part, dict):
-                            normalized.append({"type": "input_text", "text": str(part)})
-                            continue
-                        ptype = part.get("type")
-                        if ptype == "text":
-                            normalized.append({"type": "input_text", "text": part.get("text", "")})
-                        elif ptype in ("image_url", "input_image"):
-                            url = part.get("image_url", part.get("url", ""))
-                            if isinstance(url, dict):
-                                url = url.get("url", "")
-                            normalized.append(
-                                {"type": "input_image", "image_url": url, "detail": part.get("detail", "auto")}
-                            )
-                        elif ptype in ("input_text", "input_file"):
-                            normalized.append(part)
-                        else:
-                            # Unknown part type → degrade to text so collection never crashes.
-                            normalized.append({"type": "input_text", "text": part.get("text", str(part))})
-                    message["content"] = normalized
                 output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))

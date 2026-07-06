@@ -1,14 +1,19 @@
-# Unified Terminal-Bench rollout config (opencode, Path 2) covering ALL task sets'
-# SIF dirs, for the cross-set shorted-task top-up. container_formatter tries each
-# path; per-task <id>_arm64.sif resolves to whichever dir has it (afterquery ->
-# image-conversion-HSG; atcb-1/mercor-ots-1 -> tb_sifs_arm64; mercor-ots-2 -> OTS).
+# Terminal-Bench rollout — opencode, Path-2 live-state scoring, with the MODEL-IN-NETNS
+# BRIDGE for offline service tasks (branch tb-service-network-fix). Tasks whose
+# instance_dict has allow_internet=false run under `apptainer --net --network=none`
+# (private netns: services bind privileged ports, parallel workers isolated) AND reach the
+# host policy model over a bind-mounted unix-domain socket bridged with socat on both ends
+# (the bridge is active only when env TB_NET_BRIDGE_PKG points at the portable socat/ip
+# bundle). allow_internet=true tasks keep the shared host netns (unchanged). REQUIRES
+# tb_single_exec=true (the outer socat hop is started in the single-exec runner path).
+# See logbook P260611 H3 run 2026-06-14-netns-model-bridge.
 swe_agents:
   responses_api_agents:
     swe_agents: &swe_agents_config
       entrypoint: app.py
       domain: coding
-      description: Unified multi-set Terminal-Bench rollouts via opencode (top-up).
-      value: Top up shorted tasks across afterquery/atcb/mercor to 8 trajs.
+      description: Terminal-Bench rollouts (opencode) with the model-in-netns service bridge.
+      value: Roll out offline service tasks under --network=none with the model bridged into the private netns.
 
       agent_framework: opencode
       agent_max_turns: 300
@@ -21,6 +26,11 @@ swe_agents:
         - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/{instance_id}_arm64.sif
         - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
       container_folder_path: null
+
+      # Single-exec: run agent + eval in ONE apptainer exec so the inner socat bridge +
+      # boot daemons the agent starts persist into the eval phase. REQUIRED for the bridge.
+      tb_single_exec: true
+      tb_service_settle_sec: 20
 
       swebench_agent_timeout: 7200
       swebench_tests_timeout: 900

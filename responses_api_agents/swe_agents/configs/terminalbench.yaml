@@ -1,0 +1,66 @@
+# ============================================================================
+# CANONICAL Terminal-Bench rollout config (opencode, Path-2 live-state scoring).
+# THE single production setting — use this for all Terminal-Bench rollouts/evals.
+# Supersedes terminalbench_{opencode,multiset,tb21,netbridge,all}.yaml.
+#
+# One mode: tb_single_exec=true (agent + eval in ONE apptainer exec). Validated
+# equivalent to the old two-exec on afterquery (A/B 2026-06-15: pass@2 0.833 == 0.833,
+# pass@1 within noise) AND required for service tasks (daemon persistence).
+# Networking is automatic per task (gym, no flag): allow_internet=false => private
+# netns (--net --network=none) + model carried in over the unix-socket socat bridge
+# (default-on, staged bundle); allow_internet=true/absent => shared host netns.
+# container_formatter tries each path; per-task <id>_arm64.sif resolves to whichever
+# dir has it (afterquery->image-conversion-HSG; atcb-1/mercor-ots-1->tb_sifs_arm64;
+# mercor-ots-2->OTS; tb21->tb_sifs_arm64/tb21).
+# See logbook P260611 H3 run 2026-06-14-netns-model-bridge.
+# ============================================================================
+swe_agents:
+  responses_api_agents:
+    swe_agents: &swe_agents_config
+      entrypoint: app.py
+      domain: coding
+      description: Canonical Terminal-Bench rollouts via opencode (Path-2, single-exec, auto netns bridge).
+      value: One production config for all Terminal-Bench task sets; service tasks get private-netns + model bridge automatically.
+
+      agent_framework: opencode
+      agent_max_turns: 300
+      agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
+      agent_framework_commit: 0c088fd18b5ef6ff9b2a949ac2a41204b1ac8046
+      opencode_setup_receipt_enforce: true
+
+      container_formatter:
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/dev/image-conversion-HSG/{instance_id}_arm64.sif
+        - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/{instance_id}_arm64.sif
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
+        - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/tb21/{instance_id}_arm64.sif
+      container_folder_path: null
+
+      # Single production mode: agent + eval in one apptainer exec.
+      tb_single_exec: true
+      tb_service_settle_sec: 20
+
+      swebench_agent_timeout: 7200
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+
+      dataset_path: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
+
+swe_agents_train:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config

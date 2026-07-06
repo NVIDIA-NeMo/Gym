@@ -14,6 +14,7 @@
 import asyncio
 import base64
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,13 +22,14 @@ import random
 import re
 import shlex
 import shutil
+import stat
 import sys
 import time
 import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
@@ -53,18 +55,207 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OmegaConf, get_global_config_dict
-from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
 ########################################
 # START Configuration
 ########################################
+
+
+# ---------------------------------------------------------------------------
+# Model-in-netns bridge (terminal-bench offline service tasks)
+# ---------------------------------------------------------------------------
+# Offline service tasks (allow_internet=false) run under `apptainer --net
+# --network=none` so daemons can bind privileged ports (nginx :80) and parallel
+# workers don't collide on the shared host netns. That isolated netns also severs
+# the in-SIF opencode agent from the host policy-model endpoint. We carry the model
+# in over a bind-mounted unix-domain socket (a filesystem object that crosses the
+# netns boundary) bridged with socat on both ends:
+#   in-SIF agent -> 127.0.0.1:PORT (inner socat) -> unix sock -> outer socat ->
+#   real model server (host:dynport, in the rl-container netns).
+# REQUIRED for allow_internet=false: every offline Terminal-Bench task uses the private
+# netns and a usable portable socat/ip bundle. allow_internet=true / absent keeps the
+# shared host netns. The bundle path is the env override TB_NET_BRIDGE_PKG, else the staged
+# default below. Missing or invalid private-network setup is fatal; it must never silently
+# widen an offline task back onto the shared network. The model endpoint the agent dials is
+# overridden to loopback in OpenCodeHarnessProcessor.
+# See logbook P260611 H3 run 2026-06-14-netns-model-bridge (plumbing 5/5, rollout confirmed).
+# NOTE: the staged default bundle is arm64 (HSG); other architectures must set
+# TB_NET_BRIDGE_PKG to their validated bundle.
+_TB_NET_BRIDGE_DEFAULT_PKG = (
+    "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_net_bridge/socat_portable"
+)
+
+
+def _tb_private_network_requested(data_point: Dict[str, Any]) -> bool:
+    if data_point.get("dataset_name") != "terminal-bench":
+        return False
+    try:
+        instance_dict = json.loads(data_point.get("instance_dict", "{}"))
+    except Exception as error:
+        raise RuntimeError("Terminal-Bench instance_dict is not valid JSON") from error
+    if not isinstance(instance_dict, dict):
+        raise RuntimeError("Terminal-Bench instance_dict must be a JSON object")
+    return instance_dict.get("allow_internet", True) is False
+
+
+def _tb_net_bridge_cfg(data_point: Dict[str, Any], agent_run_id: str) -> Optional[Dict[str, Any]]:
+    if not _tb_private_network_requested(data_point):
+        return None
+    pkg = os.environ.get("TB_NET_BRIDGE_PKG") or _TB_NET_BRIDGE_DEFAULT_PKG
+    if not (
+        (Path(pkg) / "socat").is_file()
+        and (Path(pkg) / "ld-linux.so").is_file()
+        and (Path(pkg) / "libs").is_dir()
+    ):
+        raise RuntimeError(
+            f"Terminal-Bench private network bridge bundle is missing or invalid: pkg={pkg}"
+        )
+    # Full executable/content validation runs again on the Ray worker immediately before
+    # the outer bridge starts. Keeping this first check structural lets command-only tests
+    # use inert placeholders without creating an execution path that can fall back to the
+    # shared network.
+    try:
+        port = int(os.environ.get("TB_NET_BRIDGE_PORT", "18900"))
+    except ValueError as error:
+        raise RuntimeError("TB_NET_BRIDGE_PORT must be an integer") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"TB_NET_BRIDGE_PORT is out of range: {port}")
+    tok = hashlib.sha1(agent_run_id.encode()).hexdigest()[:16]
+    return {"pkg": pkg, "port": port, "sock": f"/tmp/tbnb/{tok}.sock", "sockdir": "/tmp/tbnb"}
+
+
+def _tb_validate_net_bridge_bundle(pkg: str) -> None:
+    required_executables = [Path(pkg) / name for name in ("socat", "ip", "ld-linux.so")]
+    invalid = [
+        str(path)
+        for path in required_executables
+        if not path.is_file() or path.stat().st_size == 0 or not os.access(path, os.X_OK)
+    ]
+    libs_dir = Path(pkg) / "libs"
+    libraries = list(libs_dir.iterdir()) if libs_dir.is_dir() else []
+    if invalid or not libraries or any(not path.is_file() or path.stat().st_size == 0 for path in libraries):
+        raise RuntimeError(
+            "Terminal-Bench private network bridge bundle is missing or invalid: "
+            f"pkg={pkg} invalid_executables={invalid} libs={libs_dir}"
+        )
+
+
+def _tb_private_host_dir(persistent_dir: Path) -> Path:
+    """Return a host-only sibling outside the agent-visible persistent mount."""
+    return persistent_dir.parent / f".{persistent_dir.name}.tb_private"
+
+
+def _tb_private_tests_host_dir(persistent_dir: Path) -> Path:
+    return _tb_private_host_dir(persistent_dir) / "tests"
+
+
+def _tb_private_verifier_host_dir(persistent_dir: Path) -> Path:
+    """Return the eval-only host directory mounted at /logs/verifier."""
+    return _tb_private_host_dir(persistent_dir) / "verifier"
+
+
+def _tb_agent_safe_instance_dict(instance_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove evaluator-only fields before mounting a TB row into the agent."""
+    safe = dict(instance_dict)
+    for hidden_key in (
+        "test_files",
+        "test_files_b64",
+        "test_entrypoint",
+        "tests_dir",
+        "verifier_timeout_sec",
+    ):
+        safe.pop(hidden_key, None)
+    return safe
+
+
+_TB_TERMINAL_TOOL_OUTPUT = (
+    "[terminal tool execution ended before the harness captured an output]"
+)
+
+
+def _append_terminal_tool_outputs(messages: list[dict]) -> list[str]:
+    """Pair only dangling tool calls in the final assistant message.
+
+    Some task commands use ``pkill -f`` with a pattern that also matches their
+    own command shell. OpenCode then persists the assistant's final tool call
+    but cannot persist a tool result before the shell disappears. Preserve the
+    event explicitly instead of emitting a structurally orphaned trajectory.
+    Earlier unmatched calls are not repaired because appending their results at
+    the end would falsify message ordering.
+    """
+    assistant_indices = [
+        index for index, message in enumerate(messages)
+        if message.get("role") == "assistant"
+    ]
+    if not assistant_indices:
+        return []
+    final_assistant_index = assistant_indices[-1]
+    tail = messages[final_assistant_index + 1 :]
+    if any(message.get("role") != "tool" for message in tail):
+        return []
+    result_ids = {
+        message.get("tool_call_id")
+        for message in tail
+        if message.get("role") == "tool" and message.get("tool_call_id")
+    }
+    missing = []
+    for call in messages[final_assistant_index].get("tool_calls") or []:
+        call_id = call.get("id")
+        if call_id and call_id not in result_ids:
+            missing.append(call_id)
+    for call_id in missing:
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": _TB_TERMINAL_TOOL_OUTPUT,
+            }
+        )
+    return missing
+
+
+def _tb_flatten_multipart_content(messages: list[dict]) -> int:
+    """Flatten list-form chat content to plain text (terminal-bench only).
+
+    Opencode formats some tool-result notices as a LIST of chat-completions
+    parts — e.g. when a tool result carries an image and the policy model is
+    text-only, opencode substitutes text parts reading "Attached image(s) from
+    tool result:" / "ERROR: Cannot read image (this model does not support
+    image input). Inform the user." — but ``NeMoGymEasyInputMessage`` accepts
+    only plain-string content, so the Responses conversion raises and 500s the
+    whole rollout. Flattening to the concatenated part text records exactly
+    what a text-only model consumed, so the trajectory stays faithful.
+
+    NOTE (vision LLMs): this is correct for TEXT-ONLY policies only. If
+    NeMo-Gym ever serves a vision policy, opencode will attach real image
+    parts and flattening would silently drop them from the recorded
+    trajectory — the implementation path must be reconsidered then (proper
+    multi-part image support through the Responses conversion, end to end).
+    Image-fixture task inventory: P260705 H2 `2026-07-05_image-task-flagging`.
+    """
+    flattened = 0
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "assistant" or not isinstance(content, list):
+            continue
+        texts = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text", "")
+                texts.append("" if value is None else str(value))
+            elif part is not None:
+                texts.append(str(part))
+        message["content"] = "\n".join(text for text in texts if text)
+        flattened += 1
+    return flattened
 
 
 class AgentPromptOverride(BaseModel):
@@ -124,14 +315,32 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     tb_single_exec: bool = Field(
         default=False,
         description=(
-            "Terminal-Bench only: run the agent and eval in ONE apptainer exec (shared PID "
-            "namespace) so background services the agent starts (grpc/nginx/pypi/...) stay alive "
-            "for the test phase. Default False keeps the proven two-exec flow (e.g. afterquery). "
-            "apptainer `instance` would be cleaner but user namespaces are blocked on the nodes."
+            "Terminal-Bench legacy compatibility mode: run agent and eval in one Apptainer exec. "
+            "This cannot provide strict hidden-test mount isolation; production collection should "
+            "leave it False and use the two-exec shared-overlay flow."
         ),
     )
     tb_service_settle_sec: int = Field(
         default=20, description="Terminal-Bench single-exec: seconds to let agent services settle before eval."
+    )
+    tb_verifier_timeout_floor_sec: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional Terminal-Bench-only lower bound for verifier wall time. "
+            "The effective timeout is max(instance verifier_timeout_sec, this floor); "
+            "useful on slower architectures where the task-declared limit assumes warm installs."
+        ),
+    )
+    opencode_setup_receipt_enforce: bool = Field(
+        default=False,
+        description=(
+            "Opt-in H8/H9 supply-chain preauthorization for the opencode setup: verify "
+            "setup_receipt.json against the committed expected-receipt reference (hash-pinned "
+            "repo/commit/bun/bundle identities) and rebuild on mismatch. Default False keeps the "
+            "original existence-checked setup for every dataset — enforcement hard-pins the "
+            "opencode (repo, commit) and would reject configs pinned to moving branches "
+            "(e.g. sdd/dev). Only terminal-bench configs should enable this."
+        ),
     )
 
     apptainer_memory_limit_mb: int = Field(
@@ -221,6 +430,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     inference_params: Dict[str, Any]
     agent_run_id: str
     instance_dataset_path: Path
+    agent_instance_dataset_path: Optional[Path] = None
     trajectories_root: Path
     prediction_path: Path
     output_for_eval_mounted_path: Path
@@ -255,6 +465,11 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     # where _build_apptainer_command is available (it lives on the wrapper, not the runner).
     merged_command: Optional[ExecuteContainerCommandArgs] = None
     merged_apptainer_command_str: Optional[str] = None
+    # Model-in-netns bridge: real model-server "host:port" + portable socat bundle path, set
+    # in _setup_params when the bridge is active, so the Ray worker can start the outer socat
+    # hop WITHOUT depending on the env var propagating into the worker process.
+    tb_bridge_real_hostport: Optional[str] = None
+    tb_bridge_pkg: Optional[str] = None
 
     # GRPO related fields
     mask_sample: bool = False
@@ -275,6 +490,7 @@ class SWEBenchMetrics(BaseModel):
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+    synthetic_terminal_tool_outputs: int = 0
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -1111,6 +1327,65 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 TB_OVERLAY_SIZE_MB = 8192
 
 
+def _validated_tb_tests_dir(raw_tests_dir: Any, workspace_path: str) -> str:
+    tests_dir = str(raw_tests_dir or "/tests")
+    path = PurePosixPath(tests_dir)
+    workspace = PurePosixPath(workspace_path)
+    allowed = {PurePosixPath("/tests")}
+    normalized_workspace = workspace.is_absolute() and workspace.as_posix() == workspace_path
+    if normalized_workspace:
+        allowed.add(workspace / "tests")
+    destroys_workspace = normalized_workspace and (
+        path == workspace or path in workspace.parents
+    )
+    if (
+        not path.is_absolute()
+        or path.as_posix() != tests_dir
+        or path not in allowed
+        or destroys_workspace
+    ):
+        raise ValueError(
+            "terminal-bench tests_dir must be the normalized absolute path /tests "
+            f"or <workspace_path>/tests; observed={tests_dir!r} "
+            f"workspace_path={workspace_path!r}"
+        )
+    return path.as_posix()
+
+
+def _validated_tb_test_entrypoint(raw_entrypoint: Any) -> str:
+    entrypoint = str(raw_entrypoint or "test.sh")
+    path = PurePosixPath(entrypoint)
+    if (
+        path == PurePosixPath(".")
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() != entrypoint
+    ):
+        raise ValueError(
+            "terminal-bench test_entrypoint must be a normalized relative path; "
+            f"observed={entrypoint!r}"
+        )
+    return path.as_posix()
+
+
+def _tb_hidden_tests_install_script(
+    tests_dir: str,
+    test_entrypoint: str,
+    *,
+    bundle_dir: str = "/root/tb_tests/bundle",
+) -> str:
+    destination = shlex.quote(tests_dir)
+    destination_copy = shlex.quote(tests_dir + "/")
+    source_copy = shlex.quote(bundle_dir.rstrip("/") + "/.")
+    entrypoint = shlex.quote(str(PurePosixPath(tests_dir) / test_entrypoint))
+    return (
+        f"rm -rf -- {destination} || exit 1\n"
+        f"mkdir -p -- {destination} || exit 1\n"
+        f"cp -a -- {source_copy} {destination_copy} || exit 1\n"
+        f"chmod +x -- {entrypoint} || exit 1"
+    )
+
+
 class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
     """Terminal-Bench (Harbor-style) tasks — Path 2 (shared-overlay, live-state).
 
@@ -1119,8 +1394,8 @@ class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
     (see `_build_apptainer_command` / `_process_single_datapoint_terminal_bench`);
     this eval step runs *sequentially* in a second container that mounts the SAME
     overlay, so it grades the agent's live filesystem. It reproduces the Harbor
-    verifier contract: the task's `tests/` bundle (staged host-side under
-    `persistent_dir/tb_tests`, mounted read-only at `/root/tb_tests` ONLY in the
+    verifier contract: the task's `tests/` bundle (staged in a host-only sibling
+    outside `persistent_dir`, mounted read-only at `/root/tb_tests` ONLY in the
     eval container — never in the agent container) is copied to `tests_dir`
     (default `/tests`); the entrypoint (default `test.sh`) is run with CWD =
     `workspace_path` (default `/app`); reward is read from Harbor's
@@ -1139,7 +1414,11 @@ class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
 
     @property
     def _tb_tests_host_dir(self) -> Path:
-        return self.config.persistent_dir / "tb_tests"
+        return _tb_private_tests_host_dir(self.config.persistent_dir)
+
+    @property
+    def _tb_verifier_host_dir(self) -> Path:
+        return _tb_private_verifier_host_dir(self.config.persistent_dir)
 
     def setup(self) -> Path:
         pass
@@ -1147,8 +1426,8 @@ class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         instance_dict = json.loads(self.config.problem_info["instance_dict"])
         workspace_path = str(instance_dict.get("workspace_path") or "/app")
-        tests_dir = str(instance_dict.get("tests_dir") or "/tests")
-        test_entrypoint = str(instance_dict.get("test_entrypoint") or "test.sh")
+        tests_dir = _validated_tb_tests_dir(instance_dict.get("tests_dir"), workspace_path)
+        test_entrypoint = _validated_tb_test_entrypoint(instance_dict.get("test_entrypoint"))
 
         test_files = instance_dict.get("test_files") or {}
         if not isinstance(test_files, dict) or not test_files:
@@ -1191,9 +1470,18 @@ class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
         report_host = self.config.persistent_dir / "eval_results" / "report.json"
         report_host.parent.mkdir(parents=True, exist_ok=True)
 
+        # This directory is mounted only in the eval container. Recreate it
+        # before each verification so an agent-created overlay path cannot
+        # supply or retain a reward file.
+        verifier_host_dir = self._tb_verifier_host_dir
+        if verifier_host_dir.exists():
+            shutil.rmtree(verifier_host_dir, ignore_errors=True)
+        verifier_host_dir.mkdir(parents=True, exist_ok=True)
+
         ws = shlex.quote(workspace_path)
         td = shlex.quote(tests_dir)
         ep = shlex.quote(test_entrypoint)
+        install_hidden_tests = _tb_hidden_tests_install_script(tests_dir, test_entrypoint)
         # Launched sequentially AFTER the agent finishes, so no sleep-until-
         # predictions busy-wait — the overlay already holds the agent's work.
         # No `set -e`: a failing test run is a valid (unresolved) outcome, not a
@@ -1203,11 +1491,12 @@ set -uo pipefail
 
 date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} 2>/dev/null || true
 
-mkdir -p /trajectories_mount/eval_results {td} /logs/verifier {ws}
+mkdir -p /trajectories_mount/eval_results /logs/verifier {ws}
+find /logs/verifier -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + 2>/dev/null || true
+VERIFIER_STARTED_EPOCH=$(date +%s)
 
 # Inject the authoritative hidden test bundle (Harbor mounts tests/ at /tests).
-cp -rf /root/tb_tests/bundle/. {td}/
-chmod +x {td}/{ep} 2>/dev/null || true
+{install_hidden_tests}
 
 # Reproduce the env the Harbor/terminal-bench verifier normally provides, and fix
 # apt inside the UNPRIVILEGED Apptainer container. Vendor test.sh scripts assume:
@@ -1223,30 +1512,47 @@ export T_BENCH_TEST_DIR={td}
 export T_BENCH_CONTAINER_LOGS_PATH=/logs
 export HOME="${{HOME:-/root}}"
 export DEBIAN_FRONTEND=noninteractive
+export PYTHONDONTWRITEBYTECODE=1
 
 # Run the task's own verifier entrypoint (e.g. test.sh) with CWD = workspace.
 cd {ws}
 bash {td}/{ep} > /trajectories_mount/eval_results/pytest_stdout.log 2> /trajectories_mount/eval_results/pytest_stderr.log
 TB_EXIT=$?
 
-# Prefer Harbor's reward.txt; fall back to the entrypoint exit code.
-# All-or-nothing: reward 1 / exit 0 == resolved.
-REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9' || echo "")
-cp -f /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt 2>/dev/null || true
+# Prefer a fresh regular Harbor reward.txt from the eval-only verifier mount;
+# otherwise fall back to the entrypoint exit code. All-or-nothing: reward 1 /
+# exit 0 == resolved.
+REWARD=""
+REWARD_SOURCE="exit_code"
+if [ -f /logs/verifier/reward.txt ] && [ ! -L /logs/verifier/reward.txt ]; then
+    REWARD_MTIME=$(stat -c %Y /logs/verifier/reward.txt 2>/dev/null || echo 0)
+    REWARD_CANDIDATE=$(tr -dc '0-9' < /logs/verifier/reward.txt 2>/dev/null || echo "")
+    if [ "$REWARD_MTIME" -ge "$VERIFIER_STARTED_EPOCH" ] && \
+       {{ [ "$REWARD_CANDIDATE" = "0" ] || [ "$REWARD_CANDIDATE" = "1" ]; }}; then
+        REWARD="$REWARD_CANDIDATE"
+        REWARD_SOURCE="verifier_file"
+        cp -f /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt
+    fi
+fi
 if [ "$REWARD" = "1" ]; then RESOLVED=true
 elif [ "$REWARD" = "0" ]; then RESOLVED=false
 elif [ "$TB_EXIT" -eq 0 ]; then RESOLVED=true
 else RESOLVED=false; fi
 cat > {report_mounted} <<EOF
-{{"{self.config.instance_id}": {{"resolved": $RESOLVED, "exit_code": $TB_EXIT, "reward_txt": "$REWARD", "patch_exists": true}}}}
+{{"{self.config.instance_id}": {{"resolved": $RESOLVED, "exit_code": $TB_EXIT, "reward_txt": "$REWARD", "reward_source": "$REWARD_SOURCE", "patch_exists": true}}}}
 EOF
 """
 
+        declared_timeout = int(
+            instance_dict.get("verifier_timeout_sec") or self.config.swebench_tests_timeout
+        )
+        timeout_floor = int(self.config.tb_verifier_timeout_floor_sec or 0)
+        effective_timeout = max(declared_timeout, timeout_floor)
         return ExecuteContainerCommandArgs(
             command=cmd,
             expected_file_pattern=str(report_host),
             mode="eval",
-            timeout=int(instance_dict.get("verifier_timeout_sec") or self.config.swebench_tests_timeout),
+            timeout=effective_timeout,
         )
 
     def postprocess_after_run(self, report_file: Path) -> None:
@@ -1599,6 +1905,354 @@ _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE = (
     Path(__file__).parent / "prompts" / "opencode_harness" / "user_prompt.txt"
 ).read_text()
 
+H8_OPENCODE_SETUP_RECEIPT_SHA256 = (
+    "133091e352ad4c9742a6bc2fff6e8790be37d64363cc9a4bc39e1d546b0400e0"
+)
+_OPENCODE_EXPECTED_RECEIPT_PATH = (
+    Path(__file__).parent / "opencode_setup_receipt_expected.json"
+)
+H9_OPENCODE_BUN_ARTIFACTS = {
+    "aarch64": {
+        "size": 101309000,
+        "sha256": "67892bb6734ef352f90a964f0a2a680d5f6e6d15bdb5510e56b8065ac4d599ae",
+    },
+    "arm64": {
+        "size": 101309000,
+        "sha256": "67892bb6734ef352f90a964f0a2a680d5f6e6d15bdb5510e56b8065ac4d599ae",
+    },
+    "x86_64": {
+        "size": 101814712,
+        "sha256": "b29d78892abd5a9398e0700f0cb602f725089602ed1a5082d681c7257b2bf4d0",
+    },
+}
+H9_OPENCODE_BUNDLE_ARTIFACTS = {
+    "aarch64": {
+        "size": 23260101,
+        "sha256": "027862bbde53b41acc2814d8d2b7a48168c7aa74f8a34326d51ab76a6a1c2709",
+    },
+    "arm64": {
+        "size": 23260101,
+        "sha256": "027862bbde53b41acc2814d8d2b7a48168c7aa74f8a34326d51ab76a6a1c2709",
+    },
+    "x86_64": {
+        "size": 23260101,
+        "sha256": "86cbb97d27389c5098998749e153518b4ea0540716bdb92faa3c7115fda4f70a",
+    },
+}
+
+OPENCODE_SETUP_RECEIPT_SCHEMA = "h8_opencode_setup_receipt_v2"
+OPENCODE_SOURCE_TREE_EXCLUDED_DIRECTORIES = (".bench-build", "node_modules")
+
+
+def _opencode_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _opencode_file_identity(path: Path, *, relative_path: Optional[str] = None) -> Dict[str, Any]:
+    metadata = path.stat()
+    identity: Dict[str, Any] = {
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "size": metadata.st_size,
+        "sha256": _opencode_sha256(path),
+    }
+    if relative_path is None:
+        identity["path"] = str(path)
+    else:
+        identity["relative_path"] = relative_path
+    return identity
+
+
+def _opencode_tree_digest(members: list[dict]) -> str:
+    canonical = json.dumps(
+        members,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _opencode_tree_identity(
+    root: Path,
+    *,
+    excluded_directories: tuple[str, ...] = (),
+) -> Dict[str, Any]:
+    if root.is_symlink():
+        raise RuntimeError(f"OpenCode tree root must not be a symlink: {root}")
+    root = root.resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"OpenCode tree root is missing or invalid: {root}")
+    excluded = tuple(sorted(excluded_directories))
+    members: list[dict] = []
+
+    def _walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, dirnames, filenames in os.walk(
+        root, followlinks=False, onerror=_walk_error
+    ):
+        directory_path = Path(directory)
+        dirnames.sort()
+        filenames.sort()
+        for dirname in list(dirnames):
+            path = directory_path / dirname
+            if dirname in excluded:
+                dirnames.remove(dirname)
+                continue
+            if path.is_symlink():
+                dirnames.remove(dirname)
+                members.append(
+                    {
+                        "relative_path": path.relative_to(root).as_posix(),
+                        "type": "symlink",
+                        "mode": stat.S_IMODE(path.lstat().st_mode),
+                        "target": os.readlink(path),
+                    }
+                )
+        for filename in filenames:
+            path = directory_path / filename
+            relative_path = path.relative_to(root).as_posix()
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                members.append(
+                    {
+                        "relative_path": relative_path,
+                        "type": "symlink",
+                        "mode": stat.S_IMODE(metadata.st_mode),
+                        "target": os.readlink(path),
+                    }
+                )
+            elif stat.S_ISREG(metadata.st_mode):
+                members.append(
+                    {
+                        "relative_path": relative_path,
+                        "type": "file",
+                        "mode": stat.S_IMODE(metadata.st_mode),
+                        "size": metadata.st_size,
+                        "sha256": _opencode_sha256(path),
+                    }
+                )
+            else:
+                raise RuntimeError(f"unsupported OpenCode tree member: {path}")
+    members.sort(key=lambda record: record["relative_path"])
+    return {
+        "root": str(root),
+        "excluded_directories": list(excluded),
+        "member_count": len(members),
+        "sha256": _opencode_tree_digest(members),
+        "members": members,
+    }
+
+
+def _build_opencode_setup_receipt(
+    opencode_dir: Path,
+    bun_binary: Path,
+    agent_framework_repo: str,
+    agent_framework_commit: str,
+) -> Dict[str, Any]:
+    opencode_dir = opencode_dir.resolve()
+    bun_binary = bun_binary.resolve()
+    source_commit_path = opencode_dir / ".source_commit"
+    if source_commit_path.read_text() != agent_framework_commit + "\n":
+        raise RuntimeError("OpenCode .source_commit does not match the configured commit")
+    build_dir = opencode_dir / ".bench-build"
+    receipt = {
+        "schema_version": OPENCODE_SETUP_RECEIPT_SCHEMA,
+        "agent_framework_repo": agent_framework_repo,
+        "agent_framework_commit": agent_framework_commit,
+        "source_commit": _opencode_file_identity(
+            source_commit_path, relative_path=".source_commit"
+        ),
+        "bun": _opencode_file_identity(bun_binary),
+        "source_tree": _opencode_tree_identity(
+            opencode_dir,
+            excluded_directories=OPENCODE_SOURCE_TREE_EXCLUDED_DIRECTORIES,
+        ),
+        "build_tree": _opencode_tree_identity(build_dir),
+    }
+    build_paths = {
+        record["relative_path"]
+        for record in receipt["build_tree"]["members"]
+        if record.get("type") == "file"
+    }
+    missing_bundles = {"bench-cli.js", "opencode.js"} - build_paths
+    if missing_bundles:
+        raise RuntimeError(f"OpenCode build tree is incomplete: {sorted(missing_bundles)}")
+    return receipt
+
+
+def _opencode_tree_record_is_valid(
+    tree: Any,
+    *,
+    expected_excluded_directories: tuple[str, ...],
+) -> bool:
+    if not isinstance(tree, dict) or set(tree) != {
+        "root",
+        "excluded_directories",
+        "member_count",
+        "sha256",
+        "members",
+    }:
+        return False
+    if not isinstance(tree.get("root"), str) or not Path(tree["root"]).is_absolute():
+        return False
+    if tree.get("excluded_directories") != sorted(expected_excluded_directories):
+        return False
+    members = tree.get("members")
+    if not isinstance(members, list) or not members or tree.get("member_count") != len(members):
+        return False
+    paths = []
+    for record in members:
+        if not isinstance(record, dict) or not isinstance(record.get("relative_path"), str):
+            return False
+        relative = PurePosixPath(record["relative_path"])
+        if (
+            relative.is_absolute()
+            or relative == PurePosixPath(".")
+            or ".." in relative.parts
+            or relative.as_posix() != record["relative_path"]
+        ):
+            return False
+        paths.append(record["relative_path"])
+        if record.get("type") == "file":
+            if set(record) != {"relative_path", "type", "mode", "size", "sha256"}:
+                return False
+            if not isinstance(record.get("mode"), int) or not isinstance(record.get("size"), int):
+                return False
+            if not isinstance(record.get("sha256"), str) or len(record["sha256"]) != 64:
+                return False
+        elif record.get("type") == "symlink":
+            if set(record) != {"relative_path", "type", "mode", "target"}:
+                return False
+            if not isinstance(record.get("mode"), int) or not isinstance(record.get("target"), str):
+                return False
+        else:
+            return False
+    return (
+        paths == sorted(paths)
+        and len(paths) == len(set(paths))
+        and tree.get("sha256") == _opencode_tree_digest(members)
+    )
+
+
+def _opencode_receipt_structure_is_valid(receipt: Any) -> bool:
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "agent_framework_repo",
+        "agent_framework_commit",
+        "source_commit",
+        "bun",
+        "source_tree",
+        "build_tree",
+    }:
+        return False
+    if receipt.get("schema_version") != OPENCODE_SETUP_RECEIPT_SCHEMA:
+        return False
+    source_commit = receipt.get("source_commit")
+    bun = receipt.get("bun")
+    if not isinstance(source_commit, dict) or set(source_commit) != {
+        "relative_path",
+        "mode",
+        "size",
+        "sha256",
+    }:
+        return False
+    if source_commit.get("relative_path") != ".source_commit":
+        return False
+    if not isinstance(bun, dict) or set(bun) != {"path", "mode", "size", "sha256"}:
+        return False
+    if not isinstance(bun.get("path"), str) or not Path(bun["path"]).is_absolute():
+        return False
+    for record in (source_commit, bun):
+        if not isinstance(record.get("mode"), int) or not isinstance(record.get("size"), int):
+            return False
+        if not isinstance(record.get("sha256"), str) or len(record["sha256"]) != 64:
+            return False
+    if not _opencode_tree_record_is_valid(
+        receipt.get("source_tree"),
+        expected_excluded_directories=OPENCODE_SOURCE_TREE_EXCLUDED_DIRECTORIES,
+    ) or not _opencode_tree_record_is_valid(
+        receipt.get("build_tree"), expected_excluded_directories=()
+    ):
+        return False
+    source_by_path = {
+        record["relative_path"]: record for record in receipt["source_tree"]["members"]
+    }
+    if source_by_path.get(".source_commit") != {
+        "type": "file",
+        **source_commit,
+    }:
+        return False
+    build_paths = {
+        record["relative_path"]
+        for record in receipt["build_tree"]["members"]
+        if record.get("type") == "file"
+    }
+    return {"bench-cli.js", "opencode.js"}.issubset(build_paths)
+
+
+def _opencode_authorized_identity(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a receipt to the fields preauthorization compares.
+
+    Authorization pins the build INPUTS — repo/commit, the patched source tree,
+    and the bun binary — plus the SHAPE of the build tree (member paths/types).
+    Bundle bytes (size/sha256) are deliberately excluded: `bun build` output is
+    not byte-reproducible across environments (confirmed empirically: identical
+    source tree + bun binary + lockfile produced an opencode.js differing by
+    ~850 bytes), so byte-pinning outputs only creates false setup failures.
+    Receipt↔disk consistency of the actual bundles is still enforced separately
+    by `_opencode_receipt_matches_runtime`.
+    """
+    identity = json.loads(json.dumps(receipt))
+    identity["bun"].pop("path")
+    identity["source_tree"].pop("root")
+    build_tree = identity["build_tree"]
+    identity["build_tree"] = {
+        "members": sorted(
+            (
+                {"relative_path": member.get("relative_path"), "type": member.get("type")}
+                for member in build_tree.get("members", [])
+            ),
+            key=lambda member: str(member["relative_path"]),
+        ),
+        "member_count": build_tree.get("member_count"),
+    }
+    return identity
+
+
+def _opencode_receipt_is_authorized(receipt: Any, expected_receipt: Any) -> bool:
+    return (
+        _opencode_receipt_structure_is_valid(receipt)
+        and _opencode_receipt_structure_is_valid(expected_receipt)
+        and _opencode_authorized_identity(receipt)
+        == _opencode_authorized_identity(expected_receipt)
+    )
+
+
+def _opencode_receipt_matches_runtime(
+    receipt: Any,
+    opencode_dir: Path,
+    bun_binary: Path,
+    agent_framework_repo: str,
+    agent_framework_commit: str,
+) -> bool:
+    if not _opencode_receipt_structure_is_valid(receipt):
+        return False
+    try:
+        observed = _build_opencode_setup_receipt(
+            opencode_dir,
+            bun_binary,
+            agent_framework_repo,
+            agent_framework_commit,
+        )
+    except (OSError, RuntimeError):
+        return False
+    return receipt == observed
+
 
 def _render_opencode_user_message(
     problem_info: Dict[str, Any],
@@ -1636,8 +2290,106 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_opencode_setup"
+        if not self.config.opencode_setup_receipt_enforce:
+            return self._setup_without_receipt_verification(self.parent_dir / "swe_opencode_setup")
 
+        # Enforced setups live in their own directory: receipt invalidation
+        # rmtree-rebuilds the tree at the pinned commit, and doing that inside
+        # the shared swe_opencode_setup cache would poison later default-path
+        # runs, whose fork-point existence check would silently reuse the
+        # pinned/patched tree instead of their configured commit.
+        setup_dir = self.parent_dir / "swe_opencode_setup_preauthorized"
+
+        try:
+            expected_bytes = _OPENCODE_EXPECTED_RECEIPT_PATH.read_bytes()
+            if hashlib.sha256(expected_bytes).hexdigest() != H8_OPENCODE_SETUP_RECEIPT_SHA256:
+                raise RuntimeError("preauthorized OpenCode receipt reference hash mismatch")
+            expected_receipt = json.loads(expected_bytes)
+        except (OSError, json.JSONDecodeError, TypeError) as error:
+            raise RuntimeError(
+                f"cannot load preauthorized OpenCode receipt reference: {error}"
+            ) from error
+        if not _opencode_receipt_structure_is_valid(expected_receipt):
+            raise RuntimeError(
+                f"preauthorized OpenCode receipt must use {OPENCODE_SETUP_RECEIPT_SCHEMA}"
+            )
+        if (
+            expected_receipt.get("agent_framework_repo")
+            != self.config.agent_framework_repo
+            or expected_receipt.get("agent_framework_commit")
+            != self.config.agent_framework_commit
+        ):
+            raise RuntimeError(
+                "OpenCode repository/commit differs from the preauthorized receipt reference"
+            )
+        machine = os.uname().machine
+        authorized_bun = H9_OPENCODE_BUN_ARTIFACTS.get(machine)
+        if authorized_bun is None:
+            raise RuntimeError(
+                f"no preauthorized OpenCode Bun artifact for architecture {machine}"
+            )
+        expected_receipt["bun"].update(authorized_bun)
+        # Bundle bytes are intentionally NOT overlaid or compared — see
+        # _opencode_authorized_identity: authorization pins inputs (source tree,
+        # bun, repo/commit) and the build-tree shape; bundle output bytes are
+        # not reproducible across environments.
+
+        with self._setup_directory_lock(setup_dir, "opencode"):
+            opencode_dir = setup_dir / "opencode"
+            bun_dir = setup_dir / "bun"
+
+            bun_binary = bun_dir / "bin" / "bun"
+            receipt_path = setup_dir / "setup_receipt.json"
+
+            def _receipt_is_valid(receipt: Any) -> bool:
+                return (
+                    (opencode_dir / "node_modules").is_dir()
+                    and _opencode_receipt_matches_runtime(
+                        receipt,
+                        opencode_dir,
+                        bun_binary,
+                        self.config.agent_framework_repo,
+                        self.config.agent_framework_commit,
+                    )
+                    and _opencode_receipt_is_authorized(receipt, expected_receipt)
+                )
+
+            try:
+                receipt = json.loads(receipt_path.read_bytes())
+                receipt_valid = _receipt_is_valid(receipt)
+            except (OSError, json.JSONDecodeError, TypeError):
+                receipt_valid = False
+            if receipt_valid:
+                print(f"verified cached opencode setup at {setup_dir}", flush=True)
+                return setup_dir
+
+            if setup_dir.exists():
+                print(f"discarding unverified opencode setup at {setup_dir}", flush=True)
+                shutil.rmtree(setup_dir)
+
+            print(f"Setting up opencode environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+
+            self._run_setup_command(self._opencode_setup_script_command(setup_dir, opencode_dir, bun_dir))
+            try:
+                rebuilt_bytes = receipt_path.read_bytes()
+                rebuilt = json.loads(rebuilt_bytes)
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"OpenCode setup did not create a valid receipt: {error}") from error
+            if not _receipt_is_valid(rebuilt):
+                raise RuntimeError(
+                    "OpenCode setup output differs from the preauthorized receipt reference"
+                )
+            return setup_dir
+
+    def _setup_without_receipt_verification(self, setup_dir: Path) -> Path:
+        """Original (fork-point) setup behavior: existence-checked cache, no receipt gate.
+
+        This is the default for every dataset. The H8/H9 receipt preauthorization above is
+        opt-in via ``opencode_setup_receipt_enforce`` because it hard-pins the opencode
+        (repo, commit) and rmtree-rebuilds unverified caches — behavior only terminal-bench
+        configs ask for.
+        """
         with self._setup_directory_lock(setup_dir, "opencode"):
             opencode_dir = setup_dir / "opencode"
             bun_dir = setup_dir / "bun"
@@ -1654,17 +2406,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             print(f"Setting up opencode environment at {setup_dir}...", flush=True)
             setup_dir.mkdir(parents=True, exist_ok=True)
 
-            script_fpath = self.parent_dir / "setup_scripts/opencode.sh"
-            command = (
-                f"SETUP_DIR={setup_dir} "
-                f"OPENCODE_DIR={opencode_dir} "
-                f"BUN_DIR={bun_dir} "
-                f"AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} "
-                f"AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} "
-                f"bash {script_fpath}"
-            )
-            self._run_setup_command(command)
+            self._run_setup_command(self._opencode_setup_script_command(setup_dir, opencode_dir, bun_dir))
             return setup_dir
+
+    def _opencode_setup_script_command(self, setup_dir: Path, opencode_dir: Path, bun_dir: Path) -> str:
+        script_fpath = self.parent_dir / "setup_scripts/opencode.sh"
+        return (
+            f"SETUP_DIR={setup_dir} "
+            f"OPENCODE_DIR={opencode_dir} "
+            f"BUN_DIR={bun_dir} "
+            f"AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} "
+            f"AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} "
+            f"bash {script_fpath}"
+        )
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         data_point = self.config.problem_info
@@ -1690,6 +2444,16 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             raise RuntimeError(
                 f"Could not resolve model server '{self.config.model_server_name}' for opencode bench: {e}"
             )
+
+        # Model-in-netns bridge: for offline service tasks the agent runs in a private
+        # netns (--network=none) and reaches the model over a unix-socket socat bridge, so
+        # override the endpoint it dials to loopback (the inner socat listens there). The
+        # REAL server host:port is recorded onto params in _setup_params (for the outer hop).
+        # The runner starts the outer socat hop around the agent in both the
+        # two-exec production path and the legacy single-exec path.
+        _tb_bridge = _tb_net_bridge_cfg(data_point, self.config.agent_run_id)
+        if _tb_bridge is not None:
+            model_server_base_url = f"http://127.0.0.1:{_tb_bridge['port']}"
 
         # Falls back to the policy model so opencode doesn't POST model=default.
         effective_model = self.config.body.model or default_model_name
@@ -2067,6 +2831,79 @@ class RunOpenHandsAgent(BaseModel):
                 f"overlay image creation failed: {(stdout2 or b'').decode(errors='replace')[:500]}"
             )
 
+    async def _tb_start_outer_bridge(self):
+        """Model-in-netns bridge OUTER hop: start `socat UNIX-LISTEN:<sock> -> TCP:<real
+        model server>` (in the rl-container netns) so the in-SIF inner hop can reach the
+        host model over the bind-mounted unix socket. Returns the subprocess, or None if
+        the bridge isn't active for this task. Killed via _tb_stop_outer_bridge."""
+        # Worker-side: rely ONLY on params (set in _setup_params on the driver) so this does
+        # not depend on TB_NET_BRIDGE_PKG propagating into the Ray worker process. The socket
+        # name is recomputed deterministically from agent_run_id (matches the inner hop).
+        if not _tb_private_network_requested(self.config.problem_info):
+            return None
+        pkg = self.config.tb_bridge_pkg
+        real_hostport = self.config.tb_bridge_real_hostport
+        if not pkg or not real_hostport:
+            raise RuntimeError(
+                "Terminal-Bench private network bridge lacks its bundle or model endpoint"
+            )
+        _tb_validate_net_bridge_bundle(pkg)
+        sockdir = "/tmp/tbnb"
+        sock = f"{sockdir}/{hashlib.sha1(self.config.agent_run_id.encode()).hexdigest()[:16]}.sock"
+        try:
+            os.makedirs(sockdir, exist_ok=True)
+            if os.path.exists(sock):
+                os.unlink(sock)
+            outer_cmd = (
+                f"{pkg}/ld-linux.so --library-path {pkg}/libs {pkg}/socat "
+                f"UNIX-LISTEN:{shlex.quote(sock)},fork,reuseaddr "
+                f"TCP:{real_hostport}"
+            )
+            proc = await asyncio.create_subprocess_shell(
+                outer_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.sleep(0.5)
+            # Fast-fail: if socat exited already (bad bundle/path/bind) don't report success.
+            if proc.returncode is not None:
+                raise RuntimeError(
+                    f"outer socat exited early rc={proc.returncode} for {self.config.instance_id}"
+                )
+            # Wait for the listening socket to appear before the agent connects through it.
+            for _ in range(25):
+                if os.path.exists(sock):
+                    break
+                await asyncio.sleep(0.2)
+            if not os.path.exists(sock):
+                proc.terminate()
+                await proc.wait()
+                raise RuntimeError(
+                    f"outer socat did not create its Unix socket for {self.config.instance_id}"
+                )
+            print(
+                f"[terminal-bench bridge] outer socat up: {sock} -> {real_hostport}",
+                flush=True,
+            )
+            return proc
+        except Exception as e:
+            raise RuntimeError(
+                f"Terminal-Bench private network bridge start failed for {self.config.instance_id}: {e}"
+            ) from e
+
+    async def _tb_stop_outer_bridge(self, proc) -> None:
+        # Async + await wait() so the terminated socat is reaped (no zombie accrual across
+        # the many datapoints/repeats a single gym process serves).
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        except Exception:
+            pass
+
     async def _process_single_datapoint_terminal_bench(self) -> Optional[Path]:
         """Path 2 orchestration for Terminal-Bench tasks.
 
@@ -2093,12 +2930,10 @@ class RunOpenHandsAgent(BaseModel):
         # 1b) SINGLE-EXEC path (opt-in via tb_single_exec): run the agent AND the eval
         # in ONE apptainer exec so background services the agent starts (grpc/nginx/
         # pypi/...) stay alive for the test phase (shared PID namespace). The two-exec
-        # default kills them between execs. apptainer `instance` would be cleaner but
-        # user namespaces are blocked on the nodes. Isolation posture is unchanged vs
-        # the two-exec flow (the staged tests are already reachable via the
-        # /trajectories_mount bind in both; the opencode agent works in the workspace
-        # and never reads /root/tb_tests — empirically verified). Tests are still cp'd
-        # into /tests only in the eval phase, AFTER the agent command returns.
+        # default kills them between execs. Apptainer `instance` would be cleaner but
+        # user namespaces are blocked on the nodes. This legacy path cannot provide
+        # strict mount isolation because agent_eval needs the eval test mount for the
+        # whole exec; H8 production collection therefore uses the two-exec path.
         if self.config.tb_single_exec and self.config.merged_command is not None:
             # The merged agent+eval command was built in _setup_params (the wrapper has
             # _build_apptainer_command; this runner does not). Just use it here.
@@ -2107,11 +2942,60 @@ class RunOpenHandsAgent(BaseModel):
             merged_apptainer = self.config.merged_apptainer_command_str
             metrics.openhands_run_time = -time.time()
             metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
-            active = await self._start_container_command(merged_cmd, merged_apptainer)
+            # Model-in-netns bridge: start the OUTER socat hop before the exec; the in-SIF
+            # inner hop connects to the bind-mounted socket. No-op unless the bridge is
+            # active for this task. Always torn down in finally.
+            _outer = await self._tb_start_outer_bridge()
             try:
-                report_file = await self._finish_container_command(active, merged_cmd)
+                active = await self._start_container_command(merged_cmd, merged_apptainer)
+                try:
+                    report_file = await self._finish_container_command(active, merged_cmd)
+                except Exception as e:
+                    print(f"[terminal-bench single-exec] merged command failed for {instance_id}: {e}", flush=True)
+                    metrics.openhands_run_time += time.time()
+                    metrics.patch_exists = False
+                    metrics.agent_timed_out = (
+                        metrics.openhands_run_time is not None
+                        and metrics.openhands_run_time >= self.config.swebench_agent_timeout
+                    )
+                    update_metrics(self.config.metrics_fpath, metrics.model_dump())
+                    return None
+                metrics.openhands_run_time += time.time()
+                metrics.patch_exists = True
+                # best-effort agent metrics (patch / error) from the agent's output file
+                try:
+                    agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
+                    if agent_out:
+                        out_file = self._openhands_dir_copy_from_host(output_file_path=agent_out[0])
+                        with open(out_file, "r") as f:
+                            out_dict = json.loads(f.read().strip())
+                        metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+                        patch = (out_dict.get("test_result") or {}).get("git_patch") or None
+                        metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
+                except Exception as e:
+                    print(f"[terminal-bench single-exec] agent-metrics read failed for {instance_id}: {e}", flush=True)
+                update_metrics(self.config.metrics_fpath, metrics.model_dump())
+                return report_file
+            finally:
+                await self._tb_stop_outer_bridge(_outer)
+
+        # 2) Run the opencode agent (sequential; writes land in the overlay).
+        metrics.openhands_run_time = -time.time()
+        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+        _outer = await self._tb_start_outer_bridge()
+        try:
+            try:
+                agent_active = await self._start_container_command(
+                    self.config.agent_command, self.config.agent_apptainer_command_str
+                )
+                out_file_in_eval = await self._finish_container_command(agent_active, self.config.agent_command)
+                out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
             except Exception as e:
-                print(f"[terminal-bench single-exec] merged command failed for {instance_id}: {e}", flush=True)
+                print(f"[terminal-bench] agent command failed for {instance_id}: {e}", flush=True)
+                try:
+                    self._openhands_dir_copy_from_host(output_file_path=None)
+                except Exception:
+                    pass
                 metrics.openhands_run_time += time.time()
                 metrics.patch_exists = False
                 metrics.agent_timed_out = (
@@ -2120,46 +3004,8 @@ class RunOpenHandsAgent(BaseModel):
                 )
                 update_metrics(self.config.metrics_fpath, metrics.model_dump())
                 return None
-            metrics.openhands_run_time += time.time()
-            metrics.patch_exists = True
-            # best-effort agent metrics (patch / error) from the agent's output file
-            try:
-                agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
-                if agent_out:
-                    out_file = self._openhands_dir_copy_from_host(output_file_path=agent_out[0])
-                    with open(out_file, "r") as f:
-                        out_dict = json.loads(f.read().strip())
-                    metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
-                    patch = (out_dict.get("test_result") or {}).get("git_patch") or None
-                    metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
-            except Exception as e:
-                print(f"[terminal-bench single-exec] agent-metrics read failed for {instance_id}: {e}", flush=True)
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
-            return report_file
-
-        # 2) Run the opencode agent (sequential; writes land in the overlay).
-        metrics.openhands_run_time = -time.time()
-        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
-        agent_active = await self._start_container_command(
-            self.config.agent_command, self.config.agent_apptainer_command_str
-        )
-        try:
-            out_file_in_eval = await self._finish_container_command(agent_active, self.config.agent_command)
-            out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
-        except Exception as e:
-            print(f"[terminal-bench] agent command failed for {instance_id}: {e}", flush=True)
-            try:
-                self._openhands_dir_copy_from_host(output_file_path=None)
-            except Exception:
-                pass
-            metrics.openhands_run_time += time.time()
-            metrics.patch_exists = False
-            metrics.agent_timed_out = (
-                metrics.openhands_run_time is not None
-                and metrics.openhands_run_time >= self.config.swebench_agent_timeout
-            )
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
-            return None
+        finally:
+            await self._tb_stop_outer_bridge(_outer)
 
         metrics.openhands_run_time += time.time()
         try:
@@ -2183,7 +3029,11 @@ class RunOpenHandsAgent(BaseModel):
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
             metrics.eval_timed_out = (
-                metrics.final_eval_time is not None and metrics.final_eval_time >= self.config.swebench_tests_timeout
+                str(e) == "Command timed out"
+                or (
+                    metrics.final_eval_time is not None
+                    and metrics.final_eval_time >= float(self.config.eval_command.timeout) + 0.05
+                )
             )
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return None
@@ -2589,6 +3439,24 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             FileNotFoundError: If no matching container file is found.
         """
         instance_id = data_point["instance_id"]
+        trusted_sif_root = os.environ.get("TB_TRUSTED_SIF_ROOT")
+        if data_point.get("dataset_name") == "terminal-bench" and trusted_sif_root:
+            root = Path(trusted_sif_root)
+            if not root.is_absolute():
+                raise FileNotFoundError(
+                    f"TB_TRUSTED_SIF_ROOT must be absolute: {trusted_sif_root}"
+                )
+            if Path(instance_id).name != instance_id or instance_id in {".", ".."}:
+                raise FileNotFoundError(
+                    f"invalid Terminal-Bench instance_id for trusted SIF lookup: {instance_id}"
+                )
+            trusted_container = root / f"{instance_id}_amd64.sif"
+            if trusted_container.is_file():
+                return str(trusted_container)
+            raise FileNotFoundError(
+                "No exact trusted Terminal-Bench SIF found: "
+                f"{trusted_container} (TB_TRUSTED_SIF_ROOT is set; fuzzy fallback disabled)"
+            )
         container_formatters = data_point["container_formatter"]
 
         if isinstance(container_formatters, str):
@@ -2675,12 +3543,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def _build_apptainer_command(
         self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
     ) -> str:
-        dataset_path_to_mount = str(params.instance_dataset_path)
         data_point = params.problem_info
+        dataset_path = params.instance_dataset_path
+        if (
+            data_point.get("dataset_name") == "terminal-bench"
+            and command.mode in ("agent", "agent_eval")
+            and params.agent_instance_dataset_path is not None
+        ):
+            dataset_path = params.agent_instance_dataset_path
+        dataset_path_to_mount = str(dataset_path)
 
-        # Fix localhost URLs not working sometimes
+        # Private-netns config for offline service tasks. The model bridge is only
+        # needed during the agent phase; eval boots the modified service state in
+        # a fresh isolated container and has no model traffic.
+        tb_net = _tb_net_bridge_cfg(data_point, params.agent_run_id)
+        tb_bridge = tb_net if command.mode in ("agent", "agent_eval") else None
+
+        # Fix localhost URLs not working sometimes. Under the bridge (--network=none) also map
+        # $(hostname) to loopback so sudo/tools that resolve the node hostname don't fail
+        # ("unable to resolve host") with no DNS in the private netns. Gated so the shared-netns
+        # path (incl. existing rollouts) keeps the exact original /etc/hosts behaviour.
         container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+        if tb_net is not None:
+            container_commands.append('echo "127.0.0.1 localhost $(hostname 2>/dev/null)" >/etc/hosts')
+        else:
+            container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -2899,11 +3786,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if command.mode in ("eval", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
             # Authoritative hidden tests, staged on the host by
-            # TerminalBenchDatasetProcessor.get_run_command. Mounted at /root/tb_tests
-            # (the agent works in the workspace and never reads it; in agent_eval the
-            # eval phase cp's it into /tests only AFTER the agent command returns).
-            tb_tests_host_dir = params.persistent_dir / "tb_tests"
+            # TerminalBenchDatasetProcessor.get_run_command in a private sibling
+            # directory outside the agent-visible /trajectories_mount bind.
+            tb_tests_host_dir = _tb_private_tests_host_dir(params.persistent_dir)
             mount_args.append(f"--mount type=bind,src={tb_tests_host_dir},dst=/root/tb_tests,ro")
+            tb_verifier_host_dir = _tb_private_verifier_host_dir(params.persistent_dir)
+            tb_verifier_host_dir.mkdir(parents=True, exist_ok=True)
+            mount_args.append(
+                f"--mount type=bind,src={tb_verifier_host_dir},dst=/logs/verifier"
+            )
 
         if command.mode in ("agent", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
             # Defense-in-depth: if the task SIF baked the hidden tests in, delete
@@ -2935,6 +3826,26 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "printf 'APT::Sandbox::User \"root\";\\nAcquire::Retries \"3\";\\n' "
                 "> /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true"
             )
+
+        if data_point.get("dataset_name") == "terminal-bench" and tb_net is not None:
+            # Give each offline service phase a private netns, bring loopback up,
+            # and boot the image runscript from the shared modified overlay. Only
+            # the agent phase needs the unix-socket hop to the policy model.
+            _ld = f"{tb_net['pkg']}/ld-linux.so --library-path {tb_net['pkg']}/libs"
+            container_commands.append(f"{_ld} {tb_net['pkg']}/ip link set lo up 2>/dev/null || true")
+            if tb_bridge is not None:
+                container_commands.append(
+                    f"{_ld} {tb_bridge['pkg']}/socat "
+                    f"TCP-LISTEN:{tb_bridge['port']},fork,reuseaddr,bind=127.0.0.1 "
+                    f"UNIX-CONNECT:{tb_bridge['sock']} >/tmp/tb_inner_socat.log 2>&1 & sleep 1"
+                )
+            container_commands.append(
+                "if [ -f /.singularity.d/runscript ]; then "
+                "( bash /.singularity.d/runscript </dev/null >/tmp/tb_boot.log 2>&1 & ); sleep 5; fi; true"
+            )
+            mount_args.append(f"--mount type=bind,src={tb_net['pkg']},dst={tb_net['pkg']},ro")
+            if tb_bridge is not None:
+                mount_args.append(f"--mount type=bind,src={tb_bridge['sockdir']},dst={tb_bridge['sockdir']}")
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
@@ -3008,13 +3919,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # is created on the Ray worker before the agent launches (see
         # _process_single_datapoint_terminal_bench). All other datasets keep the
         # original ephemeral tmpfs overlay (each container fully isolated).
+        net_flag = ""
         if data_point.get("dataset_name") == "terminal-bench":
             overlay_img = params.persistent_dir / "agent_overlay.img"
             writable_overlay_flag = f"--overlay {shlex.quote(str(overlay_img))}"
+            # Private loopback netns for offline service tasks. During the agent
+            # phase the model is carried over the unix-socket bridge; eval only
+            # needs isolated service ports and the modified overlay.
+            if tb_net is not None:
+                net_flag = " --net --network=none"
         else:
             writable_overlay_flag = "--writable-tmpfs"
         apptainer_cmd = (
-            f"apptainer exec {writable_overlay_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec {writable_overlay_flag}{net_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
@@ -3088,8 +4005,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
-        # To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
-        instance_dataset_dir = persistent_dir / "instance_datasets"
+        # To avoid HF dataset API calls, write the instance dictionary to a file.
+        # Terminal-Bench's authoritative row contains hidden test payloads, so it
+        # lives in a host-only sibling rather than the agent-visible persistent bind.
+        is_terminal_bench = problem_info.get("dataset_name") == "terminal-bench"
+        instance_dataset_dir = (
+            _tb_private_host_dir(persistent_dir) / "instance_datasets"
+            if is_terminal_bench
+            else persistent_dir / "instance_datasets"
+        )
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
         instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
         instance_dict = json.loads(problem_info["instance_dict"])
@@ -3097,6 +4021,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             instance_dict["repo_name"] = instance_dict["repo"]
         with open(instance_dataset_path, "w") as f:
             f.write(json.dumps(instance_dict) + "\n")
+
+        agent_instance_dataset_path = None
+        if is_terminal_bench:
+            agent_instance_dataset_dir = persistent_dir / "agent_instance_datasets"
+            agent_instance_dataset_dir.mkdir(parents=True, exist_ok=True)
+            agent_instance_dataset_path = agent_instance_dataset_dir / f"{agent_run_id}.jsonl"
+            agent_instance_dict = _tb_agent_safe_instance_dict(instance_dict)
+            agent_instance_dataset_path.write_text(json.dumps(agent_instance_dict) + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
         output_for_eval_mounted_path = (
@@ -3141,6 +4073,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             inference_params=inference_params,
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
+            agent_instance_dataset_path=agent_instance_dataset_path,
             trajectories_root=trajectories_root,
             output_for_eval_mounted_path=output_for_eval_mounted_path,
             output_for_eval_path=output_for_eval_path,
@@ -3198,7 +4131,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
 
-        # tb_single_exec (terminal-bench): build the merged agent+eval command HERE,
+        # Legacy tb_single_exec (terminal-bench): build the merged agent+eval command HERE,
         # where the wrapper's _build_apptainer_command is available (RunOpenHandsAgent,
         # which runs the datapoint, does NOT have that method). The merged exec runs the
         # agent then the eval in ONE apptainer exec so the agent's services persist.
@@ -3218,6 +4151,20 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 + 120,
             )
             params.merged_apptainer_command_str = self._build_apptainer_command(params, params.merged_command)
+
+        # Model-in-netns bridge: record the REAL model-server host:port on params (survives
+        # the Ray model_dump) so the runner can point the outer socat hop at the live
+        # endpoint. The agent's own base_url was overridden to loopback in get_run_command.
+        _b = _tb_net_bridge_cfg(params.problem_info, params.agent_run_id)
+        if _b is not None:
+            params.tb_bridge_pkg = _b["pkg"]
+            try:
+                _msc = get_first_server_config_dict(get_global_config_dict(), params.model_server_name)
+                params.tb_bridge_real_hostport = f"{_msc.host}:{_msc.port}"
+            except Exception as _e:
+                raise RuntimeError(
+                    "Terminal-Bench private network bridge could not resolve model server host:port"
+                ) from _e
 
         return params, dataset_processor
 
@@ -3277,6 +4224,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (
             self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
         )
+        if params.problem_info.get("dataset_name") == "terminal-bench":
+            synthetic_terminal_tool_outputs = _append_terminal_tool_outputs(
+                chat_completions_trajectory
+            )
+            metrics_to_update["synthetic_terminal_tool_outputs"] = len(
+                synthetic_terminal_tool_outputs
+            )
+            _tb_flatten_multipart_content(chat_completions_trajectory)
 
         tools = [
             FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
