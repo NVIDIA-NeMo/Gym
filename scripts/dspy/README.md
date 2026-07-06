@@ -49,7 +49,7 @@ python scripts/dspy/optimize.py \
   --seed "Answer the question." \
   --reflection-model aws/anthropic/bedrock-claude-opus-4-7 \
   --reflection-base-url https://inference-api.nvidia.com/v1 \
-  --reflection-api-key sk-cYILjzbwwF57PMufDEvmdw \
+  --reflection-api-key ... \
   --max-calls 300
 ```
 
