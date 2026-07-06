@@ -148,6 +148,7 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
         inference_params={"temperature": 1.0, "top_p": 1.0},
         agent_run_id="test_run_123",
         instance_dataset_path=persistent_dir / "data.jsonl",
+        agent_instance_dataset_path=persistent_dir / "data_agent.jsonl",
         trajectories_root=persistent_dir / "trajectories" / "django__django-12345",
         prediction_path=persistent_dir / "output.jsonl",
         output_for_eval_mounted_path=base_mounted_dir / "output_for_eval.jsonl",

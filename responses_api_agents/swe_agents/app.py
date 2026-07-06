@@ -224,6 +224,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     inference_params: Dict[str, Any]
     agent_run_id: str
     instance_dataset_path: Path
+    agent_instance_dataset_path: Path
     trajectories_root: Path
     prediction_path: Path
     output_for_eval_mounted_path: Path
@@ -261,6 +262,10 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     @property
     def instance_id(self) -> str:
         return self.problem_info["instance_id"]
+
+    @property
+    def eval_private_dir(self) -> Path:
+        return self.persistent_dir / "eval_private"
 
 
 class SWEBenchMetrics(BaseModel):
@@ -805,7 +810,7 @@ REBENCH_DIR={rebench_dir} \
         repo_name = repo.split("/")[1] if "/" in repo else repo
 
         test_patch = instance_dict.get("test_patch", "")
-        test_patch_path = self.config.persistent_dir / "test_patch.diff"
+        test_patch_path = self.config.eval_private_dir / "test_patch.diff"
         test_patch_path.write_text(test_patch)
 
         fail_to_pass = instance_dict.get("FAIL_TO_PASS", [])
@@ -816,7 +821,7 @@ REBENCH_DIR={rebench_dir} \
             pass_to_pass = json.loads(pass_to_pass)
 
         # Write test metadata to files to avoid exceeding OS argument length limits
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        eval_meta_dir = self.config.eval_private_dir / "eval_meta"
         eval_meta_dir.mkdir(parents=True, exist_ok=True)
         # Pre-normalize all expected test names so the in-container eval script
         # can compare directly without duplicating the normalization regexes.
@@ -921,7 +926,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         results = {self._normalize_test_name(k): v for k, v in results.items()}
         passed = sorted(k for k, v in results.items() if v == "PASSED")
 
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        eval_meta_dir = self.config.eval_private_dir / "eval_meta"
         expected_passed = json.loads((eval_meta_dir / "expected_passed.json").read_text())
         norm_f2p = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
         norm_p2p = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
@@ -970,7 +975,7 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
         test_framework = inst.get("test_framework", "")
 
         # Write test patch to persistent_dir (mounted into container)
-        test_patch_path = self.config.persistent_dir / "test_patch.diff"
+        test_patch_path = self.config.eval_private_dir / "test_patch.diff"
         test_patch_path.write_text(test_patch)
 
         # Write eval metadata for host-side postprocessing
@@ -981,7 +986,7 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
         if isinstance(pass_to_pass, str):
             pass_to_pass = json.loads(pass_to_pass)
 
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        eval_meta_dir = self.config.eval_private_dir / "eval_meta"
         eval_meta_dir.mkdir(parents=True, exist_ok=True)
         (eval_meta_dir / "fail_to_pass.json").write_text(json.dumps(fail_to_pass))
         (eval_meta_dir / "pass_to_pass.json").write_text(json.dumps(pass_to_pass))
@@ -1089,7 +1094,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        eval_meta_dir = self.config.eval_private_dir / "eval_meta"
         fail_to_pass = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
         pass_to_pass = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
         test_framework = (eval_meta_dir / "test_framework.txt").read_text().strip()
@@ -1144,9 +1149,9 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
         # Materialize the verifier artifacts on the host; _build_apptainer_command
         # binds them into the eval container at the absolute paths test.sh expects
         # (/tests/test.sh, /tests/test.patch).
-        test_patch_path = self.config.persistent_dir / "test.patch"
+        test_patch_path = self.config.eval_private_dir / "test.patch"
         test_patch_path.write_text(test_patch)
-        test_sh_path = self.config.persistent_dir / "test.sh"
+        test_sh_path = self.config.eval_private_dir / "test.sh"
         test_sh_path.write_text(test_sh)
 
         reset_cmd = f"git reset --hard {base_commit}" if base_commit else "git reset --hard HEAD"
@@ -1295,9 +1300,9 @@ class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
 
         # Materialise artefacts on the host; _build_apptainer_command binds
         # them into the eval container at fixed absolute paths.
-        test_patch_path = self.config.persistent_dir / "denovoswe_test_patch.diff"
+        test_patch_path = self.config.eval_private_dir / "denovoswe_test_patch.diff"
         test_patch_path.write_text(test_patch)
-        meta_path = self.config.persistent_dir / "denovoswe_meta.json"
+        meta_path = self.config.eval_private_dir / "denovoswe_meta.json"
         meta_path.write_text(
             json.dumps(
                 {
@@ -1310,7 +1315,7 @@ class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
                 }
             )
         )
-        binary_path = self.config.persistent_dir / "denovoswe_test_binary.b64"
+        binary_path = self.config.eval_private_dir / "denovoswe_test_binary.b64"
         binary_path.write_text(test_binary_b64)
         # The document/spec doubles as the agent's README.md inside the
         # container. We write it next to the other artefacts so both the agent
@@ -1835,6 +1840,32 @@ def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     return {}
+
+
+# The ONLY instance fields exposed to the AGENT container; ground truth (gold/test
+# patches, graded test names, verifier scripts) stays host-side by default.
+AGENT_VISIBLE_INSTANCE_FIELDS = frozenset(
+    {
+        "instance_id",
+        "base_commit",
+        "repo",
+        "repo_name",
+        "version",
+        "problem_statement",
+        "hints_text",
+        "image_assets",
+        "image_name",
+        "workspace",
+        "workspace_path",
+        "language",
+        "repo_language",
+        "environment_setup_commit",
+    }
+)
+
+
+def _redact_instance_dict_for_agent(instance_dict: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in instance_dict.items() if k in AGENT_VISIBLE_INSTANCE_FIELDS}
 
 
 _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE = (
@@ -2972,7 +3003,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def _build_apptainer_command(
         self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
     ) -> str:
-        dataset_path_to_mount = str(params.instance_dataset_path)
+        # Agent containers only ever see the redacted instance dict.
+        dataset_path_to_mount = str(
+            params.instance_dataset_path if command.mode == "eval" else params.agent_instance_dataset_path
+        )
         data_point = params.problem_info
 
         # Fix localhost URLs not working sometimes
@@ -3055,9 +3089,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"echo {chrome_b64} | base64 -d > /tmp/chrome-wrapper.sh && chmod +x /tmp/chrome-wrapper.sh"
         )
 
-        # Build mount arguments
+        # Build mount arguments; the empty overmount hides ground-truth eval artifacts in-container.
         mount_args = [
             f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
+            f"--mount type=bind,src={params.eval_private_dir / '.empty'},dst=/trajectories_mount/eval_private,ro",
         ]
 
         if params.agent_framework == "opencode" and command.mode == "eval":
@@ -3164,7 +3199,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             rebench_setup_dir = params.swe_rebench_setup_dir
             mount_args.append(f"--mount type=bind,src={rebench_setup_dir},dst=/swe_rebench_setup,ro")
 
-            test_patch_path = params.persistent_dir / "test_patch.diff"
+            test_patch_path = params.eval_private_dir / "test_patch.diff"
             # model_patch_path placeholder needed: eval container starts before agent writes the patch
             if not params.model_patch_path.exists():
                 params.model_patch_path.write_text("")
@@ -3172,7 +3207,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
             # Mount eval metadata files explicitly (directory bind mounts may not expose subdirs on Lustre)
-            eval_meta_dir = params.persistent_dir / "eval_meta"
+            eval_meta_dir = params.eval_private_dir / "eval_meta"
             mount_args.append(
                 f"--mount type=bind,src={eval_meta_dir / 'expected_passed.json'},dst=/eval_meta/expected_passed.json,ro"
             )
@@ -3184,7 +3219,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
 
         if command.mode == "eval" and data_point.get("dataset_name") == "swe-bench-ext":
-            test_patch_path = params.persistent_dir / "test_patch.diff"
+            test_patch_path = params.eval_private_dir / "test_patch.diff"
             if not params.model_patch_path.exists():
                 params.model_patch_path.write_text("")
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/root/test_patch.diff")
@@ -3192,8 +3227,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if command.mode == "eval" and data_point.get("dataset_name") == "deepswe":
             # DeepSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
-            test_sh_path = params.persistent_dir / "test.sh"
-            test_patch_path = params.persistent_dir / "test.patch"
+            test_sh_path = params.eval_private_dir / "test.sh"
+            test_patch_path = params.eval_private_dir / "test.patch"
             # Placeholder needed: eval container starts before the agent writes the
             # patch (golden-patch path writes it before launch).
             if not params.model_patch_path.exists():
@@ -3214,9 +3249,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             if command.mode == "eval":
                 # DeNovoSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
-                test_patch_path = params.persistent_dir / "denovoswe_test_patch.diff"
-                meta_path = params.persistent_dir / "denovoswe_meta.json"
-                binary_path = params.persistent_dir / "denovoswe_test_binary.b64"
+                test_patch_path = params.eval_private_dir / "denovoswe_test_patch.diff"
+                meta_path = params.eval_private_dir / "denovoswe_meta.json"
+                binary_path = params.eval_private_dir / "denovoswe_test_binary.b64"
                 if not params.model_patch_path.exists():
                     params.model_patch_path.write_text("")
                 mount_args.append(
@@ -3360,15 +3395,23 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
+        # Ground-truth artifacts live here; hidden from the container by an empty overmount.
+        eval_private_dir = persistent_dir / "eval_private"
+        (eval_private_dir / ".empty").mkdir(parents=True, exist_ok=True)
+
         # To avoid making HF dataset API calls, we write the instance dictionary to a file and mount it in the container.
+        # The agent container gets a redacted copy (no gold patch / test patch / graded test names).
         instance_dataset_dir = persistent_dir / "instance_datasets"
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
-        instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
+        instance_dataset_path = eval_private_dir / f"{agent_run_id}.jsonl"
+        agent_instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
         instance_dict = json.loads(problem_info["instance_dict"])
         if "repo" in instance_dict and "repo_name" not in instance_dict:
             instance_dict["repo_name"] = instance_dict["repo"]
         with open(instance_dataset_path, "w") as f:
             f.write(json.dumps(instance_dict) + "\n")
+        with open(agent_instance_dataset_path, "w") as f:
+            f.write(json.dumps(_redact_instance_dict_for_agent(instance_dict)) + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
         output_for_eval_mounted_path = (
@@ -3413,6 +3456,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             inference_params=inference_params,
             agent_run_id=agent_run_id,
             instance_dataset_path=instance_dataset_path,
+            agent_instance_dataset_path=agent_instance_dataset_path,
             trajectories_root=trajectories_root,
             output_for_eval_mounted_path=output_for_eval_mounted_path,
             output_for_eval_path=output_for_eval_path,
@@ -3477,7 +3521,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
 
-        with (params.persistent_dir / "params.json").open("w") as f:
+        with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
 
         try:
