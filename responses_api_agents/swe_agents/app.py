@@ -21,6 +21,7 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -32,7 +33,7 @@ from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
 import ray
 import tomlkit
@@ -122,7 +123,22 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
     apptainer_memory_limit_mb: int = Field(
-        default=32 * 1024, description="Memory limit for the apptainer container (MB)"
+        default=64 * 1024,
+        description=(
+            "Memory limit (MB) for both agent and eval containers, enforced as the cumulative "
+            "tree-RSS limit of the gym-side memory watchdog. <= 0 disables it."
+        ),
+    )
+    memory_watchdog_enabled: bool = Field(
+        default=True,
+        description="Enable the RSS memory watchdog for the agent and eval containers.",
+    )
+    memory_watchdog_poll_interval_s: float = Field(
+        default=1.0,
+        description=(
+            "Poll interval (seconds) for the container memory watchdog. With no ulimit backstop "
+            "this bounds the worst-case RSS overshoot of a fast allocator; a poll costs ~3ms."
+        ),
     )
 
     command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
@@ -253,11 +269,15 @@ class SWEBenchMetrics(BaseModel):
     model_patch: Optional[str] = None
 
     # Failure-mode signals used to decide mask_sample downstream.
-    # agent_error_kind is one of: "max_iteration", "context_window",
-    # "stuck_in_loop", "other", or None if the agent finished cleanly.
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+
+    # Memory watchdog signals
+    oom_killed: Optional[bool] = None
+    eval_oom_killed: Optional[bool] = None
+    agent_peak_rss_mb: Optional[int] = None
+    eval_peak_rss_mb: Optional[int] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -1915,7 +1935,12 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 
         # Falls back to the policy model so opencode doesn't POST model=default.
         effective_model = self.config.body.model or default_model_name
-        config_str = json.dumps({"llm": {"model": {"model": effective_model}}})
+        # temperature/top_p ride along; NeMo-RL asserts exact on-policy sampling params on every request.
+        llm_model_cfg: Dict[str, Any] = {"model": effective_model}
+        for key in ("temperature", "top_p"):
+            if self.config.inference_params.get(key) is not None:
+                llm_model_cfg[key] = self.config.inference_params[key]
+        config_str = json.dumps({"llm": {"model": llm_model_cfg}})
 
         workspace_path = _resolve_opencode_workspace_path(data_point)
         user_message = _render_opencode_user_message(
@@ -2127,12 +2152,120 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 #     return data
 
 
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+
+
+class ProcStat(NamedTuple):
+    pid: int
+    ppid: int
+    pgid: int
+    rss_bytes: int
+    comm: str
+
+
+_PROC_CHILDREN_SUPPORTED = os.path.exists(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+
+
+def _read_proc_stat(pid: int) -> Optional[ProcStat]:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            data = f.read()
+        # comm is parenthesized and may contain spaces: "123 (tmux: server) S 1 ..."
+        rparen = data.rindex(")")
+        comm = data[data.index("(") + 1 : rparen]
+        rest = data[rparen + 2 :].split()
+        return ProcStat(
+            pid=pid,
+            ppid=int(rest[1]),
+            pgid=int(rest[2]),
+            rss_bytes=int(rest[21]) * _PAGE_SIZE,
+            comm=comm,
+        )
+    except (OSError, ValueError, IndexError):
+        return None  # process exited mid-scan / malformed
+
+
+def _tree_pids_via_children(root_pid: int) -> set[int]:
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            tids = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            continue  # process exited mid-walk
+        for tid in tids:
+            try:
+                with open(f"/proc/{pid}/task/{tid}/children") as f:
+                    stack.extend(int(child) for child in f.read().split())
+            except (OSError, ValueError):
+                continue
+    return seen
+
+
+def _scan_container_tree(root_pid: int) -> List[ProcStat]:
+    """Snapshot the process tree rooted at root_pid."""
+    if _PROC_CHILDREN_SUPPORTED:
+        tree = []
+        for pid in _tree_pids_via_children(root_pid):
+            stat = _read_proc_stat(pid)
+            if stat is not None:
+                tree.append(stat)
+        return tree
+
+    # Fallback: full /proc sweep + ppid walk (kernels without CONFIG_PROC_CHILDREN).
+    procs: Dict[int, ProcStat] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        stat = _read_proc_stat(int(entry))
+        if stat is not None:
+            procs[stat.pid] = stat
+
+    children: Dict[int, List[int]] = {}
+    for proc in procs.values():
+        children.setdefault(proc.ppid, []).append(proc.pid)
+
+    tree = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid in procs:
+            tree.append(procs[pid])
+        stack.extend(children.get(pid, ()))
+    return tree
+
+
+def _kill_container_tree(root_pid: int) -> None:
+    """SIGKILL every process group in the container tree (setsid'd members live in their own pgids)."""
+    tree = _scan_container_tree(root_pid)
+    for pgid in {proc.pgid for proc in tree}:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for proc in tree:  # stragglers whose group kill raced with a fork
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 class ActiveContainerCommand(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     process: Process
     log_file: Any
     log_file_path: Path
+    watchdog_task: Optional[Any] = None
+    watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RunOpenHandsAgent(BaseModel):
@@ -2211,6 +2344,56 @@ class RunOpenHandsAgent(BaseModel):
 
         return dest_output
 
+    @staticmethod
+    def _apply_watchdog_stats(
+        metrics: "SWEBenchMetrics", active_command: ActiveContainerCommand, mode: str
+    ) -> None:
+        stats = active_command.watchdog_stats
+        if mode == "agent":
+            if stats.get("oom_killed"):
+                metrics.oom_killed = True
+                metrics.agent_error_kind = "oom"
+            if stats.get("agent_peak_rss_mb"):
+                metrics.agent_peak_rss_mb = stats["agent_peak_rss_mb"]
+        else:
+            if stats.get("oom_killed"):
+                metrics.eval_oom_killed = True
+            if stats.get("agent_peak_rss_mb"):
+                metrics.eval_peak_rss_mb = stats["agent_peak_rss_mb"]
+
+    async def _memory_watchdog(self, root_pid: int, stats: Dict[str, Any], mode: str) -> None:
+        """Kill the container when its cumulative process-tree RSS crosses
+        apptainer_memory_limit_mb (cgroups are unavailable in the enroot sandbox)."""
+        params = self.config
+        limit_mb = params.apptainer_memory_limit_mb
+        limit_bytes = limit_mb * 1024 * 1024
+        if limit_bytes <= 0:
+            return
+        tag = f"[MemoryWatchdog:{params.instance_id}:{mode}]"
+
+        try:
+            while True:
+                await asyncio.sleep(params.memory_watchdog_poll_interval_s)
+                tree = await asyncio.to_thread(_scan_container_tree, root_pid)
+                if not tree:
+                    return  # container exited; normal completion path takes over
+
+                total = sum(proc.rss_bytes for proc in tree)
+                stats["agent_peak_rss_mb"] = max(stats.get("agent_peak_rss_mb", 0), total >> 20)
+
+                if total >= limit_bytes:
+                    print(
+                        f"{tag} OOM: tree RSS {total >> 20}MB >= {limit_mb}MB — killing container",
+                        flush=True,
+                    )
+                    stats["oom_killed"] = True
+                    await asyncio.to_thread(_kill_container_tree, root_pid)
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # never let the watchdog take down the rollout
+            print(f"{tag} watchdog error, monitoring disabled: {e}", flush=True)
+
     async def _start_container_command(
         self, command: ExecuteContainerCommandArgs, apptainer_cmd: str
     ) -> ActiveContainerCommand:
@@ -2220,9 +2403,17 @@ class RunOpenHandsAgent(BaseModel):
         log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
         log_file = open(log_file_path, "w")
 
-        process = await asyncio.create_subprocess_shell(apptainer_cmd, stdout=log_file, stderr=log_file)
+        # start_new_session so watchdog/timeout kills can address the whole process tree
+        process = await asyncio.create_subprocess_shell(
+            apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
+        )
 
-        return ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+        active_command = ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+        if self.config.memory_watchdog_enabled:
+            active_command.watchdog_task = asyncio.create_task(
+                self._memory_watchdog(process.pid, active_command.watchdog_stats, command.mode)
+            )
+        return active_command
 
     async def _finish_container_command(
         self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
@@ -2234,11 +2425,23 @@ class RunOpenHandsAgent(BaseModel):
             await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
         except asyncio.TimeoutError:
             if active_command.process.returncode is None:
-                active_command.process.kill()
+                _kill_container_tree(active_command.process.pid)
+                try:
+                    active_command.process.kill()
+                except ProcessLookupError:
+                    pass
                 await active_command.process.wait()
             raise ValueError("Command timed out")
         finally:
             active_command.log_file.close()
+            if active_command.watchdog_task is not None:
+                active_command.watchdog_task.cancel()
+
+        if active_command.watchdog_stats.get("oom_killed"):
+            raise RuntimeError(
+                f"{command.mode} container killed by the memory watchdog (OOM). "
+                f"Peak tree RSS: {active_command.watchdog_stats.get('agent_peak_rss_mb')}MB."
+            )
 
         if active_command.process.returncode != 0:
             raise RuntimeError(
@@ -2267,9 +2470,15 @@ class RunOpenHandsAgent(BaseModel):
 
     async def _kill_active_command(self, active_command: ActiveContainerCommand) -> None:
         if active_command.process.returncode is None:
-            active_command.process.kill()
+            _kill_container_tree(active_command.process.pid)
+            try:
+                active_command.process.kill()
+            except ProcessLookupError:
+                pass
             await active_command.process.wait()
         active_command.log_file.close()
+        if active_command.watchdog_task is not None:
+            active_command.watchdog_task.cancel()
 
     async def process_single_datapoint(self) -> Optional[Path]:
         if self.config.verify_golden_patch:
@@ -2299,6 +2508,7 @@ class RunOpenHandsAgent(BaseModel):
             out_file_in_eval = await self._finish_container_command(
                 openhands_active_command, self.config.agent_command
             )
+            self._apply_watchdog_stats(metrics, openhands_active_command, mode="agent")
             out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
         except Exception as e:
             print(f"Agent command failed for {instance_id}: {e}", flush=True)
@@ -2308,6 +2518,7 @@ class RunOpenHandsAgent(BaseModel):
                 pass
             if eval_active_command is not None:
                 await self._kill_active_command(eval_active_command)
+            self._apply_watchdog_stats(metrics, openhands_active_command, mode="agent")
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
@@ -2395,8 +2606,10 @@ class RunOpenHandsAgent(BaseModel):
         metrics.final_eval_time = -time.time()
         try:
             report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
+            self._apply_watchdog_stats(metrics, eval_active_command, mode="eval")
         except Exception as e:
             print(f"Eval command failed for {instance_id}: {e}", flush=True)
+            self._apply_watchdog_stats(metrics, eval_active_command, mode="eval")
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
             # Detect wall-clock eval timeout: final_eval_time (elapsed since eval start)
@@ -3061,11 +3274,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # candidate home paths a few lines below.
         env_args += "--env GRADLE_USER_HOME=/root/.gradle "
 
-        # Cap CoreCLR heap reservation to 8 GiB so .NET / PowerShell-Pester
-        # tests survive the apptainer-imposed `ulimit -v` virtual-memory
-        # limit. Without this, CoreCLR's default upfront heap reservation
-        # exceeds the v-limit and fails with HRESULT 0x8007000E
-        # ("GC heap initialization failed").
+        # Cap CoreCLR heap reservation to 8 GiB
         env_args += "--env DOTNET_GCHeapHardLimit=0x200000000 "
 
         # Point Karma at our Chrome-flags wrapper. Real chrome is at well-known
@@ -3086,10 +3295,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
         )
-        memory_limit_mb = params.apptainer_memory_limit_mb
-        if memory_limit_mb is not None and memory_limit_mb > 0:
-            memory_limit_kb = int(memory_limit_mb) * 1024
-            apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
         return apptainer_cmd
 
@@ -3309,15 +3514,21 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         #    or blew the context window) — the reward is accidental.
         # 2) Final eval step timed out — reward is unreliable.
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
+        # 4) Memory watchdog killed the agent container (OOM).
+        # 5) Memory watchdog killed the eval container.
         persisted_metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
         resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
+        oom_killed = bool(persisted_metrics.oom_killed)
+        eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
         if (
             (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
             or eval_timed_out
             or agent_timed_out
+            or oom_killed
+            or eval_oom_killed
         ):
             params.mask_sample = True
 
