@@ -114,9 +114,12 @@ class TerminalBenchIsolationTests(unittest.TestCase):
             setup_script,
         )
         self.assertIn('handle.extractall(extract_root, filter="data")', setup_script)
-        self.assertIn(
-            'BENCH_CLI="$OPENCODE_DIR/.bench-build/bench-cli.js"', setup_script
-        )
+        # run_infer.sh must NOT be patched to launch the bundled bench-cli:
+        # from .bench-build/ its root walk overshoots and every rollout dies
+        # with "Module not found <root>/index.ts" (HSG job 4127557). The
+        # campaign-proven launcher runs bench/cli.ts from the pinned source.
+        self.assertNotIn('BENCH_CLI="$OPENCODE_DIR/.bench-build/bench-cli.js"', setup_script)
+        self.assertIn("run_infer.sh is deliberately NOT patched", setup_script)
         self.assertIn('"schema_version": "h8_opencode_setup_receipt_v2"', setup_script)
         self.assertIn('"source_tree": tree_identity(', setup_script)
         self.assertIn('"build_tree": tree_identity(', setup_script)

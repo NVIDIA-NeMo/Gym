@@ -1906,7 +1906,7 @@ _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE = (
 ).read_text()
 
 H8_OPENCODE_SETUP_RECEIPT_SHA256 = (
-    "133091e352ad4c9742a6bc2fff6e8790be37d64363cc9a4bc39e1d546b0400e0"
+    "e64f199895d8da7b1a1044f5088fe1de7758f01039b2b4d77f2fc94b40ac69b3"
 )
 _OPENCODE_EXPECTED_RECEIPT_PATH = (
     Path(__file__).parent / "opencode_setup_receipt_expected.json"

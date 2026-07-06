@@ -166,36 +166,12 @@ if content.count(old) != 1:
 path.write_text(content.replace(old, new))
 PY
 
-    # The checked-out launcher points Bun at mutable TypeScript. Replace that exact
-    # source construct with the required receipt-bound bench bundle. Count checks
-    # make upstream drift fatal instead of leaving a partially patched launcher.
-    run_infer="$opencode_dir/evaluation/benchmarks/swe_bench/scripts/run_infer.sh"
-    run_python - "$run_infer" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-content = path.read_text()
-replacements = (
-    (
-        'BENCH_CLI="$OPENCODE_DIR/packages/opencode/src/bench/cli.ts"',
-        'BENCH_CLI="$OPENCODE_DIR/.bench-build/bench-cli.js"',
-    ),
-    (
-        'if [ ! -f "$BENCH_CLI" ]; then',
-        'if [ ! -s "$BENCH_CLI" ]; then',
-    ),
-    (
-        'echo "ERROR: bench cli.ts not found at $BENCH_CLI"',
-        'echo "ERROR: bundled bench CLI not found at $BENCH_CLI"',
-    ),
-)
-for old, new in replacements:
-    if content.count(old) != 1:
-        raise SystemExit(f"expected exactly one run_infer construct: {old}")
-    content = content.replace(old, new)
-path.write_text(content)
-PY
+    # NOTE: run_infer.sh is deliberately NOT patched. The launcher runs
+    # bench/cli.ts from the (receipt-pinned) source tree — the campaign-proven
+    # path. Launching the BUNDLED bench-cli.js instead breaks detectOpencodeBin:
+    # from .bench-build/ its import.meta.url-based root walk overshoots to /,
+    # falls back to <root>/index.ts, and every rollout dies with
+    # "Module not found" (observed: HSG job 4127557, 24/24 failures).
 else
     # Original path: clone the opencode fork pinned to $agent_framework_commit.
     # runner.slurm is responsible for ensuring `git` is on PATH (it does a

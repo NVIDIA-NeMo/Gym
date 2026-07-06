@@ -15,8 +15,8 @@
       {
         "mode": 420,
         "relative_path": "opencode.js",
-        "sha256": "86cbb97d27389c5098998749e153518b4ea0540716bdb92faa3c7115fda4f70a",
-        "size": 23260101,
+        "sha256": "44b8c46288721b5f6f84d422f0f6b85af61a24c7817d0e150abd385ecf0d5fdc",
+        "size": 23259249,
         "type": "file"
       },
       {
@@ -41,12 +41,12 @@
         "type": "file"
       }
     ],
-    "root": "/lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_ultra/users/charlwang/cluster/tb/nemo-gym-sdd-opencode/responses_api_agents/swe_agents/swe_opencode_setup/opencode/.bench-build",
-    "sha256": "a0c76bafce8e513cadc6ee44cff4168df65fdb88cb3321589ad430b35b871f64"
+    "root": "/tmp/oc_receipt_regen.l8zw/opencode/.bench-build",
+    "sha256": "e253169db22d6c0a5b231f437bffbd44d9b4b824e1e8a10cbfa6031d6b46a281"
   },
   "bun": {
     "mode": 493,
-    "path": "/lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_ultra/users/charlwang/cluster/tb/nemo-gym-sdd-opencode/responses_api_agents/swe_agents/swe_opencode_setup/bun/bin/bun",
+    "path": "/tmp/oc_receipt_regen.l8zw/bun/bin/bun",
     "sha256": "b29d78892abd5a9398e0700f0cb602f725089602ed1a5082d681c7257b2bf4d0",
     "size": 101814712
   },
@@ -858,8 +858,8 @@
       {
         "mode": 493,
         "relative_path": "evaluation/benchmarks/swe_bench/scripts/run_infer.sh",
-        "sha256": "e5eb34410a8dbf81b33ddf11919159ff166f50db9beb87c69574d1fe49da5199",
-        "size": 4449,
+        "sha256": "3c717d1ac06f6bee3bf7a99c9e584132ee5c1e059563a62cfc3c564a22e18898",
+        "size": 4453,
         "type": "file"
       },
       {
@@ -31915,7 +31915,7 @@
         "type": "file"
       }
     ],
-    "root": "/lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_ultra/users/charlwang/cluster/tb/nemo-gym-sdd-opencode/responses_api_agents/swe_agents/swe_opencode_setup/opencode",
-    "sha256": "e1699b48300714d1ee76e158e278a873f12537daf1d199854cffc726a980fc4d"
+    "root": "/tmp/oc_receipt_regen.l8zw/opencode",
+    "sha256": "ca2b58ef8454d7c95fed9200ae31893c37d3156492c72ccc68d1fa155b9708dd"
   }
 }
