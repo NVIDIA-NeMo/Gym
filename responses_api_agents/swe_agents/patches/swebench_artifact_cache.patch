@@ -1,0 +1,448 @@
+diff --git a/swebench/harness/test_spec/python.py b/swebench/harness/test_spec/python.py
+index 56a1cbb..30d0f0a 100644
+--- a/swebench/harness/test_spec/python.py
++++ b/swebench/harness/test_spec/python.py
+@@ -1,25 +1,56 @@
+ import os
+ import posixpath
+ import re
++import tempfile
++from functools import cache
++from pathlib import Path
++
+ import requests
++from requests.adapters import HTTPAdapter
++from urllib3.util import Retry
+ 
+ from swebench.harness.constants import (
+-    SWEbenchInstance,
++    END_TEST_OUTPUT,
+     MAP_REPO_TO_ENV_YML_PATHS,
+     MAP_REPO_TO_INSTALL,
+     MAP_REPO_TO_REQS_PATHS,
+     MAP_REPO_VERSION_TO_SPECS,
+     NON_TEST_EXTS,
+-    SWE_BENCH_URL_RAW,
+     START_TEST_OUTPUT,
+-    END_TEST_OUTPUT,
++    SWE_BENCH_URL_RAW,
++    SWEbenchInstance,
+ )
+ from swebench.harness.utils import get_modified_files
+-from functools import cache
++
+ 
+ HEADERS = {
+     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36"
+ }
++HTTP_TIMEOUT = (10, 30)
++HTTP_RETRY = Retry(
++    total=8,
++    connect=8,
++    read=4,
++    status=4,
++    backoff_factor=0.5,
++    status_forcelist=(429, 500, 502, 503, 504),
++    allowed_methods=frozenset({"GET"}),
++)
++HTTP_ADAPTER = HTTPAdapter(max_retries=HTTP_RETRY)
++HTTP_SESSION = requests.Session()
++HTTP_SESSION.mount("http://", HTTP_ADAPTER)
++HTTP_SESSION.mount("https://", HTTP_ADAPTER)
++
++SWE_BENCH_ARTIFACT_CACHE_DIR = "SWE_BENCH_ARTIFACT_CACHE_DIR"
++SWE_BENCH_ARTIFACT_CACHE_OFFLINE = "SWE_BENCH_ARTIFACT_CACHE_OFFLINE"
++
++
++class ArtifactCacheMissError(FileNotFoundError):
++    """Raised when strict offline mode cannot find a required cached artifact."""
++
++
++class ArtifactFetchError(RuntimeError):
++    """Raised when a required artifact cannot be downloaded from GitHub."""
+ 
+ REPLACE_REQ_PACKAGES = [
+     # pkg-to-replace, replacement
+@@ -27,19 +58,153 @@ REPLACE_REQ_PACKAGES = [
+ ]
+ 
+ 
++def _artifact_cache_root() -> Path | None:
++    cache_dir = os.environ.get(SWE_BENCH_ARTIFACT_CACHE_DIR)
++    return Path(cache_dir).expanduser() if cache_dir else None
++
++
++def _offline_artifact_cache_enabled() -> bool:
++    return os.environ.get(SWE_BENCH_ARTIFACT_CACHE_OFFLINE, "0").lower() in {
++        "1",
++        "true",
++        "yes",
++    }
++
++
++def _artifact_cache_path(repo: str, commit: str, artifact_path: str) -> Path | None:
++    cache_root = _artifact_cache_root()
++    if cache_root is None:
++        return None
++
++    repo_parts = repo.split("/")
++    normalized_path = posixpath.normpath(artifact_path)
++    if (
++        len(repo_parts) != 2
++        or any(not part or part in {".", ".."} for part in repo_parts)
++        or not commit
++        or "/" in commit
++        or normalized_path in {"", "."}
++        or normalized_path.startswith("../")
++        or normalized_path.startswith("/")
++    ):
++        raise ValueError(
++            "Invalid SWE-bench artifact cache key: "
++            f"repo={repo!r}, commit={commit!r}, path={artifact_path!r}"
++        )
++
++    return cache_root.joinpath(*repo_parts, commit, *normalized_path.split("/"))
++
++
++def _read_cached_artifact(
++    repo: str, commit: str, artifact_path: str
++) -> str | None:
++    cache_path = _artifact_cache_path(repo, commit, artifact_path)
++    if cache_path is None:
++        return None
++    try:
++        return cache_path.read_text()
++    except FileNotFoundError:
++        return None
++
++
++def _write_cached_artifact(
++    repo: str, commit: str, artifact_path: str, content: str
++) -> None:
++    cache_path = _artifact_cache_path(repo, commit, artifact_path)
++    if cache_path is None:
++        return
++
++    cache_path.parent.mkdir(parents=True, exist_ok=True)
++    with tempfile.NamedTemporaryFile(
++        mode="w",
++        encoding="utf-8",
++        dir=cache_path.parent,
++        prefix=f".{cache_path.name}.",
++        suffix=".tmp",
++        delete=False,
++    ) as temporary_file:
++        temporary_file.write(content)
++        temporary_path = Path(temporary_file.name)
++
++    try:
++        os.replace(temporary_path, cache_path)
++    finally:
++        temporary_path.unlink(missing_ok=True)
++
++
++def _download_artifact(repo: str, commit: str, artifact_path: str) -> str | None:
++    artifact_url = posixpath.join(
++        SWE_BENCH_URL_RAW,
++        repo,
++        commit,
++        artifact_path,
++    )
++    try:
++        response = HTTP_SESSION.get(
++            artifact_url,
++            headers=HEADERS,
++            timeout=HTTP_TIMEOUT,
++        )
++    except requests.RequestException as error:
++        raise ArtifactFetchError(
++            f"Could not download {artifact_url}. Populate "
++            f"{SWE_BENCH_ARTIFACT_CACHE_DIR} before enabling "
++            f"{SWE_BENCH_ARTIFACT_CACHE_OFFLINE}."
++        ) from error
++
++    if response.status_code != 200:
++        return None
++
++    _write_cached_artifact(repo, commit, artifact_path, response.text)
++    return response.text
++
++
++def _get_artifact_from_candidates(
++    repo: str,
++    commit: str,
++    artifact_paths: list[str],
++    artifact_name: str,
++) -> tuple[str, str] | None:
++    for artifact_path in artifact_paths:
++        cached_artifact = _read_cached_artifact(repo, commit, artifact_path)
++        if cached_artifact is not None:
++            return artifact_path, cached_artifact
++
++    if _offline_artifact_cache_enabled():
++        cache_root = _artifact_cache_root()
++        if cache_root is None:
++            raise ArtifactCacheMissError(
++                f"{SWE_BENCH_ARTIFACT_CACHE_OFFLINE}=1 requires "
++                f"{SWE_BENCH_ARTIFACT_CACHE_DIR} to be set."
++            )
++        raise ArtifactCacheMissError(
++            f"Missing cached {artifact_name} for {repo}@{commit}. Expected one of "
++            f"{artifact_paths} under {cache_root}."
++        )
++
++    for artifact_path in artifact_paths:
++        downloaded_artifact = _download_artifact(repo, commit, artifact_path)
++        if downloaded_artifact is not None:
++            return artifact_path, downloaded_artifact
++    return None
++
++
+ @cache
+ def get_environment_yml_by_commit(repo: str, commit: str, env_name: str) -> str:
+-    for req_path in MAP_REPO_TO_ENV_YML_PATHS[repo]:
+-        reqs_url = posixpath.join(SWE_BENCH_URL_RAW, repo, commit, req_path)
+-        reqs = requests.get(reqs_url, headers=HEADERS)
+-        if reqs.status_code == 200:
+-            break
+-    else:
++    cached_or_downloaded = _get_artifact_from_candidates(
++        repo,
++        commit,
++        MAP_REPO_TO_ENV_YML_PATHS[repo],
++        "environment.yml",
++    )
++    if cached_or_downloaded is None:
+         raise ValueError(
+             f"Could not find environment.yml at paths {MAP_REPO_TO_ENV_YML_PATHS[repo]} for repo {repo} at commit {commit}"
+         )
+ 
+-    lines = reqs.text.split("\n")
++    _, yml_text = cached_or_downloaded
++
++    lines = yml_text.split("\n")
+     cleaned = []
+     for line in lines:
+         # Rename environment to given name
+@@ -135,17 +300,18 @@ def get_environment_yml(instance: SWEbenchInstance, env_name: str) -> str:
+ 
+ @cache
+ def get_requirements_by_commit(repo: str, commit: str) -> str:
+-    for req_path in MAP_REPO_TO_REQS_PATHS[repo]:
+-        reqs_url = posixpath.join(SWE_BENCH_URL_RAW, repo, commit, req_path)
+-        reqs = requests.get(reqs_url, headers=HEADERS)
+-        if reqs.status_code == 200:
+-            break
+-    else:
++    cached_or_downloaded = _get_artifact_from_candidates(
++        repo,
++        commit,
++        MAP_REPO_TO_REQS_PATHS[repo],
++        "requirements.txt",
++    )
++    if cached_or_downloaded is None:
+         raise ValueError(
+             f"Could not find requirements.txt at paths {MAP_REPO_TO_REQS_PATHS[repo]} for repo {repo} at commit {commit}"
+         )
+ 
+-    lines = reqs.text
++    req_path, lines = cached_or_downloaded
+     original_req = []
+     additional_reqs = []
+     req_dir = "/".join(req_path.split("/")[:-1])
+@@ -157,16 +323,18 @@ def get_requirements_by_commit(repo: str, commit: str) -> str:
+         if line.strip().startswith("-r"):
+             # Handle recursive requirements
+             file_name = line[len("-r") :].strip()
+-            reqs_url = os.path.join(
+-                SWE_BENCH_URL_RAW,
++            recursive_req_path = posixpath.normpath(
++                posixpath.join(req_dir, file_name)
++            )
++            recursive_requirements = _get_artifact_from_candidates(
+                 repo,
+                 commit,
+-                req_dir,
+-                file_name,
++                [recursive_req_path],
++                "recursive requirements file",
+             )
+-            reqs = requests.get(reqs_url, headers=HEADERS)
+-            if reqs.status_code == 200:
+-                for line_extra in reqs.text.split("\n"):
++            if recursive_requirements is not None:
++                _, recursive_requirements_text = recursive_requirements
++                for line_extra in recursive_requirements_text.split("\n"):
+                     if not exclude_line(line_extra):
+                         additional_reqs.append(line_extra)
+         else:
+diff --git a/swebench/harness/prefetch_artifacts.py b/swebench/harness/prefetch_artifacts.py
+new file mode 100644
+index 0000000..d5e502a
+--- /dev/null
++++ b/swebench/harness/prefetch_artifacts.py
+@@ -0,0 +1,163 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Prewarm and verify cached SWE-bench dependency artifacts for a JSONL dataset."""
++
++import argparse
++import json
++import os
++import sys
++from pathlib import Path
++
++from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
++from swebench.harness.test_spec.python import (
++    ArtifactCacheMissError,
++    ArtifactFetchError,
++    SWE_BENCH_ARTIFACT_CACHE_DIR,
++    SWE_BENCH_ARTIFACT_CACHE_OFFLINE,
++    get_environment_yml_by_commit,
++    get_requirements_by_commit,
++)
++
++
++def _load_instance(line: str, line_number: int, dataset_path: Path) -> dict:
++    try:
++        instance = json.loads(line)
++    except json.JSONDecodeError as error:
++        raise ValueError(
++            f"Invalid JSON on line {line_number} of {dataset_path}: {error.msg}"
++        ) from error
++
++    nested_instance = instance.get("instance_dict")
++    if isinstance(nested_instance, str):
++        try:
++            instance = json.loads(nested_instance)
++        except json.JSONDecodeError as error:
++            raise ValueError(
++                f"Invalid instance_dict on line {line_number} of {dataset_path}: "
++                f"{error.msg}"
++            ) from error
++    elif isinstance(nested_instance, dict):
++        instance = nested_instance
++
++    if not isinstance(instance, dict):
++        raise ValueError(
++            f"Expected an object on line {line_number} of {dataset_path}, got "
++            f"{type(instance).__name__}."
++        )
++    return instance
++
++
++def _get_setup_commit(instance: dict) -> str:
++    environment_setup_commit = instance.get("environment_setup_commit")
++    if environment_setup_commit:
++        return environment_setup_commit
++    try:
++        return instance["base_commit"]
++    except KeyError as error:
++        raise ValueError(
++            f"Instance {instance.get('instance_id', '<unknown>')} is missing base_commit."
++        ) from error
++
++
++def prefetch_dataset(dataset_path: Path) -> tuple[int, int]:
++    """Populate the artifact cache for all dependency-bearing instances in a dataset."""
++    prepared = 0
++    skipped = 0
++    seen = set()
++
++    for line_number, line in enumerate(dataset_path.read_text().splitlines(), start=1):
++        if not line.strip():
++            continue
++        instance = _load_instance(line, line_number, dataset_path)
++        try:
++            repo = instance["repo"]
++            version = instance["version"]
++        except KeyError as error:
++            raise ValueError(
++                f"Instance {instance.get('instance_id', '<unknown>')} is missing "
++                f"{error.args[0]}."
++            ) from error
++
++        commit = _get_setup_commit(instance)
++        try:
++            specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
++        except KeyError as error:
++            raise ValueError(
++                f"No SWE-bench environment specification for {repo}@{version}."
++            ) from error
++
++        packages = specs.get("packages", "")
++        if packages not in {"requirements.txt", "environment.yml"}:
++            skipped += 1
++            continue
++
++        cache_key = (repo, commit, packages)
++        if cache_key in seen:
++            continue
++        seen.add(cache_key)
++
++        if packages == "requirements.txt":
++            get_requirements_by_commit(repo, commit)
++        else:
++            get_environment_yml_by_commit(repo, commit, "swebench-artifact-cache")
++        prepared += 1
++
++    return prepared, skipped
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="Prewarm or verify a SWE-bench dependency artifact cache."
++    )
++    parser.add_argument("--dataset", type=Path, required=True)
++    parser.add_argument(
++        "--cache-dir",
++        type=Path,
++        default=os.environ.get(SWE_BENCH_ARTIFACT_CACHE_DIR),
++        help=f"Directory for {SWE_BENCH_ARTIFACT_CACHE_DIR}.",
++    )
++    parser.add_argument(
++        "--offline",
++        action="store_true",
++        help="Verify cache completeness without downloading missing artifacts.",
++    )
++    return parser.parse_args()
++
++
++def main() -> int:
++    args = parse_args()
++    if not args.dataset.is_file():
++        raise FileNotFoundError(f"Dataset does not exist: {args.dataset}")
++    if args.cache_dir is None:
++        raise ValueError("--cache-dir or SWE_BENCH_ARTIFACT_CACHE_DIR is required.")
++
++    os.environ[SWE_BENCH_ARTIFACT_CACHE_DIR] = str(args.cache_dir)
++    os.environ[SWE_BENCH_ARTIFACT_CACHE_OFFLINE] = "1" if args.offline else "0"
++    try:
++        prepared, skipped = prefetch_dataset(args.dataset)
++    except (ArtifactCacheMissError, ArtifactFetchError, ValueError) as error:
++        print(f"SWE-bench artifact prefetch failed: {error}", file=sys.stderr)
++        return 1
++
++    mode = "verified" if args.offline else "prewarmed"
++    print(
++        f"SWE-bench artifact cache {mode}: {prepared} unique dependency environments; "
++        f"{skipped} instances do not require a fetched dependency file."
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+

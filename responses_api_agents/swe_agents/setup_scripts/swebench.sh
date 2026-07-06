@@ -9,6 +9,7 @@ python_dir=$PYTHON_DIR
 swebench_dir=$SWEBENCH_DIR
 swebench_repo=$SWEBENCH_REPO
 swebench_commit=$SWEBENCH_COMMIT
+swebench_patch=${SWEBENCH_PATCH:-}
 
 cd $setup_dir
 
@@ -39,6 +40,16 @@ fi
 cd $swebench_dir
 echo "Checking out $swebench_commit..."
 git checkout $swebench_commit
+
+if [ -n "$swebench_patch" ]; then
+    if git apply --reverse --check "$swebench_patch"; then
+        echo "SWE-bench artifact-cache patch already applied"
+    else
+        echo "Applying SWE-bench artifact-cache patch..."
+        git apply --check "$swebench_patch"
+        git apply "$swebench_patch"
+    fi
+fi
 
 echo "Installing Python 3.12 to portable location..."
 uv python install 3.12

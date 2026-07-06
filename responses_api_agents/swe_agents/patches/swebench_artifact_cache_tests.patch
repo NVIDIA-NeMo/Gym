@@ -1,0 +1,178 @@
+diff --git a/tests/test_artifact_cache.py b/tests/test_artifact_cache.py
+new file mode 100644
+index 0000000..ccdab17
+--- /dev/null
++++ b/tests/test_artifact_cache.py
+@@ -0,0 +1,171 @@
++import os
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++import requests
++
++from swebench.harness.test_spec import python as test_spec_python
++
++
++class ArtifactCacheTests(unittest.TestCase):
++    repo = "example/repo"
++    commit = "0123456789abcdef"
++
++    def setUp(self):
++        self.previous_cache_dir = os.environ.get(
++            test_spec_python.SWE_BENCH_ARTIFACT_CACHE_DIR
++        )
++        self.previous_offline = os.environ.get(
++            test_spec_python.SWE_BENCH_ARTIFACT_CACHE_OFFLINE
++        )
++        test_spec_python.get_requirements_by_commit.cache_clear()
++        test_spec_python.get_environment_yml_by_commit.cache_clear()
++
++    def tearDown(self):
++        self._restore_environment(
++            test_spec_python.SWE_BENCH_ARTIFACT_CACHE_DIR,
++            self.previous_cache_dir,
++        )
++        self._restore_environment(
++            test_spec_python.SWE_BENCH_ARTIFACT_CACHE_OFFLINE,
++            self.previous_offline,
++        )
++        test_spec_python.get_requirements_by_commit.cache_clear()
++        test_spec_python.get_environment_yml_by_commit.cache_clear()
++
++    @staticmethod
++    def _restore_environment(name, value):
++        if value is None:
++            os.environ.pop(name, None)
++        else:
++            os.environ[name] = value
++
++    def _set_cache_environment(self, cache_dir: Path, offline: bool = False):
++        os.environ[test_spec_python.SWE_BENCH_ARTIFACT_CACHE_DIR] = str(cache_dir)
++        os.environ[test_spec_python.SWE_BENCH_ARTIFACT_CACHE_OFFLINE] = (
++            "1" if offline else "0"
++        )
++
++    def _write_artifact(self, cache_dir: Path, artifact_path: str, content: str):
++        cache_path = cache_dir / self.repo / self.commit / artifact_path
++        cache_path.parent.mkdir(parents=True, exist_ok=True)
++        cache_path.write_text(content)
++
++    def test_requirements_are_loaded_from_cache_without_network(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            cache_dir = Path(tmpdir)
++            self._set_cache_environment(cache_dir, offline=True)
++            self._write_artifact(cache_dir, "requirements.txt", "root\n-r extra.txt")
++            self._write_artifact(cache_dir, "extra.txt", "extra")
++
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_REQS_PATHS,
++                {self.repo: ["requirements.txt"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++            ) as request_get:
++                requirements = test_spec_python.get_requirements_by_commit(
++                    self.repo,
++                    self.commit,
++                )
++
++        self.assertEqual(requirements, "extra\nroot")
++        request_get.assert_not_called()
++
++    def test_downloaded_requirements_are_cached_for_offline_reuse(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            cache_dir = Path(tmpdir)
++            self._set_cache_environment(cache_dir)
++            root_response = MagicMock(status_code=200, text="root\n-r extra.txt")
++            recursive_response = MagicMock(status_code=200, text="extra")
++
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_REQS_PATHS,
++                {self.repo: ["requirements.txt"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++                side_effect=[root_response, recursive_response],
++            ) as request_get:
++                requirements = test_spec_python.get_requirements_by_commit(
++                    self.repo,
++                    self.commit,
++                )
++
++            self.assertEqual(requirements, "extra\nroot")
++            self.assertEqual(request_get.call_count, 2)
++            self.assertTrue((cache_dir / self.repo / self.commit / "requirements.txt").is_file())
++            self.assertTrue((cache_dir / self.repo / self.commit / "extra.txt").is_file())
++
++            self._set_cache_environment(cache_dir, offline=True)
++            test_spec_python.get_requirements_by_commit.cache_clear()
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_REQS_PATHS,
++                {self.repo: ["requirements.txt"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++                side_effect=AssertionError("cache hit must not access the network"),
++            ):
++                requirements = test_spec_python.get_requirements_by_commit(
++                    self.repo,
++                    self.commit,
++                )
++
++        self.assertEqual(requirements, "extra\nroot")
++
++    def test_offline_cache_miss_does_not_attempt_network(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            self._set_cache_environment(Path(tmpdir), offline=True)
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_REQS_PATHS,
++                {self.repo: ["requirements.txt"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++            ) as request_get:
++                with self.assertRaises(test_spec_python.ArtifactCacheMissError):
++                    test_spec_python.get_requirements_by_commit(self.repo, self.commit)
++
++        request_get.assert_not_called()
++
++    def test_connection_error_has_cache_recovery_guidance(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            self._set_cache_environment(Path(tmpdir))
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_REQS_PATHS,
++                {self.repo: ["requirements.txt"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++                side_effect=requests.ConnectionError("temporary DNS failure"),
++            ):
++                with self.assertRaises(test_spec_python.ArtifactFetchError) as error:
++                    test_spec_python.get_requirements_by_commit(self.repo, self.commit)
++
++        self.assertIn("SWE_BENCH_ARTIFACT_CACHE_DIR", str(error.exception))
++
++    def test_environment_yml_is_loaded_from_cache_without_network(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            cache_dir = Path(tmpdir)
++            self._set_cache_environment(cache_dir, offline=True)
++            self._write_artifact(cache_dir, "environment.yml", "name: original\ndependencies: []")
++
++            with patch.dict(
++                test_spec_python.MAP_REPO_TO_ENV_YML_PATHS,
++                {self.repo: ["environment.yml"]},
++            ), patch.object(
++                test_spec_python.HTTP_SESSION,
++                "get",
++            ) as request_get:
++                environment_yml = test_spec_python.get_environment_yml_by_commit(
++                    self.repo,
++                    self.commit,
++                    "renamed",
++                )
++
++        self.assertIn("name: renamed", environment_yml)
++        request_get.assert_not_called()
+

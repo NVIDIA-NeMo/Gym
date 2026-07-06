@@ -1,0 +1,98 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -558,6 +558,9 @@ class LocalRuntime(ActionExecutionClient):
+         ):
+             return await post_action()
+ 
++        _update_streaming_tool_call_metrics(
++            {"streaming_tool_call_eligible_actions": 1}
++        )
+         post_task = asyncio.create_task(post_action())
+         session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
+         sequence_no = 0
+@@ -664,6 +667,9 @@ class LocalRuntime(ActionExecutionClient):
+ 
+             response = await post_task
+             if not session_started:
++                _update_streaming_tool_call_metrics(
++                    {"streaming_tool_call_skipped_no_stable_output": 1}
++                )
+                 return response
+ 
+             observation = observation_from_dict(response.json())
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -373,10 +373,15 @@ class TestLocalRuntime:
+         action = event_from_dict(serialized_action)
+         assert action.response_id is None
+ 
+-        with patch(
+-            "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
+-            return_value={"streaming_tool_call": {"enabled": True}},
+-        ):
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
+             response = runtime._send_action_server_request(
+                 "POST",
+                 "http://runtime/execute_action",
+@@ -385,6 +391,12 @@ class TestLocalRuntime:
+             )
+ 
+         assert response is post_response
++        assert update_metrics.call_args_list[0].args == (
++            {"streaming_tool_call_eligible_actions": 1},
++        )
++        assert update_metrics.call_args_list[-1].args[0][
++            "streaming_tool_call_sessions_started"
++        ] == 1
+         actions = [
+             call.kwargs["action"]
+             for call in streaming_client.streaming_tool_call_request.await_args_list
+@@ -468,6 +480,9 @@ class TestLocalRuntime:
+             patch(
+                 "openhands.runtime.impl.local.local_runtime.ClientSession"
+             ) as client_session,
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
+         ):
+             response = runtime._send_action_server_request(
+                 "POST",
+@@ -479,6 +494,10 @@ class TestLocalRuntime:
+         assert response is post_response
+         streaming_client.streaming_tool_call_request.assert_not_awaited()
+         client_session.assert_not_called()
++        assert [call.args for call in update_metrics.call_args_list] == [
++            ({"streaming_tool_call_eligible_actions": 1},),
++            ({"streaming_tool_call_skipped_no_stable_output": 1},),
++        ]
+ 
+     def test_execute_action_skips_streaming_for_single_completed_snapshot(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+@@ -543,6 +562,9 @@ class TestLocalRuntime:
+             patch(
+                 "openhands.runtime.impl.local.local_runtime.ClientSession"
+             ) as client_session,
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
+         ):
+             response = runtime._send_action_server_request(
+                 "POST",
+@@ -554,3 +576,7 @@ class TestLocalRuntime:
+         assert response is post_response
+         streaming_client.streaming_tool_call_request.assert_not_awaited()
+         client_session.assert_not_called()
++        assert [call.args for call in update_metrics.call_args_list] == [
++            ({"streaming_tool_call_eligible_actions": 1},),
++            ({"streaming_tool_call_skipped_no_stable_output": 1},),
++        ]
