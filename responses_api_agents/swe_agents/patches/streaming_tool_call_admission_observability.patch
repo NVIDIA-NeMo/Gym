@@ -1,0 +1,185 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -575,15 +575,30 @@ class LocalRuntime(ActionExecutionClient):
+         prefill_tokens = 0
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
++        snapshot_poll_interval = context.config["snapshot_poll_interval_seconds"]
+         flush_interval = context.config["flush_interval_seconds"]
+-        poll_interval = min(0.1, flush_interval)
++        snapshot_polls = 0
++        snapshot_revisions = 0
++        nonempty_snapshots = 0
++        snapshots_at_or_above_min_chunk_chars = 0
+         streaming_http_session: ClientSession | None = None
+ 
++        def snapshot_metrics() -> dict[str, int]:
++            return {
++                "streaming_tool_call_snapshot_polls": snapshot_polls,
++                "streaming_tool_call_snapshot_revisions": snapshot_revisions,
++                "streaming_tool_call_nonempty_snapshots": nonempty_snapshots,
++                "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": (
++                    snapshots_at_or_above_min_chunk_chars
++                ),
++            }
++
+         try:
+             while not post_task.done():
+-                await asyncio.sleep(poll_interval)
++                await asyncio.sleep(snapshot_poll_interval)
+                 if post_task.done():
+                     break
++                snapshot_polls += 1
+                 snapshot_response = await call_sync_from_async(
+                     lambda: self.session.get(f"{self.api_url}/shell_stream_snapshot")
+                 )
+@@ -592,8 +607,14 @@ class LocalRuntime(ActionExecutionClient):
+                 if snapshot["revision"] == last_revision:
+                     continue
+                 last_revision = snapshot["revision"]
++                snapshot_revisions += 1
+                 content = snapshot["content"]
+-                if not content or content == last_sent_content:
++                if not content:
++                    continue
++                nonempty_snapshots += 1
++                if len(content) >= min_chunk_chars:
++                    snapshots_at_or_above_min_chunk_chars += 1
++                if content == last_sent_content:
+                     continue
+                 expected_prefix = last_sent_content or pending_start_content
+                 if expected_prefix and not content.startswith(expected_prefix):
+@@ -668,9 +689,19 @@ class LocalRuntime(ActionExecutionClient):
+ 
+             response = await post_task
+             if not session_started:
+-                _update_streaming_tool_call_metrics(
+-                    {"streaming_tool_call_skipped_no_stable_output": 1}
+-                )
++                metrics = snapshot_metrics()
++                metrics["streaming_tool_call_skipped_no_stable_output"] = 1
++                if nonempty_snapshots == 0:
++                    metrics["streaming_tool_call_skipped_no_output"] = 1
++                elif nonempty_snapshots == 1:
++                    metrics["streaming_tool_call_skipped_single_snapshot"] = 1
++                elif snapshots_at_or_above_min_chunk_chars == 0:
++                    metrics["streaming_tool_call_skipped_below_min_chunk_chars"] = 1
++                else:
++                    metrics[
++                        "streaming_tool_call_skipped_completed_before_admission"
++                    ] = 1
++                _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
+             observation = observation_from_dict(response.json())
+@@ -694,7 +725,8 @@ class LocalRuntime(ActionExecutionClient):
+                     "Streaming tool-call final token prefix did not match; "
+                     "the normal final request will run without relying on it."
+                 )
+-            _update_streaming_tool_call_metrics(
++            metrics = snapshot_metrics()
++            metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": 1,
+                     "streaming_tool_call_prefill_requests": prefill_requests,
+@@ -712,6 +744,7 @@ class LocalRuntime(ActionExecutionClient):
+                     "streaming_tool_call_overhead_seconds": streaming_request_seconds,
+                 }
+             )
++            _update_streaming_tool_call_metrics(metrics)
+             return response
+         except Exception as error:
+             logger.warning(
+@@ -729,7 +762,8 @@ class LocalRuntime(ActionExecutionClient):
+                     logger.debug(
+                         f"Failed to abort streaming tool-call session: {abort_error}"
+                     )
+-            _update_streaming_tool_call_metrics(
++            metrics = snapshot_metrics()
++            metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": int(session_started),
+                     "streaming_tool_call_prefill_requests": prefill_requests,
+@@ -738,6 +772,7 @@ class LocalRuntime(ActionExecutionClient):
+                     "streaming_tool_call_overhead_seconds": streaming_request_seconds,
+                 }
+             )
++            _update_streaming_tool_call_metrics(metrics)
+             return await post_task
+         finally:
+             if streaming_http_session is not None:
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -361,6 +361,7 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 10,
++                "snapshot_poll_interval_seconds": 0.001,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -399,6 +400,12 @@ class TestLocalRuntime:
+         assert update_metrics.call_args_list[-1].args[0][
+             "streaming_tool_call_sessions_started"
+         ] == 1
++        assert update_metrics.call_args_list[-1].args[0][
++            "streaming_tool_call_snapshot_polls"
++        ] == 2
++        assert update_metrics.call_args_list[-1].args[0][
++            "streaming_tool_call_snapshots_at_or_above_min_chunk_chars"
++        ] == 1
+         actions = [
+             call.kwargs["action"]
+             for call in streaming_client.streaming_tool_call_request.await_args_list
+@@ -464,6 +471,7 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 256,
++                "snapshot_poll_interval_seconds": 0.001,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -499,7 +507,16 @@ class TestLocalRuntime:
+         client_session.assert_not_called()
+         assert [call.args for call in update_metrics.call_args_list] == [
+             ({"streaming_tool_call_eligible_actions": 1},),
+-            ({"streaming_tool_call_skipped_no_stable_output": 1},),
++            (
++                {
++                    "streaming_tool_call_snapshot_polls": 1,
++                    "streaming_tool_call_snapshot_revisions": 1,
++                    "streaming_tool_call_nonempty_snapshots": 1,
++                    "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 0,
++                    "streaming_tool_call_skipped_no_stable_output": 1,
++                    "streaming_tool_call_skipped_single_snapshot": 1,
++                },
++            ),
+         ]
+ 
+     def test_execute_action_skips_streaming_for_single_completed_snapshot(self):
+@@ -544,6 +561,7 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 1,
++                "snapshot_poll_interval_seconds": 0.001,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -579,5 +597,14 @@ class TestLocalRuntime:
+         client_session.assert_not_called()
+         assert [call.args for call in update_metrics.call_args_list] == [
+             ({"streaming_tool_call_eligible_actions": 1},),
+-            ({"streaming_tool_call_skipped_no_stable_output": 1},),
++            (
++                {
++                    "streaming_tool_call_snapshot_polls": 1,
++                    "streaming_tool_call_snapshot_revisions": 1,
++                    "streaming_tool_call_nonempty_snapshots": 1,
++                    "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 1,
++                    "streaming_tool_call_skipped_no_stable_output": 1,
++                    "streaming_tool_call_skipped_single_snapshot": 1,
++                },
++            ),
+         ]

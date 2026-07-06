@@ -221,6 +221,16 @@ class SWEBenchMetrics(BaseModel):
     initialize_runtime_time: Optional[float] = None
     total_command_exec_time: Optional[float] = None
     total_model_call_time: Optional[float] = None
+    streaming_tool_call_eligible_actions: Optional[int] = None
+    streaming_tool_call_skipped_no_stable_output: Optional[int] = None
+    streaming_tool_call_skipped_no_output: Optional[int] = None
+    streaming_tool_call_skipped_single_snapshot: Optional[int] = None
+    streaming_tool_call_skipped_below_min_chunk_chars: Optional[int] = None
+    streaming_tool_call_skipped_completed_before_admission: Optional[int] = None
+    streaming_tool_call_snapshot_polls: Optional[int] = None
+    streaming_tool_call_snapshot_revisions: Optional[int] = None
+    streaming_tool_call_nonempty_snapshots: Optional[int] = None
+    streaming_tool_call_snapshots_at_or_above_min_chunk_chars: Optional[int] = None
     streaming_tool_call_sessions_started: Optional[int] = None
     streaming_tool_call_prefill_requests: Optional[int] = None
     streaming_tool_call_prefill_tokens: Optional[int] = None
@@ -311,36 +321,77 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
 
 class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
+    def _apply_artifact_cache_patch(self, swebench_dir: Path) -> None:
+        patch_path = self.parent_dir / "patches" / "swebench_artifact_cache.patch"
+        reverse_check = subprocess_run(
+            ["git", "apply", "--reverse", "--check", str(patch_path)],
+            cwd=swebench_dir,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode == 0:
+            return
+
+        apply_check = subprocess_run(
+            ["git", "apply", "--check", str(patch_path)],
+            cwd=swebench_dir,
+            capture_output=True,
+            text=True,
+        )
+        if apply_check.returncode != 0:
+            raise RuntimeError(
+                "SWE-bench artifact-cache patch is incompatible with the installed "
+                f"SWE-bench checkout: {apply_check.stderr}"
+            )
+        subprocess_run(["git", "apply", str(patch_path)], cwd=swebench_dir, check=True)
+
     def setup(self) -> Path:
         swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
         swebench_commit = "HEAD"
 
         setup_dir = self.parent_dir / "swe_swebench_setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
+        artifact_cache_dir = self.parent_dir / "swebench_artifact_cache"
+        artifact_cache_dir.mkdir(parents=True, exist_ok=True)
 
         with self._setup_directory_lock(setup_dir, "SWE-bench"):
             swebench_dir = setup_dir / "SWE-bench"
             uv_dir = setup_dir / "uv"
             python_dir = setup_dir / "python"
 
-            if swebench_dir.exists():
+            if (swebench_dir / "venv" / "bin" / "python").exists():
+                self._apply_artifact_cache_patch(swebench_dir)
                 print(f"SWE-bench already set up at {setup_dir}")
                 return setup_dir
 
+            if swebench_dir.exists():
+                print(
+                    f"SWE-bench setup at {setup_dir} is incomplete; rebuilding it.",
+                    flush=True,
+                )
+                rmtree(setup_dir, ignore_errors=True)
+                setup_dir.mkdir(parents=True, exist_ok=True)
+
             print(f"Setting up SWE-bench environment at {setup_dir}...", flush=True)
             script_fpath = self.parent_dir / "setup_scripts/swebench.sh"
+            patch_path = self.parent_dir / "patches" / "swebench_artifact_cache.patch"
             command = f"""SETUP_DIR={setup_dir} \\
 UV_DIR={uv_dir} \\
 PYTHON_DIR={python_dir} \\
 SWEBENCH_DIR={swebench_dir} \\
 SWEBENCH_REPO={swebench_repo} \\
 SWEBENCH_COMMIT={swebench_commit} \\
+SWEBENCH_PATCH={patch_path} \\
     {script_fpath}"""
             self._run_setup_command(command)
+            self._apply_artifact_cache_patch(swebench_dir)
 
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        artifact_cache_offline = os.environ.get(
+            "SWE_BENCH_ARTIFACT_CACHE_OFFLINE", "0"
+        )
         swebench_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
@@ -350,6 +401,8 @@ SWEBENCH_COMMIT={swebench_commit} \\
             f'export UV_INSTALL_DIR="{self.config.swebench_setup_dir}/uv" && '
             f'export UV_PYTHON_INSTALL_DIR="{self.config.swebench_setup_dir}/python" && '
             f'export PATH="{self.config.swebench_setup_dir}/uv/bin:$PATH" && '
+            "export SWE_BENCH_ARTIFACT_CACHE_DIR=/swebench_artifact_cache && "
+            f"export SWE_BENCH_ARTIFACT_CACHE_OFFLINE={shlex.quote(artifact_cache_offline)} && "
             f"ls -lrt /root/dataset && "
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
@@ -889,28 +942,53 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _apply_streaming_tool_call_patch(self, openhands_dir: Path) -> None:
-        patch_path = self.parent_dir / "patches" / "streaming_tool_call.patch"
-        reverse_check = subprocess_run(
-            ["git", "apply", "--reverse", "--check", str(patch_path)],
-            cwd=openhands_dir,
-            capture_output=True,
-            text=True,
+        base_patch_path = self.parent_dir / "patches" / "streaming_tool_call.patch"
+        observability_patch_path = (
+            self.parent_dir
+            / "patches"
+            / "streaming_tool_call_observability.patch"
         )
-        if reverse_check.returncode == 0:
-            return
+        admission_observability_patch_path = (
+            self.parent_dir
+            / "patches"
+            / "streaming_tool_call_admission_observability.patch"
+        )
 
-        apply_check = subprocess_run(
-            ["git", "apply", "--check", str(patch_path)],
-            cwd=openhands_dir,
-            capture_output=True,
-            text=True,
-        )
-        if apply_check.returncode != 0:
-            raise RuntimeError(
-                "OpenHands streaming tool-call patch is incompatible with "
-                f"{self.config.agent_framework_commit}: {apply_check.stderr}"
+        def is_applied(patch_path: Path) -> bool:
+            reverse_check = subprocess_run(
+                ["git", "apply", "--reverse", "--check", str(patch_path)],
+                cwd=openhands_dir,
+                capture_output=True,
+                text=True,
             )
-        subprocess_run(["git", "apply", str(patch_path)], cwd=openhands_dir, check=True)
+            return reverse_check.returncode == 0
+
+        def apply_patch(patch_path: Path) -> None:
+            apply_check = subprocess_run(
+                ["git", "apply", "--check", str(patch_path)],
+                cwd=openhands_dir,
+                capture_output=True,
+                text=True,
+            )
+            if apply_check.returncode != 0:
+                raise RuntimeError(
+                    f"OpenHands patch {patch_path.name} is incompatible with "
+                    f"{self.config.agent_framework_commit}: {apply_check.stderr}"
+                )
+            subprocess_run(
+                ["git", "apply", str(patch_path)], cwd=openhands_dir, check=True
+            )
+
+        # Each incremental patch depends on the previous one. Check the most
+        # recent patch first so cached compatible checkouts are upgraded in
+        # place without rebuilding their venvs.
+        if is_applied(admission_observability_patch_path):
+            return
+        if not is_applied(base_patch_path):
+            apply_patch(base_patch_path)
+        if not is_applied(observability_patch_path):
+            apply_patch(observability_patch_path)
+        apply_patch(admission_observability_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -1611,6 +1689,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            artifact_cache_dir = params.swebench_setup_dir.parent / "swebench_artifact_cache"
+            artifact_cache_dir.mkdir(parents=True, exist_ok=True)
+            mount_args.append(
+                f"--mount type=bind,src={artifact_cache_dir},dst=/swebench_artifact_cache"
+            )
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -1796,6 +1879,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.metrics_fpath.write_text(
             json.dumps(
                 {
+                    "streaming_tool_call_eligible_actions": 0,
+                    "streaming_tool_call_skipped_no_stable_output": 0,
+                    "streaming_tool_call_skipped_no_output": 0,
+                    "streaming_tool_call_skipped_single_snapshot": 0,
+                    "streaming_tool_call_skipped_below_min_chunk_chars": 0,
+                    "streaming_tool_call_skipped_completed_before_admission": 0,
+                    "streaming_tool_call_snapshot_polls": 0,
+                    "streaming_tool_call_snapshot_revisions": 0,
+                    "streaming_tool_call_nonempty_snapshots": 0,
+                    "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 0,
                     "streaming_tool_call_sessions_started": 0,
                     "streaming_tool_call_prefill_requests": 0,
                     "streaming_tool_call_prefill_tokens": 0,

@@ -24,6 +24,8 @@ agent_framework_repo=$AGENT_FRAMEWORK_REPO
 agent_framework_commit=$AGENT_FRAMEWORK_COMMIT
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 streaming_tool_call_patch="$script_dir/../patches/streaming_tool_call.patch"
+streaming_tool_call_observability_patch="$script_dir/../patches/streaming_tool_call_observability.patch"
+streaming_tool_call_admission_observability_patch="$script_dir/../patches/streaming_tool_call_admission_observability.patch"
 
 cd $setup_dir
 
@@ -101,6 +103,10 @@ git checkout $agent_framework_commit
 echo "Applying NeMo Gym streaming tool-call integration..."
 git apply --check "$streaming_tool_call_patch"
 git apply "$streaming_tool_call_patch"
+git apply --check "$streaming_tool_call_observability_patch"
+git apply "$streaming_tool_call_observability_patch"
+git apply --check "$streaming_tool_call_admission_observability_patch"
+git apply "$streaming_tool_call_admission_observability_patch"
 
 # Build OpenHands
 echo "Building OpenHands (this may take 5-10 minutes)..."

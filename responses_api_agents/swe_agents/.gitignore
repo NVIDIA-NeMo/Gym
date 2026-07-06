@@ -1,5 +1,7 @@
 swe_openhands_setup
 swe_swebench_setup
+swe_swebench_artifact_prefetch_setup
+swebench_artifact_cache
 swe_r2e_gym_setup
 swe_rebench_setup
 swe_swebench_multilingual_setup

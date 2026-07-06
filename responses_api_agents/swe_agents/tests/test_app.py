@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -84,7 +85,31 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
 def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
     """Create a SWEBenchWrapper with all setup calls mocked."""
     monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
-    monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        OpenHandsHarnessProcessor,
+        "setup",
+        MagicMock(return_value=Path("/tmp/openhands_setup")),
+    )
+    monkeypatch.setattr(
+        SweBenchDatasetProcessor,
+        "setup",
+        MagicMock(return_value=Path("/tmp/swebench_setup")),
+    )
+    monkeypatch.setattr(
+        SweBenchMultilingualDatasetProcessor,
+        "setup",
+        MagicMock(return_value=Path("/tmp/swebench_multilingual_setup")),
+    )
+    monkeypatch.setattr(
+        R2EGymDatasetProcessor,
+        "setup",
+        MagicMock(return_value=Path("/tmp/r2e_gym_setup")),
+    )
+    monkeypatch.setattr(
+        SWERebenchDatasetProcessor,
+        "setup",
+        MagicMock(return_value=Path("/tmp/swe_rebench_setup")),
+    )
 
     config = _minimal_server_config()
     wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
@@ -345,9 +370,15 @@ class TestSWEBenchMetrics:
         assert metrics.final_eval_time is None
 
     def test_with_values(self) -> None:
-        metrics = SWEBenchMetrics(resolved=True, patch_exists=True, ray_queue_time=1.5)
+        metrics = SWEBenchMetrics(
+            resolved=True,
+            patch_exists=True,
+            ray_queue_time=1.5,
+            streaming_tool_call_snapshot_polls=2,
+        )
         assert metrics.resolved is True
         assert metrics.ray_queue_time == 1.5
+        assert metrics.streaming_tool_call_snapshot_polls == 2
 
 
 class TestSWEBenchVerifyResponse:
@@ -763,26 +794,85 @@ class TestSweBenchDatasetProcessor:
                 BaseDatasetHarnessProcessor,
                 "parent_dir",
                 new_callable=lambda: property(lambda self: Path(tmpdir)),
-            ):
+            ), patch.object(
+                SweBenchDatasetProcessor,
+                "_apply_artifact_cache_patch",
+            ) as apply_patch:
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"
                 setup_dir.mkdir()
                 swebench_dir = setup_dir / "SWE-bench"
                 swebench_dir.mkdir()
+                venv_python = swebench_dir / "venv" / "bin" / "python"
+                venv_python.parent.mkdir(parents=True)
+                venv_python.touch()
                 (setup_dir / "uv").mkdir()
                 (setup_dir / "python").mkdir()
 
                 processor = SweBenchDatasetProcessor(config=config)
                 result = processor.setup()
                 assert result == setup_dir
+                apply_patch.assert_called_once_with(swebench_dir)
+
+    def test_incomplete_setup_is_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _minimal_server_config()
+            with patch.object(
+                BaseDatasetHarnessProcessor,
+                "parent_dir",
+                new_callable=lambda: property(lambda self: Path(tmpdir)),
+            ), patch.object(
+                SweBenchDatasetProcessor,
+                "_run_setup_command",
+            ) as run_setup, patch.object(
+                SweBenchDatasetProcessor,
+                "_apply_artifact_cache_patch",
+            ) as apply_patch, patch.object(swe_app, "rmtree") as remove_setup:
+                setup_dir = Path(tmpdir) / "swe_swebench_setup"
+                swebench_dir = setup_dir / "SWE-bench"
+                swebench_dir.mkdir(parents=True)
+
+                result = SweBenchDatasetProcessor(config=config).setup()
+
+            assert result == setup_dir
+            remove_setup.assert_called_once_with(setup_dir, ignore_errors=True)
+            run_setup.assert_called_once()
+            apply_patch.assert_called_once_with(swebench_dir)
+
+    def test_apply_artifact_cache_patch_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _minimal_server_config()
+            processor = SweBenchDatasetProcessor(config=config)
+
+            with patch.object(
+                swe_app,
+                "subprocess_run",
+                side_effect=[
+                    MagicMock(returncode=1),
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=0),
+                ],
+            ) as subprocess_run:
+                processor._apply_artifact_cache_patch(Path(tmpdir))
+
+            commands = [call.args[0] for call in subprocess_run.call_args_list]
+            assert commands[0][2:4] == ["--reverse", "--check"]
+            assert commands[1][2] == "--check"
+            assert commands[2][2].endswith("swebench_artifact_cache.patch")
 
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = SweBenchDatasetProcessor(config=config)
-            result = processor.get_run_command()
+            with patch.dict(
+                os.environ,
+                {"SWE_BENCH_ARTIFACT_CACHE_OFFLINE": "1"},
+            ):
+                result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert "run_local_evaluation" in result.command
             assert "django__django-12345" in result.command
+            assert "SWE_BENCH_ARTIFACT_CACHE_DIR=/swebench_artifact_cache" in result.command
+            assert "SWE_BENCH_ARTIFACT_CACHE_OFFLINE=1" in result.command
             assert result.mode == "eval"
             assert result.timeout == config.swebench_tests_timeout + 120
 
@@ -828,6 +918,33 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
+    def test_cached_base_patch_gets_observability_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            command_results = [
+                MagicMock(returncode=1),  # admission-observability reverse check
+                MagicMock(returncode=0),  # base reverse check
+                MagicMock(returncode=0),  # observability reverse check
+                MagicMock(returncode=0),  # admission-observability apply check
+                MagicMock(returncode=0),  # admission-observability apply
+            ]
+
+            with patch.object(
+                swe_app, "subprocess_run", side_effect=command_results
+            ) as subprocess_run:
+                processor._apply_streaming_tool_call_patch(Path(tmpdir))
+
+            commands = [call.args[0] for call in subprocess_run.call_args_list]
+            assert len(commands) == 5
+            assert commands[0][2:4] == ["--reverse", "--check"]
+            assert commands[1][2:4] == ["--reverse", "--check"]
+            assert commands[2][2:4] == ["--reverse", "--check"]
+            assert commands[3][2] == "--check"
+            assert commands[4][2].endswith(
+                "streaming_tool_call_admission_observability.patch"
+            )
+
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
@@ -1423,6 +1540,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "/swebench_setup" in result
+            assert "/swebench_artifact_cache" in result
 
     def test_memory_limit(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
