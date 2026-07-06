@@ -45,6 +45,9 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from responses_api_models.vllm_model.sglang_tool_parsers import (
+    parse_qwen3_coder_tool_calls,
+)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -95,6 +98,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # falls back to its default max_new_tokens=128, truncating reasoning before </think> and
     # breaking multi-turn contiguity.
     sglang_max_total_sequence_length: Optional[int] = None
+
+    # Tool-call text format the model emits (engine == "sglang"): the /generate path re-parses
+    # tool calls from raw text client-side, so this must match the model's chat template.
+    # "hermes": <tool_call>{json}</tool_call> (e.g. Qwen3 thinking models).
+    # "qwen3_coder": <tool_call><function=NAME><parameter=KEY>VALUE</parameter>...</function>
+    #                </tool_call> (e.g. Nemotron Nano V3.5 templates).
+    sglang_tool_format: Literal["hermes", "qwen3_coder"] = "hermes"
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -721,21 +731,29 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._sglang_session_seq.pop(next(iter(self._sglang_session_seq)), None)
         self._sglang_session_seq[sid] = {"messages": list(messages), "seq": seq}
 
-    def _parse_sglang_generation(self, text: str) -> Tuple[Optional[str], str, List[Dict[str, Any]]]:
+    def _parse_sglang_generation(
+        self, text: str, tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Tuple[Optional[str], str, List[Dict[str, Any]]]:
         """Reconstruct (reasoning_content, content, tool_calls) from SGLang /generate raw text.
 
-        The qwen3-thinking generation prompt ends with ``<think>\\n``, so the generated text
+        The thinking-style generation prompt ends with ``<think>\\n``, so the generated text
         begins INSIDE the reasoning block (no opening ``<think>``). Everything up to the first
-        ``</think>`` is therefore reasoning; hermes tool calls are parsed out of the remainder.
-        This mirrors what the SGLang server's reasoning_parser=qwen3-thinking +
-        tool_call_parser=hermes would have produced on /v1/chat/completions, so downstream
-        Responses marshaling is identical to the vLLM path.
+        ``</think>`` is therefore reasoning; tool calls are parsed out of the remainder in the
+        format selected by ``config.sglang_tool_format`` ("hermes" JSON, e.g. Qwen3-thinking;
+        or "qwen3_coder" XML-ish, e.g. Nemotron Nano V3.5 — see sglang_tool_parsers.py).
+        This mirrors what the serving engine's reasoning/tool parsers would have produced on
+        /v1/chat/completions, so downstream Responses marshaling is identical to the vLLM path.
+        ``tools`` (the request's tools list) enables schema-aware argument type coercion.
         """
         reasoning_content: Optional[str] = None
         if self.config.uses_reasoning_parser and "</think>" in text:
             reasoning_content, _, remainder = text.partition("</think>")
         else:
             remainder = text
+
+        if self.config.sglang_tool_format == "qwen3_coder":
+            tool_calls, content = parse_qwen3_coder_tool_calls(remainder, tools)
+            return reasoning_content, content, tool_calls
 
         tool_calls: List[Dict[str, Any]] = []
         for match in self._SGLANG_TOOL_CALL_PATTERN.finditer(remainder):
@@ -889,7 +907,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if generated_text.endswith(_eos):
                     generated_text = generated_text[: -len(_eos)]
                     _stripped = True
-        reasoning_content, content, tool_calls = self._parse_sglang_generation(generated_text)
+        reasoning_content, content, tool_calls = self._parse_sglang_generation(
+            generated_text, tools=tools
+        )
 
         if (meta_info.get("finish_reason") or {}).get("type") == "length":
             finish_reason = "length"
