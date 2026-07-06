@@ -34,16 +34,13 @@ mini_swe_agent_2:
           batch:
             concurrency: 3
       sandbox_spec:
-        timeout_s: 18000
+        ttl_s: 18000
         ready_timeout_s: 1200
         resources:
           cpu: "2"
           memory_mib: 1024
           disk_gib: 9
-        provider_options:
-          platform:
-            os: linux
-            arch: amd64
+        provider_options: {}
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent

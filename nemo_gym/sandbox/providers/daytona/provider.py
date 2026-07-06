@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers.base import (
 
 
 LOGGER = logging.getLogger(__name__)
+DAYTONA_COMMAND_ERROR_PREFIX = "Failed to execute command:"
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "connection refused",
@@ -60,6 +61,11 @@ DAYTONA_EXTENSION_PREFIX = "daytona."
 PROVIDER_OPTION_EXTENSIONS = "extensions"
 PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
 PROVIDER_OPTION_VOLUMES = "volumes"
+SUPPORTED_PROVIDER_OPTIONS = {
+    PROVIDER_OPTION_EXTENSIONS,
+    PROVIDER_OPTION_SNAPSHOT_ID,
+    PROVIDER_OPTION_VOLUMES,
+}
 SANDBOX_ID_LABEL = "sandbox_id"
 
 
@@ -157,6 +163,17 @@ def _has_retryable_error_marker(exception: BaseException) -> bool:
     return any(marker in message for marker in RETRYABLE_ERROR_MARKERS)
 
 
+def _is_daytona_command_exec_error(exception: BaseException) -> bool:
+    error_types = _daytona_error_types()
+    if not error_types or not isinstance(exception, error_types["error"]):
+        return False
+    return str(exception).strip().startswith(DAYTONA_COMMAND_ERROR_PREFIX)
+
+
+def _is_empty_daytona_command_exec_error(exception: BaseException) -> bool:
+    return _is_daytona_command_exec_error(exception) and str(exception).strip() == DAYTONA_COMMAND_ERROR_PREFIX
+
+
 def _is_retryable_create_error(exception: BaseException) -> bool:
     if isinstance(exception, SandboxCreateVerificationError):
         return True
@@ -205,6 +222,8 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
 def _is_retryable_operation_error(exception: BaseException) -> bool:
     if isinstance(exception, TimeoutError):
         return False
+    if _is_empty_daytona_command_exec_error(exception):
+        return True
     cause = exception.__cause__
     if isinstance(cause, BaseException) and _is_retryable_operation_error(cause):
         return True
@@ -237,6 +256,37 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox" in message and "not found" in message
+
+
+def _daytona_exec_error_message(exception: BaseException) -> str:
+    message = str(exception).strip()
+    if _is_empty_daytona_command_exec_error(exception):
+        message = f"{DAYTONA_COMMAND_ERROR_PREFIX} HTTP request timed out before Daytona returned a response"
+
+    details = [message]
+    status_code = _exception_status_code(exception)
+    if status_code is not None:
+        details.append(f"status_code={status_code}")
+    error_code = getattr(exception, "error_code", None)
+    if error_code:
+        details.append(f"error_code={error_code}")
+    return "; ".join(details)
+
+
+def _daytona_exec_error_result(exception: BaseException) -> SandboxExecResult:
+    message = _daytona_exec_error_message(exception)
+    is_timeout = "timeout" in message.lower() or "timed out" in message.lower()
+    error_type = "timeout" if is_timeout else "sandbox"
+    return_code = 124 if is_timeout else 125
+    return SandboxExecResult(
+        stdout=None,
+        stderr=(
+            f"Daytona command execution failed before a process exit code was returned: {message}. "
+            "The command may not have run."
+        ),
+        return_code=return_code,
+        error_type=error_type,
+    )
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -275,11 +325,27 @@ def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
+def _supplied_config_keys(value: Any, config_cls: type[Any]) -> set[str]:
+    if not isinstance(value, Mapping):
+        return set()
+    field_names = {field.name for field in fields(config_cls)}
+    return {str(key) for key in value if key in field_names}
+
+
 def _string_map(values: dict[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()}
 
 
+def _validate_provider_options(spec: SandboxSpec) -> None:
+    if not isinstance(spec.provider_options, Mapping):
+        raise TypeError("Daytona provider_options must be a mapping")
+    unsupported_keys = sorted(str(key) for key in spec.provider_options if key not in SUPPORTED_PROVIDER_OPTIONS)
+    if unsupported_keys:
+        raise ValueError(f"Unsupported Daytona provider_options: {', '.join(unsupported_keys)}")
+
+
 def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
+    _validate_provider_options(spec)
     return replace(
         spec,
         env=_string_map(spec.env),
@@ -551,6 +617,7 @@ class DaytonaProvider:
         self._probe = _coerce_config(probe, DaytonaProbeConfig)
         self._operations = _coerce_config(operations, DaytonaOperationConfig)
         self._batch = _coerce_config(batch, DaytonaBatchConfig)
+        self._connection_supplied_keys = _supplied_config_keys(connection, DaytonaConnectionConfig)
         self._daytona: Any | None = None
 
     def _client(self) -> Any:
@@ -569,7 +636,7 @@ class DaytonaProvider:
             "otel_enabled",
         ):
             value = getattr(self._connection, key)
-            if value is not None:
+            if value is not None or key in self._connection_supplied_keys:
                 kwargs[key] = value
         self._daytona = AsyncDaytona() if not kwargs else AsyncDaytona(DaytonaConfig(**kwargs))
         return self._daytona
@@ -654,6 +721,7 @@ class DaytonaProvider:
 
     def _to_create_params(self, spec: SandboxSpec) -> Any | None:
         _, _, ImageParams, SnapshotParams, _, _ = _require_daytona_sdk()
+        _validate_provider_options(spec)
         snapshot_id = _spec_snapshot_id(spec)
         if spec.image is not None and snapshot_id is not None:
             raise ValueError("Daytona provider does not support both image and snapshot_id")
@@ -732,7 +800,14 @@ class DaytonaProvider:
         try:
             await self._verify_created_handle(handle)
         except Exception:
-            await self.close(handle, delete=True)
+            try:
+                await self.close(handle, delete=True)
+            except Exception as cleanup_error:
+                LOGGER.warning(
+                    "Failed to delete Daytona sandbox after create probe failure; sandbox_id=%s; error=%r",
+                    handle.sandbox_id,
+                    cleanup_error,
+                )
             raise
         return handle
 
@@ -844,18 +919,32 @@ class DaytonaProvider:
         user: str | int | None = None,
         retries: int | None = None,
     ) -> SandboxExecResult:
-        response = await self._await_operation(
-            lambda: handle.raw.process.exec(
-                self._effective_command(command, user),
-                cwd=cwd,
-                env=env,
-                timeout=timeout_s,
-            ),
-            operation="process.exec",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(timeout_s) + self._operations.command_timeout_margin_s if timeout_s is not None else None,
-            retries=self._command_retry_count() if retries is None else retries,
-        )
+        try:
+            response = await self._await_operation(
+                lambda: handle.raw.process.exec(
+                    self._effective_command(command, user),
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout_s,
+                ),
+                operation="process.exec",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(timeout_s) + self._operations.command_timeout_margin_s
+                if timeout_s is not None
+                else None,
+                retries=self._command_retry_count() if retries is None else retries,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not _is_daytona_command_exec_error(e):
+                raise
+            LOGGER.warning(
+                "Daytona process.exec failed without a process result; sandbox_id=%s; error=%r",
+                handle.sandbox_id,
+                e,
+            )
+            return _daytona_exec_error_result(e)
         artifacts = getattr(response, "artifacts", None)
         stdout = getattr(response, "result", None)
         if stdout is None and artifacts is not None:

@@ -16,6 +16,7 @@
 import asyncio
 import builtins
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -252,6 +253,10 @@ def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> Non
         daytona_provider._spec_extensions(SandboxSpec(provider_options={"extensions": []}))
     with pytest.raises(TypeError, match="volumes"):
         daytona_provider._spec_volumes(SandboxSpec(provider_options={"volumes": {}}))
+    with pytest.raises(TypeError, match="provider_options"):
+        daytona_provider._validate_provider_options(SandboxSpec(provider_options=None))
+    with pytest.raises(ValueError, match="Unsupported Daytona provider_options: platform"):
+        daytona_provider._validate_provider_options(SandboxSpec(provider_options={"platform": {"os": "linux"}}))
 
     assert daytona_provider._to_resources({}) is None
     assert daytona_provider._to_resources({"gpu": "1"}).kwargs == {"gpu": 1}
@@ -285,6 +290,9 @@ def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> Non
     for kwargs in invalid_provider_kwargs:
         with pytest.raises(ValueError):
             daytona_provider.DaytonaProvider(**kwargs)
+
+    with pytest.raises(ValueError, match="Unsupported Daytona DaytonaConnectionConfig settings: typo"):
+        daytona_provider.DaytonaProvider(connection={"typo": True})
 
 
 def test_snapshot_creation_rejects_ignored_resources(fake_daytona_sdk: None) -> None:
@@ -351,6 +359,12 @@ async def test_client_lifecycle_create_kwargs_and_status_fallbacks(fake_daytona_
     await provider.aclose()
     assert client.closed is True
     assert await provider.aclose() is None
+
+    FakeAsyncDaytona.instances.clear()
+    unlimited_provider = daytona_provider.DaytonaProvider(connection={"connection_pool_maxsize": None})
+    unlimited_client = unlimited_provider._client()
+    assert unlimited_client.config.kwargs == {"connection_pool_maxsize": None}
+    await unlimited_provider.aclose()
 
     kwargs = provider._base_create_kwargs(
         SandboxSpec(
@@ -522,10 +536,87 @@ async def test_exec_maps_stderr_only_output() -> None:
     assert result.return_code == 3
 
 
+async def test_exec_maps_daytona_command_error_to_sandbox_result(fake_daytona_module: None) -> None:
+    error_types = daytona_provider._daytona_error_types()
+
+    class FakeProcess:
+        async def exec(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise error_types["error"]("Failed to execute command:")
+
+    raw = SimpleNamespace(process=FakeProcess())
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
+    result = await provider.exec(SandboxHandle(sandbox_id="sandbox-1", provider_name="daytona", raw=raw), "cmd")
+
+    assert result.stdout is None
+    assert result.return_code == 124
+    assert result.error_type == "timeout"
+    assert result.stderr is not None
+    assert "HTTP request timed out before Daytona returned a response" in result.stderr
+    assert "The command may not have run" in result.stderr
+
+
+async def test_exec_maps_daytona_command_timeout_to_timeout_result(fake_daytona_module: None) -> None:
+    error_types = daytona_provider._daytona_error_types()
+
+    class FakeProcess:
+        async def exec(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise error_types["error"]("Failed to execute command: request timeout: command execution timeout")
+
+    raw = SimpleNamespace(process=FakeProcess())
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0})
+    result = await provider.exec(SandboxHandle(sandbox_id="sandbox-1", provider_name="daytona", raw=raw), "cmd")
+
+    assert result.return_code == 124
+    assert result.error_type == "timeout"
+    assert result.stderr is not None
+    assert "command execution timeout" in result.stderr
+
+
+async def test_exec_retries_empty_daytona_command_error_when_enabled(
+    fake_daytona_module: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error_types = daytona_provider._daytona_error_types()
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def exec(self, *_args: Any, **_kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise error_types["error"]("Failed to execute command:")
+            return SimpleNamespace(result="ok", exit_code=0)
+
+    monkeypatch.setattr(daytona_provider.asyncio, "sleep", record_sleep)
+    process = FakeProcess()
+    raw = SimpleNamespace(process=process)
+    provider = daytona_provider.DaytonaProvider(
+        operations={
+            "retries": 0,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "command_retries": 1,
+        }
+    )
+
+    result = await provider.exec(SandboxHandle(sandbox_id="sandbox-1", provider_name="daytona", raw=raw), "cmd")
+
+    assert result.stdout == "ok"
+    assert result.return_code == 0
+    assert process.calls == 2
+    assert sleeps == [0]
+
+
 async def test_probe_create_connect_file_and_close_paths(
     fake_daytona_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class FakeSandbox:
         def __init__(self, sandbox_id: str) -> None:
@@ -617,6 +708,19 @@ async def test_probe_create_connect_file_and_close_paths(
     with pytest.raises(RuntimeError, match="probe failed"):
         await provider._create_once(SandboxSpec(image="python:3.12"))
     assert cleanup_calls == [("sandbox-created", True)]
+
+    async def close_cleanup_failure(cleanup_handle: SandboxHandle, *, delete: bool) -> None:
+        cleanup_calls.append((cleanup_handle.sandbox_id, delete))
+        raise RuntimeError("cleanup failed")
+
+    cleanup_calls.clear()
+    monkeypatch.setattr(provider, "close", close_cleanup_failure)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError, match="probe failed"):
+            await provider._create_once(SandboxSpec(image="python:3.12"))
+    assert cleanup_calls == [("sandbox-created", True)]
+    assert "Failed to delete Daytona sandbox after create probe failure" in caplog.text
+    assert "cleanup failed" in caplog.text
 
     class TimeoutClient(FakeClient):
         async def create(self, _params: Any, *, timeout: float) -> FakeSandbox:
