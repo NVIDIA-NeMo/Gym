@@ -68,6 +68,10 @@ If `TeamCreate` is NOT in your tool list, fall back to the `Agent` tool:
   message is the agent's findings (returned to you, not shown to the user).
 - **Continue / question** an already-spawned agent with `SendMessage` addressed to
   that agent's ID or name — its context is preserved.
+- **Lost findings**: an agent's idle notification can arrive WITHOUT its findings
+  message (only the summary line). If TaskList shows its task completed but no content
+  reached you, `SendMessage` the agent asking it to resend (split across multiple
+  messages if long) — its context is preserved and it responds quickly.
 
 ### Common to both modes
 
@@ -244,6 +248,15 @@ Build the briefing from the ACTUAL repo, not from memory:
 3. **Position / blast radius**: note whether the change sits on a hot path, a startup
    path, a serialization boundary, a shared schema/contract, etc. — i.e. what a mistake
    here would ripple into.
+4. **Background references**: for each domain term the PR introduces (benchmark, method,
+   external framework — e.g. a paper-backed technique or dataset suite), collect a
+   canonical link (paper + repo). VERIFY every reference before citing — resolve arXiv
+   IDs via the API (`curl -sL "https://export.arxiv.org/api/query?search_query=..."` —
+   note: must be **https**; http 301s to an empty body) or fetch the repo README; never
+   cite paper IDs from memory. These links go in a "Background" section at the top of
+   the review body so readers unfamiliar with the domain can follow the findings. Also
+   be precise about external endpoints in the briefing and diagram (e.g. "NVIDIA hosted
+   inference endpoint, integrate.api.nvidia.com" rather than a bare product acronym).
 
 **Render a diagram** (Mermaid `flowchart` preferred; ASCII fallback if Mermaid is
 unsuitable) showing the relevant components and the data flow, with the PR's touched
@@ -676,6 +689,11 @@ its inbox and respond — preventing deadlocks.
 Review comments represent the team — constructive and helpful, especially for community
 contributors:
 
+- **Question-first, confirm intent**: open each inline comment by asking whether the
+  behavior was deliberate BEFORE presenting the evidence — "Was it intentional that
+  the returned rollout carries only the last action?", "Is `num_repeats: 1` a
+  placeholder for the example, or the intended protocol?" Keep all technical evidence,
+  permalinks, and suggestions after the question; never water down the facts.
 - **Ask, don't accuse**: "It would help to include baseline reward numbers" not "The PR
   contains no evidence."
 - **Suggest, don't demand**: "Consider adding..." / "This could be improved by..."
@@ -818,16 +836,21 @@ should read as a single reviewer's voice. (Agent attributions belong only in the
 preview shown to the user, never on the PR.)
 
 **All actionable findings MUST be inline comments**, not body text. The body is for
-general context (PR summary, merge-conflict note, non-actionable observations). Tie
+general context (PR summary, merge-conflict note, non-actionable observations).
+Exception: a longer **architecture/design proposal** that spans several findings belongs
+in the body as its own section, explicitly framed as optional ("a sketch, not a demand",
+ideally with a phased plan); the related inline comment keeps only the finding + a
+pointer like "(a concrete architecture sketch is in the review summary)". Tie
 "general" findings to the most relevant diff line:
 - Bug in a file not in the diff → comment on the diff line that introduces the
   requirement; reference the external file in the body.
 - Missing test coverage → comment on the most relevant test file in the diff, listing
   untested functions with permalinks.
 
-**ALWAYS lead the review body with the end-to-end system context from §1.3a** — a 1-2
-sentence "where this PR sits" framing followed by the **diagram** (Mermaid fenced block;
-GitHub renders Mermaid in review/comment markdown). This gives every reader the
+**ALWAYS lead the review body with the end-to-end system context from §1.3a** — a short
+**Background** bullet list (the verified paper/repo links from §1.3a item 4, one line
+per domain term), then a 1-2 sentence "where this PR sits" framing followed by the
+**diagram** (Mermaid fenced block; GitHub renders Mermaid in review/comment markdown). This gives every reader the
 big-picture map of which components and data-flow stages the PR touches before they read
 the inline findings. Keep it to the PR's slice (the same focused diagram from §1.3a), and
 keep the single-reviewer voice — no agent-team / AI-generation references. The system
@@ -842,7 +865,7 @@ backticks/markdown):
 cat <<'REVIEW_JSON' > "$TMPDIR/review.json"
 {
   "commit_id": "$HEAD_SHA",
-  "body": "<system context FIRST: 'where this PR sits' framing + the §1.3a Mermaid diagram (```mermaid ... ``` fenced) — then a brief summary of what the PR does, merge-conflict note, and any non-actionable observations. No agent-team / AI-generation references.>",
+  "body": "<Background links FIRST (verified paper/repo refs), then system context: 'where this PR sits' framing + the §1.3a Mermaid diagram (```mermaid ... ``` fenced) — then a brief summary of what the PR does, merge-conflict note, any architecture proposal section, and non-actionable observations. No agent-team / AI-generation references.>",
   "comments": [
     {"path": "<file>", "line": <line>, "side": "RIGHT", "body": "[`<file>:<line>`](<permalink>)\n\n<comment with evidence permalinks>"}
   ]
@@ -883,14 +906,38 @@ json.dump(gql, open("$TMPDIR/add_comment.json", "w"))
 gh api graphql --input "$TMPDIR/add_comment.json"
 ```
 
+### Step 1b: Edit an existing PENDING comment
+
+REST `PATCH /pulls/comments/$COMMENT_ID` returns **404** for comments of a PENDING
+review — use the GraphQL `updatePullRequestReviewComment` mutation with the comment's
+**node_id** (`PRRC_...`):
+
+```python
+import json
+gql = {
+  "query": ("mutation($id: ID!, $body: String!) {"
+            " updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id,"
+            " body: $body}) { pullRequestReviewComment { id } } }"),
+  "variables": {"id": "<PRRC_node_id>", "body": "<new comment body>"},
+}
+json.dump(gql, open("$TMPDIR/edit_comment.json", "w"))
+```
+```bash
+gh api graphql --input "$TMPDIR/edit_comment.json"
+```
+
+Get node_ids from `GET /pulls/$PRNUM/reviews/$REVIEW_ID/comments` — but note that
+listing returns `line: null` for pending comments, so match a comment to its finding by
+**creation order or body content**, not by line. (The review *body* CAN be updated via
+REST: `PUT /pulls/$PRNUM/reviews/$REVIEW_ID` with `{"body": ...}`.)
+
 ### Step 1.5: Preview and confirm
 
 Show the user the pending-review URL and ask them to preview on GitHub. Use
 `AskUserQuestion`: **Publish**, **Edit comments**, **Cancel**.
 
-- **Edit comments**: ask which comment, update via
-  `gh api repos/NVIDIA-NeMo/Gym/pulls/comments/$COMMENT_ID --method PATCH -f body="..."`,
-  then re-ask.
+- **Edit comments**: ask which comment, update via the GraphQL mutation in Step 1b
+  (REST PATCH 404s on pending comments), then re-ask.
 - **Cancel**: delete the pending review
   (`gh api repos/NVIDIA-NeMo/Gym/pulls/$PRNUM/reviews/$REVIEW_ID --method DELETE`) and stop.
 
@@ -922,6 +969,21 @@ Then tell the user: "Review published with <N> inline comments and a summary."
 
 If the user selected "Stage + Run validation", spawn `validation-runner` and stage its
 results for user review before posting as a PR comment.
+
+### Follow-up issues for platform gaps
+
+When a finding reveals a **platform gap** rather than a PR defect (e.g. a missing
+capability in the core library or Model Server that forces the PR's workaround), don't
+leave it as a rhetorical "would it be worth opening an issue?" in the comment — propose
+filing the issue to the user, and on approval create it while the review is still
+pending:
+
+1. Search for an existing issue first (`gh issue list --search`, `gh search issues`).
+2. Use the repo's issue template (`.github/ISSUE_TEMPLATE/feature.md`: use cases,
+   description, design with concrete file paths, out-of-scope, acceptance criteria),
+   citing the PR as the motivating case.
+3. Update the pending review (Step 1b) to link the created issue ("tracked in #NNNN")
+   instead of the rhetorical ask, in both the inline comment and the body.
 
 ---
 
