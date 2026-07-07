@@ -19,14 +19,14 @@ rerunning model inference.
 Batches that the live run already scored successfully are skipped, so partial
 quota is never wasted re-scoring submissions that already have a verdict.
 
-API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY.
+API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY.  # pragma: allowlist secret
 
     # Single key (free tier, 10 CritPt scorings / 24h):
     ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx"  # pragma: allowlist secret
 
     # Multiple keys for rotation on HTTP 429 (bracketed list literal,
     # comma-separated; whitespace ok):
-    ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]"
+    ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]"  # pragma: allowlist secret
 
 Rotation is always on when more than one key is configured: every 429
 advances to the next key. When every configured key 429s on the same batch
@@ -34,7 +34,7 @@ advances to the next key. When every configured key 429s on the same batch
 in aa_responses.jsonl, so simply rerun after the AA daily quota resets.
 
 Example:
-    ARTIFICIAL_ANALYSIS_API_KEY="[k1,k2,k3]" python -m resources_servers.critpt.replay \\
+    ARTIFICIAL_ANALYSIS_API_KEY="[k1,k2,k3]" python -m resources_servers.critpt.replay \\  # pragma: allowlist secret
         --cache-dir /path/to/critpt_cache
 
 AA only accepts full batches of `--batch-size` (70) submissions, so a partial
@@ -66,7 +66,7 @@ AA_API_KEY_ENV_VAR = "ARTIFICIAL_ANALYSIS_API_KEY"  # pragma: allowlist secret
 
 
 def _parse_api_keys_env(raw: str) -> List[str]:
-    """Parse $ARTIFICIAL_ANALYSIS_API_KEY into a non-empty ordered list.
+    """Parse $ARTIFICIAL_ANALYSIS_API_KEY into a non-empty ordered list.  # pragma: allowlist secret
 
     Accepts two shapes:
 
@@ -101,7 +101,7 @@ def _parse_api_keys_env(raw: str) -> List[str]:
 
 
 def _load_api_keys() -> List[str]:
-    """Resolve AA API keys from $ARTIFICIAL_ANALYSIS_API_KEY.
+    """Resolve AA API keys from $ARTIFICIAL_ANALYSIS_API_KEY.  # pragma: allowlist secret
 
     Single-key and bracketed-list shapes are both accepted by
     `_parse_api_keys_env`. Returns [] when the env var is unset so the

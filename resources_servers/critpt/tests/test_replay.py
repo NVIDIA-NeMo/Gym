@@ -114,15 +114,15 @@ class TestPackIntoBatches:
 
 class TestLoadApiKeys:
     def test_unset_returns_empty(self, monkeypatch):
-        monkeypatch.delenv("ARTIFICIAL_ANALYSIS_API_KEY", raising=False)
+        monkeypatch.delenv("ARTIFICIAL_ANALYSIS_API_KEY", raising=False)  # pragma: allowlist secret
         assert _load_api_keys() == []
 
     def test_single_key_from_env(self, monkeypatch):
-        monkeypatch.setenv("ARTIFICIAL_ANALYSIS_API_KEY", "aa-from-env")
+        monkeypatch.setenv("ARTIFICIAL_ANALYSIS_API_KEY", "aa-from-env")  # pragma: allowlist secret
         assert _load_api_keys() == ["aa-from-env"]
 
     def test_bracketed_list_from_env(self, monkeypatch):
-        monkeypatch.setenv("ARTIFICIAL_ANALYSIS_API_KEY", "[k1,k2,k3]")
+        monkeypatch.setenv("ARTIFICIAL_ANALYSIS_API_KEY", "[k1,k2,k3]")  # pragma: allowlist secret
         assert _load_api_keys() == ["k1", "k2", "k3"]
 
 

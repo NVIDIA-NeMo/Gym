@@ -125,7 +125,7 @@ For multiple AA keys, pass a bracketed comma-separated list. Replay rotates to t
 on each HTTP 429:
 
 ```bash
-ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]" \
+ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]" <!-- pragma: allowlist secret --> \
   python -m resources_servers.critpt.replay --cache-dir "$RUN_DIR"
 ```
 
@@ -140,7 +140,7 @@ padding submissions and ship it anyway (matching the server's smoke-test `fire_a
 submissions are recorded as scored:
 
 ```bash
-ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" \
+ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" <!-- pragma: allowlist secret --> \
   python -m resources_servers.critpt.replay --cache-dir "$RUN_DIR" --fire-after 5
 ```
 
