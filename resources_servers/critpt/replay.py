@@ -19,7 +19,7 @@ rerunning model inference.
 Batches that the live run already scored successfully are skipped, so partial
 quota is never wasted re-scoring submissions that already have a verdict.
 
-API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY. 
+API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY.
 
     # Single key (free tier, 10 CritPt scorings / 24h):
     ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx"

@@ -47,8 +47,7 @@ def _cache_dir_from_env() -> Optional[Path]:
 
 
 def _resolve_cache_dir(cache_dir: Path) -> Path:
-    """Anchor a relative cache_dir to the repo root; leave absolute paths as-is.
-    """
+    """Anchor a relative cache_dir to the repo root; leave absolute paths as-is."""
     return cache_dir if cache_dir.is_absolute() else _REPO_ROOT / cache_dir
 
 
