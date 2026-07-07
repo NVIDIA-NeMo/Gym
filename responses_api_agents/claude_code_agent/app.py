@@ -15,9 +15,11 @@
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -46,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
@@ -233,10 +236,13 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     bare: bool = True
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
+    sandbox_provider: Optional[dict[str, Any]] = None
+    in_box_timeout_s: int = 1800
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+    verifier_metadata: Optional[dict[str, Any]] = None
 
 
 class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
@@ -488,6 +494,131 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         config_path.write_text(json.dumps(config, indent=2, sort_keys=True))
         return str(config_path)
 
+    @staticmethod
+    def _sandbox_spec_from_descriptor(spec_dict: dict[str, Any]) -> SandboxSpec:
+        payload = dict(spec_dict)
+        resources = payload.pop("resources", None)
+        if resources is None:
+            resources = SandboxResources()
+        elif not isinstance(resources, SandboxResources):
+            resources = SandboxResources.from_mapping(resources)
+        return SandboxSpec(**payload, resources=resources)
+
+    def _anthropic_env(self) -> tuple[dict[str, str], str]:
+        base_url = self._resolve_base_url()
+        model = self.config.model if base_url else self.config.model.split("/")[-1]
+        api_key = self.config.anthropic_api_key
+        env = {
+            "ANTHROPIC_API_KEY": api_key,  # pragma: allowlist secret
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "IS_SANDBOX": "1",
+        }
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = base_url
+            env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
+        return env, model
+
+    async def _run_in_box(
+        self,
+        body: ClaudeCodeAgentRunRequest,
+        seed_resp_json: dict[str, Any],
+        *,
+        skills_path: Optional[str] = None,
+    ) -> tuple[dict[str, Any], str]:
+        spec_dict = (seed_resp_json.get("sandbox") or {}).get("spec") or {}
+        workdir = spec_dict.get("workdir") or "/testbed"
+        spec = self._sandbox_spec_from_descriptor(spec_dict)
+        egress_env = (seed_resp_json.get("egress") or {}).get("env") or {}
+        anthropic_env, model = self._anthropic_env()
+        spec = dataclasses.replace(spec, env={**spec.env, **egress_env, **anthropic_env})
+
+        provider = self.config.sandbox_provider or {"docker": {}}
+        sandbox = AsyncSandbox(provider, spec)
+        await sandbox.start()
+        claude_config_dir: Path | None = None
+        try:
+            claude_config_dir = self._setup_config_dir(skills_path=skills_path)
+            remote_cfg = "/tmp/nemo_gym_claude"
+            await sandbox.exec(f"mkdir -p {shlex.quote(remote_cfg)}", cwd=workdir, timeout_s=60)
+            await sandbox.upload(str(claude_config_dir / "settings.json"), f"{remote_cfg}/settings.json")
+
+            params = body.responses_create_params.model_copy(deep=True)
+            if isinstance(params.input, str):
+                params.input = [NeMoGymEasyInputMessage(role="user", content=params.input)]
+            user_message, input_system = _extract_instruction(params.input)
+            system_parts = [p for p in [self.config.system_prompt, input_system] if p]
+            system_prompt = "\n\n".join(system_parts) if system_parts else None
+
+            cmd_parts = self._build_command(
+                model,
+                user_message,
+                system_prompt=system_prompt,
+                skills_active=bool(skills_path),
+            )
+            env_prefix = " ".join(f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in spec.env.items())
+            remote_cmd = f"{env_prefix} CLAUDE_CONFIG_DIR={shlex.quote(remote_cfg)} {shlex.join(cmd_parts)}"
+            result = await sandbox.exec(remote_cmd, cwd=workdir, timeout_s=self.config.in_box_timeout_s)
+            stdout = result.stdout or ""
+            if result.error_type == "timeout":
+                LOG.warning("claude-code in-box timed out after %ss", self.config.in_box_timeout_s)
+            elif result.return_code not in (0, None) and stdout.strip() == "":
+                LOG.warning(
+                    "claude-code in-box exited %s: %s",
+                    result.return_code,
+                    (result.stderr or "")[:500],
+                )
+
+            output_items, usage = parse_stream_json(stdout)
+            if not any(
+                getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+                for item in output_items
+            ):
+                output_items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{uuid4().hex}",
+                        content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
+
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            agent_resp = NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=model,
+                object="response",
+                output=output_items,
+                tool_choice=params.tool_choice,
+                tools=params.tools,
+                parallel_tool_calls=params.parallel_tool_calls,
+                usage=NeMoGymResponseUsage(
+                    input_tokens=input_tokens,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                    output_tokens=output_tokens,
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                    total_tokens=input_tokens + output_tokens,
+                ),
+            )
+
+            patch_result = await sandbox.exec(
+                f"cd {shlex.quote(workdir)} && git add -A && git diff --cached",
+                cwd=workdir,
+                timeout_s=120,
+            )
+            patch = patch_result.stdout or ""
+            return agent_resp.model_dump(mode="json"), patch
+        finally:
+            if claude_config_dir is not None:
+                shutil.rmtree(claude_config_dir, ignore_errors=True)
+            await sandbox.stop()
+
     async def _create_response(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -567,23 +698,32 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
             seed_resp_json = await get_response_json(seed_resp)
 
-            # The run-level skills_ref (stamped by rollout collection) rides on the request body
-            # (extra="allow"). Pass its path straight into _create_response so the CLI invocation
-            # can stage the skills into its per-request CLAUDE_CONFIG_DIR. run() calls _create_response
-            # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
+            topology = (seed_resp_json.get("placement") or {}).get("topology") or "none"
 
-            with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
-                mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                agent_resp = await self._create_response(
-                    body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
-                )
-                agent_resp_json = agent_resp.model_dump(mode="json")
+            if topology == "agent_in_env":
+                agent_resp_json, model_patch = await self._run_in_box(body, seed_resp_json, skills_path=skills_path)
+                verifier_metadata = {
+                    **(body.verifier_metadata or {}),
+                    **(seed_resp_json.get("verifier_metadata") or {}),
+                    "model_patch": model_patch,
+                }
+            else:
+                with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
+                    mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
+                    agent_resp = await self._create_response(
+                        body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
+                    )
+                    agent_resp_json = agent_resp.model_dump(mode="json")
+                verifier_metadata = {
+                    **(body.verifier_metadata or {}),
+                    **(seed_resp_json.get("verifier_metadata") or {}),
+                }
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump() | {"response": agent_resp_json, "verifier_metadata": verifier_metadata},
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
