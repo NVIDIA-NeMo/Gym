@@ -270,6 +270,7 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
     # in-container agent harness
     concurrency: int = 256
+    results_dir: Optional[Path] = None
 
 
 class AnyTerminalRunRequest(BaseRunRequest):
@@ -520,15 +521,21 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         model_name = str(self.server_client.global_config_dict.get("policy_model_name") or "")
 
         agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
-        session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         workspace = Path(__file__).parent
 
         results_dir = workspace / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
+        base_results_dir = self.config.results_dir
+        if base_results_dir is None:
+            session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+            base_results_dir = results_dir / f"anyterminal_results_{session_id}"
+        else:
+            session_id = base_results_dir.name
+        base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._server = AnyTerminalServerConfig(
             run_session_id=session_id,
-            base_results_dir=results_dir / f"anyterminal_results_{session_id}",
+            base_results_dir=base_results_dir,
             model_server_url=model_url,
             model_name=model_name,
             nemo_gym_root=PARENT_DIR,
