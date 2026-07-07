@@ -19,6 +19,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    NotRequired,
     Optional,
     Required,
     TypeAlias,
@@ -101,12 +102,28 @@ class TokenIDLogProbMixin(BaseModel):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    generation_token_id_source: Optional[str] = None
+    native_generation_token_ids_count: Optional[int] = None
+    logprob_generation_token_ids_count: Optional[int] = None
+    native_logprob_token_id_mismatch_count: Optional[int] = None
+    native_logprob_token_id_first_mismatches: Optional[List[int]] = None
+    finish_reason: Optional[str] = None
+    debug_vllm_generation_top_logprobs: Optional[List[List[dict]]] = None
+    debug_vllm_generation_top_logprobs_status: Optional[str] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    generation_token_id_source: NotRequired[str]
+    native_generation_token_ids_count: NotRequired[int]
+    logprob_generation_token_ids_count: NotRequired[int]
+    native_logprob_token_id_mismatch_count: NotRequired[int]
+    native_logprob_token_id_first_mismatches: NotRequired[List[int]]
+    finish_reason: NotRequired[str]
+    debug_vllm_generation_top_logprobs: NotRequired[List[List[dict]]]
+    debug_vllm_generation_top_logprobs_status: NotRequired[str]
 
 
 ########################################
@@ -147,6 +164,54 @@ class NeMoGymResponseOutputRefusal(BaseModel):
 NeMoGymContent: TypeAlias = Union[NeMoGymResponseOutputText, NeMoGymResponseOutputRefusal]
 
 
+class NeMoGymInputTextPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    type: Literal["input_text"] = "input_text"
+
+
+class NeMoGymInputImagePart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_url: Union[str, Dict[str, Any]]
+    type: Literal["input_image"] = "input_image"
+    detail: Optional[str] = None
+
+
+class NeMoGymImageUrlPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_url: Union[str, Dict[str, Any]]
+    type: Literal["image_url"] = "image_url"
+    detail: Optional[str] = None
+
+
+class NeMoGymInputVideoPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["input_video"] = "input_video"
+    video_url: Optional[Union[str, Dict[str, Any]]] = None
+    video: Optional[Union[str, Dict[str, Any]]] = None
+
+
+class NeMoGymVideoUrlPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video_url: Union[str, Dict[str, Any]]
+    type: Literal["video_url"] = "video_url"
+
+
+NeMoGymVideoInputContentPart: TypeAlias = Union[
+    NeMoGymInputTextPart,
+    NeMoGymInputImagePart,
+    NeMoGymImageUrlPart,
+    NeMoGymInputVideoPart,
+    NeMoGymVideoUrlPart,
+]
+NeMoGymVideoInputContentList: TypeAlias = List[NeMoGymVideoInputContentPart]
+
+
 class NeMoGymResponseOutputMessage(BaseModel):
     id: str
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
@@ -157,13 +222,13 @@ class NeMoGymResponseOutputMessage(BaseModel):
 
 
 class NeMoGymEasyInputMessage(BaseModel):
-    content: Union[str, ResponseInputMessageContentListParam]
+    content: Union[str, ResponseInputMessageContentListParam, NeMoGymVideoInputContentList]
     role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
-    content: ResponseInputMessageContentListParam
+    content: Union[ResponseInputMessageContentListParam, NeMoGymVideoInputContentList]
     role: Literal["user", "system", "developer"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
@@ -353,9 +418,22 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
+class NeMoGymChatCompletionContentPartVideoUrlParam(TypedDict, total=False):
+    video_url: Required[Union[str, Dict[str, Any]]]
+    type: Required[Literal["video_url"]]
+
+
+class NeMoGymChatCompletionContentPartInputVideoParam(TypedDict, total=False):
+    video_url: Union[str, Dict[str, Any]]
+    video: Union[str, Dict[str, Any]]
+    type: Required[Literal["input_video"]]
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
+    NeMoGymChatCompletionContentPartVideoUrlParam,
+    NeMoGymChatCompletionContentPartInputVideoParam,
 ]
 
 

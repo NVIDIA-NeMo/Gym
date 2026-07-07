@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import logging
+import os
 import re
 from copy import deepcopy
 from time import time
@@ -38,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChatCompletionMessageParam,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
@@ -66,6 +68,52 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_LOGPROB_TOKEN_ID_SOURCES = {"logprob", "logprobs", "logprob_tokens"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUE_ENV_VALUES
+
+
+def _vllm_token_id_source() -> str:
+    return os.environ.get("NEMO_GYM_VLLM_TOKEN_ID_SOURCE", "native").strip().lower()
+
+
+def _metadata_json_dict(value: Any, *, field_name: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        value = json.loads(value.strip() or "{}")
+    elif isinstance(value, BaseModel):
+        value = value.model_dump(exclude_unset=True)
+
+    if not isinstance(value, dict):
+        raise TypeError(f"metadata.{field_name} must be a JSON object")
+    return value
+
+
+def _summarize_forwarded_extra_body(extra_body: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    for key, value in extra_body.items():
+        if key == "mm_processor_kwargs" and isinstance(value, dict):
+            mm_summary = deepcopy(value)
+            precomputed = mm_summary.get("precomputed_imgs_sizes")
+            if isinstance(precomputed, list):
+                mm_summary["precomputed_imgs_sizes"] = {
+                    "count": len(precomputed),
+                    "first": precomputed[:1],
+                    "last": precomputed[-1:],
+                }
+            summary[key] = mm_summary
+            continue
+
+        summary[key] = value
+    return summary
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -269,6 +317,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
 
         body_dict = body.model_dump(exclude_unset=True)
+        body_dict = {key: value for key, value in body_dict.items() if value is not None}
         body_dict["model"] = self.config.model
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
@@ -308,10 +357,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
 
         metadata = body_dict.get("metadata") or dict()
+        if isinstance(metadata, BaseModel):
+            metadata = metadata.model_dump(exclude_unset=True)
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dict")
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
-        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
-        chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
+        chat_template_kwargs.update(
+            _metadata_json_dict(
+                metadata.get("chat_template_kwargs"),
+                field_name="chat_template_kwargs",
+            )
+        )
 
         if chat_template_kwargs:
             body_dict["chat_template_kwargs"] = chat_template_kwargs
@@ -321,10 +378,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
 
-        metadata_extra_body_str = metadata.get("extra_body", "{}")
-        extra_body.update(json.loads(metadata_extra_body_str))
+        extra_body.update(
+            _metadata_json_dict(
+                metadata.get("extra_body"),
+                field_name="extra_body",
+            )
+        )
 
         if self.config.return_token_id_information:
+            token_id_source = _vllm_token_id_source()
             body_dict |= dict(
                 logprobs=True,
                 return_tokens_as_token_ids=True,
@@ -332,6 +394,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # For prompt token IDs
                 # prompt_logprobs=0,
             )
+            debug_top_logprobs_k = int(os.environ.get("NEMO_GYM_VLLM_DEBUG_TOP_LOGPROBS_K", "0") or "0")
+            if debug_top_logprobs_k > 0:
+                body_dict["top_logprobs"] = debug_top_logprobs_k
+            if _env_flag(
+                "NEMO_GYM_VLLM_RETURN_TOKEN_IDS",
+                default=token_id_source not in _LOGPROB_TOKEN_ID_SOURCES,
+            ):
+                body_dict["return_token_ids"] = True
 
         if self.config.uses_reasoning_parser:
             for message_dict in body_dict["messages"]:
@@ -371,7 +441,20 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         if extra_body:
-            body_dict = extra_body | body_dict
+            body_dict = deepcopy(extra_body) | body_dict
+            if _env_flag("NRL_DEBUG") or _env_flag("NEMO_GYM_VLLM_DEBUG_EXTRA_BODY"):
+                extra_body_summary = _summarize_forwarded_extra_body(extra_body)
+                LOGGER.info(
+                    "[VLLM_EXTRA_BODY_FORWARD] keys=%s summary=%s",
+                    sorted(str(key) for key in extra_body),
+                    extra_body_summary,
+                )
+                print(
+                    "[VLLM_EXTRA_BODY_FORWARD] "
+                    f"keys={sorted(str(key) for key in extra_body)} "
+                    f"summary={extra_body_summary}",
+                    flush=True,
+                )
 
         return body_dict
 
@@ -385,10 +468,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         prompt_token_ids: Optional[List[int]] = None
         vllm_max_model_len: Optional[int] = None
 
-        should_tokenize_prompt = (
-            self.config.return_token_id_information
-            or self.config.max_input_tokens is not None
-        )
+        should_tokenize_prompt = self.config.max_input_tokens is not None
         if should_tokenize_prompt:
             tokenize_response = await self._get_tokenize_response(client, body_dict)
             prompt_token_ids = tokenize_response["tokens"]
@@ -453,10 +533,23 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
-                res = self._create_empty_chat_completion()
-                res.choices[0].finish_reason = "length"
-                return res
+                if prompt_token_ids is None:
+                    try:
+                        prompt_token_ids = await self._get_prompt_token_ids(
+                            client, body_dict
+                        )
+                    except Exception:
+                        prompt_token_ids = None
+                return self._create_context_length_exceeded_chat_completion(
+                    prompt_token_ids
+                )
             else:
+                LOGGER.error(
+                    "vLLM chat-completions request rejected: status=%s body=%s payload_keys=%s",
+                    e.status,
+                    result_content_str,
+                    sorted(body_dict.keys()),
+                )
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
@@ -484,15 +577,102 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = (choice_dict.get("logprobs") or {}).get("content") or []
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            # Looks like `"token_id:151667"` when
-            # return_tokens_as_token_ids=True.
-            generation_token_ids = [
-                log_prob["token"].removeprefix("token_id:")
-                for log_prob in log_probs
-            ]
+            def _token_id_from_logprob_token(token: Any) -> int:
+                if isinstance(token, str) and token.startswith("token_id:"):
+                    return int(token.removeprefix("token_id:"))
+                raise ValueError(
+                    "Cannot recover a token id from logprobs.content token "
+                    f"{token!r}. Expected vLLM return_tokens_as_token_ids=True "
+                    "format like 'token_id:151667'."
+                )
 
-            tokenize_response = await self._get_tokenize_response(client, body_dict)
-            prompt_token_ids = tokenize_response["tokens"]
+            def _extract_top_logprobs_for_debug() -> tuple[List[List[Dict[str, Any]]], str]:
+                if not int(os.environ.get("NEMO_GYM_VLLM_DEBUG_TOP_LOGPROBS_K", "0") or "0"):
+                    return [], "disabled"
+                per_token: List[List[Dict[str, Any]]] = []
+                try:
+                    for log_prob in log_probs:
+                        entries: List[Dict[str, Any]] = []
+                        for top_item in log_prob.get("top_logprobs") or []:
+                            try:
+                                token_id = _token_id_from_logprob_token(top_item.get("token"))
+                            except Exception:
+                                continue
+                            entries.append(
+                                {
+                                    "token_id": int(token_id),
+                                    "logprob": float(top_item["logprob"]),
+                                }
+                            )
+                        per_token.append(entries)
+                except Exception as exc:
+                    LOGGER.warning("vLLM top-logprob diagnostic parse failed", exc_info=True)
+                    return [], f"error:{type(exc).__name__}"
+                return per_token, "ok"
+
+            token_id_source = _vllm_token_id_source()
+            use_logprob_token_ids = token_id_source in _LOGPROB_TOKEN_ID_SOURCES
+            debug_generation_top_logprobs, debug_generation_top_logprobs_status = _extract_top_logprobs_for_debug()
+
+            logprob_token_ids = None
+            mismatch_positions: List[int] = []
+            direct_generation_token_ids = choice_dict.get("token_ids")
+            if direct_generation_token_ids is not None:
+                generation_token_ids = [
+                    int(token_id) for token_id in direct_generation_token_ids
+                ]
+                try:
+                    logprob_token_ids = [
+                        _token_id_from_logprob_token(log_prob["token"])
+                        for log_prob in log_probs
+                    ]
+                except ValueError:
+                    logprob_token_ids = None
+                if logprob_token_ids is not None and logprob_token_ids != generation_token_ids:
+                    mismatch_positions = [
+                        idx
+                        for idx, (direct_token_id, logprob_token_id) in enumerate(
+                            zip(generation_token_ids, logprob_token_ids)
+                        )
+                        if direct_token_id != logprob_token_id
+                    ]
+                    LOGGER.warning(
+                        "vLLM native token_ids differ from logprobs token strings "
+                        "at %d/%d positions; token source=%s. First mismatches: %s",
+                        len(mismatch_positions),
+                        len(generation_token_ids),
+                        token_id_source,
+                        mismatch_positions[:10],
+                    )
+                if use_logprob_token_ids and logprob_token_ids is not None:
+                    generation_token_ids = logprob_token_ids
+            else:
+                if not use_logprob_token_ids:
+                    LOGGER.warning(
+                        "vLLM response did not include native token_ids while "
+                        "NEMO_GYM_VLLM_TOKEN_ID_SOURCE=%s; falling back to "
+                        "logprobs.content token strings. Set "
+                        "NEMO_GYM_VLLM_RETURN_TOKEN_IDS=1 or use a vLLM build "
+                        "that supports return_token_ids.",
+                        token_id_source,
+                    )
+                generation_token_ids = [
+                    _token_id_from_logprob_token(log_prob["token"])
+                    for log_prob in log_probs
+                ]
+
+            if len(generation_token_ids) != len(generation_log_probs):
+                raise ValueError(
+                    "vLLM returned mismatched generation token/logprob lengths: "
+                    f"len(generation_token_ids)={len(generation_token_ids)}, "
+                    f"len(generation_log_probs)={len(generation_log_probs)}"
+                )
+
+            native_prompt_token_ids = chat_completion_dict.get("prompt_token_ids")
+            if native_prompt_token_ids is not None:
+                prompt_token_ids = [int(token_id) for token_id in native_prompt_token_ids]
+            elif prompt_token_ids is None:
+                prompt_token_ids = await self._get_prompt_token_ids(client, body_dict)
 
             message_dict = choice_dict["message"]
             message_dict.update(
@@ -500,11 +680,25 @@ class VLLMModel(SimpleResponsesAPIModel):
                     prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
+                    generation_token_id_source=token_id_source,
+                    native_generation_token_ids_count=len(direct_generation_token_ids)
+                    if direct_generation_token_ids is not None
+                    else None,
+                    logprob_generation_token_ids_count=len(logprob_token_ids)
+                    if logprob_token_ids is not None
+                    else None,
+                    native_logprob_token_id_mismatch_count=len(mismatch_positions)
+                    if direct_generation_token_ids is not None and logprob_token_ids is not None
+                    else None,
+                    native_logprob_token_id_first_mismatches=mismatch_positions[:10] if mismatch_positions else [],
+                    finish_reason=choice_dict.get("finish_reason"),
+                    debug_vllm_generation_top_logprobs=debug_generation_top_logprobs,
+                    debug_vllm_generation_top_logprobs_status=debug_generation_top_logprobs_status,
                 )
             )
 
             # Clean the duplicated information
-            choice_dict.pop("logprobs")
+            choice_dict.pop("logprobs", None)
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
 
@@ -716,10 +910,30 @@ class VLLMConverter(BaseModel):
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
                         image_url = part_param.get("image_url", "")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url", "")
                         detail = part_param.get("detail", "auto")
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
+                    case "image_url":
+                        image_url = part_param.get("image_url", "")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url", "")
+                        detail = part_param.get("detail", "auto")
+                        converted_parts.append(
+                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+                        )
+                    case "input_video":
+                        video_url = part_param.get("video_url", part_param.get("video", ""))
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        converted_parts.append({"type": "video_url", "video_url": {"url": video_url}})
+                    case "video_url":
+                        video_url = part_param.get("video_url", "")
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        converted_parts.append({"type": "video_url", "video_url": {"url": video_url}})
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
             content = converted_parts
@@ -866,11 +1080,22 @@ class VLLMConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            token_info_keys = (
+                "prompt_token_ids",
+                "generation_token_ids",
+                "generation_log_probs",
+                "generation_token_id_source",
+                "native_generation_token_ids_count",
+                "logprob_generation_token_ids_count",
+                "native_logprob_token_id_mismatch_count",
+                "native_logprob_token_id_first_mismatches",
+                "finish_reason",
+                "debug_vllm_generation_top_logprobs",
+                "debug_vllm_generation_top_logprobs_status",
+            )
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
+                **{key: message_dict[key] for key in token_info_keys if key in message_dict},
             )
 
         return response_output
