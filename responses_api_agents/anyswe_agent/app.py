@@ -293,6 +293,7 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 16
+    results_dir: Optional[Path] = None
 
 
 class AnySweServerConfig(BaseModel):
@@ -427,12 +428,18 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
 
-        session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         workspace = Path(__file__).parent
+        base_results_dir = self.config.results_dir
+        if base_results_dir is None:
+            session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+            base_results_dir = workspace / f"anyswe_results_{session_id}"
+        else:
+            session_id = base_results_dir.name
+        base_results_dir.mkdir(parents=True, exist_ok=True)
 
         self._server = AnySweServerConfig(
             run_session_id=session_id,
-            base_results_dir=workspace / f"anyswe_results_{session_id}",
+            base_results_dir=base_results_dir,
             model_server_url=model_url,
             nemo_gym_root=PARENT_DIR,
             agent_deps_dir=agent_deps_dir,
