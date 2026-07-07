@@ -249,12 +249,94 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     return None
 
 
-def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
+def get_file_image_text_blocks(
+    file_dir: str,
+    file_name: str,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+) -> list[dict]:
+    """``images_and_text`` variant of :func:`get_file_content_block`.
+
+    For image-only local VLM judges (e.g. a gym-spawned Kimi K2.6) PDFs and
+    (preconverted) Office docs are rasterized to per-page PNG image blocks with
+    the extracted text attached, instead of being sent as an ``application/pdf``
+    data URL the judge can't decode. Native images and text files pass through
+    unchanged; audio/video files (which an image-only judge can't read) are
+    replaced with a one-line marker. Returns a list of 0+ content blocks.
+    """
+    from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+
+    file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    info = FILE_TYPE_MAP.get(file_extension)
+    file_type = info["type"] if info else "DOC"
+    full_path = os.path.join(file_dir, file_name)
+
+    try:
+        size_bytes = os.path.getsize(full_path)
+    except OSError:
+        return []
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        size_mb = size_bytes / (1024 * 1024)
+        return [{"type": "text", "text": f"[oversize: {file_name} {size_mb:.1f}MB — not included]"}]
+
+    try:
+        # PDFs and Office docs (preconverted to a sibling .pdf) → page images + text.
+        if file_type == "PDF":
+            pdf_bytes: bytes | None = Path(full_path).read_bytes()
+        elif file_type == "DOC":
+            pdf_bytes = _convert_to_pdf(full_path)
+        else:
+            pdf_bytes = None
+
+        if pdf_bytes is not None:
+            blocks = pdf_bytes_to_blocks(
+                pdf_bytes,
+                dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+            )
+            if blocks:
+                return blocks
+            # Office doc with no preconverted PDF (or an unrenderable PDF): fall
+            # back to raw text extraction so the judge still sees the content.
+            if file_type == "DOC":
+                return [{"type": "text", "text": f"[no PDF render available for {file_name}]"}]
+            return []
+
+        # Image-only judges can't read audio/video — advertise the file by name.
+        if file_type in ("AUDIO", "VIDEO"):
+            return [{"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}]
+
+        # Text and native images pass through exactly as in native mode.
+        block = get_file_content_block(file_dir, file_name)
+        return [block] if block is not None else []
+    except Exception as e:
+        raise RuntimeError(f"Error getting file: {file_name} in directory: {file_dir}: {e}") from e
+
+
+def build_file_section(
+    file_dir: str | None,
+    clean_up_list: list[Path] | None = None,
+    *,
+    media_mode: str = "native_pdf",
+    render_dpi: int = 150,
+    max_pages: int = 50,
+    include_text: bool = True,
+) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
     Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
     (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
     Returns a list of content block dicts suitable for OpenAI messages.
+
+    *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
+    (default) sends them as ``application/pdf`` data URLs for frontier judges;
+    ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
+    extracted text, for image-only local VLM judges (see
+    :func:`get_file_image_text_blocks`). *render_dpi*, *max_pages*, and
+    *include_text* tune the ``images_and_text`` rendering.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -276,6 +358,18 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
         if file_name in IGNORE_FILES:
             return
         section.append({"type": "text", "text": f"\n{file_name}:\n"})
+        if media_mode == "images_and_text":
+            blocks = get_file_image_text_blocks(
+                directory,
+                file_name,
+                render_dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+            )
+            if blocks:
+                section.extend(blocks)
+                no_files = False
+            return
         block = get_file_content_block(directory, file_name)
         if block is not None:
             section.append(block)

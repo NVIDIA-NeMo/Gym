@@ -235,7 +235,41 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             shutil.rmtree(stage_dir, ignore_errors=True)
 
 
-def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, Any]]:
+def _pdf_bytes_to_image_text_blocks(
+    pdf_bytes: bytes,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+) -> list[dict[str, Any]] | None:
+    """Rasterize PDF bytes to page-image + text blocks for image-only judges.
+
+    Delegates to :mod:`resources_servers.gdpval.media_conversion` (imported
+    lazily so this module stays importable even where that package isn't on the
+    path). Returns ``None`` when the helper is unavailable or yields nothing, so
+    the caller can fall back to the native ``application/pdf`` data URL.
+    """
+    try:
+        from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+    except ImportError:
+        return None
+    blocks = pdf_bytes_to_blocks(
+        pdf_bytes,
+        dpi=render_dpi,
+        max_pages=max_pages,
+        include_text=include_text,
+    )
+    return blocks or None
+
+
+def convert_deliverables_to_content_blocks(
+    output_dir: str,
+    *,
+    media_mode: str = "native_pdf",
+    render_dpi: int = 150,
+    max_pages: int = 50,
+    include_text: bool = True,
+) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
     Returns a list of content blocks suitable for the ``content`` field of an
@@ -246,10 +280,18 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
 
     Office documents (.docx/.xlsx/.pptx) are first converted to PDF via
     LibreOffice headless so the judge sees rendered formatting/tables/charts.
+
+    *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
+    (default) sends them as ``application/pdf`` data URLs for frontier judges;
+    ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
+    extracted text, for image-only local VLM judges (e.g. a gym-spawned Kimi
+    K2.6). *render_dpi*, *max_pages*, and *include_text* tune that rendering.
     """
     output_path = Path(output_dir)
     if not output_path.is_dir():
         return []
+
+    images_and_text = media_mode == "images_and_text"
 
     blocks: list[dict[str, Any]] = []
     converted_pdfs: list[Path] = []  # track for cleanup
@@ -271,6 +313,14 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                 if pdf_path and pdf_path.exists():
                     converted_pdfs.append(pdf_path)
                     data = pdf_path.read_bytes()
+                    if images_and_text:
+                        rendered = _pdf_bytes_to_image_text_blocks(
+                            data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
+                        )
+                        if rendered is not None:
+                            blocks.append({"type": "text", "text": f"\n{fpath.name} (rendered from PDF):"})
+                            blocks.extend(rendered)
+                            continue
                     b64 = base64.b64encode(data).decode("ascii")
                     blocks.append({"type": "text", "text": f"\n{fpath.name} (converted to PDF):"})
                     blocks.append(
@@ -287,6 +337,14 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
 
             elif ext == ".pdf":
                 data = fpath.read_bytes()
+                if images_and_text:
+                    rendered = _pdf_bytes_to_image_text_blocks(
+                        data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
+                    )
+                    if rendered is not None:
+                        blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                        blocks.extend(rendered)
+                        continue
                 b64 = base64.b64encode(data).decode("ascii")
                 blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
                 blocks.append(

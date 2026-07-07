@@ -266,6 +266,67 @@ To grade with a **single judge** instead of the panel, set `judge_panel` to
     ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
 ```
 
+## Local multimodal judge (gym-spawned Kimi K2.6)
+
+By default the judges are **remote** frontier models that decode PDFs natively.
+You can instead run a **local** open multimodal judge that gym spawns in vLLM —
+e.g. Kimi K2.6 with its vision tower enabled — so judging needs no external
+inference API.
+
+Two pieces make this work:
+
+1. **`judge_media_mode: images_and_text`** — image-only VLM judges can't decode a
+   raw `application/pdf` data URL, so each PDF/Office-doc **page is rasterized to
+   a PNG** (via PyMuPDF) and the **extracted text is attached** alongside. This
+   applies to every judge mode (rubric text/visual/structured and pairwise
+   comparison). See `resources_servers/gdpval/media_conversion.py`. Knobs:
+   `judge_pdf_render_dpi` (default 150), `judge_pdf_max_pages` (cap per file),
+   `judge_pdf_include_text` (attach the text copy).
+2. **A gym-spawned vLLM judge** — `local_vllm_model` serves Kimi K2.6 with the
+   vision tower loaded (the model is commonly served text-only with
+   `--language-model-only`; the gym configs **drop** that flag). See
+   `responses_api_models/local_vllm_model/configs/moonshotai/Kimi-K2.6.yaml`
+   (standalone serving) and
+   `resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml` (the judge
+   overlay).
+
+### Run it
+
+```bash
+# Local checkpoint (HF format) — defaults to the reviewed GDPVal baseline path.
+export KIMI_CHECKPOINT_PATH=/path/to/Kimi-K2.6-full
+
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval \
+    --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
+    --split benchmark \
+    --output results/gdpval_kimi_judge.jsonl \
+    ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+```
+
+The overlay defines a `gdpval_judge_model_local` server (TP=8 / DP=1, spanning
+two 4-GPU nodes on this cluster), repoints `judge_model_server` at it, sets
+`judge_panel: null`, and selects `judge_media_mode: images_and_text`. The
+benchmark's default remote
+`gdpval_judge_model` proxy stays defined but idle — drop it with
+`~gdpval_judge_model` for a fully clean run.
+
+Notes:
+
+- **Serving shape**: TP=8, DP=1. When the tensor-parallel group spans more than
+  one node (e.g. 8 GPUs across two 4-GPU nodes, as on this cluster), set
+  `VLLM_RAY_DP_PACK_STRATEGY: span` so gym spreads the instance across nodes; use
+  `strict` only when the whole instance fits on one node. Size
+  `tensor_parallel_size` to your total GPU count and node layout.
+- **Context budget**: high-DPI page images consume context faster on a local VLM
+  than on a hosted judge; the overlay caps `judge_pdf_max_pages: 30`. Lower the
+  DPI or page cap if you hit `finish_reason: length`.
+- **Audio/video**: Kimi is image+text only. AV deliverables (which no local
+  member advertises `handles_audio_video`) are replaced with a one-line marker;
+  route AV tasks to an AV-capable panel member if you need them scored.
+
 ## Aggregate metrics
 
 After `gym eval run` returns, the resources server's

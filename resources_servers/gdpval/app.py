@@ -189,6 +189,22 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
 
+    # How deliverable/reference files are presented to the judge:
+    # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
+    #   as ``application/pdf`` data URLs. Works for frontier judges (Gemini/GPT/
+    #   Claude) that decode PDFs server-side.
+    # - ``"images_and_text"``: each PDF/Office page is rasterized to a PNG image
+    #   block and the extracted text is attached alongside. Required for image-
+    #   only local VLM judges (e.g. a gym-spawned Kimi K2.6) that cannot decode a
+    #   raw PDF data URL. Applies to every judge mode (rubric text/visual/
+    #   structured and pairwise comparison). See ``media_conversion.py``.
+    judge_media_mode: Literal["native_pdf", "images_and_text"] = "native_pdf"
+    # ``images_and_text`` render knobs (ignored in ``native_pdf`` mode).
+    judge_pdf_render_dpi: int = 144
+    judge_pdf_max_pages: int = 50
+    # Attach the extracted text copy alongside the page images. Off → images only.
+    judge_pdf_include_text: bool = True
+
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
     judge_prompt_template_fpath: Optional[str] = None
@@ -401,7 +417,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
             read = read_deliverable_files(body.deliverables_dir)
             if read:
                 deliverable_text = read
-            blocks = convert_deliverables_to_content_blocks(body.deliverables_dir)
+            blocks = convert_deliverables_to_content_blocks(
+                body.deliverables_dir,
+                media_mode=self.config.judge_media_mode,
+                render_dpi=self.config.judge_pdf_render_dpi,
+                max_pages=self.config.judge_pdf_max_pages,
+                include_text=self.config.judge_pdf_include_text,
+            )
             if blocks:
                 deliverable_content_blocks = blocks
 
@@ -591,8 +613,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
         last_error: Optional[Exception] = None
+        # Present PDFs/Office docs either as native PDF data URLs (frontier
+        # judges) or rasterized page images + text (image-only local VLM judges
+        # like a gym-spawned Kimi K2.6) — see ``judge_media_mode``.
+        media_kwargs: Dict[str, Any] = {
+            "media_mode": self.config.judge_media_mode,
+            "render_dpi": self.config.judge_pdf_render_dpi,
+            "max_pages": self.config.judge_pdf_max_pages,
+            "include_text": self.config.judge_pdf_include_text,
+        }
         try:
-            eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
+            eval_submission = build_file_section(str(eval_task_dir), clean_up_list, **media_kwargs)
 
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
@@ -606,8 +637,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     refs = build_file_section(
                         str(refs_subdir) if refs_subdir.is_dir() else None,
                         clean_up_list,
+                        **media_kwargs,
                     )
-                    ref_submission = build_file_section(str(ref_dir), clean_up_list)
+                    ref_submission = build_file_section(str(ref_dir), clean_up_list, **media_kwargs)
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
