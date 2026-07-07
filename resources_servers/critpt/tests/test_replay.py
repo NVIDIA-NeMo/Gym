@@ -145,7 +145,7 @@ class TestCallApiWithRotation:
             assert response["accuracy"] == 0.7
             assert next_idx == 0
             assert call_api.await_count == 1
-            assert call_api.await_args.kwargs["api_key"] == "k0"
+            assert call_api.await_args.kwargs["api_key"] == "k0"  # pragma: allowlist secret
 
     @pytest.mark.asyncio
     async def test_rotates_past_first_429(self):
@@ -208,5 +208,5 @@ class TestCallApiWithRotation:
             )
 
             assert next_idx == 2
-            assert call_api.await_args.kwargs["api_key"] == "k2"
+            assert call_api.await_args.kwargs["api_key"] == "k2"  # pragma: allowlist secret
             assert response["accuracy"] == 0.4

@@ -22,7 +22,7 @@ quota is never wasted re-scoring submissions that already have a verdict.
 API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY.
 
     # Single key (free tier, 10 CritPt scorings / 24h):
-    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx"
+    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx"  # pragma: allowlist secret
 
     # Multiple keys for rotation on HTTP 429 (bracketed list literal,
     # comma-separated; whitespace ok):
@@ -42,7 +42,7 @@ run (e.g. a 5-problem smoke test) leaves a short batch that is skipped by
 default. Pass `--fire-after N` to pad short batches up to batch_size with empty
 padding submissions and ship them anyway, mirroring the live server's smoke-test fire_after:
 
-    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxx" python -m resources_servers.critpt.replay \\
+    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxx" python -m resources_servers.critpt.replay \\  # pragma: allowlist secret
         --cache-dir /path/to/critpt_cache --fire-after 5
 """
 
@@ -62,7 +62,7 @@ from resources_servers.critpt.app import (
 )
 
 
-AA_API_KEY_ENV_VAR = "ARTIFICIAL_ANALYSIS_API_KEY"
+AA_API_KEY_ENV_VAR = "ARTIFICIAL_ANALYSIS_API_KEY"  # pragma: allowlist secret
 
 
 def _parse_api_keys_env(raw: str) -> List[str]:

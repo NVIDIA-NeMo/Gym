@@ -111,7 +111,7 @@ replay at that run's subdirectory:
 
 ```bash
 RUN_DIR="$CRITPT_CACHE_DIR/20260707-110622-48213-1a2b3c4d"  # from the server startup log
-ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" \
+ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" <!-- pragma: allowlist secret --> \
   python -m resources_servers.critpt.replay --cache-dir "$RUN_DIR"
 ```
 
