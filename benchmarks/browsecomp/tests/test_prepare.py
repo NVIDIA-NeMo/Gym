@@ -18,6 +18,8 @@ By default prepare() writes a reproducible 400-sample subset (seed 42); BROWSECO
 keeps the full 1266. These exercise the pure _select_samples helper without downloading the CSV.
 """
 
+import random
+
 import pandas
 
 from benchmarks.browsecomp.prepare import BROWSECOMP_SUBSET_N, BROWSECOMP_SUBSET_SEED, _select_samples
@@ -44,8 +46,8 @@ def test_subset_is_deterministic_and_matches_seeded_sample():
     a = _select_samples(df, run_full=False)
     b = _select_samples(df, run_full=False)
     assert list(a["row"]) == list(b["row"])  # same rows every call
-    expected = df.sample(n=BROWSECOMP_SUBSET_N, random_state=BROWSECOMP_SUBSET_SEED).reset_index(drop=True)
-    assert list(a["row"]) == list(expected["row"])
+    expected = random.Random(BROWSECOMP_SUBSET_SEED).sample(range(1266), BROWSECOMP_SUBSET_N)
+    assert list(a["row"]) == expected
 
 
 def test_subset_is_strict_subset_no_dupes():

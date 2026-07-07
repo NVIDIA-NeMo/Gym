@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -177,11 +178,12 @@ BROWSECOMP_SUBSET_SEED = 42
 
 def _select_samples(df, run_full: bool):
     """1266-row df in -> the full df if run_full, else a deterministic 400-row subset (seed 42).
-    Pure + network-free so it is unit-testable. numpy's legacy RandomState(42) is version-stable and
-    the downloaded CSV row order is fixed, so the subset is reproducible across NEL + adhoc + fresh clones."""
+    Uses stdlib random.Random(seed).sample, the same selection the bc_frankie harness's
+    browsecomp_eval.py performs, so both harnesses' seed-42 subset is the same 400."""
     if run_full:
         return df
-    return df.sample(n=BROWSECOMP_SUBSET_N, random_state=BROWSECOMP_SUBSET_SEED).reset_index(drop=True)
+    idx = random.Random(BROWSECOMP_SUBSET_SEED).sample(range(len(df)), BROWSECOMP_SUBSET_N)
+    return df.iloc[idx].reset_index(drop=True)
 
 
 def derive_key(password: str, length: int) -> bytes:
