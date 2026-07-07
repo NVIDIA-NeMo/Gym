@@ -31,11 +31,7 @@ from fastapi import Request
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -223,7 +219,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # pragma: allowlist secret
     anthropic_base_url: Optional[str] = None
-    max_turns: int = 30
+    max_turns: Optional[int] = 30  # None -> unlimited turns
     timeout: int = 300
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
@@ -349,7 +345,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.bare and not skills_active:
             cmd.append("--bare")
-        cmd += ["--max-turns", str(self.config.max_turns), "--model", model]
+        cmd += ["--model", model]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -363,6 +359,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
+        if self.config.max_turns is not None:
+            cmd += ["--max-turns", str(self.config.max_turns)]
         cmd += ["--", instruction]
         return cmd
 

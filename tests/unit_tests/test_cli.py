@@ -37,7 +37,6 @@ from nemo_gym.cli.env import (
     _resolve_server_dir,
     _select_shard,
     dump_config,
-    exit_cleanly_on_config_error,
     init_resources_server,
     list_environments,
     pip_list,
@@ -45,6 +44,7 @@ from nemo_gym.cli.env import (
     status,
     validate,
 )
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.registry import EnvironmentEntry
 

@@ -129,7 +129,8 @@ def get_ruler_data(
         files_exist = all((json_dir / fname).exists() for fname in required_files)
         if not files_exist:
             subprocess.run(
-                "git clone https://github.com/NVIDIA/RULER && "
+                # temporary re-direct to a forked repo with a fix for the hotspot_qa download issue, until merged upstream
+                "git -C  RULER pull || git clone https://github.com/NVIDIA/RULER && "
                 "cd RULER/scripts/data/synthetic/json && "
                 "python download_paulgraham_essay.py && bash download_qa_dataset.sh",
                 check=True,
