@@ -331,8 +331,8 @@ exclude-dependencies = [
 # and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
 # train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
-# Only nemo_gym's own non-package resource scripts need an explicit entry here.
-nemo_gym = ["resources/*.py"]
+# Only nemo_gym's own non-package resource scripts and sandbox provider configs need an explicit entry here.
+nemo_gym = ["resources/*.py", "sandbox/providers/*/configs/*.yaml"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
