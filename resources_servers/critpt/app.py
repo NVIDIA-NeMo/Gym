@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -35,11 +36,32 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 from nemo_gym.server_utils import request
 
 
+# Repo root: resources_servers/critpt/app.py -> nemo-gym/
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 def _cache_dir_from_env() -> Optional[Path]:
-    """Read CRITPT_CACHE_DIR at server-construction time, or None if unset.
-    """
+    """Read CRITPT_CACHE_DIR at server-construction time, or None if unset."""
     raw = os.environ.get("CRITPT_CACHE_DIR")
     return Path(raw) if raw else None
+
+
+def _resolve_cache_dir(cache_dir: Path) -> Path:
+    """Anchor a relative cache_dir to the repo root; leave absolute paths as-is.
+    """
+    return cache_dir if cache_dir.is_absolute() else _REPO_ROOT / cache_dir
+
+
+def _run_subdir_name() -> str:
+    """Unique-per-launch subdirectory name (``<timestamp>-<pid>-<rand>``).
+
+    Each server launch writes into its own subdirectory so independent runs never
+    share the append-only cache files. Sharing them would pollute partial_metrics.json
+    (which aggregates every line in aa_responses.jsonl) and collide the per-process
+    submission_id counter across runs. The random suffix guarantees uniqueness even for
+    launches that land in the same second within one process.
+    """
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 LOG = logging.getLogger(__name__)
@@ -62,8 +84,7 @@ class CritPtRateLimitExceeded(RuntimeError):
         self.reset_unix = reset_unix
         self.body = body
         super().__init__(
-            f"CritPt AA quota exhausted (retry_after={retry_after_seconds}s, "
-            f"reset_unix={reset_unix}); body={body!r}"
+            f"CritPt AA quota exhausted (retry_after={retry_after_seconds}s, reset_unix={reset_unix}); body={body!r}"
         )
 
 
@@ -78,7 +99,7 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_max_retries: int = 4
     api_retry_backoff_seconds: float = 5.0
     # Smoke-test only. When set < batch_size, the buffer fires after this many real
-    # submissions arrive and pads up to batch_size with empty dummies.
+    # submissions arrive and pads up to batch_size with empty padding submissions.
     fire_after: Optional[int] = None
     # Max time a single verify() will wait for its batch to fill (and the AA call to
     # finish) to prevent hang.
@@ -92,6 +113,11 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     #   partial_metrics.json aggregate accuracy over scored submissions
     # Leaving this None (or unset) preserves the prior behavior (no on-disk state).
     cache_dir: Optional[Path] = Field(default_factory=_cache_dir_from_env)
+    # Each server launch writes into its own ``<timestamp>-<pid>`` subdirectory under
+    # cache_dir so independent runs never share append-only cache files (which would
+    # otherwise pollute partial_metrics.json and collide submission ids across runs).
+    # Set False to write directly into cache_dir, e.g. to replay a specific prior run.
+    unique_cache_per_run: bool = True
 
     @field_validator("api_key")
     @classmethod
@@ -112,9 +138,7 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("CritPt api_key list must contain only strings")
         keys = [k for k in items if k.strip()]
         if not keys:
-            raise ValueError(
-                "CritPt api_key list must contain at least one non-empty key"
-            )
+            raise ValueError("CritPt api_key list must contain at least one non-empty key")
         return keys
 
 
@@ -158,7 +182,12 @@ class CritPtResourcesServer(SimpleResourcesServer):
         self._api_keys: List[str] = [raw] if isinstance(raw, str) else list(raw)
         self._key_index: int = 0
         if self.config.cache_dir is not None:
+            base = _resolve_cache_dir(self.config.cache_dir)
+            if self.config.unique_cache_per_run:
+                base = base / _run_subdir_name()
+            self.config.cache_dir = base
             self.config.cache_dir.mkdir(parents=True, exist_ok=True)
+            LOG.warning("CritPt cache for this run: %s", self.config.cache_dir)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -218,7 +247,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 submissions_snapshot = list(target_batch["submissions"].values())
                 submission_ids_snapshot = list(target_batch["submission_ids"].values())
                 self._batches.remove(target_batch)
-                # Smoke-mode padding: top up to batch_size with empty dummies for missing
+                # Smoke-mode padding: top up to batch_size with empty padding for missing
                 # problem_ids. Padded entries are synthetic so they get no submission_id.
                 if len(submissions_snapshot) < self.config.batch_size:
                     existing = {s["problem_id"] for s in submissions_snapshot}
@@ -240,9 +269,9 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
         if ready_to_fire:
             LOG.warning(
-                "CritPt batch full (%d submissions); firing AA API (key idx=%d/%d).",
+                "CritPt batch full (%d submissions); firing AA API (key %d/%d).",
                 len(submissions_snapshot),
-                self._key_index,
+                self._key_index + 1,
                 len(self._api_keys),
             )
             try:
@@ -340,18 +369,16 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 if remaining > 0:
                     next_idx = (current + 1) % n
                     LOG.warning(
-                        "CritPt AA rate-limited on key idx=%d/%d "
-                        "(retry_after=%ds, reset_unix=%d); rotating to key idx=%d.",
-                        current,
+                        "CritPt AA rate-limited on key %d/%d (retry_after=%ds, reset_unix=%d); rotating to key %d/%d.",
+                        current + 1,
                         n,
                         exc.retry_after_seconds,
                         exc.reset_unix,
-                        next_idx,
+                        next_idx + 1,
+                        n,
                     )
         if last_exc is None:
-            raise RuntimeError(
-                "_call_aa_with_rotation invoked with no api_keys configured"
-            )
+            raise RuntimeError("_call_aa_with_rotation invoked with no api_keys configured")
         raise last_exc
 
     # ──────────────────────────────────────────────────────────

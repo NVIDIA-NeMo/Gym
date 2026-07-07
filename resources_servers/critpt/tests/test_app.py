@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,11 +27,13 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.critpt.app import (
+    _REPO_ROOT,
     CritPtRateLimitExceeded,
     CritPtResourcesServer,
     CritPtResourcesServerConfig,
     CritPtVerifyRequest,
     _extract_code,
+    _resolve_cache_dir,
 )
 
 
@@ -77,6 +80,51 @@ def _make_verify_request(output_text: str, problem_id: str = "1") -> CritPtVerif
         response=response,
         problem_id=problem_id,
     )
+
+
+class TestResolveCacheDir:
+    def test_relative_path_anchored_to_repo_root(self):
+        resolved = _resolve_cache_dir(Path("results/critpt_cache"))
+        assert resolved == _REPO_ROOT / "results/critpt_cache"
+        assert resolved.is_absolute()
+
+    def test_absolute_path_unchanged(self, tmp_path):
+        assert _resolve_cache_dir(tmp_path) == tmp_path
+
+    def test_server_resolves_relative_cache_dir(self, tmp_path, monkeypatch):
+        """A relative cache_dir is anchored to the repo root at construction,
+        independent of the process cwd (Gym runs the server from its own dir)."""
+        monkeypatch.chdir(tmp_path)
+        rel = "results/_pytest_critpt_cache_probe"
+        try:
+            server = _make_server(_make_config(cache_dir=Path(rel), unique_cache_per_run=False))
+            assert server.config.cache_dir == _REPO_ROOT / rel
+            assert server.config.cache_dir.is_absolute()
+            assert server.config.cache_dir.exists()
+        finally:
+            probe = _REPO_ROOT / rel
+            if probe.exists():
+                probe.rmdir()
+
+    def test_unique_cache_per_run_creates_launch_subdir(self, tmp_path):
+        """With unique_cache_per_run (the default), each launch writes into its own
+        subdirectory of cache_dir so independent runs never share cache files."""
+        server = _make_server(_make_config(cache_dir=tmp_path))
+        assert server.config.cache_dir.parent == tmp_path
+        assert server.config.cache_dir != tmp_path
+        assert server.config.cache_dir.is_dir()
+
+    def test_unique_cache_per_run_isolates_independent_launches(self, tmp_path):
+        """Two server launches pointed at the same cache_dir get distinct subdirs."""
+        a = _make_server(_make_config(cache_dir=tmp_path))
+        b = _make_server(_make_config(cache_dir=tmp_path))
+        assert a.config.cache_dir != b.config.cache_dir
+        assert a.config.cache_dir.parent == b.config.cache_dir.parent == tmp_path
+
+    def test_unique_cache_per_run_disabled_uses_cache_dir_directly(self, tmp_path):
+        """Opting out writes straight into cache_dir (e.g. to replay a prior run)."""
+        server = _make_server(_make_config(cache_dir=tmp_path, unique_cache_per_run=False))
+        assert server.config.cache_dir == tmp_path
 
 
 def _mock_api(api_result: dict):
@@ -323,7 +371,7 @@ class TestApp:
     @pytest.mark.asyncio
     async def test_smoke_padding_fires_early_and_pads_to_batch_size(self):
         """fire_after=2 + batch_size=5: fires after 2 real submissions, pads to 5 with empty
-        dummies drawn from _ALL_PROBLEM_IDS. AA receives 5 (2 real + 3 padded)."""
+        padding submissions drawn from _ALL_PROBLEM_IDS. AA receives 5 (2 real + 3 padded)."""
         # Use the canonical CritPt problem_ids (Challenge_<N>_main) so they collide with the
         # hardcoded _ALL_PROBLEM_IDS list inside app.py.
         server = _make_server(_make_config(batch_size=5, fire_after=2))
@@ -341,7 +389,7 @@ class TestApp:
             # The two real submissions are present with real code.
             assert "a=1" in submitted["Challenge_1_main"]
             assert "b=2" in submitted["Challenge_2_main"]
-            # Three padded slots are empty dummies pulled from _ALL_PROBLEM_IDS (in order,
+            # Three padded slots are empty padding entries pulled from _ALL_PROBLEM_IDS (in order,
             # skipping the two already-present ones — so Challenge_3, 4, 5).
             for pid in ("Challenge_3_main", "Challenge_4_main", "Challenge_5_main"):
                 assert submitted[pid] == "```python\n```"
@@ -445,9 +493,7 @@ class TestKeyRotation:
         """One configured key, 429: raises immediately (one attempt, no rotation)."""
         server = _make_server(_make_config(batch_size=2, api_key=["solo-key"]))  # pragma: allowlist secret
 
-        mock_request, patches = _mock_api_sequence(
-            [{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}]
-        )
+        mock_request, patches = _mock_api_sequence([{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}])
         try:
             with pytest.raises(CritPtRateLimitExceeded):
                 await asyncio.gather(
@@ -484,4 +530,3 @@ class TestKeyRotation:
             assert server._key_index == 0
         finally:
             _stop_patches(patches)
-

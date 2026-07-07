@@ -13,14 +13,17 @@ server's test suite (see test_app.py::TestKeyRotation); this file pins the
 pure parsing/rotation logic so a regression in the env-shape contract is
 caught fast without spinning up an httpx mock.
 """
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from resources_servers.critpt.app import CritPtRateLimitExceeded
+from resources_servers.critpt.app import _ALL_PROBLEM_IDS, CritPtRateLimitExceeded
 from resources_servers.critpt.replay import (
     _call_api_with_rotation,
     _load_api_keys,
+    _pack_into_batches,
+    _pad_to_batch_size,
     _parse_api_keys_env,
 )
 
@@ -62,6 +65,51 @@ class TestParseApiKeysEnv:
     def test_list_of_empties_rejected(self):
         with pytest.raises(ValueError):
             _parse_api_keys_env("[,, ,]")
+
+
+class TestPadToBatchSize:
+    def _real(self, pid: str) -> dict:
+        return {"problem_id": pid, "generated_code": "```python\nx=1\n```", "model": "m"}
+
+    def test_pads_short_batch_up_to_batch_size(self):
+        payload = [self._real("Challenge_1_main"), self._real("Challenge_2_main")]
+        padded = _pad_to_batch_size(payload, batch_size=70)
+        assert len(padded) == 70
+        # Real submissions are preserved unchanged at the front.
+        assert padded[:2] == payload
+
+    def test_padding_uses_missing_problem_ids_with_empty_code(self):
+        payload = [self._real("Challenge_1_main")]
+        padded = _pad_to_batch_size(payload, batch_size=70)
+        padding_entries = padded[1:]
+        assert all(d["generated_code"] == "```python\n```" for d in padding_entries)
+        # No padding entry reuses a real problem_id, and together they cover the canonical set.
+        assert "Challenge_1_main" not in {d["problem_id"] for d in padding_entries}
+        assert {p["problem_id"] for p in padded} == set(_ALL_PROBLEM_IDS)
+
+    def test_already_full_batch_unchanged(self):
+        payload = [self._real(pid) for pid in _ALL_PROBLEM_IDS]
+        padded = _pad_to_batch_size(payload, batch_size=70)
+        assert padded == payload
+
+
+class TestPackIntoBatches:
+    def _sub(self, pid: str) -> dict:
+        return {"submission_id": pid, "submission": {"problem_id": pid}}
+
+    def test_unique_problem_ids_share_one_batch(self):
+        subs = [self._sub("p1"), self._sub("p2"), self._sub("p3")]
+        batches = _pack_into_batches(subs, batch_size=70)
+        assert len(batches) == 1
+        assert len(batches[0]) == 3
+
+    def test_duplicate_problem_id_opens_new_batch(self):
+        subs = [self._sub("p1"), self._sub("p1"), self._sub("p2")]
+        batches = _pack_into_batches(subs, batch_size=70)
+        # The second p1 cannot join the first batch (already has p1), so a new one opens.
+        assert len(batches) == 2
+        assert len(batches[0]) == 2  # p1, p2
+        assert len(batches[1]) == 1  # duplicate p1
 
 
 class TestLoadApiKeys:
