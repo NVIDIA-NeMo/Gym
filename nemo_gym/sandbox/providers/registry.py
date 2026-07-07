@@ -137,5 +137,12 @@ def _load_apptainer_provider() -> ProviderClass:
     return ApptainerProvider
 
 
+def _load_enroot_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.enroot import EnrootProvider
+
+    return EnrootProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
+_BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
