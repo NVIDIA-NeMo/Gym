@@ -9,7 +9,10 @@
 #
 #   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
 #   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
-#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/daytona/configs/daytona.yaml, $MODEL]"
+#   gym env start \
+#       --config $AGENT \
+#       --config nemo_gym/sandbox/providers/daytona/configs/daytona.yaml \
+#       --config $MODEL
 #
 # To run multiple sandboxes at once, give each block a distinct instance name
 # (e.g. `daytona_foo`, `daytona_baz`) and reference each by name.

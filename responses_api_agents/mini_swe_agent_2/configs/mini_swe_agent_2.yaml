@@ -5,7 +5,10 @@
 #
 #   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
 #   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
-#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, $MODEL]"
+#   gym env start \
+#       --config $AGENT \
+#       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+#       --config $MODEL
 mini_swe_agent_2:
   responses_api_agents:
     mini_swe_agent_2:
@@ -28,10 +31,7 @@ mini_swe_agent_2:
           cpu: 2
           memory_mib: 8192
           disk_gib: 20
-        provider_options:
-          platform:
-            os: linux
-            arch: amd64
+        provider_options: {}
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
