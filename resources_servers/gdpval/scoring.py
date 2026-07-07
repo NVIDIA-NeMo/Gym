@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +92,8 @@ async def score_with_rubric(
     rubric_pretty: str,
     task_prompt: str,
     judge_prompt_template: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
-    create_overrides: dict | None = None,
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score a deliverable against a rubric using an LLM judge.
@@ -101,11 +102,14 @@ async def score_with_rubric(
     and *judge_response* is the parsed JSON dict from the judge (or ``None``
     on failure).
 
-    *create_overrides* is merged into the kwargs passed to
-    ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    One member of *judges* is sampled for this scoring call (see
+    ``judge_panel.sample_judge``); its ``create_overrides`` (reasoning settings,
+    ``max_tokens``, etc.) are merged into ``client.chat.completions.create``.
+    Pass *rng* (a seeded ``random.Random``) for reproducible selection.
     """
     from openai import AsyncOpenAI
+
+    judge = sample_judge(judges, rng or random.Random())
 
     rubric_str = rubric_pretty if rubric_pretty else json.dumps(rubric_json, indent=2)
 
@@ -116,7 +120,7 @@ async def score_with_rubric(
         deliverable_text=deliverable_text,
     )
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
+    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
 
     max_retries = 5
     base_delay = 2.0
@@ -125,20 +129,21 @@ async def score_with_rubric(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                create_kwargs: dict = {
-                    "model": model_name,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
-                        },
-                        {"role": "user", "content": judge_prompt},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 8192,
-                }
-                if create_overrides:
-                    create_kwargs.update(create_overrides)
+                create_kwargs: dict = merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                            },
+                            {"role": "user", "content": judge_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 8192,
+                    },
+                    judge.create_overrides,
+                )
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
@@ -207,9 +212,11 @@ async def score_with_rubric(
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
             score = 0.0
 
-        print(f"Rubric final score: {score}", flush=True)
-        if include_raw_responses and isinstance(result, dict):
-            result["raw_responses"] = [raw_response_text]
+        print(f"Rubric final score: {score} (judge: {judge.name})", flush=True)
+        if isinstance(result, dict):
+            result["judge_name"] = judge.name
+            if include_raw_responses:
+                result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -226,10 +233,8 @@ async def score_with_rubric_visual(
     rubric_pretty: str,
     task_prompt: str,
     judge_prompt_template: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
-    create_overrides: dict | None = None,
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
@@ -240,13 +245,15 @@ async def score_with_rubric_visual(
     *deliverable_content_blocks* is a list of OpenAI-compatible content blocks
     (text and image_url) produced by ``file_reader.convert_deliverables_to_content_blocks()``.
 
-    *create_overrides* is merged into the kwargs passed to
-    ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Use it to bump ``max_tokens`` (default 8192), tweak ``temperature``, etc.
+    One member of *judges* is sampled for this scoring call; its
+    ``create_overrides`` are merged into ``client.chat.completions.create``.
+    Pass *rng* (a seeded ``random.Random``) for reproducible selection.
 
     Returns ``(score, judge_response)`` — same contract as ``score_with_rubric``.
     """
     from openai import AsyncOpenAI
+
+    judge = sample_judge(judges, rng or random.Random())
 
     rubric_str = rubric_pretty if rubric_pretty else json.dumps(rubric_json, indent=2)
 
@@ -261,7 +268,7 @@ async def score_with_rubric_visual(
     content: list[dict] = [{"type": "text", "text": judge_text}]
     content.extend(deliverable_content_blocks)
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
+    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
 
     max_retries = 5
     base_delay = 2.0
@@ -270,20 +277,21 @@ async def score_with_rubric_visual(
         response = None
         for attempt in range(max_retries + 1):
             try:
-                create_kwargs: dict = {
-                    "model": model_name,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an expert evaluator. You must respond with valid JSON only.",
-                        },
-                        {"role": "user", "content": content},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 8192,
-                }
-                if create_overrides:
-                    create_kwargs.update(create_overrides)
+                create_kwargs: dict = merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are an expert evaluator. You must respond with valid JSON only.",
+                            },
+                            {"role": "user", "content": content},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 8192,
+                    },
+                    judge.create_overrides,
+                )
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
@@ -342,9 +350,11 @@ async def score_with_rubric_visual(
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
             score = 0.0
 
-        print(f"Visual judge final score: {score}", flush=True)
-        if include_raw_responses and isinstance(result, dict):
-            result["raw_responses"] = [raw_response_text]
+        print(f"Visual judge final score: {score} (judge: {judge.name})", flush=True)
+        if isinstance(result, dict):
+            result["judge_name"] = judge.name
+            if include_raw_responses:
+                result["raw_responses"] = [raw_response_text]
         return max(0.0, min(1.0, score)), result
 
     except Exception as e:
@@ -365,9 +375,8 @@ async def score_with_rubric_structured(
     rubric_json: Any,
     rubric_pretty: str,
     task_prompt: str,
-    model_base_url: str,
-    model_name: str,
-    api_key: str = "dummy",
+    judges: list[ResolvedJudge],
+    rng: Optional[random.Random] = None,
     num_trials: int = 2,
     formatting_retries: int = 3,
     deliverable_content_blocks: list[dict] | None = None,
@@ -378,11 +387,24 @@ async def score_with_rubric_structured(
     Uses ``FINAL_SCORE[x] out of MAX_POSSIBLE_SCORE[y]`` tags for reliable
     parsing.  Runs *num_trials* scoring rounds (each with up to
     *formatting_retries* retries on parse failure) and averages the results.
+    A judge is sampled from *judges* per trial ("sample between the judges"),
+    so the averaged score pools the panel; pass *rng* for reproducibility.
 
     Returns ``(normalized_score, metadata)`` where *normalized_score* is in
     [0, 1] and *metadata* contains per-trial scores and percentages.
     """
     from openai import AsyncOpenAI
+
+    rng = rng or random.Random()
+    # One AsyncOpenAI client per distinct upstream (base_url, api_key), reused
+    # across trials that sample the same judge.
+    client_cache: dict[tuple[str, str], Any] = {}
+
+    def _client_for(judge: ResolvedJudge) -> Any:
+        key = (judge.base_url, judge.api_key)
+        if key not in client_cache:
+            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+        return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
     # the per-criterion point field differently — accept either ``score`` or
@@ -430,25 +452,25 @@ async def score_with_rubric_structured(
 
     messages = [{"role": "user", "content": content}]
 
-    client = AsyncOpenAI(base_url=model_base_url, api_key=api_key)
-
     scores: list[float] = []
     max_scores: list[float] = []
     percentages: list[float] = []
     trial_responses: list[str] = []
+    trial_judges: list[str] = []
 
     for trial in range(num_trials):
         trial_num = trial + 1
         parsed_ok = False
+        judge = sample_judge(judges, rng)
+        client = _client_for(judge)
+        create_kwargs = merge_create_kwargs(
+            {"model": judge.model, "messages": messages, "temperature": 0.3, "max_tokens": 65535},
+            judge.create_overrides,
+        )
 
         for retry in range(formatting_retries):
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=65535,
-                )
+                response = await client.chat.completions.create(**create_kwargs)
                 resp_text = (response.choices[0].message.content or "").strip()
             except Exception as e:
                 err_str = str(e).lower()
@@ -479,6 +501,7 @@ async def score_with_rubric_structured(
                 max_scores.append(parsed_max)
                 percentages.append((score / parsed_max) * 100 if parsed_max > 0 else 0)
                 trial_responses.append(resp_text)
+                trial_judges.append(judge.name)
                 parsed_ok = True
                 print(
                     f"[structured-rubric] trial {trial_num}: score={score}/{parsed_max} ({percentages[-1]:.1f}%)",
@@ -520,6 +543,7 @@ async def score_with_rubric_structured(
         "max_possible_score": effective_max,
         "num_trials_completed": len(scores),
         "num_trials_requested": num_trials,
+        "trial_judges": trial_judges,
     }
     if include_raw_responses:
         metadata["raw_responses"] = trial_responses

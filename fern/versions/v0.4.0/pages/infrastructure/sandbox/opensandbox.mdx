@@ -1,0 +1,175 @@
+---
+title: "OpenSandbox Provider"
+description: "Configure NeMo Gym sandboxes backed by an OpenSandbox server."
+position: 1
+---
+
+The `opensandbox` provider creates sandboxes through the OpenSandbox SDK and server API. It is the Kubernetes-backed provider used by agentic software engineering environments such as `mini_swe_agent_2`.
+
+## Setup
+
+Install the sandbox extra in the runtime image or virtual environment that creates sandboxes:
+
+```bash
+uv sync --extra sandbox
+```
+
+For package installs, use:
+
+```bash
+pip install "nemo-gym[sandbox]"
+```
+
+Set connection values through the provider config. The shipped config reads these environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENSANDBOX_DOMAIN` | OpenSandbox server domain. Defaults to the in-cluster service name in the shipped config. |
+| `OPENSANDBOX_API_KEY` | API key passed to the OpenSandbox SDK connection config. |
+
+## Provider Config
+
+NeMo Gym ships an OpenSandbox provider config at `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. It defines a top-level `sandbox` block that agents reference with `sandbox_provider: sandbox`.
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
+      protocol: http
+      request_timeout_s: 300
+      use_server_proxy: true
+    create:
+      request_timeout_s: 1200
+      timeout_s: 1200
+      skip_health_check: true
+      retries: 10
+      retry_delay_s: 5.0
+      retry_max_delay_s: 90.0
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+      stable_count: 2
+      stable_delay_s: 1.0
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 30
+```
+
+Run an agent with the provider config by passing it alongside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+The provider constructor accepts four optional config sections:
+
+| Section | Purpose |
+| --- | --- |
+| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, and server proxy mode. |
+| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+| `operations` | Retry and timeout behavior for SDK operations after create, including command retries and close timeout. |
+
+## SandboxSpec Provider Options
+
+Set OpenSandbox-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:
+
+```yaml
+sandbox_spec:
+  provider_options:
+    platform:
+      os: linux
+      arch: amd64
+    skip_health_check: false
+    extensions:
+      imagePullPolicy: IfNotPresent
+```
+
+Supported options are:
+
+| Option | Purpose |
+| --- | --- |
+| `platform` | Mapping passed to the OpenSandbox SDK `PlatformSpec`, such as `os` and `arch`. |
+| `snapshot_id` | OpenSandbox snapshot ID to create from instead of only an image. |
+| `volumes` | List of mappings passed to the OpenSandbox SDK `Volume` model. |
+| `skip_health_check` | Per-sandbox override for SDK create health checking unless the provider config forces it on. |
+| `extensions` | String map passed to OpenSandbox create extensions. |
+
+Unknown provider option keys raise `ValueError`; values with the wrong type raise `TypeError`. This catches config drift before a sandbox allocation is attempted.
+
+## Relevant SandboxSpec Fields
+
+| Field | OpenSandbox behavior |
+| --- | --- |
+| `image` | Container image passed to OpenSandbox create. |
+| `ttl_s` | Converted to an OpenSandbox sandbox timeout. |
+| `ready_timeout_s` | Converted to an OpenSandbox ready timeout. |
+| `env` | Passed to OpenSandbox create and command execution. |
+| `files` | Seed files uploaded before the first command. |
+| `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
+| `resources` | Mapped to OpenSandbox resource quantities. |
+| `entrypoint` | Passed to OpenSandbox create when set. |
+| `provider_options` | Per-sandbox OpenSandbox options such as `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+
+## Resource Mapping
+
+`SandboxResources` is translated into OpenSandbox resource quantities:
+
+| SandboxResources field | OpenSandbox resource key |
+| --- | --- |
+| `cpu` | `cpu` |
+| `memory_mib` | `memory`, formatted as `<value>Mi` |
+| `disk_gib` | `ephemeral-storage`, formatted as `<value>Gi` |
+| `gpu` | `gpu` |
+| `gpu_type` | `gpu_type` |
+
+The provider also normalizes metadata values for backend labels by replacing unsupported characters and truncating values to the provider limit.
+
+## Lifecycle
+
+The provider creates one OpenSandbox sandbox per Gym sandbox:
+
+| Operation | OpenSandbox behavior |
+| --- | --- |
+| Create | `opensandbox.Sandbox.create(...)` with normalized `SandboxSpec` fields. |
+| Exec | `handle.raw.commands.run(...)` with command options derived from `exec()` arguments. |
+| Status | `handle.raw.get_info()` mapped onto `SandboxStatus`. |
+| Close | `handle.raw.kill()` followed by local SDK handle cleanup. |
+
+If `create.skip_health_check` is enabled, the provider reconnects to the sandbox before running the NeMo Gym readiness probe so follow-up operations use a fresh SDK handle.
+
+## File Transfer
+
+The provider uses the OpenSandbox SDK file API for uploads and downloads:
+
+- `upload()` reads the local file and writes bytes to the target sandbox path.
+- `download()` reads bytes from the sandbox path and writes them to the local target path.
+
+Startup files from `SandboxSpec.files` use the same provider file path semantics before the first command runs.
+
+## User and Runtime Notes
+
+The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
+
+| `user` value | Behavior |
+| --- | --- |
+| `None` | Use the sandbox default user. |
+| `"root"` | Run the command as provided. |
+| Integer uid | Pass the uid through the OpenSandbox command options. |
+| Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
+
+Command failures return `SandboxExecResult` with the command's exit code. If OpenSandbox reports an execution error without an exit code, the provider returns code `125` with `error_type="sandbox"`.
+
+The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid values are `Always`, `IfNotPresent`, and `Never`. The resolved policy is written into OpenSandbox create extensions as both `imagePullPolicy` and `opensandbox.extensions.image-pull-policy` unless those keys are already present in `provider_options.extensions`.
+
+Create retries handle transient allocation, connection, image pull, and server-side errors. Command retries are controlled separately by `operations.command_retries`.
