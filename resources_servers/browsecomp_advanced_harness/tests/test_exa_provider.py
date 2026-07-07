@@ -20,6 +20,7 @@ via /contents and reuses the existing disk/inline formatting. exclude_domains ar
 honored. Per-call metering records provider + function for the cost/latency summary.
 """
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -27,9 +28,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import fixture
 
+import resources_servers.browsecomp_advanced_harness.app as app_module
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
+    ExaAIOHTTPClient,
+    TavilySearchAIOHTTPClient,
     TavilySearchRequest,
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
@@ -194,6 +198,38 @@ class TestExaProvider:
 
         resp = await server.browse(self._req(), BrowseRequest(urls=["https://x.com"]))
         assert "Failed to extract content" in resp.results_string
+
+    # ---- invalid API key ----
+
+    @staticmethod
+    def _http_response(status: int, body: dict):
+        r = MagicMock()
+        r.status = status
+        r.content.read = AsyncMock(return_value=json.dumps(body).encode())
+        r.json = AsyncMock(return_value=body)
+        return r
+
+    async def test_exa_401_aborts_benchmark(self, monkeypatch) -> None:
+        client = ExaAIOHTTPClient(headers={}, base_url="https://api.exa.ai", debug=False)
+        fake_request = AsyncMock(return_value=self._http_response(401, {"error": "invalid key"}))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        with pytest.raises(SystemExit):
+            await client.search("q", num_results=5)
+        app_module.os._exit.assert_called_once_with(1)
+        fake_request.assert_awaited_once()  # no retries on auth failure
+
+    async def test_tavily_403_aborts_benchmark(self, monkeypatch) -> None:
+        client = TavilySearchAIOHTTPClient(headers={}, base_url="https://api.tavily.com", debug=False)
+        fake_request = AsyncMock(return_value=self._http_response(403, {"error": "forbidden"}))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        with pytest.raises(SystemExit):
+            await client.post("/search", {"query": "q"}, 30)
+        app_module.os._exit.assert_called_once_with(1)
+        fake_request.assert_awaited_once()
 
     # ---- dispatch ----
 

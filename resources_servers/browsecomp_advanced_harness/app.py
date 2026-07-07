@@ -204,6 +204,17 @@ class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     metrics: TavilySearchMetrics
 
 
+def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
+    """A 401/403 from the search provider means the API key is bad — every search in the
+    run would silently degrade, so kill the benchmark instead of producing a garbage score."""
+    print(
+        f"[browsecomp][fatal][{provider}_invalid_api_key] HTTP {status}: search-provider API key "
+        f"rejected — aborting benchmark. body={body[:300]}",
+        flush=True,
+    )
+    os._exit(1)
+
+
 class TavilySearchAIOHTTPClientResponse(BaseModel):
     status_code: int
     data: Dict[str, Any]
@@ -236,6 +247,9 @@ class TavilySearchAIOHTTPClient(BaseModel):
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
+
+            if response.status in (401, 403):
+                _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
@@ -300,6 +314,9 @@ class ExaAIOHTTPClient(BaseModel):
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
+
+            if response.status in (401, 403):
+                _abort_on_invalid_api_key("exa", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
