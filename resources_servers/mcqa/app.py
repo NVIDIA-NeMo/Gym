@@ -78,8 +78,8 @@ CHOICE_LETTER_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])(?![A-Za-z])")
 # Strict boxed: capture a single UPPERCASE letter, allowing non-letter chars around it inside the box
 STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
-# Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
-ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
+# Markdown-aware variant: captures the final-answer payload after Answer:.
+ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -95,6 +95,8 @@ def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> t
 
 BOXED_CONTENT_PATTERN = re.compile(r"\\boxed\{\s*(.*?)\s*\}", re.S)
 LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
+LEADING_CHOICE_LETTER_PATTERN = re.compile(r"^([a-zA-Z])(?![a-zA-Z0-9])")
+LAST_STANDALONE_CHOICE_LETTER_PATTERN = re.compile(r"\b[A-Z]\b(?!.*\b[A-Z]\b)", re.S)
 
 
 def _strip_latex_wrappers(s: str) -> str:
@@ -110,6 +112,26 @@ def _strip_latex_wrappers(s: str) -> str:
 def _normalize_for_match(s: str) -> str:
     """Lowercase and collapse whitespace for robust substring/equality checks."""
     return " ".join(s.lower().split())
+
+
+def _extract_choice_letter(text: str, allowed_letters: set[str]) -> Optional[str]:
+    """Extract a single valid choice letter from an answer payload."""
+    candidate = _normalize_extracted_answer(text).strip().strip("*_` \t\n\r.,;:")
+    if len(candidate) == 1:
+        letter = candidate
+    else:
+        # Prefer a leading letter for "Answer: B because..." style payloads
+        m = LEADING_CHOICE_LETTER_PATTERN.match(candidate)
+        if m:
+            letter = m.group(1)
+        else:
+            m = LAST_STANDALONE_CHOICE_LETTER_PATTERN.search(candidate)
+            letter = m.group(0) if m else None
+    if letter:
+        up = letter.upper()
+        if up in allowed_letters:
+            return up
+    return None
 
 
 def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters: set[str]) -> Optional[str]:
@@ -309,12 +331,10 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                # Markdown-aware Answer: extraction handles **Answer: B**, etc.
-                md_match = ANSWER_COLON_MD_PATTERN.search(text)
-                if md_match:
-                    letter_up = md_match.group(1).strip().upper()
-                    if letter_up in allowed_letters:
-                        pred = letter_up
+                for candidate in reversed(ANSWER_COLON_PAYLOAD_PATTERN.findall(text)):
+                    pred = _extract_choice_letter(candidate, allowed_letters)
+                    if pred is not None:
+                        break
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
