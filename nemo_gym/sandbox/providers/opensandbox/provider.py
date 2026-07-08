@@ -33,6 +33,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -417,16 +418,6 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
-
-
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        return config_cls(**value)
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
 @dataclass(frozen=True)

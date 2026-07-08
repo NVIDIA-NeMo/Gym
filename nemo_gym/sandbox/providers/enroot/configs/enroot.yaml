@@ -1,0 +1,46 @@
+# Enroot sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider:
+# sandbox`; the child key `enroot` selects the provider class and its value is
+# passed to the provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping
+# providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/enroot/configs/enroot.yaml, $MODEL]"
+#
+# Enroot is a local, rootless container runtime — no server or API key is needed
+# (unlike opensandbox). The binary must be on PATH and all enroot calls run as
+# the same OS user (see this provider's README.md for the design notes).
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: enroot
+  enroot:
+    create:
+      # Provider-scoped enroot paths. Leave unset to auto-resolve under a
+      # per-user temp base dir; override to control where rootfs / cache /
+      # runtime state / imported squashfs images live.
+      base_dir: ${oc.env:NEMO_GYM_ENROOT_BASE,null}
+      data_path: ${oc.env:ENROOT_DATA_PATH,null}
+      cache_path: ${oc.env:ENROOT_CACHE_PATH,null}
+      runtime_path: ${oc.env:ENROOT_RUNTIME_PATH,null}
+      sqsh_cache_dir: ${oc.env:NEMO_GYM_ENROOT_SQSH_CACHE,null}
+      rw: true
+      remap_root: false
+      import_timeout_s: 1800
+      create_timeout_s: 600
+      start_timeout_s: 600
+      start_poll_s: 0.5
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+      stable_count: 2
+      stable_delay_s: 1.0
