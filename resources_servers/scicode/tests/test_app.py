@@ -69,16 +69,9 @@ def _request(solutions, n_steps=2):
 
 
 @contextmanager
-def _mock_ray(passed: bool):
-    """Stub the Ray worker so verify() runs without launching Ray or reading test_data.h5."""
-
-    class _Future:
-        pass
-
-    with (
-        patch.object(app.run_substep_remote, "remote", lambda *a, **k: _Future()),
-        patch.object(app.ray, "get", lambda f: {"passed": passed, "error": ""}),
-    ):
+def _mock_substep(passed: bool):
+    """Stub sub-step execution so verify() runs without executing code or reading test_data.h5."""
+    with patch.object(app, "run_substep", lambda *a, **k: {"passed": passed, "error": ""}):
         yield
 
 
@@ -137,7 +130,7 @@ class TestApp:
     @pytest.mark.asyncio
     async def test_verify_excludes_steps_absent_from_solutions(self):
         # Step 1.2 has no solution entry (prefilled) -> excluded from the denominator entirely.
-        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_ray(passed=True):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
             result = await _server(h5.name).verify(_request(solutions={"1.1": "a"}, n_steps=2))
         assert result.num_steps_total == 1
         assert result.num_steps_passed == 1
@@ -165,7 +158,7 @@ class TestApp:
 
     @pytest.mark.asyncio
     async def test_verify_all_pass(self):
-        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_ray(passed=True):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
             result = await _server(h5.name).verify(_request(solutions={"1.1": "a", "1.2": "b"}))
         assert result.reward == 1.0
         assert result.step_results == [True, True]
@@ -175,7 +168,7 @@ class TestApp:
 
     @pytest.mark.asyncio
     async def test_verify_all_fail(self):
-        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_ray(passed=False):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=False):
             result = await _server(h5.name).verify(_request(solutions={"1.1": "a", "1.2": "b"}))
         assert result.reward == 0.0
         assert result.num_steps_passed == 0
@@ -184,7 +177,7 @@ class TestApp:
     @pytest.mark.asyncio
     async def test_verify_out_of_context_step_fails(self):
         # First sub-step runs (mocked pass); second is the out-of-context sentinel -> fails unrun.
-        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_ray(passed=True):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
             result = await _server(h5.name).verify(_request(solutions={"1.1": "a", "1.2": "_ran_out_of_context_"}))
         assert result.step_results == [True, False]
         assert result.num_steps_passed == 1
