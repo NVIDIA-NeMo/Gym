@@ -50,6 +50,12 @@ AGENT_INIT_METRICS = (
     "initialize_runtime_time",
 )
 
+PER_TURN_METRICS = (
+    "response_latencies",
+    "action_execution_latencies",
+    "token_usages",
+)
+
 
 def parse_iso_timestamp(ts_str):
     """Parse ISO timestamp string to epoch seconds (float).
@@ -73,13 +79,15 @@ def extract_instance_id(dirname):
     return dirname.rsplit("_", 2)[0]
 
 
+def has_per_turn_metrics(nm):
+    """Return whether all data needed for a detailed rollout timeline exists."""
+    ptm = nm.get("per_turn_metrics")
+    return isinstance(ptm, dict) and all(isinstance(ptm.get(field), list) for field in PER_TURN_METRICS)
+
+
 def validate_precise_metrics(nm, dir_name):
     """Require complete source data for every emitted event."""
     errors = []
-    ptm = nm.get("per_turn_metrics")
-    if not isinstance(ptm, dict):
-        errors.append("per_turn_metrics is missing")
-        ptm = {}
 
     if not nm.get("generation_start_timestamp"):
         errors.append("generation_start_timestamp is missing")
@@ -90,6 +98,8 @@ def validate_precise_metrics(nm, dir_name):
         errors.append("ray_queue_time is missing")
     elif not isinstance(nm["ray_queue_time"], (int, float)) or nm["ray_queue_time"] < 0:
         errors.append("ray_queue_time is invalid")
+    if not isinstance(nm.get("resolved"), bool):
+        errors.append("resolved is missing or invalid")
     eval_start = nm.get("evaluation_start_timestamp")
     eval_time = nm.get("final_eval_time")
     if eval_start and (not isinstance(eval_time, (int, float)) or eval_time < 0):
@@ -97,14 +107,21 @@ def validate_precise_metrics(nm, dir_name):
     if (eval_time or 0) > 0 and not eval_start:
         errors.append("evaluation_start_timestamp is missing for a completed evaluation")
 
+    if not has_per_turn_metrics(nm):
+        if errors:
+            raise ValueError(f"Incomplete metrics for {dir_name}: " + "; ".join(errors))
+        return
+
+    ptm = nm["per_turn_metrics"]
+
     for field in AGENT_INIT_METRICS:
         duration = nm.get(field)
         if not isinstance(duration, (int, float)) or duration < 0:
             errors.append(f"{field} is invalid")
 
-    responses = ptm.get("response_latencies") or []
-    actions = ptm.get("action_execution_latencies") or []
-    token_usages = ptm.get("token_usages") or []
+    responses = ptm["response_latencies"]
+    actions = ptm["action_execution_latencies"]
+    token_usages = ptm["token_usages"]
 
     for label, records in (("response", responses), ("action", actions)):
         for index, record in enumerate(records):
@@ -127,11 +144,6 @@ def validate_precise_metrics(nm, dir_name):
 
 def reconstruct_rollout_events(nm):
     """Place events from their absolute UTC timestamps in nemo_gym_metrics.json."""
-    ptm = nm["per_turn_metrics"]
-    responses = ptm["response_latencies"]
-    actions = ptm["action_execution_latencies"]
-    token_by_rid = {usage["response_id"]: usage for usage in ptm["token_usages"]}
-
     gen_start = parse_iso_timestamp(nm["generation_start_timestamp"])
     eval_start = (
         parse_iso_timestamp(nm["evaluation_start_timestamp"]) if nm.get("evaluation_start_timestamp") else None
@@ -140,6 +152,26 @@ def reconstruct_rollout_events(nm):
     eval_time = nm["final_eval_time"] if eval_start is not None else 0
 
     events = []
+    if not has_per_turn_metrics(nm):
+        if ray_queue_time > 0:
+            events.append(("queue_wait", gen_start - ray_queue_time, ray_queue_time, {}))
+        events.append(("agent_rollout", gen_start, nm["openhands_run_time"], {}))
+        if eval_start is not None and eval_time > 0:
+            events.append(
+                (
+                    "evaluation",
+                    eval_start,
+                    eval_time,
+                    {"resolved": nm["resolved"]},
+                )
+            )
+        return events
+
+    ptm = nm["per_turn_metrics"]
+    responses = ptm["response_latencies"]
+    actions = ptm["action_execution_latencies"]
+    token_by_rid = {usage["response_id"]: usage for usage in ptm["token_usages"]}
+
     llm_starts = []
     for response in responses:
         timestamp = response["timestamp"]
@@ -244,6 +276,7 @@ def reconstruct_rollout_events(nm):
 
 # Chrome trace cname color palette
 CATEGORY_COLORS = {
+    "agent_rollout": "grey",  # neutral gray
     "llm_generation": "good",  # green
     "tool_execution": "vsync_highlight_color",  # blue/teal
     "evaluation": "terrible",  # dark red
@@ -254,6 +287,7 @@ CATEGORY_COLORS = {
 }
 
 CATEGORY_DISPLAY = {
+    "agent_rollout": "Agent Rollout",
     "llm_generation": "LLM Generation (GPU)",
     "tool_execution": "Tool Execution (CPU)",
     "evaluation": "Evaluation (CPU)",
@@ -285,6 +319,7 @@ def build_chrome_trace(log_dir):
     # Collect all entry directories
     entries = []
     entry_start_times = {}
+    skipped_entries = 0
     for name in sorted(os.listdir(log_dir)):
         full_path = os.path.join(log_dir, name)
         if not os.path.isdir(full_path):
@@ -294,13 +329,21 @@ def build_chrome_trace(log_dir):
         metrics_file = os.path.join(full_path, "nemo_gym_metrics.json")
         if not os.path.exists(metrics_file):
             continue
-        with open(metrics_file, "r") as f:
-            data = json.load(f)
-        validate_precise_metrics(data, name)
+        try:
+            with open(metrics_file, "r") as f:
+                data = json.load(f)
+            validate_precise_metrics(data, name)
+            start_time = parse_iso_timestamp(data["generation_start_timestamp"])
+            reconstruct_rollout_events(data)
+        except (OSError, KeyError, TypeError, ValueError):
+            skipped_entries += 1
+            continue
         entries.append((name, data))
-        entry_start_times[name] = parse_iso_timestamp(data["generation_start_timestamp"])
+        entry_start_times[name] = start_time
 
     print(f"Processing {len(entries)} rollout entries...")
+    if skipped_entries:
+        print(f"Skipped {skipped_entries} incomplete rollout entries")
 
     # Group by instance ID
     instance_groups = defaultdict(list)
@@ -340,6 +383,7 @@ def build_chrome_trace(log_dir):
     # --- Process each entry ---
     rollout_count = 0
     stats = {
+        "total_agent_rollout_time": 0.0,
         "total_llm_time": 0.0,
         "total_tool_time": 0.0,
         "total_eval_time": 0.0,
@@ -401,7 +445,9 @@ def build_chrome_trace(log_dir):
             trace_events.append(event)
 
             # Accumulate stats
-            if cat == "llm_generation":
+            if cat == "agent_rollout":
+                stats["total_agent_rollout_time"] += dur_s
+            elif cat == "llm_generation":
                 stats["total_llm_time"] += dur_s
             elif cat == "tool_execution":
                 stats["total_tool_time"] += dur_s
@@ -426,6 +472,7 @@ def build_chrome_trace(log_dir):
     print(f"Generated {len(trace_events)} trace events")
 
     print("\n[INFO] Category descriptions:")
+    print("Agent Rollout: Full measured generation span when per-turn details are unavailable")
     print("LLM Generation (GPU): Time spent on LLM inference API calls (GPU-bound)")
     print("Tool Execution (CPU): Bash commands, file edits, etc. (CPU-bound)")
     print("Evaluation (CPU): SWE-bench test suite execution after agent completes (CPU-bound)")
@@ -444,7 +491,8 @@ def build_chrome_trace(log_dir):
         f"({100 * stats['resolved_count'] / max(stats['total_count'], 1):.1f}%)"
     )
     total_time = (
-        stats["total_llm_time"]
+        stats["total_agent_rollout_time"]
+        + stats["total_llm_time"]
         + stats["total_tool_time"]
         + stats["total_eval_time"]
         + stats["total_init_time"]
@@ -456,6 +504,11 @@ def build_chrome_trace(log_dir):
     if total_time > 0:
         avg_time = total_time / n
         print(f"  Avg per rollout:        {avg_time:>10.1f}s")
+        if stats["total_agent_rollout_time"] > 0:
+            print(
+                f"  Agent Rollout:          {stats['total_agent_rollout_time'] / n:>10.1f}s  "
+                f"({100 * stats['total_agent_rollout_time'] / total_time:.1f}%)"
+            )
         print(
             f"  LLM Generation (GPU):   {stats['total_llm_time'] / n:>10.1f}s  "
             f"({100 * stats['total_llm_time'] / total_time:.1f}%)"
