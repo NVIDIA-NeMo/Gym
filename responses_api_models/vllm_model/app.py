@@ -15,14 +15,17 @@
 import base64
 import json
 import os
+import re
+from collections import OrderedDict
 from copy import deepcopy
+from dataclasses import dataclass
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field
+from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -88,6 +91,15 @@ class StreamingToolCallPromptRequest(BaseModel):
     session_id: str
     sequence_no: int
     chat_completion: Dict[str, Any]
+    final: bool = False
+    max_candidates: Optional[int] = Field(default=None, gt=0)
+    candidate_ttl_seconds: Optional[float] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_final_candidate_limits(self):
+        if self.final and (self.max_candidates is None or self.candidate_ttl_seconds is None):
+            raise ValueError("final tokenizer requests require max_candidates and candidate_ttl_seconds")
+        return self
 
 
 class StreamingToolCallCloseRequest(BaseModel):
@@ -97,6 +109,14 @@ class StreamingToolCallCloseRequest(BaseModel):
 
 class StreamingToolCallAbortRequest(BaseModel):
     session_id: str
+
+
+@dataclass(frozen=True)
+class StreamingPromptTokenCandidate:
+    client: NeMoGymAsyncOpenAI
+    prompt: Dict[str, Any]
+    prompt_token_ids: tuple[int, ...]
+    expires_at: float
 
 
 class VLLMModel(SimpleResponsesAPIModel):
@@ -118,6 +138,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def setup_webserver(self):
         app = super().setup_webserver()
+        app.post("/v1/streaming_tool_call/tokenize")(self.tokenize_streaming_tool_call)
         app.post("/v1/streaming_tool_call/start")(self.start_streaming_tool_call)
         app.post("/v1/streaming_tool_call/append")(self.append_streaming_tool_call)
         app.post("/v1/streaming_tool_call/close")(self.close_streaming_tool_call)
@@ -135,30 +156,167 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._streaming_prompt_token_candidates: OrderedDict[str, StreamingPromptTokenCandidate] = OrderedDict()
 
         self._converter = self.get_converter()
+
+    @staticmethod
+    def _streaming_prompt_tokenize_body(
+        body_dict: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        tokenize_body = {
+            key: deepcopy(body_dict[key]) for key in ("model", "tools", "chat_template_kwargs") if key in body_dict
+        }
+        token_fields = (
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+        )
+        messages = body_dict.get("messages", [])
+        latest_token_fields_index = next(
+            (
+                index
+                for index in reversed(range(len(messages)))
+                if all(field in messages[index] for field in token_fields)
+            ),
+            None,
+        )
+        tokenize_body["messages"] = [
+            {
+                key: deepcopy(value)
+                for key, value in message.items()
+                if index == latest_token_fields_index or key not in token_fields
+            }
+            for index, message in enumerate(messages)
+        ]
+        return tokenize_body
+
+    @staticmethod
+    def _streaming_prompt_comparison_body(
+        tokenize_body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        token_fields = (
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+        )
+        comparison_body = {
+            key: deepcopy(tokenize_body[key])
+            for key in ("model", "tools", "chat_template_kwargs")
+            if key in tokenize_body
+        }
+        comparison_body["messages"] = [
+            {key: deepcopy(value) for key, value in message.items() if key not in token_fields}
+            for message in tokenize_body.get("messages", [])
+        ]
+        return comparison_body
+
+    def _expire_streaming_prompt_token_candidates(self) -> None:
+        now = time()
+        while self._streaming_prompt_token_candidates:
+            _, candidate = next(iter(self._streaming_prompt_token_candidates.items()))
+            if candidate.expires_at > now:
+                break
+            self._streaming_prompt_token_candidates.popitem(last=False)
+
+    def _store_streaming_prompt_token_candidate(
+        self,
+        *,
+        reuse_id: str,
+        client: NeMoGymAsyncOpenAI,
+        prompt: Dict[str, Any],
+        prompt_token_ids: list[int],
+        max_candidates: int,
+        candidate_ttl_seconds: float,
+    ) -> None:
+        self._expire_streaming_prompt_token_candidates()
+        self._streaming_prompt_token_candidates.pop(reuse_id, None)
+        self._streaming_prompt_token_candidates[reuse_id] = StreamingPromptTokenCandidate(
+            client=client,
+            prompt=deepcopy(prompt),
+            prompt_token_ids=tuple(prompt_token_ids),
+            expires_at=time() + candidate_ttl_seconds,
+        )
+        while len(self._streaming_prompt_token_candidates) > max_candidates:
+            self._streaming_prompt_token_candidates.popitem(last=False)
+
+    def _consume_streaming_prompt_token_candidate(
+        self,
+        *,
+        reuse_id: str,
+        client: NeMoGymAsyncOpenAI,
+        prompt: Dict[str, Any],
+    ) -> tuple[
+        str,
+        Optional[list[int]],
+        Optional[StreamingPromptTokenCandidate],
+    ]:
+        self._expire_streaming_prompt_token_candidates()
+        candidate = self._streaming_prompt_token_candidates.pop(reuse_id, None)
+        if candidate is None:
+            return "missing", None, None
+        if candidate.client is not client:
+            return "mismatch", None, None
+        if candidate.prompt != prompt:
+            return "mismatch", None, candidate
+        return "matched", list(candidate.prompt_token_ids), None
+
+    @classmethod
+    def _first_streaming_prompt_difference(
+        cls,
+        candidate: Any,
+        request: Any,
+        path: str = "$",
+    ) -> str:
+        if type(candidate) is not type(request):
+            return f"{path}: type {type(candidate).__name__} != {type(request).__name__}"
+        if isinstance(candidate, dict):
+            for key in sorted(candidate.keys() | request.keys()):
+                if key not in candidate:
+                    return f"{path}.{key}: missing from candidate"
+                if key not in request:
+                    return f"{path}.{key}: missing from request"
+                difference = cls._first_streaming_prompt_difference(candidate[key], request[key], f"{path}.{key}")
+                if difference:
+                    return difference
+            return ""
+        if isinstance(candidate, list):
+            if len(candidate) != len(request):
+                return f"{path}: list lengths {len(candidate)} != {len(request)}"
+            for index, (candidate_item, request_item) in enumerate(zip(candidate, request)):
+                difference = cls._first_streaming_prompt_difference(
+                    candidate_item,
+                    request_item,
+                    f"{path}[{index}]",
+                )
+                if difference:
+                    return difference
+            return ""
+        if candidate == request:
+            return ""
+        if isinstance(candidate, str):
+            return f"{path}: string lengths {len(candidate)} != {len(request)}"
+        return f"{path}: values differ"
 
     async def _tokenize_streaming_tool_call_prompt(
         self,
         request: Request,
         chat_completion: Dict[str, Any],
-    ) -> tuple[NeMoGymAsyncOpenAI, list[int]]:
+    ) -> tuple[NeMoGymAsyncOpenAI, list[int], Dict[str, Any]]:
         body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(chat_completion)
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
-        tokenize_body = {
-            key: body_dict[key] for key in ("model", "messages", "tools", "chat_template_kwargs") if key in body_dict
-        }
+        tokenize_body = self._streaming_prompt_tokenize_body(body_dict)
         client = self._resolve_client(request)
         tokenize_response = await client.create_tokenize(**tokenize_body)
-        return client, tokenize_response["tokens"]
+        return client, tokenize_response["tokens"], tokenize_body
 
     async def start_streaming_tool_call(
         self,
         request: Request,
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
-        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        client, prompt_token_ids, _ = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
         return await client.create_streaming_tool_call(
             "start",
             session_id=body.session_id,
@@ -166,12 +324,39 @@ class VLLMModel(SimpleResponsesAPIModel):
             prompt_token_ids=prompt_token_ids,
         )
 
+    async def tokenize_streaming_tool_call(
+        self,
+        request: Request,
+        body: StreamingToolCallPromptRequest = Body(),
+    ) -> Dict[str, Any]:
+        """Tokenize a partial tool result without starting a prefill session."""
+        client, prompt_token_ids, tokenize_body = await self._tokenize_streaming_tool_call_prompt(
+            request, body.chat_completion
+        )
+        result = {
+            "sequence_no": body.sequence_no,
+            "token_count": len(prompt_token_ids),
+        }
+        if body.final:
+            assert body.max_candidates is not None
+            assert body.candidate_ttl_seconds is not None
+            self._store_streaming_prompt_token_candidate(
+                reuse_id=body.session_id,
+                client=client,
+                prompt=self._streaming_prompt_comparison_body(tokenize_body),
+                prompt_token_ids=prompt_token_ids,
+                max_candidates=body.max_candidates,
+                candidate_ttl_seconds=body.candidate_ttl_seconds,
+            )
+            result["reuse_id"] = body.session_id
+        return result
+
     async def append_streaming_tool_call(
         self,
         request: Request,
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
-        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        client, prompt_token_ids, _ = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
         return await client.create_streaming_tool_call(
             "append",
             session_id=body.session_id,
@@ -184,7 +369,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         request: Request,
         body: StreamingToolCallCloseRequest = Body(),
     ) -> Dict[str, Any]:
-        client, prompt_token_ids = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
+        client, prompt_token_ids, _ = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
         return await client.create_streaming_tool_call(
             "close",
             session_id=body.session_id,
@@ -520,9 +705,57 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
+        streaming_prompt_reuse_id = body_dict.pop("streaming_prompt_reuse_id", None)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        streaming_prompt_reuse_status = None
+        streaming_prompt_reuse_match_kind = None
+        reused_prompt_token_ids = None
+        if streaming_prompt_reuse_id is not None:
+            tokenize_body_dict = self._streaming_prompt_tokenize_body(body_dict)
+            comparison_body_dict = self._streaming_prompt_comparison_body(tokenize_body_dict)
+            (
+                streaming_prompt_reuse_status,
+                reused_prompt_token_ids,
+                mismatched_candidate,
+            ) = self._consume_streaming_prompt_token_candidate(
+                reuse_id=streaming_prompt_reuse_id,
+                client=client,
+                prompt=comparison_body_dict,
+            )
+            if reused_prompt_token_ids is not None:
+                streaming_prompt_reuse_match_kind = "exact"
+            elif mismatched_candidate is not None:
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                request_prompt_token_ids = tokenize_response["tokens"]
+                if tuple(request_prompt_token_ids) == (mismatched_candidate.prompt_token_ids):
+                    streaming_prompt_reuse_status = "matched"
+                    streaming_prompt_reuse_match_kind = "token_equivalent"
+                    reused_prompt_token_ids = request_prompt_token_ids
+                else:
+                    common_prefix_tokens = 0
+                    for candidate_token, request_token in zip(
+                        mismatched_candidate.prompt_token_ids,
+                        request_prompt_token_ids,
+                    ):
+                        if candidate_token != request_token:
+                            break
+                        common_prefix_tokens += 1
+                    difference = self._first_streaming_prompt_difference(
+                        mismatched_candidate.prompt,
+                        comparison_body_dict,
+                    )
+                    print(
+                        "Streaming prompt reuse token mismatch: "
+                        f"{difference}; candidate_tokens="
+                        f"{len(mismatched_candidate.prompt_token_ids)}, "
+                        f"request_tokens={len(request_prompt_token_ids)}, "
+                        f"common_prefix_tokens={common_prefix_tokens}",
+                        flush=True,
+                    )
+            if reused_prompt_token_ids is not None:
+                body_dict["required_full_prompt_token_ids"] = reused_prompt_token_ids
 
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
@@ -607,13 +840,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
             # `prompt_str`) can be built with different chat template settings than
             # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+            if reused_prompt_token_ids is None:
+                tokenize_body_dict = self._streaming_prompt_tokenize_body(body_dict)
+                # The base url has /v1 at the end but vLLM's tokenize endpoint
+                # does not have v1.
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                prompt_token_ids = tokenize_response["tokens"]
+            else:
+                prompt_token_ids = reused_prompt_token_ids
             """
             END
             """
@@ -623,7 +857,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 dict(
                     # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
                     # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
+                    prompt_token_ids=prompt_token_ids,
                     # generation_token_ids=choice_dict["token_ids"],
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
@@ -635,6 +869,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+
+        if streaming_prompt_reuse_status is not None:
+            chat_completion_dict["streaming_prompt_reuse_status"] = streaming_prompt_reuse_status
+        if streaming_prompt_reuse_match_kind is not None:
+            chat_completion_dict["streaming_prompt_reuse_match_kind"] = streaming_prompt_reuse_match_kind
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

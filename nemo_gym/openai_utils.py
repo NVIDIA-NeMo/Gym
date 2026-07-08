@@ -336,6 +336,10 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    streaming_prompt_reuse_status: Optional[Literal["matched", "mismatch", "missing"]] = None
+    streaming_prompt_reuse_match_kind: Optional[
+        Literal["exact", "token_equivalent"]
+    ] = None
 
 
 ########################################
@@ -453,6 +457,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
+    streaming_prompt_reuse_id: Optional[str] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall

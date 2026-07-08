@@ -1,0 +1,448 @@
+diff --git a/evaluation/benchmarks/swe_bench/run_infer.py b/evaluation/benchmarks/swe_bench/run_infer.py
+--- a/evaluation/benchmarks/swe_bench/run_infer.py
++++ b/evaluation/benchmarks/swe_bench/run_infer.py
+@@ -1309,6 +1309,8 @@ def process_instance(
+                 error=None,
+             )
+ 
++    process_instance_start_time = time.perf_counter()
++    os.environ['OPENHANDS_METRICS_PHASE'] = 'runtime_setup'
+     config = get_config(instance, metadata)
+ 
+     # Setup the logger properly, so you can run multi-processing to parallelize the evaluation
+@@ -1349,6 +1351,7 @@ def process_instance(
+     pre_existing_sessions = set(os.listdir(eval_sessions_dir)) if os.path.isdir(eval_sessions_dir) else set()
+ 
+     try:
++        os.environ['OPENHANDS_METRICS_PHASE'] = 'runtime_initialize'
+         start_time = time.perf_counter()
+         initialize_runtime(runtime, instance, metadata)
+         end_time = time.perf_counter()
+@@ -1366,6 +1369,7 @@ def process_instance(
+             )
+ 
+         # Here's how you can run the agent (similar to the `main` function) and get the final task state
++        os.environ['OPENHANDS_METRICS_PHASE'] = 'controller'
+         start_time = time.perf_counter()
+         state: State | None = asyncio.run(
+             run_controller(
+@@ -1379,7 +1383,10 @@ def process_instance(
+             )
+         )
+         end_time = time.perf_counter()
++        run_controller_time = end_time - start_time
++        update_metrics({'run_controller_time': run_controller_time})
+         print(f"run controller: {end_time - start_time} seconds", flush = True)
++        post_controller_start_time = end_time
+ 
+         # if fatal error, throw EvalError to trigger re-run
+         if is_fatal_evaluation_error(state.last_error):
+@@ -1393,13 +1400,21 @@ def process_instance(
+             )
+         else:
+             complete_runtime_fn = complete_runtime
++        os.environ['OPENHANDS_METRICS_PHASE'] = 'runtime_completion'
++        complete_runtime_start_time = time.perf_counter()
+         return_val = complete_runtime_fn(runtime, instance)
++        complete_runtime_time = time.perf_counter() - complete_runtime_start_time
++        update_metrics({'complete_runtime_time': complete_runtime_time})
+         git_patch = return_val['git_patch']
+         logger.info(
+             f'Got git diff for instance {instance.instance_id}:\n--------\n{git_patch}\n--------'
+         )
+     finally:
++        runtime_close_start_time = time.perf_counter()
+         runtime.close()
++        update_metrics(
++            {'runtime_close_time': time.perf_counter() - runtime_close_start_time}
++        )
+         # _cleanup_eval_sessions(eval_sessions_dir, pre_existing_sessions)
+     # ==========================================
+ 
+@@ -1438,6 +1453,17 @@ def process_instance(
+         metrics=metrics,
+         error=state.last_error if state and state.last_error else None,
+     )
++    output_ready_time = time.perf_counter()
++    update_metrics(
++        {
++            'post_controller_processing_time': (
++                output_ready_time - post_controller_start_time
++            ),
++            'process_instance_time': (
++                output_ready_time - process_instance_start_time
++            ),
++        }
++    )
+     return output
+ 
+ 
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -274,6 +274,9 @@ class NemoGymClient:
+         existing_dict["total_model_call_time"] = (
+             model_call_time_taken + time.time() - start_time
+         )
++        existing_dict["total_model_call_count"] = (
++            existing_dict.get("total_model_call_count", 0) + 1
++        )
+ 
+         with open(metrics_fpath, "w") as f:
+             json.dump(existing_dict, f)
+diff --git a/openhands/runtime/action_execution_server.py b/openhands/runtime/action_execution_server.py
+--- a/openhands/runtime/action_execution_server.py
++++ b/openhands/runtime/action_execution_server.py
+@@ -413,9 +413,14 @@ class ActionExecutionServer:
+         logger.debug('Bash init commands completed')
+ 
+     async def run_action(self, action) -> Observation:
++        action_start_time = time.perf_counter()
+         async with self.lock:
+             action_type = action.action
+             observation = await getattr(self, action_type)(action)
++            # Preserve the time spent inside the action server. The runtime client
++            # reads this value before Runtime._handle_action replaces it with the
++            # wider end-to-end action latency.
++            observation._execution_latency = time.perf_counter() - action_start_time
+             return observation
+ 
+     async def run(
+diff --git a/openhands/runtime/base.py b/openhands/runtime/base.py
+--- a/openhands/runtime/base.py
++++ b/openhands/runtime/base.py
+@@ -337,8 +337,26 @@ class Runtime(ABC):
+             with open(metrics_fpath) as f:
+                 existing_dict = json.loads(f.read())
+ 
++            action_time_taken = time.time() - start_time
+             exec_time_taken = existing_dict.get("total_command_exec_time", 0.0)
+-            existing_dict["total_command_exec_time"] = exec_time_taken + time.time() - start_time
++            existing_dict["total_command_exec_time"] = (
++                exec_time_taken + action_time_taken
++            )
++            existing_dict["total_controller_action_count"] = (
++                existing_dict.get("total_controller_action_count", 0) + 1
++            )
++            existing_dict["total_controller_action_time"] = (
++                existing_dict.get("total_controller_action_time", 0.0)
++                + action_time_taken
++            )
++            if isinstance(event, CmdRunAction):
++                existing_dict["total_controller_cmd_action_count"] = (
++                    existing_dict.get("total_controller_cmd_action_count", 0) + 1
++                )
++                existing_dict["total_controller_cmd_action_time"] = (
++                    existing_dict.get("total_controller_cmd_action_time", 0.0)
++                    + action_time_taken
++                )
+ 
+             with open(metrics_fpath, "w") as f:
+                 json.dump(existing_dict, f)
+diff --git a/openhands/runtime/impl/action_execution/action_execution_client.py b/openhands/runtime/impl/action_execution/action_execution_client.py
+--- a/openhands/runtime/impl/action_execution/action_execution_client.py
++++ b/openhands/runtime/impl/action_execution/action_execution_client.py
+@@ -1,6 +1,8 @@
++import json
+ import os
+ import tempfile
+ import threading
++import time
+ from pathlib import Path
+ from typing import Any
+ from zipfile import ZipFile
+@@ -81,6 +83,57 @@ def _is_retryable_error(exception):
+     )
+ 
+ 
++def _update_action_timing_metrics(
++    action: Action,
++    request_seconds: float,
++    server_seconds: float,
++) -> None:
++    """Record low-overhead action timing when detailed diagnostics are enabled."""
++    if os.getenv('OPENHANDS_DETAILED_RUNTIME_METRICS') != '1':
++        return
++    metrics_path = os.getenv('NEMO_GYM_METRICS_FPATH')
++    if not metrics_path:
++        return
++
++    phase = os.getenv('OPENHANDS_METRICS_PHASE', 'unknown')
++    phase_prefixes = {
++        'runtime_setup': 'openhands_runtime_setup',
++        'runtime_initialize': 'openhands_runtime_initialize',
++        'controller': 'openhands_controller',
++        'runtime_completion': 'openhands_runtime_completion',
++    }
++    increments: dict[str, int | float] = {
++        'openhands_action_request_count': 1,
++        'openhands_action_request_seconds': request_seconds,
++        'openhands_action_server_seconds': server_seconds,
++    }
++    phase_prefix = phase_prefixes.get(phase)
++    if phase_prefix is not None:
++        increments[f'{phase_prefix}_action_count'] = 1
++        increments[f'{phase_prefix}_action_request_seconds'] = request_seconds
++        increments[f'{phase_prefix}_action_server_seconds'] = server_seconds
++    if phase == 'controller' and isinstance(
++        action, (CmdRunAction, Terminus2CmdRunAction)
++    ):
++        increments['openhands_controller_cmd_action_count'] = 1
++        increments['openhands_controller_cmd_action_request_seconds'] = (
++            request_seconds
++        )
++        increments['openhands_controller_cmd_action_server_seconds'] = (
++            server_seconds
++        )
++
++    try:
++        with open(metrics_path) as metrics_file:
++            metrics = json.load(metrics_file)
++        for key, increment in increments.items():
++            metrics[key] = metrics.get(key, 0) + increment
++        with open(metrics_path, 'w') as metrics_file:
++            json.dump(metrics, metrics_file)
++    except (FileNotFoundError, json.JSONDecodeError, OSError):
++        pass
++
++
+ class ActionExecutionClient(Runtime):
+     """Base class for runtimes that interact with the action execution server.
+ 
+@@ -355,6 +408,7 @@ class ActionExecutionClient(Runtime):
+                 execution_action_body: dict[str, Any] = {
+                     'action': event_to_dict(action),
+                 }
++                request_start_time = time.perf_counter()
+                 response = self._send_action_server_request(
+                     'POST',
+                     f'{self.action_execution_server_url}/execute_action',
+@@ -364,10 +418,17 @@ class ActionExecutionClient(Runtime):
+                 )
+                 assert response.is_closed
+                 output = response.json()
++                server_seconds = float(output.get('execution_latency', 0.0) or 0.0)
+                 if getattr(action, 'hidden', False):
+                     output.get('extras')['hidden'] = True
+                 obs = observation_from_dict(output)
+                 obs._cause = action.id  # type: ignore[attr-defined]
++                request_seconds = time.perf_counter() - request_start_time
++                _update_action_timing_metrics(
++                    action,
++                    request_seconds,
++                    server_seconds,
++                )
+             except httpx.TimeoutException:
+                 raise AgentRuntimeTimeoutError(
+                     f'Runtime failed to return execute_action before the requested timeout of {action.timeout}s'
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -563,7 +563,17 @@ class LocalRuntime(ActionExecutionClient):
+         _update_streaming_tool_call_metrics(
+             {"streaming_tool_call_eligible_actions": 1}
+         )
+-        post_task = asyncio.create_task(post_action())
++        post_task_started_at = time.monotonic()
++        post_task_finished_at: float | None = None
++
++        async def timed_post_action() -> httpx.Response:
++            nonlocal post_task_finished_at
++            try:
++                return await post_action()
++            finally:
++                post_task_finished_at = time.monotonic()
++
++        post_task = asyncio.create_task(timed_post_action())
+         session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
+         sequence_no = 0
+         tokenizer_only = bool(context.config.get("tokenizer_only"))
+@@ -585,6 +595,7 @@ class LocalRuntime(ActionExecutionClient):
+         snapshot_revisions = 0
+         nonempty_snapshots = 0
+         snapshots_at_or_above_min_chunk_chars = 0
++        snapshot_request_seconds = 0.0
+         streaming_http_session: ClientSession | None = None
+ 
+         def snapshot_metrics() -> dict[str, int]:
+@@ -597,6 +608,20 @@ class LocalRuntime(ActionExecutionClient):
+                 ),
+             }
+ 
++        def streaming_timing_metrics() -> dict[str, float]:
++            finished_at = post_task_finished_at or time.monotonic()
++            return {
++                "streaming_tool_call_command_request_seconds": (
++                    finished_at - post_task_started_at
++                ),
++                "streaming_tool_call_post_command_tail_seconds": max(
++                    0.0, time.monotonic() - finished_at
++                ),
++                "streaming_tool_call_snapshot_request_seconds": (
++                    snapshot_request_seconds
++                ),
++            }
++
+         async def tokenize_snapshot(tool_output: str) -> None:
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+@@ -622,9 +647,13 @@ class LocalRuntime(ActionExecutionClient):
+                 if post_task.done():
+                     break
+                 snapshot_polls += 1
++                snapshot_request_start = time.monotonic()
+                 snapshot_response = await call_sync_from_async(
+                     lambda: self.session.get(f"{self.api_url}/shell_stream_snapshot")
+                 )
++                snapshot_request_seconds += (
++                    time.monotonic() - snapshot_request_start
++                )
+                 snapshot_response.raise_for_status()
+                 snapshot = snapshot_response.json()
+                 if snapshot["revision"] == last_revision:
+@@ -722,6 +751,7 @@ class LocalRuntime(ActionExecutionClient):
+             response = await post_task
+             if not incremental_started:
+                 metrics = snapshot_metrics()
++                metrics.update(streaming_timing_metrics())
+                 metrics["streaming_tool_call_skipped_no_stable_output"] = 1
+                 if nonempty_snapshots == 0:
+                     metrics["streaming_tool_call_skipped_no_output"] = 1
+@@ -738,6 +768,7 @@ class LocalRuntime(ActionExecutionClient):
+ 
+             if tokenizer_only:
+                 metrics = snapshot_metrics()
++                metrics.update(streaming_timing_metrics())
+                 metrics.update(
+                     {
+                         "streaming_tool_call_sessions_started": 0,
+@@ -784,6 +815,7 @@ class LocalRuntime(ActionExecutionClient):
+                     "the normal final request will run without relying on it."
+                 )
+             metrics = snapshot_metrics()
++            metrics.update(streaming_timing_metrics())
+             metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": 1,
+@@ -824,7 +856,9 @@ class LocalRuntime(ActionExecutionClient):
+                     logger.debug(
+                         f"Failed to abort streaming tool-call session: {abort_error}"
+                     )
++            response = await post_task
+             metrics = snapshot_metrics()
++            metrics.update(streaming_timing_metrics())
+             metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": int(session_started),
+@@ -847,7 +881,7 @@ class LocalRuntime(ActionExecutionClient):
+                 }
+             )
+             _update_streaming_tool_call_metrics(metrics)
+-            return await post_task
++            return response
+         finally:
+             if streaming_http_session is not None:
+                 await streaming_http_session.close()
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1,8 +1,9 @@
+ """Unit tests for LocalRuntime's URL-related methods."""
+ 
++import json
+ import os
+ import threading
+-from unittest.mock import AsyncMock, MagicMock, patch
++from unittest.mock import ANY, AsyncMock, MagicMock, patch
+ 
+ import pytest
+ from litellm import ModelResponse
+@@ -20,6 +21,7 @@ from openhands.events.serialization import event_from_dict, event_to_dict
+ from openhands.events.tool import ToolCallMetadata
+ from openhands.runtime.impl.action_execution.action_execution_client import (
+     ActionExecutionClient,
++    _update_action_timing_metrics,
+ )
+ from openhands.runtime.impl.local.local_runtime import LocalRuntime
+ 
+@@ -67,6 +69,60 @@ class TestLocalRuntime:
+ class TestLocalRuntime:
+     """Tests for LocalRuntime's URL-related methods."""
+ 
++    def test_detailed_action_timing_metrics(self, tmp_path, monkeypatch):
++        metrics_path = tmp_path / "metrics.json"
++        metrics_path.write_text("{}")
++        monkeypatch.setenv("OPENHANDS_DETAILED_RUNTIME_METRICS", "1")
++        monkeypatch.setenv("OPENHANDS_METRICS_PHASE", "controller")
++        monkeypatch.setenv("NEMO_GYM_METRICS_FPATH", str(metrics_path))
++
++        _update_action_timing_metrics(
++            CmdRunAction(command="echo test"),
++            request_seconds=2.0,
++            server_seconds=1.5,
++        )
++
++        metrics = json.loads(metrics_path.read_text())
++        assert metrics["openhands_action_request_count"] == 1
++        assert metrics["openhands_action_request_seconds"] == 2.0
++        assert metrics["openhands_action_server_seconds"] == 1.5
++        assert metrics["openhands_controller_cmd_action_count"] == 1
++        assert metrics["openhands_controller_cmd_action_request_seconds"] == 2.0
++        assert metrics["openhands_controller_cmd_action_server_seconds"] == 1.5
++
++    def test_detailed_action_timing_uses_serialized_server_latency(
++        self, local_runtime, tmp_path, monkeypatch
++    ):
++        metrics_path = tmp_path / "metrics.json"
++        metrics_path.write_text("{}")
++        monkeypatch.setenv("OPENHANDS_DETAILED_RUNTIME_METRICS", "1")
++        monkeypatch.setenv("OPENHANDS_METRICS_PHASE", "controller")
++        monkeypatch.setenv("NEMO_GYM_METRICS_FPATH", str(metrics_path))
++        local_runtime.api_url = "http://runtime"
++        local_runtime.action_semaphore = threading.Semaphore(1)
++
++        observation = CmdOutputObservation(
++            content="output",
++            command="echo output",
++            metadata=CmdOutputMetadata(exit_code=0),
++        )
++        observation._execution_latency = 1.5
++        response = MagicMock(is_closed=True)
++        response.json.return_value = event_to_dict(observation)
++
++        with patch.object(
++            local_runtime,
++            "_send_action_server_request",
++            return_value=response,
++        ):
++            local_runtime.send_action_for_execution(
++                CmdRunAction(command="echo output")
++            )
++
++        metrics = json.loads(metrics_path.read_text())
++        assert metrics["openhands_action_server_seconds"] == 1.5
++        assert metrics["openhands_controller_cmd_action_server_seconds"] == 1.5
++
+     def test_runtime_url_with_env_var(self):
+         """Test runtime_url when RUNTIME_URL environment variable is set."""
+         # Create a fresh instance for this test
+@@ -625,6 +681,9 @@ class TestLocalRuntime:
+                     "streaming_tool_call_snapshot_revisions": 1,
+                     "streaming_tool_call_nonempty_snapshots": 1,
+                     "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 0,
++                    "streaming_tool_call_command_request_seconds": ANY,
++                    "streaming_tool_call_post_command_tail_seconds": ANY,
++                    "streaming_tool_call_snapshot_request_seconds": ANY,
+                     "streaming_tool_call_skipped_no_stable_output": 1,
+                     "streaming_tool_call_skipped_single_snapshot": 1,
+                 },
+@@ -715,6 +774,9 @@ class TestLocalRuntime:
+                     "streaming_tool_call_snapshot_revisions": 1,
+                     "streaming_tool_call_nonempty_snapshots": 1,
+                     "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 1,
++                    "streaming_tool_call_command_request_seconds": ANY,
++                    "streaming_tool_call_post_command_tail_seconds": ANY,
++                    "streaming_tool_call_snapshot_request_seconds": ANY,
+                     "streaming_tool_call_skipped_no_stable_output": 1,
+                     "streaming_tool_call_skipped_single_snapshot": 1,
+                 },

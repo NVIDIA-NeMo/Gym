@@ -48,6 +48,9 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _count_tool_calls,
+    _finalize_failed_agent_command_metrics,
+    _summarize_openhands_internal_metrics,
     runner_ray_remote,
     update_metrics,
 )
@@ -379,6 +382,59 @@ class TestSWEBenchMetrics:
         assert metrics.resolved is True
         assert metrics.ray_queue_time == 1.5
         assert metrics.streaming_tool_call_snapshot_polls == 2
+
+    def test_finalize_failed_agent_command_metrics(self) -> None:
+        metrics = SWEBenchMetrics(
+            openhands_run_time=-100.0,
+            generation_apptainer_spinup_time=-100.0,
+            final_eval_apptainer_spinup_time=-100.0,
+        )
+
+        _finalize_failed_agent_command_metrics(metrics, end_time=125.0)
+
+        assert metrics.openhands_run_time == 25.0
+        assert metrics.generation_apptainer_spinup_time is None
+        assert metrics.final_eval_apptainer_spinup_time is None
+        assert metrics.patch_exists is False
+
+    def test_count_tool_calls(self) -> None:
+        output_items = [
+            MagicMock(type="message"),
+            MagicMock(type="function_call"),
+            MagicMock(type="function_call_output"),
+            MagicMock(type="function_call"),
+        ]
+        assert _count_tool_calls(output_items) == 2
+
+    def test_summarize_openhands_internal_metrics(self) -> None:
+        summary = _summarize_openhands_internal_metrics(
+            {
+                "response_latencies": [
+                    {"latency": 1.25},
+                    {"latency": 2.75},
+                ],
+                "action_execution_latencies": [
+                    {"observation_type": "CmdOutputObservation", "latency": 3.0},
+                    {"observation_type": "CmdOutputObservation", "latency": 4.0},
+                    {"observation_type": "FileReadObservation", "latency": 0.5},
+                ],
+            }
+        )
+
+        assert summary == {
+            "openhands_model_api_call_count": 2,
+            "openhands_model_api_call_seconds": 4.0,
+            "openhands_controller_observation_count": 3,
+            "openhands_controller_observation_seconds": 7.5,
+            "openhands_controller_observation_type_counts": {
+                "CmdOutputObservation": 2,
+                "FileReadObservation": 1,
+            },
+            "openhands_controller_observation_type_seconds": {
+                "CmdOutputObservation": 7.0,
+                "FileReadObservation": 0.5,
+            },
+        }
 
 
 class TestSWEBenchVerifyResponse:
@@ -790,14 +846,17 @@ class TestSweBenchDatasetProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _minimal_server_config()
 
-            with patch.object(
-                BaseDatasetHarnessProcessor,
-                "parent_dir",
-                new_callable=lambda: property(lambda self: Path(tmpdir)),
-            ), patch.object(
-                SweBenchDatasetProcessor,
-                "_apply_artifact_cache_patch",
-            ) as apply_patch:
+            with (
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "parent_dir",
+                    new_callable=lambda: property(lambda self: Path(tmpdir)),
+                ),
+                patch.object(
+                    SweBenchDatasetProcessor,
+                    "_apply_artifact_cache_patch",
+                ) as apply_patch,
+            ):
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"
                 setup_dir.mkdir()
                 swebench_dir = setup_dir / "SWE-bench"
@@ -816,17 +875,22 @@ class TestSweBenchDatasetProcessor:
     def test_incomplete_setup_is_rebuilt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _minimal_server_config()
-            with patch.object(
-                BaseDatasetHarnessProcessor,
-                "parent_dir",
-                new_callable=lambda: property(lambda self: Path(tmpdir)),
-            ), patch.object(
-                SweBenchDatasetProcessor,
-                "_run_setup_command",
-            ) as run_setup, patch.object(
-                SweBenchDatasetProcessor,
-                "_apply_artifact_cache_patch",
-            ) as apply_patch, patch.object(swe_app, "rmtree") as remove_setup:
+            with (
+                patch.object(
+                    BaseDatasetHarnessProcessor,
+                    "parent_dir",
+                    new_callable=lambda: property(lambda self: Path(tmpdir)),
+                ),
+                patch.object(
+                    SweBenchDatasetProcessor,
+                    "_run_setup_command",
+                ) as run_setup,
+                patch.object(
+                    SweBenchDatasetProcessor,
+                    "_apply_artifact_cache_patch",
+                ) as apply_patch,
+                patch.object(swe_app, "rmtree") as remove_setup,
+            ):
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"
                 swebench_dir = setup_dir / "SWE-bench"
                 swebench_dir.mkdir(parents=True)
@@ -918,32 +982,48 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
-    def test_cached_base_patch_gets_observability_upgrade(self) -> None:
+    def test_cached_admission_patch_gets_remaining_upgrades(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
-                MagicMock(returncode=1),  # admission-observability reverse check
+                MagicMock(returncode=1),  # prompt-reuse reverse check
+                MagicMock(returncode=1),  # runtime-breakdown reverse check
+                MagicMock(returncode=1),  # valid-action-metrics reverse check
+                MagicMock(returncode=1),  # tokenizer-only reverse check
                 MagicMock(returncode=0),  # base reverse check
                 MagicMock(returncode=0),  # observability reverse check
-                MagicMock(returncode=0),  # admission-observability apply check
-                MagicMock(returncode=0),  # admission-observability apply
+                MagicMock(returncode=0),  # admission-observability reverse check
+                MagicMock(returncode=0),  # tokenizer-only apply check
+                MagicMock(returncode=0),  # tokenizer-only apply
+                MagicMock(returncode=0),  # valid-action-metrics apply check
+                MagicMock(returncode=0),  # valid-action-metrics apply
+                MagicMock(returncode=0),  # runtime-breakdown apply check
+                MagicMock(returncode=0),  # runtime-breakdown apply
+                MagicMock(returncode=0),  # prompt-reuse apply check
+                MagicMock(returncode=0),  # prompt-reuse apply
             ]
 
-            with patch.object(
-                swe_app, "subprocess_run", side_effect=command_results
-            ) as subprocess_run:
+            with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 5
+            assert len(commands) == 15
             assert commands[0][2:4] == ["--reverse", "--check"]
             assert commands[1][2:4] == ["--reverse", "--check"]
             assert commands[2][2:4] == ["--reverse", "--check"]
-            assert commands[3][2] == "--check"
-            assert commands[4][2].endswith(
-                "streaming_tool_call_admission_observability.patch"
-            )
+            assert commands[3][2:4] == ["--reverse", "--check"]
+            assert commands[4][2:4] == ["--reverse", "--check"]
+            assert commands[5][2:4] == ["--reverse", "--check"]
+            assert commands[6][2:4] == ["--reverse", "--check"]
+            assert commands[7][2] == "--check"
+            assert commands[8][2].endswith("streaming_tool_call_tokenizer_only.patch")
+            assert commands[9][2] == "--check"
+            assert commands[10][2].endswith("streaming_tool_call_valid_action_metrics.patch")
+            assert commands[11][2] == "--check"
+            assert commands[12][2].endswith("openhands_runtime_breakdown.patch")
+            assert commands[13][2] == "--check"
+            assert commands[14][2].endswith("streaming_tool_call_prompt_reuse.patch")
 
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

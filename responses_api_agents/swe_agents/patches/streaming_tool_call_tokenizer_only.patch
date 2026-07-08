@@ -1,0 +1,302 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -566,6 +566,8 @@ class LocalRuntime(ActionExecutionClient):
+         post_task = asyncio.create_task(post_action())
+         session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
+         sequence_no = 0
++        tokenizer_only = bool(context.config.get("tokenizer_only"))
++        incremental_started = False
+         session_started = False
+         last_sent_content = ""
+         last_revision = -1
+@@ -573,6 +575,8 @@ class LocalRuntime(ActionExecutionClient):
+         streaming_request_seconds = 0.0
+         prefill_requests = 0
+         prefill_tokens = 0
++        tokenizer_requests = 0
++        tokenizer_tokens = 0
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+         snapshot_poll_interval = context.config["snapshot_poll_interval_seconds"]
+@@ -593,6 +597,25 @@ class LocalRuntime(ActionExecutionClient):
+                 ),
+             }
+ 
++        async def tokenize_snapshot(tool_output: str) -> None:
++            nonlocal streaming_request_seconds
++            nonlocal tokenizer_requests
++            nonlocal tokenizer_tokens
++
++            assert streaming_http_session is not None
++            request_start_time = time.monotonic()
++            tokenize_result = await context.client.streaming_tool_call_request(
++                action="tokenize",
++                session_id=session_id,
++                context=context,
++                sequence_no=sequence_no,
++                tool_output=tool_output,
++                http_session=streaming_http_session,
++            )
++            streaming_request_seconds += time.monotonic() - request_start_time
++            tokenizer_requests += 1
++            tokenizer_tokens += tokenize_result["token_count"]
++
+         try:
+             while not post_task.done():
+                 await asyncio.sleep(snapshot_poll_interval)
+@@ -622,7 +645,7 @@ class LocalRuntime(ActionExecutionClient):
+                         "shell output changed a previously streamed prefix"
+                     )
+ 
+-                if not session_started:
++                if not incremental_started:
+                     if pending_start_content is None:
+                         # A single candidate cannot prove stable tokens. Keep it local
+                         # until a later snapshot demonstrates that the command is still
+@@ -651,44 +674,53 @@ class LocalRuntime(ActionExecutionClient):
+                         ),
+                     )
+ 
+-                if not session_started:
++                if not incremental_started:
+                     assert pending_start_content is not None
++                    if tokenizer_only:
++                        await tokenize_snapshot(pending_start_content)
++                    else:
++                        request_start_time = time.monotonic()
++                        prefill_result = (
++                            await context.client.streaming_tool_call_request(
++                                action="start",
++                                session_id=session_id,
++                                context=context,
++                                sequence_no=sequence_no,
++                                tool_output=pending_start_content,
++                                http_session=streaming_http_session,
++                            )
++                        )
++                        streaming_request_seconds += (
++                            time.monotonic() - request_start_time
++                        )
++                        prefill_requests += 1
++                        prefill_tokens += prefill_result["chunk_tokens"]
++                        session_started = True
++                    incremental_started = True
++                    sequence_no += 1
++                    last_sent_content = pending_start_content
++
++                if tokenizer_only:
++                    await tokenize_snapshot(content)
++                else:
+                     request_start_time = time.monotonic()
+                     prefill_result = await context.client.streaming_tool_call_request(
+-                        action="start",
++                        action="append",
+                         session_id=session_id,
+                         context=context,
+                         sequence_no=sequence_no,
+-                        tool_output=pending_start_content,
++                        tool_output=content,
+                         http_session=streaming_http_session,
+                     )
+-                    streaming_request_seconds += (
+-                        time.monotonic() - request_start_time
+-                    )
++                    streaming_request_seconds += time.monotonic() - request_start_time
+                     prefill_requests += 1
+                     prefill_tokens += prefill_result["chunk_tokens"]
+-                    session_started = True
+-                    sequence_no += 1
+-                    last_sent_content = pending_start_content
+-
+-                request_start_time = time.monotonic()
+-                prefill_result = await context.client.streaming_tool_call_request(
+-                    action="append",
+-                    session_id=session_id,
+-                    context=context,
+-                    sequence_no=sequence_no,
+-                    tool_output=content,
+-                    http_session=streaming_http_session,
+-                )
+-                streaming_request_seconds += time.monotonic() - request_start_time
+-                prefill_requests += 1
+-                prefill_tokens += prefill_result["chunk_tokens"]
+                 sequence_no += 1
+                 last_sent_content = content
+                 last_send_time = time.monotonic()
+ 
+             response = await post_task
+-            if not session_started:
++            if not incremental_started:
+                 metrics = snapshot_metrics()
+                 metrics["streaming_tool_call_skipped_no_stable_output"] = 1
+                 if nonempty_snapshots == 0:
+@@ -704,6 +736,31 @@ class LocalRuntime(ActionExecutionClient):
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
++            if tokenizer_only:
++                metrics = snapshot_metrics()
++                metrics.update(
++                    {
++                        "streaming_tool_call_sessions_started": 0,
++                        "streaming_tool_call_prefill_requests": 0,
++                        "streaming_tool_call_prefill_tokens": 0,
++                        "streaming_tool_call_tokenizer_only_actions": 1,
++                        "streaming_tool_call_incremental_tokenizer_requests": (
++                            tokenizer_requests
++                        ),
++                        "streaming_tool_call_incremental_tokenizer_tokens": (
++                            tokenizer_tokens
++                        ),
++                        "streaming_tool_call_incremental_tokenizer_seconds": (
++                            streaming_request_seconds
++                        ),
++                        "streaming_tool_call_overhead_seconds": (
++                            streaming_request_seconds
++                        ),
++                    }
++                )
++                _update_streaming_tool_call_metrics(metrics)
++                return response
++
+             observation = observation_from_dict(response.json())
+             final_tool_output = observation.to_agent_observation()
+             if not final_tool_output.startswith(last_sent_content):
+@@ -768,6 +825,18 @@ class LocalRuntime(ActionExecutionClient):
+                     "streaming_tool_call_sessions_started": int(session_started),
+                     "streaming_tool_call_prefill_requests": prefill_requests,
+                     "streaming_tool_call_prefill_tokens": prefill_tokens,
++                    "streaming_tool_call_tokenizer_only_actions": int(
++                        tokenizer_only and incremental_started
++                    ),
++                    "streaming_tool_call_incremental_tokenizer_requests": (
++                        tokenizer_requests
++                    ),
++                    "streaming_tool_call_incremental_tokenizer_tokens": (
++                        tokenizer_tokens
++                    ),
++                    "streaming_tool_call_incremental_tokenizer_seconds": (
++                        streaming_request_seconds if tokenizer_only else 0.0
++                    ),
+                     "streaming_tool_call_fallbacks": 1,
+                     "streaming_tool_call_overhead_seconds": streaming_request_seconds,
+                 }
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -430,6 +430,114 @@ class TestLocalRuntime:
+             == final_observation.to_agent_observation()
+         )
+ 
++    @pytest.mark.asyncio
++    async def test_execute_action_incrementally_tokenizes_without_prefill(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="partial output final",
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        snapshots = [
++            {"revision": 1, "content": "partial"},
++            {"revision": 2, "content": "partial output"},
++        ]
++        snapshot_index = 0
++
++        def get(*args, **kwargs):
++            nonlocal snapshot_index
++            snapshot = snapshots[min(snapshot_index, len(snapshots) - 1)]
++            snapshot_index += 1
++            response = MagicMock()
++            response.json.return_value = snapshot
++            return response
++
++        session.post.side_effect = post
++        session.get.side_effect = get
++        streaming_client = MagicMock()
++
++        async def tokenize_request(**kwargs):
++            assert kwargs["action"] == "tokenize"
++            if kwargs["sequence_no"] == 1:
++                release_post.set()
++            return {"sequence_no": kwargs["sequence_no"], "token_count": 17}
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=tokenize_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "min_chunk_chars": 10,
++                "snapshot_poll_interval_seconds": 0.001,
++                "flush_interval_seconds": 0.001,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++        serialized_action = event_to_dict(action)
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": serialized_action},
++                timeout=5,
++            )
++
++        assert response is post_response
++        actions = [
++            call.kwargs["action"]
++            for call in streaming_client.streaming_tool_call_request.await_args_list
++        ]
++        assert actions == ["tokenize", "tokenize"]
++        assert all(
++            action not in {"start", "append", "close", "abort"}
++            for action in actions
++        )
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_sessions_started"] == 0
++        assert metrics["streaming_tool_call_prefill_requests"] == 0
++        assert metrics["streaming_tool_call_prefill_tokens"] == 0
++        assert metrics["streaming_tool_call_tokenizer_only_actions"] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
++        assert metrics["streaming_tool_call_incremental_tokenizer_tokens"] == 34
++
+     def test_execute_action_skips_streaming_for_short_completed_output(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"

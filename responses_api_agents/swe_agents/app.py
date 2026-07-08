@@ -225,6 +225,7 @@ class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
     model_patch: Optional[str] = None
+    num_tool_calls: Optional[int] = None
 
     # Failure-mode signals used to decide mask_sample downstream.
     # agent_error_kind is one of: "max_iteration", "context_window",
@@ -240,8 +241,42 @@ class SWEBenchMetrics(BaseModel):
     create_runtime_time: Optional[float] = None
     connect_to_runtime_time: Optional[float] = None
     initialize_runtime_time: Optional[float] = None
+    run_controller_time: Optional[float] = None
+    complete_runtime_time: Optional[float] = None
+    runtime_close_time: Optional[float] = None
+    post_controller_processing_time: Optional[float] = None
+    process_instance_time: Optional[float] = None
     total_command_exec_time: Optional[float] = None
+    total_controller_action_count: Optional[int] = None
+    total_controller_action_time: Optional[float] = None
+    total_controller_cmd_action_count: Optional[int] = None
+    total_controller_cmd_action_time: Optional[float] = None
     total_model_call_time: Optional[float] = None
+    total_model_call_count: Optional[int] = None
+    openhands_model_api_call_count: Optional[int] = None
+    openhands_model_api_call_seconds: Optional[float] = None
+    openhands_controller_observation_count: Optional[int] = None
+    openhands_controller_observation_seconds: Optional[float] = None
+    openhands_controller_observation_type_counts: Optional[dict[str, int]] = None
+    openhands_controller_observation_type_seconds: Optional[dict[str, float]] = None
+    openhands_action_request_count: Optional[int] = None
+    openhands_action_request_seconds: Optional[float] = None
+    openhands_action_server_seconds: Optional[float] = None
+    openhands_runtime_setup_action_count: Optional[int] = None
+    openhands_runtime_setup_action_request_seconds: Optional[float] = None
+    openhands_runtime_setup_action_server_seconds: Optional[float] = None
+    openhands_runtime_initialize_action_count: Optional[int] = None
+    openhands_runtime_initialize_action_request_seconds: Optional[float] = None
+    openhands_runtime_initialize_action_server_seconds: Optional[float] = None
+    openhands_controller_action_count: Optional[int] = None
+    openhands_controller_action_request_seconds: Optional[float] = None
+    openhands_controller_action_server_seconds: Optional[float] = None
+    openhands_controller_cmd_action_count: Optional[int] = None
+    openhands_controller_cmd_action_request_seconds: Optional[float] = None
+    openhands_controller_cmd_action_server_seconds: Optional[float] = None
+    openhands_runtime_completion_action_count: Optional[int] = None
+    openhands_runtime_completion_action_request_seconds: Optional[float] = None
+    openhands_runtime_completion_action_server_seconds: Optional[float] = None
     streaming_tool_call_eligible_actions: Optional[int] = None
     streaming_tool_call_skipped_no_stable_output: Optional[int] = None
     streaming_tool_call_skipped_no_output: Optional[int] = None
@@ -255,6 +290,22 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_sessions_started: Optional[int] = None
     streaming_tool_call_prefill_requests: Optional[int] = None
     streaming_tool_call_prefill_tokens: Optional[int] = None
+    streaming_tool_call_valid_prefill_actions: Optional[int] = None
+    streaming_tool_call_tokenizer_only_actions: Optional[int] = None
+    streaming_tool_call_valid_tokenizer_actions: Optional[int] = None
+    streaming_tool_call_prompt_reuse_candidates: Optional[int] = None
+    streaming_tool_call_prompt_reuse_requests: Optional[int] = None
+    streaming_tool_call_prompt_reuse_matches: Optional[int] = None
+    streaming_tool_call_prompt_reuse_exact_matches: Optional[int] = None
+    streaming_tool_call_prompt_reuse_token_equivalent_matches: Optional[int] = None
+    streaming_tool_call_prompt_reuse_mismatches: Optional[int] = None
+    streaming_tool_call_prompt_reuse_missing: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_requests: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_tokens: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_seconds: Optional[float] = None
+    streaming_tool_call_command_request_seconds: Optional[float] = None
+    streaming_tool_call_post_command_tail_seconds: Optional[float] = None
+    streaming_tool_call_snapshot_request_seconds: Optional[float] = None
     streaming_tool_call_completed_chunks: Optional[int] = None
     streaming_tool_call_dummy_tokens: Optional[int] = None
     streaming_tool_call_prefix_matches: Optional[int] = None
@@ -262,6 +313,15 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_overhead_seconds: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
+
+
+def _finalize_failed_agent_command_metrics(metrics: SWEBenchMetrics, end_time: float) -> None:
+    """Finalize only metrics whose start timestamps remain valid after failure."""
+    assert metrics.openhands_run_time is not None
+    metrics.openhands_run_time += end_time
+    metrics.generation_apptainer_spinup_time = None
+    metrics.final_eval_apptainer_spinup_time = None
+    metrics.patch_exists = False
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
@@ -410,9 +470,7 @@ SWEBENCH_PATCH={patch_path} \\
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
-        artifact_cache_offline = os.environ.get(
-            "SWE_BENCH_ARTIFACT_CACHE_OFFLINE", "0"
-        )
+        artifact_cache_offline = os.environ.get("SWE_BENCH_ARTIFACT_CACHE_OFFLINE", "0")
         swebench_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
@@ -1125,16 +1183,16 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _apply_streaming_tool_call_patch(self, openhands_dir: Path) -> None:
         base_patch_path = self.parent_dir / "patches" / "streaming_tool_call.patch"
-        observability_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_observability.patch"
-        )
+        observability_patch_path = self.parent_dir / "patches" / "streaming_tool_call_observability.patch"
         admission_observability_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_admission_observability.patch"
+            self.parent_dir / "patches" / "streaming_tool_call_admission_observability.patch"
         )
+        tokenizer_only_patch_path = self.parent_dir / "patches" / "streaming_tool_call_tokenizer_only.patch"
+        valid_action_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_valid_action_metrics.patch"
+        )
+        runtime_breakdown_patch_path = self.parent_dir / "patches" / "openhands_runtime_breakdown.patch"
+        prompt_reuse_patch_path = self.parent_dir / "patches" / "streaming_tool_call_prompt_reuse.patch"
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1157,20 +1215,29 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
                     f"OpenHands patch {patch_path.name} is incompatible with "
                     f"{self.config.agent_framework_commit}: {apply_check.stderr}"
                 )
-            subprocess_run(
-                ["git", "apply", str(patch_path)], cwd=openhands_dir, check=True
-            )
+            subprocess_run(["git", "apply", str(patch_path)], cwd=openhands_dir, check=True)
 
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
-        if is_applied(admission_observability_patch_path):
+        if is_applied(prompt_reuse_patch_path):
             return
+        runtime_breakdown_applied = is_applied(runtime_breakdown_patch_path)
+        valid_action_metrics_applied = is_applied(valid_action_metrics_patch_path)
+        tokenizer_only_applied = is_applied(tokenizer_only_patch_path)
         if not is_applied(base_patch_path):
             apply_patch(base_patch_path)
         if not is_applied(observability_patch_path):
             apply_patch(observability_patch_path)
-        apply_patch(admission_observability_patch_path)
+        if not is_applied(admission_observability_patch_path):
+            apply_patch(admission_observability_patch_path)
+        if not tokenizer_only_applied:
+            apply_patch(tokenizer_only_patch_path)
+        if not valid_action_metrics_applied:
+            apply_patch(valid_action_metrics_patch_path)
+        if not runtime_breakdown_applied:
+            apply_patch(runtime_breakdown_patch_path)
+        apply_patch(prompt_reuse_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -1270,6 +1337,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 
         workspace_check_cmd = ""
 
+        detailed_runtime_metrics = int(bool(get_global_config_dict().get("detailed_runtime_metrics", False)))
         agent_main_cmd = (
             f"{workspace_check_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
@@ -1291,6 +1359,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
+            f"export OPENHANDS_DETAILED_RUNTIME_METRICS={detailed_runtime_metrics} && "
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
@@ -1414,6 +1483,37 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 #         if data.get(key) is None:
 #             data[key] = False
 #     return data
+
+
+def _count_tool_calls(output_items: list[Any]) -> int:
+    """Count function-call items in a completed OpenHands trajectory."""
+    return sum(getattr(item, "type", None) == "function_call" for item in output_items)
+
+
+def _summarize_openhands_internal_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Reduce per-call OpenHands metrics to compact trajectory diagnostics."""
+    response_latencies = [
+        float(item["latency"]) for item in metrics.get("response_latencies", []) if item.get("latency") is not None
+    ]
+    action_latencies = [
+        item for item in metrics.get("action_execution_latencies", []) if item.get("latency") is not None
+    ]
+    type_counts: dict[str, int] = {}
+    type_seconds: dict[str, float] = {}
+    for item in action_latencies:
+        observation_type = str(item.get("observation_type", "unknown"))
+        latency = float(item["latency"])
+        type_counts[observation_type] = type_counts.get(observation_type, 0) + 1
+        type_seconds[observation_type] = type_seconds.get(observation_type, 0.0) + latency
+
+    return {
+        "openhands_model_api_call_count": len(response_latencies),
+        "openhands_model_api_call_seconds": sum(response_latencies),
+        "openhands_controller_observation_count": len(action_latencies),
+        "openhands_controller_observation_seconds": sum(float(item["latency"]) for item in action_latencies),
+        "openhands_controller_observation_type_counts": type_counts,
+        "openhands_controller_observation_type_seconds": type_seconds,
+    }
 
 
 class ActiveContainerCommand(BaseModel):
@@ -1565,9 +1665,7 @@ class RunOpenHandsAgent(BaseModel):
             except Exception:
                 pass
             await self._kill_active_command(eval_active_command)
-            metrics.openhands_run_time += time.time()
-            metrics.patch_exists = False
-            metrics.final_eval_apptainer_spinup_time = None
+            _finalize_failed_agent_command_metrics(metrics, time.time())
             # Detect wall-clock agent timeout: openhands_run_time (elapsed since start)
             # reached or exceeded the configured swebench_agent_timeout.
             metrics.agent_timed_out = (
@@ -1589,6 +1687,10 @@ class RunOpenHandsAgent(BaseModel):
             out_dict = json.loads(f.read().strip())
 
         metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+        update_metrics(
+            self.config.metrics_fpath,
+            _summarize_openhands_internal_metrics(out_dict.get("metrics", {})),
+        )
 
         patch = out_dict["test_result"]["git_patch"] or None
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
@@ -1970,9 +2072,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
             artifact_cache_dir = params.swebench_setup_dir.parent / "swebench_artifact_cache"
             artifact_cache_dir.mkdir(parents=True, exist_ok=True)
-            mount_args.append(
-                f"--mount type=bind,src={artifact_cache_dir},dst=/swebench_artifact_cache"
-            )
+            mount_args.append(f"--mount type=bind,src={artifact_cache_dir},dst=/swebench_artifact_cache")
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -2178,6 +2278,22 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_sessions_started": 0,
                     "streaming_tool_call_prefill_requests": 0,
                     "streaming_tool_call_prefill_tokens": 0,
+                    "streaming_tool_call_valid_prefill_actions": 0,
+                    "streaming_tool_call_tokenizer_only_actions": 0,
+                    "streaming_tool_call_valid_tokenizer_actions": 0,
+                    "streaming_tool_call_prompt_reuse_candidates": 0,
+                    "streaming_tool_call_prompt_reuse_requests": 0,
+                    "streaming_tool_call_prompt_reuse_matches": 0,
+                    "streaming_tool_call_prompt_reuse_exact_matches": 0,
+                    "streaming_tool_call_prompt_reuse_token_equivalent_matches": 0,
+                    "streaming_tool_call_prompt_reuse_mismatches": 0,
+                    "streaming_tool_call_prompt_reuse_missing": 0,
+                    "streaming_tool_call_incremental_tokenizer_requests": 0,
+                    "streaming_tool_call_incremental_tokenizer_tokens": 0,
+                    "streaming_tool_call_incremental_tokenizer_seconds": 0.0,
+                    "streaming_tool_call_command_request_seconds": 0.0,
+                    "streaming_tool_call_post_command_tail_seconds": 0.0,
+                    "streaming_tool_call_snapshot_request_seconds": 0.0,
                     "streaming_tool_call_completed_chunks": 0,
                     "streaming_tool_call_dummy_tokens": 0,
                     "streaming_tool_call_prefix_matches": 0,
@@ -2286,6 +2402,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             chat_completions_trajectory
         )
         input_items, output_items = split_responses_input_output_items(responses_items)
+        metrics_to_update["num_tool_calls"] = _count_tool_calls(output_items)
 
         update_metrics(params.metrics_fpath, metrics_to_update)
 
