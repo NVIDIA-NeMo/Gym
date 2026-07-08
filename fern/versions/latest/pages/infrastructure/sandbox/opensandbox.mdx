@@ -87,6 +87,9 @@ Set OpenSandbox-specific create options under `SandboxSpec.provider_options`, or
 ```yaml
 sandbox_spec:
   provider_options:
+    image_auth:
+      username: ${oc.env:REGISTRY_USERNAME}
+      password: ${oc.env:REGISTRY_PASSWORD}
     platform:
       os: linux
       arch: amd64
@@ -99,6 +102,7 @@ Supported options are:
 
 | Option | Purpose |
 | --- | --- |
+| `image_auth` | Registry username and password passed to the OpenSandbox SDK for private image pulls. |
 | `platform` | Mapping passed to the OpenSandbox SDK `PlatformSpec`, such as `os` and `arch`. |
 | `snapshot_id` | OpenSandbox snapshot ID to create from instead of only an image. |
 | `volumes` | List of mappings passed to the OpenSandbox SDK `Volume` model. |
@@ -119,7 +123,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
-| `provider_options` | Per-sandbox OpenSandbox options such as `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+| `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
 
 ## Resource Mapping
 

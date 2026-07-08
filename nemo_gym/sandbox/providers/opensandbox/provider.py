@@ -441,8 +441,8 @@ def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
-    ``platform`` and ``volumes`` entries are passed through to the OpenSandbox SDK,
-    so their inner fields are validated by the SDK rather than here.
+    ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
+    OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
     """
 
     image_auth: Mapping[str, Any] | None = None
