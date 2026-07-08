@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import socket
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import TCPConnector
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -29,6 +31,7 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     SimpleServer,
+    _TCPKeepAliveConnector,
     initialize_ray,
 )
 
@@ -227,6 +230,68 @@ class TestServerUtils:
         get_global_config_dict_mock.assert_called_once()
         ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
         ray_get_runtime_context_mock.assert_called_once()
+
+    async def test_TCPKeepAliveConnector_sets_keepalive_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_socket = MagicMock()
+        mock_transport = MagicMock()
+        mock_transport.get_extra_info.return_value = mock_socket
+        mock_protocol = MagicMock()
+
+        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
+        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
+
+        connector = _TCPKeepAliveConnector()
+        try:
+            transport, protocol = await connector._wrap_create_connection()
+        finally:
+            await connector.close()
+
+        assert transport is mock_transport
+        assert protocol is mock_protocol
+        mock_transport.get_extra_info.assert_called_once_with("socket")
+        mock_socket.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", _TCPKeepAliveConnector._KEEPALIVE_IDLE_SECONDS),
+            ("TCP_KEEPINTVL", _TCPKeepAliveConnector._KEEPALIVE_INTERVAL_SECONDS),
+            ("TCP_KEEPCNT", _TCPKeepAliveConnector._KEEPALIVE_PROBES),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                mock_socket.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+
+    async def test_TCPKeepAliveConnector_skips_missing_platform_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_socket = MagicMock()
+        mock_transport = MagicMock()
+        mock_transport.get_extra_info.return_value = mock_socket
+        mock_protocol = MagicMock()
+
+        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
+        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
+        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
+            monkeypatch.delattr(socket, opt_name, raising=False)
+
+        connector = _TCPKeepAliveConnector()
+        try:
+            await connector._wrap_create_connection()
+        finally:
+            await connector.close()
+
+        mock_socket.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    async def test_TCPKeepAliveConnector_raises_when_no_socket(self, monkeypatch: MonkeyPatch) -> None:
+        mock_transport = MagicMock()
+        mock_transport.get_extra_info.return_value = None
+        mock_protocol = MagicMock()
+
+        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
+        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
+
+        connector = _TCPKeepAliveConnector()
+        try:
+            with raises(RuntimeError):
+                await connector._wrap_create_connection()
+        finally:
+            await connector.close()
 
     def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)

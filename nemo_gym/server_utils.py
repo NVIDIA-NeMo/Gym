@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import socket
 import sys
 import time
 from abc import abstractmethod
@@ -100,6 +101,28 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+class _TCPKeepAliveConnector(TCPConnector):
+    _KEEPALIVE_IDLE_SECONDS: int = 60
+    _KEEPALIVE_INTERVAL_SECONDS: int = 10
+    _KEEPALIVE_PROBES: int = 3
+
+    async def _wrap_create_connection(self, *args, **kwargs):
+        transport, protocol = await super()._wrap_create_connection(*args, **kwargs)
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            raise RuntimeError("_TCPKeepAliveConnector: transport has no underlying socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", self._KEEPALIVE_IDLE_SECONDS),
+            ("TCP_KEEPINTVL", self._KEEPALIVE_INTERVAL_SECONDS),
+            ("TCP_KEEPCNT", self._KEEPALIVE_PROBES),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        return transport, protocol
+
+
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
@@ -107,7 +130,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
-        connector=TCPConnector(
+        connector=_TCPKeepAliveConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
