@@ -186,6 +186,24 @@ async def test_direct_create_passes_platform_to_sdk_create(
     )
 
 
+async def test_direct_create_passes_image_auth_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="registry.example/repo:tag",
+            provider_options={"image_auth": {"username": "user", "password": "secret"}},
+        )
+    )
+
+    image = FakeSandbox.created_kwargs["image"]
+    assert image.image == "registry.example/repo:tag"
+    assert image.auth.username == "user"
+    assert image.auth.password == "secret"
+
+
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
@@ -248,6 +266,7 @@ def test_provider_options_from_mapping() -> None:
 
     parsed = options_cls.from_mapping(
         {
+            "image_auth": {"username": "user", "password": "secret"},
             "platform": {"os": "linux", "arch": "amd64"},
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
@@ -255,6 +274,7 @@ def test_provider_options_from_mapping() -> None:
             "extensions": {"imagePullPolicy": "Never"},
         }
     )
+    assert parsed.image_auth == {"username": "user", "password": "secret"}
     assert parsed.platform == {"os": "linux", "arch": "amd64"}
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
@@ -267,6 +287,8 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping(["not", "a", "mapping"])
     with pytest.raises(TypeError, match="'platform' must be a mapping"):
         options_cls.from_mapping({"platform": "linux/amd64"})
+    with pytest.raises(TypeError, match="'image_auth' must be a mapping"):
+        options_cls.from_mapping({"image_auth": "user:secret"})
     with pytest.raises(TypeError, match="'snapshot_id' must be a string"):
         options_cls.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):

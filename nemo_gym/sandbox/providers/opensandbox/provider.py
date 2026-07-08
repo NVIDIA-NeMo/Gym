@@ -319,6 +319,14 @@ def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     return [Volume(**dict(volume)) for volume in volumes]
 
 
+def _to_image_spec(image: str, image_auth: Mapping[str, Any] | None) -> Any:
+    if image_auth is None:
+        return image
+    from opensandbox.models.sandboxes import SandboxImageAuth, SandboxImageSpec
+
+    return SandboxImageSpec(image, auth=SandboxImageAuth(**dict(image_auth)))
+
+
 def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
@@ -437,6 +445,7 @@ class OpenSandboxProviderOptions:
     so their inner fields are validated by the SDK rather than here.
     """
 
+    image_auth: Mapping[str, Any] | None = None
     platform: Mapping[str, Any] | None = None
     snapshot_id: str | None = None
     volumes: tuple[Mapping[str, Any], ...] = ()
@@ -461,6 +470,9 @@ class OpenSandboxProviderOptions:
         platform = options.get("platform")
         if platform is not None and not isinstance(platform, Mapping):
             raise TypeError("OpenSandbox provider option 'platform' must be a mapping")
+        image_auth = options.get("image_auth")
+        if image_auth is not None and not isinstance(image_auth, Mapping):
+            raise TypeError("OpenSandbox provider option 'image_auth' must be a mapping")
         snapshot_id = options.get("snapshot_id")
         if snapshot_id is not None and not isinstance(snapshot_id, str):
             raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
@@ -475,6 +487,7 @@ class OpenSandboxProviderOptions:
             raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
 
         return cls(
+            image_auth=dict(image_auth) if image_auth is not None else None,
             platform=dict(platform) if platform is not None else None,
             snapshot_id=snapshot_id,
             volumes=tuple(dict(volume) for volume in volumes),
@@ -732,7 +745,7 @@ class OpenSandboxProvider:
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if spec.image is not None:
-            kwargs["image"] = spec.image
+            kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
