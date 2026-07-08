@@ -13,11 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import List
+from typing import List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
+from nemo_gym.agent_modules import (
+    AGENT_ARTIFACT_REFS_KEY,
+    AGENT_UPDATE_EVENTS_KEY,
+    AgentModuleConfig,
+    TrajectoryEvent,
+    build_agent_modules,
+    collect_artifact_refs,
+    observe_agent_modules,
+    prepare_agent_context,
+)
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -46,6 +56,10 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    modules: Optional[List[AgentModuleConfig]] = Field(
+        default=None,
+        description="Agent modules applied at prepare/observe time (prompt, skill_library, …).",
+    )
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -175,37 +189,61 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
+        row = body.model_dump()
+        modules = build_agent_modules(self.config.modules)
 
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
-            json=body.model_dump(),
+            json=row,
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
+        agent_ctx = await prepare_agent_context(modules, row, body.responses_create_params)
+        responses_create_params = agent_ctx.responses_create_params
+
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path="/v1/responses",
-            json=body.responses_create_params,
+            json=responses_create_params.model_dump(mode="json"),
             cookies=cookies,
         )
         await raise_for_status(response)
         cookies = response.cookies
+        model_response_json = await get_response_json(response)
+        model_response = NeMoGymResponse.model_validate(model_response_json)
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+        verify_request = SimpleAgentVerifyRequest.model_validate(row | {"response": model_response_json})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
-            json=verify_request.model_dump(),
+            json=verify_request.model_dump(mode="json"),
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        verify_response_json = await get_response_json(verify_response)
+
+        trajectory_event = TrajectoryEvent(
+            kind="terminated",
+            reward=verify_response_json.get("reward"),
+            response=model_response,
+            row=row,
+            task_index=row.get("_ng_task_index"),
+            rollout_index=row.get("_ng_rollout_index"),
+        )
+        update_events = await observe_agent_modules(modules, trajectory_event)
+
+        result = verify_response_json
+        artifact_refs = collect_artifact_refs(modules)
+        if artifact_refs:
+            result[AGENT_ARTIFACT_REFS_KEY] = [ref.model_dump() for ref in artifact_refs]
+        if update_events:
+            result[AGENT_UPDATE_EVENTS_KEY] = [event.model_dump() for event in update_events]
+
+        return SimpleAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""

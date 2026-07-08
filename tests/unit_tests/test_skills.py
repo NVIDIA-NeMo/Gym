@@ -18,9 +18,14 @@ import pytest
 from nemo_gym import PARENT_DIR
 from nemo_gym.skills import (
     _resolve_skills_path,
+    append_skill_body_section,
+    apply_skill_adaptation,
+    format_skills_for_context,
     hash_skill_dir,
+    load_skill_bodies,
     load_skill_directory,
     parse_skill_md,
+    read_skill_body,
     stage_skills,
 )
 
@@ -196,3 +201,37 @@ class TestStageSkills:
     def test_missing_source_raises(self, tmp_path):
         with pytest.raises(ValueError, match="is not a directory"):
             stage_skills(str(tmp_path / "nope"), tmp_path / "dest")
+
+
+class TestSkillBodiesAndAdaptation:
+    def test_read_skill_body_and_format_context(self, tmp_path):
+        skill_dir = _write_skill(tmp_path, "cot", description="Think.", body="# CoT\nStep by step.\n")
+        body = read_skill_body(skill_dir / "SKILL.md")
+        assert body.name == "cot"
+        assert "Step by step" in body.body
+
+        text = format_skills_for_context([body])
+        assert "Skill: cot" in text
+        assert "Step by step" in text
+
+    def test_append_skill_body_section_preserves_frontmatter(self, tmp_path):
+        skill_dir = _write_skill(tmp_path, "cot", body="# Body\n")
+        skill_md = skill_dir / "SKILL.md"
+        append_skill_body_section(skill_md, "\n## Lesson\nNew tip.")
+        content = skill_md.read_text()
+        assert content.startswith("---\nname: cot")
+        assert "## Lesson" in content
+        assert "New tip" in content
+
+    def test_apply_skill_adaptation_changes_hash(self, tmp_path):
+        _write_skill(tmp_path, "cot", body="# Body\n")
+        before = load_skill_directory(str(tmp_path))
+        after = apply_skill_adaptation(str(tmp_path), "cot", "\n## Lesson\nTry again.")
+        assert after.hash != before.hash
+        assert "Try again" in (tmp_path / "cot" / "SKILL.md").read_text()
+
+    def test_load_skill_bodies(self, tmp_path):
+        _write_skill(tmp_path, "a")
+        _write_skill(tmp_path, "b")
+        bodies = load_skill_bodies(str(tmp_path))
+        assert {b.name for b in bodies} == {"a", "b"}

@@ -56,6 +56,16 @@ class SkillMetadata(BaseModel):
     version: Optional[str] = None
 
 
+class SkillBody(BaseModel):
+    """Full skill content: frontmatter metadata plus markdown body after the closing ``---``."""
+
+    name: str
+    description: Optional[str] = None
+    version: Optional[str] = None
+    body: str
+    skill_md_path: Path
+
+
 class SkillsRef(BaseModel):
     """Provenance stamp describing the skills made available for a run.
 
@@ -147,6 +157,113 @@ def parse_skill_md(skill_md_path: Path) -> SkillMetadata:
         description=data.get("description"),
         version=version,
     )
+
+
+def _split_skill_md(skill_md_path: Path) -> tuple[SkillMetadata, str]:
+    """Return frontmatter metadata and markdown body for a ``SKILL.md`` file."""
+    text = skill_md_path.read_text(encoding="utf-8-sig", errors="replace")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(
+            f"Skill file {skill_md_path} is missing YAML frontmatter. "
+            f"It must start with a '---' line followed by 'name:' and 'description:' fields."
+        )
+
+    closing_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            closing_idx = idx
+            break
+    if closing_idx is None:
+        raise ValueError(
+            f"Skill file {skill_md_path} has an unterminated YAML frontmatter block (no closing '---' line)."
+        )
+
+    metadata = parse_skill_md(skill_md_path)
+    body = "\n".join(lines[closing_idx + 1 :]).strip()
+    return metadata, body
+
+
+def read_skill_body(skill_md_path: Path) -> SkillBody:
+    """Load one skill's metadata and markdown body."""
+    metadata, body = _split_skill_md(skill_md_path)
+    return SkillBody(
+        name=metadata.name,
+        description=metadata.description,
+        version=metadata.version,
+        body=body,
+        skill_md_path=skill_md_path,
+    )
+
+
+def load_skill_bodies(path: str) -> List[SkillBody]:
+    """Load every skill under ``path`` (directory of skill directories)."""
+    resolved = _resolve_skills_path(path)
+    if not resolved.is_dir():
+        raise ValueError(f"Skills path must be a directory of skill directories: {resolved}")
+
+    bodies: List[SkillBody] = []
+    for skill_dir in sorted(d for d in resolved.iterdir() if d.is_dir()):
+        skill_md = skill_dir / SKILL_MD_FILENAME
+        if skill_md.is_file():
+            bodies.append(read_skill_body(skill_md))
+    if not bodies:
+        raise ValueError(f"Skills path {resolved} contains no readable {SKILL_MD_FILENAME} files.")
+    return bodies
+
+
+def format_skills_for_context(bodies: List[SkillBody]) -> str:
+    """Format skill bodies for injection into a model-visible system message.
+
+      Agents without native skill discovery (e.g. ``simple_agent``) can use this to surface
+      Agent Skills standard content in-context. Native runtimes (Claude Code, Codex) should
+    prefer ``stage_skills`` instead.
+    """
+    sections: List[str] = ["The following agent skills are available. Follow their guidance when relevant.\n"]
+    for skill in bodies:
+        header = f"### Skill: {skill.name}"
+        if skill.description:
+            header += f"\n{skill.description}"
+        body = skill.body.strip() or "(no additional instructions)"
+        sections.append(f"{header}\n\n{body}")
+    return "\n\n".join(sections)
+
+
+def find_skill_md_by_name(skills_root: Path, skill_name: str) -> Path:
+    """Resolve a skill's ``SKILL.md`` path by frontmatter ``name``."""
+    for skill_dir in sorted(d for d in skills_root.iterdir() if d.is_dir()):
+        skill_md = skill_dir / SKILL_MD_FILENAME
+        if not skill_md.is_file():
+            continue
+        if parse_skill_md(skill_md).name == skill_name:
+            return skill_md
+    raise ValueError(f"No skill named {skill_name!r} under {skills_root}.")
+
+
+def append_skill_body_section(skill_md_path: Path, section: str) -> None:
+    """Append markdown to a skill body (preserving YAML frontmatter).
+
+    Used by skill adaptation loops (ACE, EvoSkill, GEPA-over-skills) that mutate skills in place.
+    The directory content hash changes, so subsequent rollouts get a new ``skills_ref``.
+    """
+    metadata, body = _split_skill_md(skill_md_path)
+    frontmatter_lines = skill_md_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    closing_idx = next(i for i in range(1, len(frontmatter_lines)) if frontmatter_lines[i].strip() == "---")
+    prefix = "\n".join(frontmatter_lines[: closing_idx + 1])
+    new_body = body
+    if new_body:
+        new_body = f"{new_body.rstrip()}\n{section.rstrip()}\n"
+    else:
+        new_body = f"{section.rstrip()}\n"
+    skill_md_path.write_text(f"{prefix}\n{new_body}", encoding="utf-8")
+
+
+def apply_skill_adaptation(skills_path: str, skill_name: str, section: str) -> SkillsRef:
+    """Append an adaptation section to one skill and return the updated ``SkillsRef``."""
+    resolved = _resolve_skills_path(skills_path)
+    skill_md = find_skill_md_by_name(resolved, skill_name)
+    append_skill_body_section(skill_md, section)
+    return load_skill_directory(skills_path)
 
 
 def load_skill_directory(path: str) -> SkillsRef:
