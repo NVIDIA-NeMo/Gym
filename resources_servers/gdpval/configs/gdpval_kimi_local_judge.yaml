@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPVal judge overlay: swap the default remote frontier-judge panel for a
+# gym-spawned, LOCAL, MULTIMODAL Kimi-K2.6 judge served in vLLM.
+#
+# Chain this AFTER the benchmark config, e.g.:
+#
+#   gym eval run --benchmark gdpval --model-type vllm_model \
+#     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
+#     --split benchmark --output results/gdpval_kimi_judge.jsonl \
+#     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+#     ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+#
+# What it does:
+#   1. Defines a NEW model server `gdpval_judge_model_local` that gym auto-spawns
+#      as a local vLLM engine serving Kimi-K2.6 with the VISION TOWER ENABLED
+#      (the NEL deployments run `--language-model-only`; we drop it so the judge
+#      can read rasterized deliverable pages). Serve settings mirror
+#      responses_api_models/local_vllm_model/configs/moonshotai/Kimi-K2.6.yaml.
+#   2. Repoints the GDPVal resources server's `judge_model_server` at that local
+#      engine, disables the frontier panel (`judge_panel: null`), and switches
+#      deliverable presentation to `images_and_text` so PDFs/Office docs are sent
+#      as page images + extracted text (Kimi can't decode a raw PDF data URL).
+#
+# The benchmark's default `gdpval_judge_model` (an OpenAI proxy) stays defined
+# but UNUSED. It boots a cheap idle FastAPI proxy (no GPU); for a fully clean
+# run drop it with `~gdpval_judge_model` on the CLI.
+#
+# Serving shape: TP=8 / DP=1. On this cluster (4 GPUs/node) the TP group spans
+# two nodes, so VLLM_RAY_DP_PACK_STRATEGY is `span` below. See the standalone
+# serving config for more on sizing the TP group to your node layout.
+
+# --- Local multimodal judge engine (gym-spawned vLLM) ----------------------
+gdpval_judge_model_local:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ${oc.env:KIMI_CHECKPOINT_PATH,/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_compeval/checkpoints/hf_cache/Kimi-K2.6-full-2755962d07cb}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      debug: false
+      hf_home: null
+
+      vllm_serve_env_vars:
+        # TP=8 spans two 4-GPU nodes on this cluster → `span`. Use `strict` only
+        # when the whole instance fits on a single node.
+        VLLM_RAY_DP_PACK_STRATEGY: span
+        VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        RAY_CGRAPH_get_timeout: "600"
+
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+        gpu_memory_utilization: 0.80
+        served_model_name: [moonshotai/Kimi-K2.6]
+        # `--language-model-only` intentionally OMITTED → vision tower loads.
+        enable_expert_parallel: true
+        trust_remote_code: true
+        enable_auto_tool_choice: true
+        tool_call_parser: kimi_k2
+        reasoning_parser: kimi_k2
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 96
+
+# --- Point the GDPVal resources server at the local judge ------------------
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      # Repoint the judge from the default remote `gdpval_judge_model` proxy to
+      # the local vLLM engine defined above.
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model_local
+      # The judge model id must match the vLLM served_model_name above.
+      judge_responses_create_params_overrides:
+        model: moonshotai/Kimi-K2.6
+      # Disable the frontier panel so scoring uses the single local judge from
+      # judge_model_server (+ the overrides above).
+      judge_panel: null
+      # Present PDFs/Office docs as rasterized page images + extracted text —
+      # Kimi is image-only multimodal and cannot decode an application/pdf URL.
+      judge_media_mode: images_and_text
+      judge_pdf_render_dpi: 150
+      # Conservative page cap: many high-DPI page images can exhaust a local
+      # VLM's context far sooner than a hosted judge. Raise if your deliverables
+      # are short and you have context headroom.
+      judge_pdf_max_pages: 30
+      judge_pdf_include_text: true
