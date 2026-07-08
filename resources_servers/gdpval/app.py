@@ -204,6 +204,11 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_max_pages: int = 50
     # Attach the extracted text copy alongside the page images. Off → images only.
     judge_pdf_include_text: bool = True
+    # Whether the (local) judge natively reads audio/video. When True, ``images_
+    # and_text`` mode passes AV files through as native media data URLs (e.g. for
+    # MiniMax M3) instead of replacing them with a filename-only stub. Leave False
+    # for image-only judges (e.g. Kimi K2.6) that can't decode those modalities.
+    judge_handles_audio_video: bool = False
 
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
@@ -423,6 +428,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 render_dpi=self.config.judge_pdf_render_dpi,
                 max_pages=self.config.judge_pdf_max_pages,
                 include_text=self.config.judge_pdf_include_text,
+                av_capable=self.config.judge_handles_audio_video,
             )
             if blocks:
                 deliverable_content_blocks = blocks
@@ -621,6 +627,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             "render_dpi": self.config.judge_pdf_render_dpi,
             "max_pages": self.config.judge_pdf_max_pages,
             "include_text": self.config.judge_pdf_include_text,
+            "av_capable": self.config.judge_handles_audio_video,
         }
         try:
             eval_submission = build_file_section(str(eval_task_dir), clean_up_list, **media_kwargs)

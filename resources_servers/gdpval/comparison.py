@@ -256,6 +256,7 @@ def get_file_image_text_blocks(
     render_dpi: int,
     max_pages: int,
     include_text: bool,
+    av_capable: bool = False,
 ) -> list[dict]:
     """``images_and_text`` variant of :func:`get_file_content_block`.
 
@@ -263,8 +264,10 @@ def get_file_image_text_blocks(
     (preconverted) Office docs are rasterized to per-page PNG image blocks with
     the extracted text attached, instead of being sent as an ``application/pdf``
     data URL the judge can't decode. Native images and text files pass through
-    unchanged; audio/video files (which an image-only judge can't read) are
-    replaced with a one-line marker. Returns a list of 0+ content blocks.
+    unchanged. Audio/video files pass through as native media data URLs when
+    *av_capable* (the local judge natively reads those modalities, e.g. MiniMax
+    M3); otherwise they are replaced with a one-line marker. Returns a list of
+    0+ content blocks.
     """
     from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
 
@@ -305,11 +308,13 @@ def get_file_image_text_blocks(
                 return [{"type": "text", "text": f"[no PDF render available for {file_name}]"}]
             return []
 
-        # Image-only judges can't read audio/video — advertise the file by name.
-        if file_type in ("AUDIO", "VIDEO"):
+        # Audio/video: pass through as a native media data URL when the judge
+        # can read those modalities; otherwise advertise the file by name.
+        if file_type in ("AUDIO", "VIDEO") and not av_capable:
             return [{"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}]
 
-        # Text and native images pass through exactly as in native mode.
+        # Text, native images, and (av_capable) audio/video pass through exactly
+        # as in native mode.
         block = get_file_content_block(file_dir, file_name)
         return [block] if block is not None else []
     except Exception as e:
@@ -324,6 +329,7 @@ def build_file_section(
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
+    av_capable: bool = False,
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
@@ -336,7 +342,9 @@ def build_file_section(
     ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
     extracted text, for image-only local VLM judges (see
     :func:`get_file_image_text_blocks`). *render_dpi*, *max_pages*, and
-    *include_text* tune the ``images_and_text`` rendering.
+    *include_text* tune the ``images_and_text`` rendering. *av_capable* keeps
+    audio/video files as native media blocks (vs stubbing them) when the judge
+    reads those modalities.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -365,6 +373,7 @@ def build_file_section(
                 render_dpi=render_dpi,
                 max_pages=max_pages,
                 include_text=include_text,
+                av_capable=av_capable,
             )
             if blocks:
                 section.extend(blocks)

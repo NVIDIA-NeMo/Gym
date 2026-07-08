@@ -163,6 +163,10 @@ def _read_pptx(fpath: Path) -> str:
 OFFICE_EXTS = {".docx", ".pptx", ".xlsx"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".yaml", ".yml", ".py", ".sh", ".log"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
+# Audio/video are only passed through when the judge is AV-capable (e.g. MiniMax
+# M3); image-only judges can't decode them, so they are otherwise skipped.
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -172,6 +176,17 @@ MIME_TYPES = {
     ".webp": "image/webp",
     ".heic": "image/heic",
     ".heif": "image/heif",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".aac": "audio/aac",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
 }
 
 
@@ -269,6 +284,7 @@ def convert_deliverables_to_content_blocks(
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
+    av_capable: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
@@ -286,6 +302,9 @@ def convert_deliverables_to_content_blocks(
     ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
     extracted text, for image-only local VLM judges (e.g. a gym-spawned Kimi
     K2.6). *render_dpi*, *max_pages*, and *include_text* tune that rendering.
+    *av_capable* passes audio/video files through as native media data URLs (for
+    judges that read those modalities, e.g. MiniMax M3); otherwise they are
+    skipped.
     """
     output_path = Path(output_dir)
     if not output_path.is_dir():
@@ -365,6 +384,21 @@ def convert_deliverables_to_content_blocks(
                         "image_url": {"url": f"data:{mime};base64,{b64}"},
                     }
                 )
+
+            elif ext in AUDIO_EXTS or ext in VIDEO_EXTS:
+                # Only forward AV to judges that read those modalities; image-only
+                # judges can't decode them, so skip silently otherwise.
+                if av_capable:
+                    mime = MIME_TYPES.get(ext, "application/octet-stream")
+                    data = fpath.read_bytes()
+                    b64 = base64.b64encode(data).decode("ascii")
+                    blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                    blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        }
+                    )
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
