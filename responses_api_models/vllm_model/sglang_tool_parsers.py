@@ -133,3 +133,42 @@ def parse_qwen3_coder_tool_calls(
         )
     content = QWEN3_CODER_TOOL_CALL_PATTERN.sub("", text).strip()
     return tool_calls, content
+
+
+def normalize_tool_call_arguments(messages: List[Any]) -> List[Any]:
+    """Return ``messages`` with assistant tool-call arguments as mappings.
+
+    OpenAI-format conversation history carries ``function.arguments`` as a
+    JSON string (exactly what the parsers above emit), but chat templates
+    iterate the arguments as a mapping (``tool_call.arguments|items``), which
+    raises ``TypeError: Can only get item pairs from a mapping.`` when handed
+    a string. Decode string arguments that parse to a JSON object; leave
+    everything else untouched. The input list and its messages are not
+    mutated.
+    """
+    normalized: List[Any] = []
+    for message in messages:
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not tool_calls:
+            normalized.append(message)
+            continue
+        new_tool_calls = []
+        for tool_call in tool_calls:
+            function = (
+                tool_call.get("function") if isinstance(tool_call, dict) else None
+            )
+            arguments = (
+                function.get("arguments") if isinstance(function, dict) else None
+            )
+            if isinstance(arguments, str):
+                try:
+                    decoded = json.loads(arguments)
+                except ValueError:
+                    decoded = None
+                if isinstance(decoded, dict):
+                    tool_call = dict(
+                        tool_call, function=dict(function, arguments=decoded)
+                    )
+            new_tool_calls.append(tool_call)
+        normalized.append(dict(message, tool_calls=new_tool_calls))
+    return normalized

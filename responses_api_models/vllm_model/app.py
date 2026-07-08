@@ -46,6 +46,7 @@ from nemo_gym.responses_converter import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.sglang_tool_parsers import (
+    normalize_tool_call_arguments,
     parse_qwen3_coder_tool_calls,
 )
 
@@ -617,8 +618,12 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> List[int]:
         """Tokenize the full chat prompt via the chat template (the original, non-spliced path)."""
         tokenizer = self._get_sglang_tokenizer()
+        # History carries assistant tool-call arguments as JSON strings; the
+        # chat template iterates them as a mapping (arguments|items) and
+        # 500s on a string. Only this full-render path sees old assistant
+        # turns (the splice path reuses their exact tokens).
         encoded = tokenizer.apply_chat_template(
-            messages,
+            normalize_tool_call_arguments(messages),
             tools=tools,
             chat_template=self._get_sglang_chat_template(),
             add_generation_prompt=True,

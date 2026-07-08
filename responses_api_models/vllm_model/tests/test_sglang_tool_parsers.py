@@ -28,6 +28,7 @@ chat template (``chat_template.jinja``), which instructs the model to emit::
 import json
 
 from responses_api_models.vllm_model.sglang_tool_parsers import (
+    normalize_tool_call_arguments,
     parse_qwen3_coder_tool_calls,
 )
 
@@ -172,3 +173,57 @@ def test_bash_command_value_with_angle_brackets():
     args = json.loads(tool_calls[0]["function"]["arguments"])
     assert args == {"command": "grep -rn 'x < y && y > z' src/ | head -5"}
     assert content == ""
+
+
+def test_normalize_decodes_string_arguments():
+    # OpenAI-format history: arguments is a JSON string (as our parsers emit).
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_bash",
+                        "arguments": '{"command": "ls"}',
+                    },
+                }
+            ],
+        },
+    ]
+    out = normalize_tool_call_arguments(messages)
+    assert out[1]["tool_calls"][0]["function"]["arguments"] == {"command": "ls"}
+    # Inputs are not mutated (the session cache holds the originals).
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] == '{"command": "ls"}'
+    assert out[0] is messages[0]
+
+
+def test_normalize_roundtrips_parser_output():
+    tool_calls, _ = parse_qwen3_coder_tool_calls(
+        "<tool_call>\n<function=f>\n<parameter=k>\nv\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    out = normalize_tool_call_arguments([{"role": "assistant", "tool_calls": tool_calls}])
+    assert out[0]["tool_calls"][0]["function"]["arguments"] == {"k": "v"}
+
+
+def test_normalize_leaves_non_object_arguments():
+    def msg(args):
+        return {
+            "role": "assistant",
+            "tool_calls": [{"type": "function", "function": {"name": "f", "arguments": args}}],
+        }
+
+    # Already a mapping: untouched.
+    out = normalize_tool_call_arguments([msg({"k": 1})])
+    assert out[0]["tool_calls"][0]["function"]["arguments"] == {"k": 1}
+    # Non-JSON string and JSON-but-not-object string: left as-is.
+    for raw in ("not json", "[1, 2]"):
+        out = normalize_tool_call_arguments([msg(raw)])
+        assert out[0]["tool_calls"][0]["function"]["arguments"] == raw
+    # Messages without tool_calls pass through by identity.
+    plain = {"role": "tool", "content": "ok"}
+    assert normalize_tool_call_arguments([plain])[0] is plain
