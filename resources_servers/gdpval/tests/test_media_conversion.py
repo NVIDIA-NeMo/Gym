@@ -141,6 +141,43 @@ class TestComparisonImagesAndText:
         assert blocks[0]["type"] == "text"
         assert "not readable by this judge" in blocks[0]["text"]
 
+    def test_get_file_image_text_blocks_audio_passthrough_when_av_capable(self, tmp_path) -> None:
+        from resources_servers.gdpval.comparison import get_file_image_text_blocks
+
+        payload = b"ID3fakeaudio"
+        (tmp_path / "clip.mp3").write_bytes(payload)
+        blocks = get_file_image_text_blocks(
+            str(tmp_path), "clip.mp3", render_dpi=72, max_pages=10, include_text=True, av_capable=True
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "image_url"
+        url = blocks[0]["image_url"]["url"]
+        assert url.startswith("data:audio/mp3;base64,")
+
+    def test_get_file_image_text_blocks_video_passthrough_when_av_capable(self, tmp_path) -> None:
+        from resources_servers.gdpval.comparison import get_file_image_text_blocks
+
+        payload = b"\x00\x00\x00\x18ftypmp42"
+        (tmp_path / "clip.mp4").write_bytes(payload)
+        blocks = get_file_image_text_blocks(
+            str(tmp_path), "clip.mp4", render_dpi=72, max_pages=10, include_text=True, av_capable=True
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "image_url"
+        url = blocks[0]["image_url"]["url"]
+        assert url.startswith("data:video/mp4;base64,")
+
+    def test_build_file_section_av_passthrough_when_av_capable(self, tmp_path) -> None:
+        from resources_servers.gdpval.comparison import build_file_section
+
+        (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
+        section = build_file_section(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        assert any(
+            b.get("type") == "image_url" and b.get("image_url", {}).get("url", "").startswith("data:audio/mp3;base64,")
+            for b in section
+        )
+        assert not any("not readable by this judge" in b.get("text", "") for b in section)
+
     def test_get_file_image_text_blocks_oversize_marker(self, tmp_path) -> None:
         import os as _os
 
@@ -174,4 +211,33 @@ class TestRubricImagesAndText:
         blocks = convert_deliverables_to_content_blocks(str(tmp_path))  # default native_pdf
         assert any(
             b.get("type") == "image_url" and "application/pdf" in b.get("image_url", {}).get("url", "") for b in blocks
+        )
+
+    def test_convert_deliverables_skips_audio_when_not_av_capable(self, tmp_path) -> None:
+        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+
+        (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=False)
+        assert blocks == []
+
+    def test_convert_deliverables_audio_passthrough_when_av_capable(self, tmp_path) -> None:
+        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+
+        (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        assert any(
+            b.get("type") == "image_url"
+            and b.get("image_url", {}).get("url", "").startswith("data:audio/mpeg;base64,")
+            for b in blocks
+        )
+
+    def test_convert_deliverables_video_passthrough_when_av_capable(self, tmp_path) -> None:
+        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+
+        (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        assert any(
+            b.get("type") == "image_url"
+            and b.get("image_url", {}).get("url", "").startswith("data:video/mp4;base64,")
+            for b in blocks
         )
