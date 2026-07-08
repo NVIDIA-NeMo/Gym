@@ -65,12 +65,25 @@ class ApptainerCreateVerificationError(SandboxCreateVerificationError):
 def _require_apptainer() -> str:
     """Return the apptainer binary path or hard-error if it is not installed."""
     path = shutil.which("apptainer")
-    if path is None:
-        raise RuntimeError(
-            "The 'apptainer' binary is required for the apptainer sandbox provider. "
-            "Install Apptainer before using env.sandbox.provider.name=apptainer."
-        )
-    return path
+    if path is not None:
+        return path
+    bin_path = os.environ.get("APPTAINER_BINPATH")
+    if bin_path:
+        path = Path(bin_path) / "apptainer"
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise RuntimeError(
+        "The 'apptainer' binary is required for the apptainer sandbox provider. "
+        "Install Apptainer before using env.sandbox.provider.name=apptainer."
+    )
+
+
+def _apptainer_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    bin_path = env.get("APPTAINER_BINPATH")
+    if bin_path:
+        env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
+    return env
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -287,6 +300,7 @@ class ApptainerProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=_apptainer_subprocess_env(),
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
@@ -317,6 +331,7 @@ class ApptainerProvider:
                 stdout=out_f,
                 stderr=err_f,
                 start_new_session=True,
+                env=_apptainer_subprocess_env(),
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
