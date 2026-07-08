@@ -1,0 +1,18 @@
+# Qwen3-Omni overlay. The clean upstream OSWorld Qwen3VL scaffold builds prompts and
+# parses actions; Gym owns model transport, retries, and compound execution.
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      runner_name: qwen3_omni_agent
+      max_steps: 100
+      max_trajectory_length: 4
+      max_tokens: 32768
+      temperature: 0.0
+      top_p: 0.9
+      sleep_after_execution: 5.0
+      task_timeout: 7200
+      agent_kwargs:
+        coordinate_type: relative
+        api_backend: openai
+        model_call_retries: 3
+        require_tool_call: true

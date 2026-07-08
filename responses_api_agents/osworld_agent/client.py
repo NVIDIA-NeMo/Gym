@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import hashlib
 import inspect
 import json
 import logging
@@ -28,8 +29,10 @@ import re
 import sys
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from importlib import import_module
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
@@ -63,6 +66,28 @@ class RolloutResult:
     #  • loop exhausted max_steps without DONE/FAIL (finished=False), or
     #  • task_timeout tripped.
     mask_sample: bool = False
+    # Absolute path to the per-task on-disk evidence bundle when
+    # OSWORLD_TASK_ARTIFACT_ROOT is configured.
+    artifact_dir: Optional[str] = None
+
+
+@dataclass
+class _TaskArtifacts:
+    """Per-rollout file handlers and evidence paths.
+
+    Ray reuses worker processes, so every handler installed for a task must be
+    removed and closed when that task finishes. Keeping the lifecycle in one
+    object prevents cross-task log leakage.
+    """
+
+    task_id: str
+    directory: str
+    trajectory_path: str
+    task_logger: logging.Logger
+    worker_handler: logging.FileHandler
+    runtime_handler: logging.FileHandler
+    attached_loggers: List[tuple[logging.Logger, int]]
+    started_at: str
 
 
 # `ModelFn` takes (system_prompt, instruction, observation_history) and
@@ -71,7 +96,7 @@ class RolloutResult:
 # be driven from a Ray actor.
 ObservationHistory = List[Dict[str, Any]]
 ModelFn = Callable[[str, str, ObservationHistory], str]
-MessagesModelFn = Callable[[List[Dict[str, Any]], Dict[str, Any]], str]
+MessagesModelFn = Callable[[List[Dict[str, Any]], Dict[str, Any]], Any]
 
 
 def _b64(screenshot_bytes: Optional[bytes]) -> str:
@@ -98,6 +123,136 @@ def _flatten_actions(actions: Any) -> List[Any]:
         else:
             flattened.append(action)
     return flattened
+
+
+def _merge_consecutive_pyautogui_actions(actions: List[Any]) -> List[Any]:
+    """Execute adjacent Qwen pyautogui calls as one OSWorld step.
+
+    The internal ``nemotron-v3`` branch added this to Qwen3VLAgent so a
+    compound model tool call does not incur a screenshot/wait between every
+    individual key or click. It belongs at the adapter boundary because it is
+    an execution policy, not an OSWorld environment change.
+    """
+
+    merged: List[Any] = []
+    pending: List[str] = []
+    for action in actions:
+        if isinstance(action, str) and action.startswith("pyautogui."):
+            pending.append(action)
+            continue
+        if pending:
+            merged.append("\n".join(pending))
+            pending = []
+        merged.append(action)
+    if pending:
+        merged.append("\n".join(pending))
+    return merged
+
+
+def _model_response_content(response: Any) -> str:
+    if isinstance(response, str):
+        return response
+    if isinstance(response, Mapping):
+        return str(response.get("content") or "")
+    return str(getattr(response, "content", "") or "")
+
+
+def _link_if_present(source: str, destination: str) -> bool:
+    if not os.path.exists(source) or os.path.lexists(destination):
+        return False
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        os.symlink(os.path.abspath(source), destination, target_is_directory=os.path.isdir(source))
+        return True
+    except FileExistsError:
+        # Multiple rollout workers can stage the same shared cache at once.
+        return False
+
+
+def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
+    """Expose pre-staged setup artifacts through OSWorld's per-task cache.
+
+    This is the adapter equivalent of the internal branch's changes to
+    ``DesktopEnv._set_task_info``. Staging before ``env.reset`` avoids any
+    mutation of OSWorld while preserving its existing SetupController flow.
+    """
+
+    task_id = str(task_config.get("id") or task_config.get("task_id") or "")
+    if not task_id:
+        return 0
+    task_cache_dir = os.path.join(cache_dir, task_id)
+    linked = 0
+
+    flat_cache_env: Optional[str] = None
+    if "spreadsheetbench" in task_id:
+        flat_cache_env = "SPREADSHEETBENCH_SETUP_CACHE_DIR"
+    elif "pptc" in task_id:
+        flat_cache_env = "PPTC_SETUP_CACHE_DIR"
+
+    if flat_cache_env:
+        source_dir = os.environ.get(flat_cache_env, "")
+        if not os.path.isdir(source_dir):
+            return 0
+        for setup_item in task_config.get("config", []):
+            if setup_item.get("type") != "download":
+                continue
+            for file_config in setup_item.get("parameters", {}).get("files", []):
+                url = file_config.get("url")
+                destination_path = file_config.get("path")
+                if not url or not destination_path:
+                    continue
+                cache_name = f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}_{os.path.basename(destination_path)}"
+                linked += int(
+                    _link_if_present(
+                        os.path.join(source_dir, cache_name),
+                        os.path.join(task_cache_dir, cache_name),
+                    )
+                )
+        return linked
+
+    cache_env = "OW_SETUP_CACHE_DIR" if task_id.startswith("ow-") else "OSWORLD_SETUP_CACHE_DIR"
+    source_root = os.environ.get(cache_env, "")
+    source_dir = os.path.join(source_root, task_id) if source_root else ""
+    if not os.path.isdir(source_dir):
+        return 0
+    for name in os.listdir(source_dir):
+        linked += int(_link_if_present(os.path.join(source_dir, name), os.path.join(task_cache_dir, name)))
+    return linked
+
+
+def _patch_extension_name_aliases() -> None:
+    """Apply the internal Chrome extension alias without forking OSWorld."""
+
+    try:
+        from desktop_env.evaluators import metrics as metrics_package  # type: ignore
+        from desktop_env.evaluators.metrics import chrome as chrome_metrics  # type: ignore
+    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
+        return
+
+    current = chrome_metrics.is_expected_installed_extensions
+    if getattr(current, "_nemo_gym_alias_patch", False):
+        return
+
+    aliases = {
+        "Speechify — Text to Speech": "Speechify — Voice AI Assistant",
+    }
+
+    def canonicalize(name: Any) -> Any:
+        return aliases.get(name, name)
+
+    def wrapped(installed_extensions: Any, expected: Any) -> float:
+        installed = (
+            [canonicalize(name) for name in installed_extensions] if installed_extensions else installed_extensions
+        )
+        normalized_expected = expected
+        if isinstance(expected, dict) and isinstance(expected.get("expected"), list):
+            normalized_expected = dict(expected)
+            normalized_expected["expected"] = [canonicalize(name) for name in expected["expected"]]
+        return current(installed, normalized_expected)
+
+    wrapped._nemo_gym_alias_patch = True  # type: ignore[attr-defined]
+    chrome_metrics.is_expected_installed_extensions = wrapped
+    metrics_package.is_expected_installed_extensions = wrapped
 
 
 def _normalize_prompt_agent_computer_13_action(action: Any) -> Any:
@@ -410,6 +565,238 @@ def _safe_task_id(task_config: Dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120] or "unknown"
 
 
+def _safe_artifact_component(value: Any, *, fallback: str = "unknown") -> str:
+    component = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._")
+    return component[:120] or fallback
+
+
+def _write_json(path: str, payload: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        fh.write("\n")
+
+
+def _setup_task_artifacts(
+    task_config: Dict[str, Any],
+    *,
+    run_metadata: Dict[str, Any],
+) -> Optional[_TaskArtifacts]:
+    """Create an internal-OSWorld-style evidence directory for one rollout.
+
+    The Python boundary is opt-in; the multienv launch script enables it by
+    default. A collision-safe directory supports ``num_repeats > 1`` and
+    reruns that intentionally reuse the same result root.
+    """
+
+    artifact_root = os.environ.get("OSWORLD_TASK_ARTIFACT_ROOT", "").strip()
+    if not artifact_root:
+        return None
+
+    task_id = _safe_task_id(task_config)
+    domain = _safe_artifact_component(
+        task_config.get("domain")
+        or task_config.get("snapshot")
+        or next(iter(task_config.get("related_apps") or []), None),
+    )
+    parent_dir = os.path.abspath(os.path.expanduser(os.path.join(artifact_root, domain)))
+    base_dir = os.path.join(parent_dir, task_id)
+    worker_handler: Optional[logging.FileHandler] = None
+    runtime_handler: Optional[logging.FileHandler] = None
+    attached_loggers: List[tuple[logging.Logger, int]] = []
+
+    try:
+        os.makedirs(parent_dir, exist_ok=True)
+        artifact_dir = base_dir
+        try:
+            os.mkdir(artifact_dir)
+        except FileExistsError:
+            suffix = (
+                f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+                f"-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+            )
+            artifact_dir = f"{base_dir}--{suffix}"
+            os.mkdir(artifact_dir)
+
+        log_format = "[%(asctime)s %(levelname)s %(name)s/%(lineno)d pid=%(process)d] %(message)s"
+        formatter = logging.Formatter(log_format)
+        worker_handler = logging.FileHandler(os.path.join(artifact_dir, "worker.log"), encoding="utf-8")
+        worker_handler.setLevel(logging.DEBUG)
+        worker_handler.setFormatter(formatter)
+        runtime_handler = logging.FileHandler(os.path.join(artifact_dir, "runtime.log"), encoding="utf-8")
+        runtime_handler.setLevel(logging.DEBUG)
+        runtime_handler.setFormatter(formatter)
+
+        # The adapter and native agent use nemo_gym.osworld_agent; upstream
+        # OSWorld uses both desktopenv and desktop_env across versions.
+        for logger_name in ("nemo_gym.osworld_agent", "desktopenv", "desktop_env", "mm_agents"):
+            artifact_logger = logging.getLogger(logger_name)
+            attached_loggers.append((artifact_logger, artifact_logger.level))
+            artifact_logger.setLevel(logging.DEBUG)
+            artifact_logger.addHandler(worker_handler)
+            if logger_name == "nemo_gym.osworld_agent":
+                artifact_logger.addHandler(runtime_handler)
+
+        logger_name = f"nemo_gym.osworld_agent.task.{task_id}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        task_logger = logging.getLogger(logger_name)
+        task_logger.setLevel(logging.DEBUG)
+        task_logger.propagate = True
+
+        started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        trajectory_path = os.path.join(artifact_dir, "traj.jsonl")
+        with open(trajectory_path, "w", encoding="utf-8"):
+            pass
+        _write_json(os.path.join(artifact_dir, "task.json"), task_config)
+        _write_json(
+            os.path.join(artifact_dir, "run.json"),
+            {
+                "task_id": task_id,
+                "started_at": started_at,
+                "pid": os.getpid(),
+                **run_metadata,
+            },
+        )
+        context = _TaskArtifacts(
+            task_id=task_id,
+            directory=artifact_dir,
+            trajectory_path=trajectory_path,
+            task_logger=task_logger,
+            worker_handler=worker_handler,
+            runtime_handler=runtime_handler,
+            attached_loggers=attached_loggers,
+            started_at=started_at,
+        )
+        task_logger.info("Created per-task artifact directory: %s", artifact_dir)
+        return context
+    except Exception:  # noqa: BLE001 - observability must not fail a rollout.
+        for artifact_logger, previous_level in reversed(attached_loggers):
+            if worker_handler is not None:
+                artifact_logger.removeHandler(worker_handler)
+            if runtime_handler is not None:
+                artifact_logger.removeHandler(runtime_handler)
+            artifact_logger.setLevel(previous_level)
+        for handler in (runtime_handler, worker_handler):
+            if handler is not None:
+                handler.close()
+        LOG.exception("Failed to initialize per-task OSWorld artifacts")
+        return None
+
+
+def _append_task_trajectory(
+    artifacts: Optional[_TaskArtifacts],
+    payload: Dict[str, Any],
+) -> None:
+    if artifacts is None:
+        return
+    record = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        **payload,
+    }
+    try:
+        with open(artifacts.trajectory_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:  # noqa: BLE001 - evidence I/O must not fail a rollout.
+        artifacts.task_logger.exception("Failed to append task trajectory")
+
+
+def _save_task_screenshot(
+    artifacts: Optional[_TaskArtifacts],
+    step_num: int,
+    obs: Mapping[str, Any],
+) -> Optional[str]:
+    if artifacts is None:
+        return None
+    screenshot = obs.get("screenshot")
+    if not isinstance(screenshot, (bytes, bytearray)) or not screenshot:
+        return None
+    filename = f"step_{step_num:03d}.png"
+    try:
+        with open(os.path.join(artifacts.directory, filename), "wb") as fh:
+            fh.write(screenshot)
+        return filename
+    except Exception:  # noqa: BLE001
+        artifacts.task_logger.exception("Failed to save screenshot for artifact step %d", step_num)
+        return None
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _finalize_task_artifacts(
+    artifacts: Optional[_TaskArtifacts],
+    *,
+    result: RolloutResult,
+    duration_seconds: float,
+    recording_path: Optional[str],
+) -> None:
+    if artifacts is None:
+        return
+
+    try:
+        artifacts.task_logger.info(
+            "OSWorld rollout finished: score=%s reward=%s finished=%s mask_sample=%s error=%r",
+            result.score,
+            result.reward,
+            result.finished,
+            result.mask_sample,
+            result.error,
+        )
+        _write_json(
+            os.path.join(artifacts.directory, "result.json"),
+            {
+                "task_id": artifacts.task_id,
+                "started_at": artifacts.started_at,
+                "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "duration_seconds": duration_seconds,
+                "reward": result.reward,
+                "score": result.score,
+                "finished": result.finished,
+                "mask_sample": result.mask_sample,
+                "error": result.error,
+                "step_count": len(result.steps),
+                "recording_path": recording_path,
+            },
+        )
+        if recording_path and os.path.isfile(recording_path):
+            recording_link = os.path.join(artifacts.directory, "recording.mp4")
+            if not os.path.lexists(recording_link):
+                os.symlink(os.path.relpath(recording_path, artifacts.directory), recording_link)
+
+        artifacts.worker_handler.flush()
+        artifacts.runtime_handler.flush()
+        files = []
+        for name in sorted(os.listdir(artifacts.directory)):
+            path = os.path.join(artifacts.directory, name)
+            if os.path.isfile(path) and not os.path.islink(path):
+                files.append({"path": name, "bytes": os.path.getsize(path), "sha256": _sha256_file(path)})
+            elif os.path.islink(path):
+                files.append({"path": name, "symlink": os.readlink(path)})
+        _write_json(
+            os.path.join(artifacts.directory, "manifest.json"),
+            {
+                "task_id": artifacts.task_id,
+                "artifact_dir": artifacts.directory,
+                "recording_path": recording_path,
+                "files": files,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        artifacts.task_logger.exception("Failed to finalize per-task OSWorld artifacts")
+    finally:
+        for artifact_logger, previous_level in reversed(artifacts.attached_loggers):
+            artifact_logger.removeHandler(artifacts.worker_handler)
+            artifact_logger.removeHandler(artifacts.runtime_handler)
+            artifact_logger.setLevel(previous_level)
+        artifacts.runtime_handler.flush()
+        artifacts.worker_handler.flush()
+        artifacts.runtime_handler.close()
+        artifacts.worker_handler.close()
+
+
 def _record_video_for_task(task_config: Dict[str, Any]) -> bool:
     """Return whether this task is selected for opt-in VM video recording."""
 
@@ -453,17 +840,54 @@ def _setup_pointer_task_logger(
     return task_logger, handler
 
 
-def _evaluate_osworld_env(env: Any, eval_logger: logging.Logger) -> float:
-    """Call the OSWorld evaluator across DesktopEnv variants."""
+def _evaluate_osworld_env(
+    env: Any,
+    eval_logger: logging.Logger,
+    *,
+    disable_gpu: bool = True,
+) -> float:
+    """Call the OSWorld evaluator across DesktopEnv variants.
+
+    Internal OSWorld forced EasyOCR onto CPU to keep evaluation from
+    reserving or initializing rollout GPUs. The Gym worker calls the model
+    remotely, so temporarily hiding CUDA for the whole inline evaluator is a
+    dependency-agnostic equivalent.
+    """
 
     evaluate = env.evaluate
+    original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    easyocr_module: Optional[Any] = None
+    original_easyocr_reader: Optional[Any] = None
+    if disable_gpu:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        try:
+            easyocr_module = import_module("easyocr")
+            original_easyocr_reader = easyocr_module.Reader
+
+            def cpu_reader(*args: Any, **kwargs: Any) -> Any:
+                kwargs["gpu"] = False
+                return original_easyocr_reader(*args, **kwargs)
+
+            easyocr_module.Reader = cpu_reader
+        except Exception:  # noqa: BLE001 - not every OSWorld task imports EasyOCR.
+            easyocr_module = None
+            original_easyocr_reader = None
     try:
-        params = inspect.signature(evaluate).parameters
-    except (TypeError, ValueError):
-        params = {}
-    if not params:
-        return float(evaluate())
-    return float(evaluate(eval_logger))
+        try:
+            params = inspect.signature(evaluate).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if not params:
+            return float(evaluate())
+        return float(evaluate(eval_logger))
+    finally:
+        if disable_gpu:
+            if easyocr_module is not None and original_easyocr_reader is not None:
+                easyocr_module.Reader = original_easyocr_reader
+            if original_cuda_visible is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
 
 
 def run_osworld_task(
@@ -481,7 +905,7 @@ def run_osworld_task(
     sleep_after_execution: float = 0.5,
     system_prompt: Optional[str] = None,
     cache_dir: str = "cache",
-    mem_limit_mb: int = 16384,
+    mem_limit_mb: int = 0,
     step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
     task_timeout: int = 1800,  # wall-clock cap on the whole rollout
     runner_name: str = "gym_pyautogui",
@@ -497,6 +921,8 @@ def run_osworld_task(
     policy_max_tokens: int = 1500,
     policy_temperature: float = 1.0,
     policy_top_p: Optional[float] = 0.9,
+    evaluator_disable_gpu: bool = True,
+    reward_mode: str = "binary",
 ) -> RolloutResult:
     """Run a single OSWorld task and return a structured result.
 
@@ -504,20 +930,19 @@ def run_osworld_task(
     this module on a machine without OSWorld installed still works — only
     actually *running* a rollout requires it.
     """
-    # Apptainer provider reads these env vars at start_emulator time. Must
-    # be set before DesktopEnv() is constructed so the provider's lazy import
-    # picks them up. (No-op for docker provider — it ignores these.)
+    if reward_mode not in {"raw", "binary"}:
+        raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
+
+    # Keep the requested Docker image visible to future/custom providers. The
+    # clean upstream main provider currently starts happysixd/osworld-docker
+    # directly and therefore ignores this environment variable.
     os.environ["OSWORLD_DOCKER_IMAGE"] = container_image
-    os.environ["OSWORLD_APPTAINER_SIF_CACHE"] = os.path.join(cache_dir, "sif")
-    os.environ["OSWORLD_APPTAINER_VMS_DIR"] = os.path.join(cache_dir, "vms")
-    # mem_limit_mb=0 means "no cgroup memory cap" → skip setting the env var, so
-    # provider.py doesn't add `--memory` to apptainer argv. The `--memory` flag
-    # can trigger apptainer cgroup setup, which fails under enroot+fakeroot+
-    # no-systemd stacks with `rootless cgroups is not usable in fakeroot mode`.
-    # Set mem_limit_mb=0 when running under such setups; the docker provider
-    # accepts --memory normally.
     if mem_limit_mb > 0:
-        os.environ["OSWORLD_APPTAINER_MEM_LIMIT"] = f"{mem_limit_mb}M"
+        LOG.warning(
+            "mem_limit_mb=%d is not enforced by the clean upstream Docker provider; "
+            "configure Docker/QEMU resources on the Colossus host instead",
+            mem_limit_mb,
+        )
 
     from responses_api_agents.osworld_agent.prompts import get_system_prompt
 
@@ -534,6 +959,7 @@ def run_osworld_task(
     )
     env_cls = load_attr(runner_spec.env_class_path)
     instruction = task_config.get("instruction", "")
+    _patch_extension_name_aliases()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []
@@ -543,6 +969,36 @@ def run_osworld_task(
     final_score = 0.0
     timed_out = False
     task_start = time.monotonic()
+    recording_path: Optional[str] = None
+    task_artifacts = _setup_task_artifacts(
+        task_config,
+        run_metadata={
+            "runner_name": runner_spec.name,
+            "runner_kind": runner_spec.kind,
+            "action_space": runner_spec.action_space,
+            "observation_type": runner_spec.observation_type,
+            "provider_name": provider_name,
+            "container_image": container_image,
+            "headless": headless,
+            "screen_size": list(screen_size),
+            "max_steps": max_steps,
+            "max_trajectory_length": max_trajectory_length,
+            "sleep_after_execution": sleep_after_execution,
+            "task_timeout": task_timeout,
+            "model_name": policy_model_name,
+            "max_tokens": policy_max_tokens,
+            "temperature": policy_temperature,
+            "top_p": policy_top_p,
+            "reward_mode": reward_mode,
+        },
+    )
+    task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
+    task_logger.info(
+        "Starting OSWorld rollout task_id=%s runner=%s model=%s",
+        _safe_task_id(task_config),
+        runner_spec.name,
+        policy_model_name or "<unset>",
+    )
 
     # Opt-in mp4 recording of the entire rollout, captured server-side inside
     # the VM and pulled back on env.close(). Saved at
@@ -562,6 +1018,11 @@ def run_osworld_task(
             client_password=client_password,
             cache_dir=cache_dir,
         )
+        linked_cache_files = _stage_setup_cache(task_config, cache_dir)
+        if linked_cache_files:
+            LOG.info(
+                "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
+            )
         env.reset(task_config=task_config)
         native_agent = None
         pointer_agent = None
@@ -591,9 +1052,84 @@ def run_osworld_task(
 
             native_agent.call_llm = _call_llm
             try:
-                native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
+                native_agent.reset(task_logger, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
-                native_agent.reset(LOG)
+                native_agent.reset(task_logger)
+        elif runner_spec.kind in {"nemotron_v3_agent", "omni_mini_agent"}:
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            if messages_model_fn is None:
+                raise ValueError(f"runner {runner_spec.name!r} requires messages_model_fn")
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            nemotron_kwargs: Dict[str, Any] = {
+                "platform": "ubuntu",
+                "model": policy_model_name or "policy_model",
+                "max_steps": max_steps,
+                "max_tokens": policy_max_tokens,
+                "top_p": policy_top_p,
+                "temperature": policy_temperature,
+                "action_space": runner_spec.action_space,
+                "observation_type": runner_spec.observation_type,
+                "screen_size": screen_size,
+                "client_password": client_password,
+                "max_image_history_length": max_trajectory_length,
+            }
+            nemotron_kwargs.update(runner_spec.agent_kwargs)
+            native_agent = agent_cls(**nemotron_kwargs)
+
+            def _call_nemotron_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> Any:
+                return messages_model_fn(payload["messages"], payload)
+
+            native_agent.call_llm = _call_nemotron_llm
+            native_agent.reset(task_logger)
+        elif runner_spec.kind == "qwen3_omni_agent":
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            if messages_model_fn is None:
+                raise ValueError(f"runner {runner_spec.name!r} requires messages_model_fn")
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            qwen_kwargs = dict(runner_spec.agent_kwargs)
+            model_call_retries = int(qwen_kwargs.pop("model_call_retries", 3))
+            require_tool_call = bool(qwen_kwargs.pop("require_tool_call", True))
+            qwen_defaults: Dict[str, Any] = {
+                "platform": "ubuntu",
+                "model": policy_model_name or "policy_model",
+                "max_tokens": policy_max_tokens,
+                "top_p": policy_top_p,
+                "temperature": policy_temperature,
+                "action_space": runner_spec.action_space,
+                "observation_type": runner_spec.observation_type,
+                "history_n": max_trajectory_length,
+            }
+            qwen_defaults.update(qwen_kwargs)
+            native_agent = agent_cls(**qwen_defaults)
+
+            def _call_qwen_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> str:
+                last_response = ""
+                last_error: Optional[Exception] = None
+                for attempt in range(max(1, model_call_retries)):
+                    payload["_nemo_gym_require_stop"] = True
+                    try:
+                        last_response = _model_response_content(messages_model_fn(payload["messages"], payload))
+                        if last_response and (not require_tool_call or "<tool_call>" in last_response):
+                            return last_response
+                        LOG.warning(
+                            "Qwen3-Omni response attempt %d/%d did not contain a tool call",
+                            attempt + 1,
+                            max(1, model_call_retries),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - transport/finish failures are retryable.
+                        last_error = exc
+                        LOG.warning(
+                            "Qwen3-Omni response attempt %d/%d failed: %s",
+                            attempt + 1,
+                            max(1, model_call_retries),
+                            exc,
+                        )
+                raise ValueError("Qwen3-Omni model returned no parseable <tool_call> response") from last_error
+
+            native_agent.call_llm = _call_qwen_llm
+            native_agent.reset(task_logger)
         elif runner_spec.kind == "m3_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
@@ -615,9 +1151,9 @@ def run_osworld_task(
             native_agent = agent_cls(**m3_kwargs)
             _patch_m3_native_tool_use(native_agent)
             try:
-                native_agent.reset(LOG, vm_ip=getattr(env, "vm_ip", None))
+                native_agent.reset(task_logger, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
-                native_agent.reset(LOG)
+                native_agent.reset(task_logger)
             if hasattr(native_agent, "set_api_log_dir"):
                 m3_results_base = os.environ.get(
                     "OSWORLD_M3_RESULTS_DIR",
@@ -681,9 +1217,16 @@ def run_osworld_task(
         # pyautogui clicks land an error / non-zero returncode silently in
         # the VM (hypothesis observed in earlier experiments: clicks hit
         # the right pixel but the X event never reaches the target window).
-        _vm_exec_log_path = os.environ.get("OSWORLD_VM_EXEC_LOG")
-        if _vm_exec_log_path:
-            os.makedirs(os.path.dirname(_vm_exec_log_path), exist_ok=True)
+        _vm_exec_log_paths: List[str] = []
+        configured_vm_exec_log = os.environ.get("OSWORLD_VM_EXEC_LOG", "").strip()
+        if configured_vm_exec_log:
+            _vm_exec_log_paths.append(os.path.abspath(os.path.expanduser(configured_vm_exec_log)))
+        if task_artifacts is not None:
+            _vm_exec_log_paths.append(os.path.join(task_artifacts.directory, "vm-exec.jsonl"))
+        _vm_exec_log_paths = list(dict.fromkeys(_vm_exec_log_paths))
+        if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
+            for vm_exec_log_path in _vm_exec_log_paths:
+                os.makedirs(os.path.dirname(vm_exec_log_path), exist_ok=True)
             _orig_exec_py = env.controller.execute_python_command
             _exec_call_idx = [0]
 
@@ -692,23 +1235,27 @@ def run_osworld_task(
                 _exec_call_idx[0] += 1
                 result = _orig_exec_py(command)
                 try:
-                    with open(_vm_exec_log_path, "a") as fh:
-                        fh.write(
-                            json.dumps(
-                                {
-                                    "call_idx": idx,
-                                    "command_head": (command or "")[:300],
-                                    "response": result if isinstance(result, dict) else {"_repr": repr(result)[:200]},
-                                },
-                                default=str,
-                            )
-                            + "\n"
-                        )
+                    record = json.dumps(
+                        {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "task_id": _safe_task_id(task_config),
+                            "call_idx": idx,
+                            "command": command or "",
+                            "response": result if isinstance(result, dict) else {"_repr": repr(result)},
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                    for vm_exec_log_path in _vm_exec_log_paths:
+                        with open(vm_exec_log_path, "a", encoding="utf-8") as fh:
+                            fh.write(record + "\n")
                 except Exception:
-                    LOG.exception("Failed to write VM exec log entry %d", idx)
+                    task_logger.exception("Failed to write VM exec log entry %d", idx)
                 return result
 
             env.controller.execute_python_command = _exec_logged
+        elif _vm_exec_log_paths:
+            task_logger.debug("Controller has no execute_python_command; VM exec trace is unavailable")
 
         # Opt-in one-shot diagnostic: probe the VM's actual display +
         # pyautogui dimensions. Output lands in OSWORLD_VM_EXEC_LOG (via the
@@ -897,11 +1444,27 @@ def run_osworld_task(
             except Exception:
                 LOG.exception("Failed to refresh obs after controlled-click")
 
+        initial_screenshot = _save_task_screenshot(task_artifacts, 0, obs)
+        _append_task_trajectory(
+            task_artifacts,
+            {
+                "event": "initial_state",
+                "step_num": 0,
+                "instruction": instruction,
+                "screenshot_file": initial_screenshot,
+                "screenshot_bytes": len(obs.get("screenshot") or b""),
+            },
+        )
+
         for step_idx in range(max_steps):
             if time.monotonic() - task_start > task_timeout:
                 error = f"task_timeout exceeded ({task_timeout}s) at step {step_idx}"
                 timed_out = True
-                LOG.warning(error)
+                task_logger.warning(error)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {"event": "timeout", "step_num": step_idx + 1, "error": error},
+                )
                 break
             obs_entry = {
                 "screenshot_b64": _b64(obs.get("screenshot")),
@@ -969,15 +1532,25 @@ def run_osworld_task(
                     LOG.exception("Failed to dump a11y XML for step %d", step_idx)
             history_window = obs_history[-max_trajectory_length:] if max_trajectory_length else []
 
+            agent_step_info: Dict[str, Any] = {}
             try:
                 if pointer_agent is not None:
                     model_text, actions = pointer_agent.predict(obs)
                     model_text = strip_thinking(model_text or "")
                     actions = _flatten_actions(actions)
                 elif native_agent is not None:
-                    model_text, actions = native_agent.predict(instruction, obs)
-                    model_text = strip_thinking(model_text or "")
+                    prediction = native_agent.predict(instruction, obs)
+                    if not isinstance(prediction, tuple) or len(prediction) not in {2, 3}:
+                        raise TypeError(
+                            f"Native OSWorld agent returned unsupported prediction shape: {type(prediction).__name__}"
+                        )
+                    model_text, actions = prediction[:2]
+                    if len(prediction) == 3 and isinstance(prediction[2], dict):
+                        agent_step_info = prediction[2]
+                    model_text = strip_thinking(_model_response_content(model_text))
                     actions = _flatten_actions(actions)
+                    if runner_spec.kind == "qwen3_omni_agent":
+                        actions = _merge_consecutive_pyautogui_actions(actions)
                     if runner_spec.action_space == "computer_13":
                         actions = [_normalize_prompt_agent_computer_13_action(action) for action in actions]
                 else:
@@ -986,29 +1559,72 @@ def run_osworld_task(
                     actions = parse_actions(model_text)
             except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
                 error = f"agent/model call failed at step {step_idx}: {exc}"
-                LOG.exception("Agent/model call failed at step %d", step_idx)
+                task_logger.exception("Agent/model call failed at step %d", step_idx)
                 steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
+                screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {
+                        "event": "step",
+                        "step_num": step_idx + 1,
+                        "response": "",
+                        "actions": [],
+                        "reward": 0.0,
+                        "done": False,
+                        "error": error,
+                        "screenshot_file": screenshot_file,
+                    },
+                )
                 break
 
+            task_logger.info("Step %d model response:\n%s", step_idx + 1, model_text)
+            task_logger.info("Step %d parsed actions: %r", step_idx + 1, actions)
             if not actions:
                 # No parseable action — log the step and continue. The model
                 # gets another chance next iteration with a fresh screenshot.
-                steps.append(StepRecord(step=step_idx, model_text=model_text, actions=[], reward=0.0, done=False))
+                steps.append(
+                    StepRecord(
+                        step=step_idx,
+                        model_text=model_text,
+                        actions=[],
+                        reward=0.0,
+                        done=False,
+                        info={"agent": agent_step_info} if agent_step_info else {},
+                    )
+                )
                 obs_history.append(obs_entry)
+                screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {
+                        "event": "step",
+                        "step_num": step_idx + 1,
+                        "response": model_text,
+                        "actions": [],
+                        "reward": 0.0,
+                        "done": False,
+                        "info": {"agent": agent_step_info} if agent_step_info else {},
+                        "screenshot_file": screenshot_file,
+                    },
+                )
                 continue
 
             step_done = False
             step_reward = 0.0
             step_info: Dict[str, Any] = {}
             for action in actions:
+                task_logger.info("Step %d executing action: %r", step_idx + 1, action)
                 try:
                     obs, reward, done, info = env.step(action, sleep_after_execution)
                 except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
                     error = f"env.step() failed at step {step_idx}: {exc}"
-                    LOG.exception("Environment step failed at step %d for action %r", step_idx, action)
+                    task_logger.exception("Environment step failed at step %d for action %r", step_idx, action)
                     break
                 step_reward += float(reward or 0.0)
                 step_info = info if isinstance(info, dict) else {"info": info}
+                if agent_step_info:
+                    step_info = dict(step_info)
+                    step_info.setdefault("agent", agent_step_info)
                 if done:
                     step_done = True
                     break
@@ -1027,6 +1643,28 @@ def run_osworld_task(
                 )
             )
             obs_history.append(obs_entry)
+            screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
+            _append_task_trajectory(
+                task_artifacts,
+                {
+                    "event": "step",
+                    "step_num": step_idx + 1,
+                    "response": model_text,
+                    "actions": actions,
+                    "reward": step_reward,
+                    "done": step_done,
+                    "info": step_info,
+                    "error": error,
+                    "screenshot_file": screenshot_file,
+                },
+            )
+            task_logger.info(
+                "Step %d completed: reward=%s done=%s error=%r",
+                step_idx + 1,
+                step_reward,
+                step_done,
+                error,
+            )
 
             if step_done:
                 finished = True
@@ -1037,12 +1675,16 @@ def run_osworld_task(
         # Let the VM settle before scoring, mirroring lib_run_single.py.
         time.sleep(2)
         try:
-            eval_logger = pointer_logger if pointer_agent is not None else LOG
-            final_score = _evaluate_osworld_env(env, eval_logger)
+            eval_logger = pointer_logger if pointer_agent is not None else task_logger
+            final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
         except Exception as exc:  # noqa: BLE001
             error = f"env.evaluate() failed: {exc}"
-            LOG.exception("Evaluator failed")
+            task_logger.exception("Evaluator failed")
             final_score = 0.0
+        _append_task_trajectory(
+            task_artifacts,
+            {"event": "evaluation", "score": final_score, "error": error},
+        )
         if pointer_agent is not None and hasattr(pointer_agent, "log_usage"):
             try:
                 pointer_agent.log_usage()
@@ -1068,7 +1710,8 @@ def run_osworld_task(
                 _task_id = task_config.get("id", "unknown")
                 _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
                 env.controller.end_recording(_mp4_path)
-                LOG.info("Saved VM recording: %s", _mp4_path)
+                recording_path = _mp4_path
+                task_logger.info("Saved VM recording: %s", _mp4_path)
             except Exception:  # noqa: BLE001 — best-effort.
                 LOG.exception("end_recording() failed; mp4 may be missing or partial")
         if env is not None:
@@ -1077,16 +1720,27 @@ def run_osworld_task(
             except Exception:
                 LOG.exception("env.close() raised")
 
-    reward = 1.0 if final_score >= 1.0 else 0.0
+    if reward_mode == "raw":
+        reward = float(final_score)
+    else:
+        reward = 1.0 if final_score >= 1.0 else 0.0
     # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
     # or (c) loop exhausted max_steps without the model emitting DONE/FAIL.
     mask_sample = bool(error) or timed_out or not finished
 
-    return RolloutResult(
+    result = RolloutResult(
         reward=reward,
         score=final_score,
         steps=steps,
         error=error,
         finished=finished,
         mask_sample=mask_sample,
+        artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
     )
+    _finalize_task_artifacts(
+        task_artifacts,
+        result=result,
+        duration_seconds=time.monotonic() - task_start,
+        recording_path=recording_path,
+    )
+    return result

@@ -63,6 +63,38 @@ def test_m3_agent_runner_uses_official_osworld_scaffold() -> None:
     assert spec.observation_type == "screenshot"
 
 
+def test_nemotron_v3_runner_is_owned_by_the_gym_adapter() -> None:
+    spec = resolve_runner_spec("nemotron_v3_agent")
+
+    assert spec.kind == "nemotron_v3_agent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.native_agents.NemotronV3Agent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs["coordinate_type"] == "relative"
+    assert spec.agent_kwargs["thinking"] is True
+
+
+def test_omni_mini_runner_uses_single_image_gym_adapter() -> None:
+    spec = resolve_runner_spec("omni_mini_agent")
+
+    assert spec.kind == "omni_mini_agent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.native_agents.NemotronOmniAgent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs["coordinate_type"] == "relative"
+    assert spec.agent_kwargs["thinking"] is True
+
+
+def test_qwen3_omni_runner_reuses_upstream_scaffold_with_gym_transport() -> None:
+    spec = resolve_runner_spec("qwen3_omni_agent")
+
+    assert spec.kind == "qwen3_omni_agent"
+    assert spec.agent_class_path == "mm_agents.qwen3vl_agent.Qwen3VLAgent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs == {"api_backend": "openai", "coordinate_type": "relative"}
+
+
 def test_m3_config_overrides_the_osworld_server_config() -> None:
     config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_m3.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -78,6 +110,54 @@ def test_m3_config_overrides_the_osworld_server_config() -> None:
         "sleep_after_execution": 3.0,
         "task_timeout": 7200,
     }
+
+
+@pytest.mark.parametrize(
+    ("config_name", "runner_name", "max_steps", "max_tokens", "task_timeout"),
+    [
+        ("osworld_agent_nemotron_v3.yaml", "nemotron_v3_agent", 100, 4096, 7200),
+        ("osworld_agent_omni_mini.yaml", "omni_mini_agent", 100, 8192, 3600),
+        ("osworld_agent_omni_mini_parity.yaml", "omni_mini_agent", 100, 8192, 7200),
+        ("osworld_agent_qwen3_omni.yaml", "qwen3_omni_agent", 100, 32768, 7200),
+    ],
+)
+def test_internal_runner_overlays(
+    config_name: str,
+    runner_name: str,
+    max_steps: int,
+    max_tokens: int,
+    task_timeout: int,
+) -> None:
+    config_path = Path(__file__).parents[1] / "configs" / config_name
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    assert server_config["runner_name"] == runner_name
+    assert server_config["max_steps"] == max_steps
+    assert server_config["max_tokens"] == max_tokens
+    assert server_config["task_timeout"] == task_timeout
+
+
+def test_omni_mini_parity_overlay_matches_internal_scaffold() -> None:
+    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_omni_mini_parity.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+
+    assert server_config["agent_class_path"].endswith(".NemotronV3Agent")
+    assert server_config["max_trajectory_length"] == 1
+    assert server_config["sleep_after_execution"] == 5.0
+    assert server_config["reward_mode"] == "raw"
+    assert server_config["agent_kwargs"]["max_image_history_length"] == 1
+
+
+def test_omni_mini_overlay_enables_hosted_reasoning_template() -> None:
+    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_omni_mini.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    chat_template = config["policy_model"]["responses_api_models"]["openai_model"]["extra_body"][
+        "chat_template_kwargs"
+    ]
+    assert chat_template == {"enable_thinking": True, "reasoning_budget": 4096}
 
 
 @pytest.mark.parametrize(

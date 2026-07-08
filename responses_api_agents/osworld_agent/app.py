@@ -16,11 +16,15 @@ that nothing else uses.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import json
 import logging
+import os
+import re
 import sys
 from asyncio import Semaphore
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import ray
 from fastapi import Body
@@ -49,6 +53,31 @@ from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NA
 LOG = logging.getLogger("nemo_gym.osworld_agent")
 
 
+def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) -> str:
+    """Resolve the model that the rollout actually sends to the policy endpoint.
+
+    Deployment snapshots may retain a stale ``policy_model_name`` in env.yaml.
+    Local Omni runs already use ``OMNI_MINI_VLLM_MODEL`` to configure the
+    outbound vLLM adapter, so prefer that runtime source of truth and surface a
+    warning when it disagrees with the global config instead of mislabelling
+    every rollout (for example, as Claude Opus).
+    """
+
+    configured_name = str(global_config.get("policy_model_name") or "").strip()
+    runtime_name = os.environ.get("OSWORLD_POLICY_MODEL_NAME", "").strip()
+    if not runtime_name and runner_name == "omni_mini_agent":
+        runtime_name = os.environ.get("OMNI_MINI_VLLM_MODEL", "").strip()
+    if runtime_name:
+        if configured_name and configured_name != runtime_name:
+            LOG.warning(
+                "Using runtime policy model %s instead of stale global policy_model_name %s",
+                runtime_name,
+                configured_name,
+            )
+        return runtime_name
+    return configured_name
+
+
 class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     """OSWorld agent config.
 
@@ -72,9 +101,11 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
-    mem_limit_mb: int = 16384  # cgroup memory cap for the VM container (~16 GB)
+    mem_limit_mb: int = 0  # clean upstream Docker controls QEMU/container resources internally
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
     task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    evaluator_disable_gpu: bool = True
+    reward_mode: Literal["binary", "raw"] = "binary"
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -196,7 +227,7 @@ def _build_messages_model_fn(
 
     client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
 
-    def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> str:
+    def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Any:
         create_kwargs: Dict[str, Any] = {
             "model": payload.get("model") or model_name,
             "messages": messages,
@@ -206,9 +237,144 @@ def _build_messages_model_fn(
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
         resp = client.chat.completions.create(**create_kwargs)
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        if payload.get("_nemo_gym_require_stop") and choice.finish_reason not in {"stop", "tool_calls"}:
+            raise ValueError(f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}")
+        return _normalize_chat_message(
+            choice.message,
+            structured=bool(payload.get("_nemo_gym_return_message")),
+        )
 
     return _call
+
+
+def _recover_first_fenced_action(content: str) -> str | None:
+    """Recover the first code block from a malformed serialized text-part list."""
+
+    stripped = content.strip()
+    if not stripped.startswith("[") or "text" not in stripped[:256].lower():
+        return None
+    fence_start = stripped.find("```")
+    if fence_start < 0:
+        return None
+    fence_end = stripped.find("```", fence_start + 3)
+    if fence_end < 0:
+        return None
+    fence = stripped[fence_start : fence_end + 3]
+    return "## Action:\nExecute the first generated action.\n## Code:\n" + fence
+
+
+def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
+    """Recover one executable turn without serializing structured content.
+
+    The external-vLLM path can expose Chat Completions content as a list of
+    text parts.  ``str(list)`` preserves literal ``\\n`` escapes inside code
+    fences, producing invalid Python actions.  Some model responses also put
+    several complete actions in separate text parts.  OSWorld executes one
+    action per observation, so retain text only through the first complete
+    fenced block instead of accidentally selecting the final ``terminate``.
+    """
+
+    if _depth > 4:
+        raise ValueError("Chat content nesting exceeds four levels")
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped.startswith("["):
+            decoded: Any = None
+            try:
+                decoded = ast.literal_eval(stripped)
+            except (SyntaxError, ValueError):
+                try:
+                    decoded = json.loads(stripped)
+                except json.JSONDecodeError:
+                    pass
+            if isinstance(decoded, list):
+                LOG.warning("Recovering serialized chat content containing %d parts", len(decoded))
+                return _normalize_chat_content(decoded, _depth=_depth + 1)
+            recovered = _recover_first_fenced_action(stripped)
+            if recovered:
+                LOG.warning("Recovering first action from malformed serialized chat content")
+                return recovered
+        return content
+    if not isinstance(content, list):
+        raise ValueError(f"Unsupported chat content type: {type(content).__name__}")
+
+    text_parts: List[str] = []
+    for part in content:
+        part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+        if part_type not in {"text", "output_text"} or not isinstance(text, str):
+            raise ValueError(f"Unsupported chat content part: {part!r}")
+        text_parts.append(_normalize_chat_content(text, _depth=_depth + 1))
+    if not text_parts:
+        raise ValueError("Chat content contains no text parts")
+    if len(text_parts) == 1:
+        return text_parts[0]
+
+    candidate = ""
+    for text in text_parts:
+        candidate += ("\n" if candidate else "") + text
+        fence = re.search(r"```(?:code|python|json)?\s*.*?```", candidate, re.DOTALL | re.IGNORECASE)
+        if fence:
+            candidate = candidate[: fence.end()].strip()
+            break
+    else:
+        raise ValueError(f"No complete code block in {len(text_parts)} chat text parts")
+
+    if not re.search(r"^\s*##\s*Action\s*:?", candidate, re.MULTILINE | re.IGNORECASE):
+        candidate = "## Action:\n" + candidate
+    LOG.warning(
+        "Model returned %d chat text parts; executing only the first complete action",
+        len(text_parts),
+    )
+    return candidate
+
+
+def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
+    """Normalize OpenAI native tool calls for text-protocol OSWorld agents."""
+
+    content = _normalize_chat_content(message.content or "")
+
+    # Tool-aware vLLM deployments can return native OpenAI tool_calls even
+    # when the OSWorld agent scaffold expects textual <tool_call> blocks.
+    # Normalize at the Gym transport boundary instead of patching OSWorld.
+    textual_tool_calls: List[str] = []
+    for tool_call in getattr(message, "tool_calls", None) or []:
+        function = getattr(tool_call, "function", None)
+        name = getattr(function, "name", None)
+        raw_arguments = getattr(function, "arguments", None)
+        if not name:
+            continue
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(arguments, dict):
+            continue
+        textual_tool_calls.append(
+            "<tool_call>\n" + json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False) + "\n</tool_call>"
+        )
+    if textual_tool_calls and "<tool_call>" not in content:
+        content = "\n".join(part for part in [content, *textual_tool_calls] if part)
+
+    if structured:
+        model_extra = getattr(message, "model_extra", None) or {}
+        reasoning = getattr(message, "reasoning_content", None) or model_extra.get("reasoning_content") or ""
+        # Gym's external-vLLM proxy must return a schema-valid OpenAI message,
+        # so it wraps vLLM's separate reasoning field in <think> tags. Recover
+        # that field here for NemotronV3Agent, matching a direct vLLM call.
+        if not reasoning:
+            think_match = re.match(
+                r"^\s*<think(?:ing)?>\s*(.*?)\s*</think(?:ing)?>\s*",
+                content,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if think_match:
+                reasoning = think_match.group(1).strip()
+                content = content[think_match.end() :]
+        content = _normalize_chat_content(content)
+        return {"content": content, "reasoning_content": reasoning}
+    return content
 
 
 def _format_observation(obs: Dict[str, Any], instruction: str, *, is_current: bool) -> List[Dict[str, Any]]:
@@ -286,6 +452,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "finished": result.finished,
         "error": result.error,
         "mask_sample": result.mask_sample,
+        "artifact_dir": result.artifact_dir,
         "steps": [
             {
                 "step": s.step,
@@ -326,7 +493,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             model_server_name = self.config.model_server.name
             global_config_dict = ServerClient.load_from_global_config().global_config_dict
             model_server_config = get_first_server_config_dict(global_config_dict, model_server_name)
-            policy_model_name = global_config_dict.get("policy_model_name", "")
+            policy_model_name = _resolve_policy_model_name(global_config_dict, self.config.runner_name)
             policy_api_key = global_config_dict.get("policy_api_key", "")
             policy_base_url = global_config_dict.get("policy_base_url", "")
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
@@ -348,6 +515,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "mem_limit_mb": self.config.mem_limit_mb,
                 "step_timeout": self.config.step_timeout,
                 "task_timeout": self.config.task_timeout,
+                "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
+                "reward_mode": self.config.reward_mode,
                 "base_url": base_url,
                 "policy_base_url": policy_base_url,
                 "model_name": policy_model_name,
@@ -416,6 +585,8 @@ def _build_response(
     metadata["osworld_finished"] = result.get("finished", False)
     metadata["osworld_error"] = result.get("error")
     metadata["osworld_steps"] = result.get("steps", [])
+    metadata["osworld_artifact_dir"] = result.get("artifact_dir")
+    metadata["osworld_model_name"] = policy_model_name
 
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,

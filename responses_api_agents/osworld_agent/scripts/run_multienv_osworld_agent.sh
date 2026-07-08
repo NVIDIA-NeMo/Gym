@@ -27,9 +27,12 @@ NUM_REPEATS="${NUM_REPEATS:-1}"
 LIMIT="${LIMIT:-4}"
 NUM_ENVS="${NUM_ENVS:-4}"
 NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
+RESUME_FROM_CACHE="${RESUME_FROM_CACHE:-0}"
 START_NG_RUN="${START_NG_RUN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
+TASK_ARTIFACTS="${TASK_ARTIFACTS:-1}"
+TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-${RUN_DIR}/task-artifacts}"
 VIDEO_SAMPLE_PER="${VIDEO_SAMPLE_PER:-100}"
 VIDEO_SAMPLE_COUNT="${VIDEO_SAMPLE_COUNT:-4}"
 VIDEO_SAMPLE_SEED="${VIDEO_SAMPLE_SEED:-${RUN_TAG}}"
@@ -48,6 +51,13 @@ POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 MAX_STEPS="${MAX_STEPS:-}"
 
 mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")"
+
+if [[ "${TASK_ARTIFACTS}" == "1" ]]; then
+    export OSWORLD_TASK_ARTIFACT_ROOT="${OSWORLD_TASK_ARTIFACT_ROOT:-${TASK_ARTIFACT_ROOT}}"
+    mkdir -p "${OSWORLD_TASK_ARTIFACT_ROOT}"
+else
+    unset OSWORLD_TASK_ARTIFACT_ROOT
+fi
 
 if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     export OSWORLD_RECORD_VIDEO_DIR="${OSWORLD_RECORD_VIDEO_DIR:-${RUN_DIR}/videos}"
@@ -140,11 +150,14 @@ POLICY_MODEL_NAME=${POLICY_MODEL_NAME}
 LIMIT=${LIMIT}
 NUM_ENVS=${NUM_ENVS}
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL}
+RESUME_FROM_CACHE=${RESUME_FROM_CACHE}
 NUM_REPEATS=${NUM_REPEATS}
 MAX_STEPS=${MAX_STEPS}
 MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS}
 TEMPERATURE=${TEMPERATURE}
 RECORD_VIDEO=${RECORD_VIDEO}
+TASK_ARTIFACTS=${TASK_ARTIFACTS}
+OSWORLD_TASK_ARTIFACT_ROOT=${OSWORLD_TASK_ARTIFACT_ROOT:-}
 OSWORLD_RECORD_VIDEO_DIR=${OSWORLD_RECORD_VIDEO_DIR:-}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
@@ -162,6 +175,7 @@ echo "output:      ${OUTPUT_JSONL}"
 echo "limit:       ${LIMIT}"
 echo "num envs:    ${NUM_ENVS}"
 echo "parallel:    ${NUM_SAMPLES_IN_PARALLEL}"
+echo "resume:      ${RESUME_FROM_CACHE}"
 if [[ -n "${MAX_STEPS}" ]]; then
     echo "max steps:   ${MAX_STEPS}"
 fi
@@ -170,6 +184,9 @@ if [[ -n "${POLICY_MODEL_NAME}" ]]; then
 fi
 if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     echo "video dir:   ${OSWORLD_RECORD_VIDEO_DIR}"
+fi
+if [[ "${TASK_ARTIFACTS}" == "1" ]]; then
+    echo "task logs:   ${OSWORLD_TASK_ARTIFACT_ROOT}"
 fi
 if [[ "${RECORD_VIDEO}" == "sample" ]]; then
     echo "video sample:${OSWORLD_RECORD_VIDEO_TASK_IDS_FILE} (${VIDEO_SAMPLE_COUNT}/${VIDEO_SAMPLE_PER}, seed=${VIDEO_SAMPLE_SEED})"
@@ -202,6 +219,10 @@ collect_cmd=(
 
 if [[ "${LIMIT}" != "null" ]]; then
     collect_cmd+=("+limit=${LIMIT}")
+fi
+
+if [[ "${RESUME_FROM_CACHE}" == "1" ]]; then
+    collect_cmd+=("+resume_from_cache=true")
 fi
 
 echo "--- ng_run command ---"
@@ -306,6 +327,9 @@ PY
 
 echo
 echo "Run dir: ${RUN_DIR}"
+if [[ "${TASK_ARTIFACTS}" == "1" ]]; then
+    echo "Task artifacts: ${OSWORLD_TASK_ARTIFACT_ROOT}"
+fi
 if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
     echo "Videos:  ${OSWORLD_RECORD_VIDEO_DIR}"
 fi

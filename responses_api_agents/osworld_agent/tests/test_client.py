@@ -146,6 +146,53 @@ class FakeM3Agent:
         return "M3 response", ["DONE"]
 
 
+class FakeNemotronAgent:
+    instances: List["FakeNemotronAgent"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.reset_calls = 0
+        FakeNemotronAgent.instances.append(self)
+
+    def reset(self, *_args: Any, **_kwargs: Any) -> None:
+        self.reset_calls += 1
+
+    def predict(self, instruction: str, obs: Dict[str, Any]):
+        response = self.call_llm(
+            {
+                "model": self.kwargs["model"],
+                "messages": [{"role": "user", "content": instruction}],
+                "_nemo_gym_return_message": True,
+            },
+            self.kwargs["model"],
+        )
+        assert obs["screenshot"] == b"not-black"
+        return response["content"], ["DONE"], {"thought": response["reasoning_content"]}
+
+
+class FakeQwenAgent:
+    instances: List["FakeQwenAgent"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.reset_calls = 0
+        FakeQwenAgent.instances.append(self)
+
+    def reset(self, *_args: Any, **_kwargs: Any) -> None:
+        self.reset_calls += 1
+
+    def predict(self, instruction: str, obs: Dict[str, Any]):
+        response = self.call_llm(
+            {
+                "model": self.kwargs["model"],
+                "messages": [{"role": "user", "content": instruction}],
+            },
+            self.kwargs["model"],
+        )
+        assert obs["screenshot"] == b"not-black"
+        return response, ["pyautogui.click(1, 2)", "pyautogui.press('enter')", "DONE"]
+
+
 class FakePointerEnv(FakeEnv):
     def evaluate(self, eval_logger: Any) -> float:
         assert eval_logger is not None
@@ -158,6 +205,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakePromptAgent.next_actions = [{"action_type": "DONE"}]
     FakePointerAgent.instances.clear()
     FakeM3Agent.instances.clear()
+    FakeNemotronAgent.instances.clear()
+    FakeQwenAgent.instances.clear()
 
     def fake_load_attr(import_path: str):
         if import_path == "fake.FakeEnv":
@@ -170,6 +219,10 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
             return FakePointerAgent
         if import_path == "fake.FakeM3Agent":
             return FakeM3Agent
+        if import_path == "fake.FakeNemotronAgent":
+            return FakeNemotronAgent
+        if import_path == "fake.FakeQwenAgent":
+            return FakeQwenAgent
         raise AssertionError(f"unexpected import path: {import_path}")
 
     monkeypatch.setattr(osworld_client, "load_attr", fake_load_attr)
@@ -268,6 +321,24 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert FakeEnv.instances[0].actions == ["DONE"]
 
 
+def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda _self: 0.4)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "partial-score", "instruction": "Finish the task."},
+        model_fn=lambda _system, _instruction, _history: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+        reward_mode="raw",
+    )
+
+    assert result.score == 0.4
+    assert result.reward == 0.4
+    assert result.finished is True
+
+
 def test_recording_can_be_limited_to_selected_task_ids(monkeypatch, tmp_path: Path) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     monkeypatch.setenv("OSWORLD_RECORD_VIDEO_DIR", str(tmp_path / "videos"))
@@ -299,6 +370,78 @@ def test_recording_can_be_limited_to_selected_task_ids(monkeypatch, tmp_path: Pa
     assert FakeEnv.instances[0].controller.ended_paths == [str(tmp_path / "videos" / "record-me.mp4")]
     assert FakeEnv.instances[1].controller.started == 0
     assert FakeEnv.instances[1].controller.ended_paths == []
+
+
+def test_task_artifacts_capture_logs_trajectory_screenshots_and_result(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    artifact_root = tmp_path / "task-artifacts"
+    monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", str(artifact_root))
+    adapter_logger = osworld_client.logging.getLogger("nemo_gym.osworld_agent")
+    handlers_before = list(adapter_logger.handlers)
+
+    result = osworld_client.run_osworld_task(
+        {
+            "id": "artifact-task",
+            "snapshot": "chrome",
+            "instruction": "Capture complete evidence.",
+        },
+        model_fn=lambda _system, _instruction, _history: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        policy_model_name="model-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    artifact_dir = artifact_root / "chrome" / "artifact-task"
+    assert result.artifact_dir == str(artifact_dir)
+    assert adapter_logger.handlers == handlers_before
+    expected_files = {
+        "manifest.json",
+        "result.json",
+        "run.json",
+        "runtime.log",
+        "step_000.png",
+        "step_001.png",
+        "task.json",
+        "traj.jsonl",
+        "worker.log",
+    }
+    assert expected_files.issubset({path.name for path in artifact_dir.iterdir()})
+
+    trajectory = [
+        osworld_client.json.loads(line)
+        for line in (artifact_dir / "traj.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["event"] for record in trajectory] == ["initial_state", "step", "evaluation"]
+    assert trajectory[1]["actions"] == ["DONE"]
+    assert trajectory[1]["screenshot_file"] == "step_001.png"
+
+    result_payload = osworld_client.json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
+    assert result_payload["reward"] == 1.0
+    assert result_payload["score"] == 1.0
+    assert result_payload["step_count"] == 1
+    assert "Starting OSWorld rollout" in (artifact_dir / "worker.log").read_text(encoding="utf-8")
+    assert "Starting OSWorld rollout" in (artifact_dir / "runtime.log").read_text(encoding="utf-8")
+
+
+def test_task_artifact_directory_is_collision_safe(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", str(tmp_path))
+    task = {"id": "same-task", "snapshot": "calc", "instruction": "Repeat safely."}
+    kwargs = {
+        "model_fn": lambda _system, _instruction, _history: "```DONE```",
+        "env_class_path": "fake.FakeEnv",
+        "sleep_after_execution": 0,
+        "task_timeout": 10,
+    }
+
+    first = osworld_client.run_osworld_task(task, **kwargs)
+    second = osworld_client.run_osworld_task(task, **kwargs)
+
+    assert first.artifact_dir == str(tmp_path / "calc" / "same-task")
+    assert second.artifact_dir is not None
+    assert second.artifact_dir != first.artifact_dir
+    assert Path(second.artifact_dir).name.startswith("same-task--")
 
 
 def test_prompt_agent_runner_routes_native_agent_messages_to_policy_model(monkeypatch) -> None:
@@ -487,6 +630,194 @@ def test_m3_agent_runner_uses_messages_endpoint_and_native_predict_loop(monkeypa
     assert Path(agent.api_log_dirs[0]).name == "api_logs"
     assert Path(agent.api_log_dirs[0]).parent.name.endswith("-task-m3")
     assert Path(agent.api_log_dirs[0]).is_relative_to(tmp_path)
+
+
+def test_omni_mini_runner_uses_gym_messages_transport(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls: List[Dict[str, Any]] = []
+
+    def messages_model_fn(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, str]:
+        calls.append({"messages": messages, "payload": payload})
+        return {"content": "Nemotron response", "reasoning_content": "Inspect then finish."}
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-omni-mini", "instruction": "Use the Nemotron Omni scaffold."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("Nemotron should use messages_model_fn")),
+        runner_name="omni_mini_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=messages_model_fn,
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        policy_max_tokens=8192,
+        policy_temperature=0.6,
+        policy_top_p=0.95,
+        max_steps=100,
+        max_trajectory_length=3,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.finished is True
+    assert result.steps[0].model_text == "Nemotron response"
+    assert result.steps[0].actions == ["DONE"]
+    assert result.steps[0].info["agent"]["thought"] == "Inspect then finish."
+    assert calls[0]["payload"]["_nemo_gym_return_message"] is True
+    assert FakeNemotronAgent.instances[0].kwargs["model"] == "nemotron-3-nano-omni-under-test"
+    assert FakeNemotronAgent.instances[0].kwargs["max_steps"] == 100
+
+
+def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    responses = [
+        "No tool call yet.",
+        '<tool_call>\n{"name":"computer_use","arguments":{"action":"left_click"}}\n</tool_call>',
+    ]
+    calls = 0
+
+    def messages_model_fn(_messages: List[Dict[str, Any]], _payload: Dict[str, Any]) -> str:
+        nonlocal calls
+        response = responses[calls]
+        calls += 1
+        return response
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-qwen", "instruction": "Use Qwen3-Omni."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("Qwen should use messages_model_fn")),
+        runner_name="qwen3_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeQwenAgent",
+        agent_kwargs={"model_call_retries": 3, "require_tool_call": True},
+        messages_model_fn=messages_model_fn,
+        policy_model_name="qwen3-omni-under-test",
+        policy_max_tokens=32768,
+        policy_temperature=0.0,
+        policy_top_p=0.9,
+        max_steps=100,
+        max_trajectory_length=4,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert calls == 2
+    assert result.reward == 1.0
+    assert result.steps[0].actions == ["pyautogui.click(1, 2)\npyautogui.press('enter')", "DONE"]
+    assert FakeEnv.instances[0].actions == ["pyautogui.click(1, 2)\npyautogui.press('enter')", "DONE"]
+    qwen = FakeQwenAgent.instances[0]
+    assert qwen.kwargs["model"] == "qwen3-omni-under-test"
+    assert qwen.kwargs["history_n"] == 4
+
+
+def test_stage_setup_cache_links_task_artifacts_without_patching_osworld(monkeypatch, tmp_path: Path) -> None:
+    task_id = "task-with-prestaged-files"
+    source_dir = tmp_path / "prestage" / task_id
+    source_dir.mkdir(parents=True)
+    (source_dir / "reference.pdf").write_bytes(b"pdf")
+    monkeypatch.setenv("OSWORLD_SETUP_CACHE_DIR", str(tmp_path / "prestage"))
+
+    linked = osworld_client._stage_setup_cache(
+        {"id": task_id, "instruction": "Use the reference.", "config": []},
+        str(tmp_path / "cache"),
+    )
+
+    destination = tmp_path / "cache" / task_id / "reference.pdf"
+    assert linked == 1
+    assert destination.is_symlink()
+    assert destination.read_bytes() == b"pdf"
+
+
+def test_stage_setup_cache_supports_flat_spreadsheet_download_cache(monkeypatch, tmp_path: Path) -> None:
+    task_id = "spreadsheetbench-task"
+    url = "https://example.test/input.xlsx"
+    destination_path = "/home/oai/share/input.xlsx"
+    cache_name = f"{osworld_client.uuid.uuid5(osworld_client.uuid.NAMESPACE_URL, url)}_input.xlsx"
+    source_dir = tmp_path / "spreadsheet-prestage"
+    source_dir.mkdir()
+    (source_dir / cache_name).write_bytes(b"xlsx")
+    monkeypatch.setenv("SPREADSHEETBENCH_SETUP_CACHE_DIR", str(source_dir))
+
+    linked = osworld_client._stage_setup_cache(
+        {
+            "id": task_id,
+            "config": [
+                {
+                    "type": "download",
+                    "parameters": {"files": [{"url": url, "path": destination_path}]},
+                }
+            ],
+        },
+        str(tmp_path / "cache"),
+    )
+
+    destination = tmp_path / "cache" / task_id / cache_name
+    assert linked == 1
+    assert destination.is_symlink()
+    assert destination.read_bytes() == b"xlsx"
+
+
+def test_extension_alias_patch_updates_both_metric_exports(monkeypatch) -> None:
+    desktop_env = ModuleType("desktop_env")
+    evaluators = ModuleType("desktop_env.evaluators")
+    metrics = ModuleType("desktop_env.evaluators.metrics")
+    chrome_metrics = ModuleType("desktop_env.evaluators.metrics.chrome")
+    calls: List[tuple[Any, Any]] = []
+
+    def original(installed: Any, expected: Any) -> float:
+        calls.append((installed, expected))
+        return float(installed == expected["expected"])
+
+    chrome_metrics.is_expected_installed_extensions = original
+    metrics.is_expected_installed_extensions = original
+    metrics.chrome = chrome_metrics
+    evaluators.metrics = metrics
+    desktop_env.evaluators = evaluators
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics", metrics)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics.chrome", chrome_metrics)
+
+    osworld_client._patch_extension_name_aliases()
+    osworld_client._patch_extension_name_aliases()
+
+    result = metrics.is_expected_installed_extensions(
+        ["Speechify — Text to Speech"],
+        {"expected": ["Speechify — Voice AI Assistant"]},
+    )
+    assert result == 1.0
+    assert calls == [
+        (
+            ["Speechify — Voice AI Assistant"],
+            {"expected": ["Speechify — Voice AI Assistant"]},
+        )
+    ]
+    assert metrics.is_expected_installed_extensions is chrome_metrics.is_expected_installed_extensions
+
+
+def test_evaluator_gpu_visibility_is_restored(monkeypatch) -> None:
+    observed_cuda_values: List[str | None] = []
+    observed_easyocr_gpu: List[bool] = []
+    easyocr_module = ModuleType("easyocr")
+
+    def reader(_languages: List[str], *, gpu: bool = True) -> object:
+        observed_easyocr_gpu.append(gpu)
+        return object()
+
+    easyocr_module.Reader = reader
+    monkeypatch.setitem(sys.modules, "easyocr", easyocr_module)
+
+    class Env:
+        def evaluate(self) -> float:
+            observed_cuda_values.append(osworld_client.os.environ.get("CUDA_VISIBLE_DEVICES"))
+            easyocr_module.Reader(["en"], gpu=True)
+            return 1.0
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+
+    assert osworld_client._evaluate_osworld_env(Env(), osworld_client.LOG, disable_gpu=True) == 1.0
+    assert observed_cuda_values == [""]
+    assert observed_easyocr_gpu == [False]
+    assert easyocr_module.Reader is reader
+    assert osworld_client.os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
 
 
 def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missing(monkeypatch, tmp_path) -> None:

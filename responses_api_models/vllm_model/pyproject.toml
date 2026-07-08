@@ -19,6 +19,10 @@ version = "0.2.0rc0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
+    # ng_run, the OSWorld agent server, and this proxy all join one Ray
+    # cluster. Pin the server venv to the root/agent version so uv cannot
+    # independently upgrade only this process to a newer Ray protocol.
+    "ray==2.55.1",
 ]
 
 [build-system]

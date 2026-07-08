@@ -1,0 +1,26 @@
+# External vLLM transport for Nemotron 3 Nano Omni ("Omni Mini").
+#
+# vLLM is intentionally managed outside ng_run: the B200 allocation and model
+# process can survive Gym/Ray/OSWorld restarts. Override the three values with
+# environment variables; no env.yaml rewrite is needed.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:OMNI_MINI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+      api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}
+      model: ${oc.env:OMNI_MINI_VLLM_MODEL,nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning}
+      return_token_id_information: false
+      # The vLLM server must be started with --reasoning-parser nemotron_v3.
+      # Gym converts its separate reasoning field back into <think>...</think>
+      # so the adapter-owned agent sees the same contract as the hosted API.
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      replace_developer_role_with_system: false
+      sequential_reasoning_allowed: true
+      is_responses_native: false
+      # The public checkpoint's bundled template enables thinking by default.
+      # Keep this null to match internal-osworld-adapter-nano-omni's validated TP8 service.
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

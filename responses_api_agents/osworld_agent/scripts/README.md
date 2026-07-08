@@ -4,18 +4,58 @@ Host-prep helpers plus a native `PromptAgent` smoke runner.
 
 | Script | When to use it | What it does |
 |---|---|---|
-| [`bringup_local_host.sh`](bringup_local_host.sh) | **Mode A** — `ng_run` and the docker VM host are the **same** machine | apt-installs docker / git / curl / unzip / ffmpeg / xvfb / tigervnc-viewer · enables the docker daemon · adds `$USER` to the `docker` group · installs `uv` · symlinks `uv` into `/usr/local/bin` (so `ng_run`'s non-interactive `bash -c "uv run …"` subshells can find it) · pre-flight verify (docker daemon up, `/dev/kvm` present, uv visible to `bash -c`) |
-| [`bringup_remote_host.sh`](bringup_remote_host.sh) | **Mode B** — controller runs locally, but the docker VM host is a **separate** machine reached via SSH | passwordless-SSH check · same apt installs over SSH · stages `Ubuntu.qcow2` via rsync · `docker pull happysixd/osworld-docker` on the remote · pre-flight verify (kvm + image + ports free on the remote) |
+| [`bringup_local_host.sh`](bringup_local_host.sh) | Colossus/local Docker — `ng_run` and the Docker VM host are the **same** machine | apt-installs docker / git / curl / unzip / ffmpeg / xvfb / tigervnc-viewer · enables the docker daemon · adds `$USER` to the `docker` group · installs `uv` · symlinks `uv` into `/usr/local/bin` (so `ng_run`'s non-interactive `bash -c "uv run …"` subshells can find it) · pre-flight verify (docker daemon up, `/dev/kvm` present, uv visible to `bash -c`) |
 | [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Quick functional smoke for OSWorld's native `mm_agents.agent.PromptAgent` path | starts `ng_run` with `osworld_agent_native_prompt_agent.yaml`, collects one rollout from `data/example.jsonl`, and prints a compact reward/step/error summary |
 | [`run_multienv_osworld_agent.sh`](run_multienv_osworld_agent.sh) | OSWorld-style multi-environment runner through Gym | starts `ng_run`, waits for the agent/model servers, then runs `ng_collect_rollouts` with `NUM_ENVS` mapped to `+num_samples_in_parallel`; optionally records per-task VM mp4s |
 | [`run_m3_multienv.sh`](run_m3_multienv.sh) | MiniMax M3 through the official OSWorld M3Agent | selects the M3 Gym runner, InferenceHub model id, and leaderboard-oriented M3 config before delegating to `run_multienv_osworld_agent.sh` |
+| [`launch_omni_mini_vllm.sh`](launch_omni_mini_vllm.sh) | B200/H200/H100-80GB model node | starts the official Omni Mini BF16 checkpoint with vLLM 0.20.0 and the Nemotron reasoning parser |
+| [`probe_omni_mini_vllm.py`](probe_omni_mini_vllm.py) | Before a rollout | checks `/models` and a real one-image Chat Completions request |
+| [`run_omni_mini_local_vllm.sh`](run_omni_mini_local_vllm.sh) | 100-step Omni Mini parity run | points Gym's external-vLLM adapter at the endpoint, probes it, then runs clean OSWorld with the internal-compatible prompt/history/sleep settings |
+| [`inspect_prenyx_b200.sh`](inspect_prenyx_b200.sh) | Prenyx login node | reports B200 partitions, Slurm associations, and current jobs without changing cluster state |
+| [`start_omni_mini_vllm_prenyx.sh`](start_omni_mini_vllm_prenyx.sh) | After a Prenyx allocation reaches RUNNING | attaches an Enroot vLLM step to the allocation, exposes one B200, and prints the compute-node endpoint |
+| [`watch_omni_mini_vllm_prenyx.sh`](watch_omni_mini_vllm_prenyx.sh) | While a Prenyx job/assets are pending | waits for the allocation and downloads, starts vLLM, then runs model-list and one-image probes |
 
 The host-prep scripts stop short of cloning the repo, running `uv sync`, or
 prestaging `Ubuntu.qcow2`. Keep private configuration and VM images outside
 Git, then expose them to the checkout through `env.yaml` and
 `docker_vm_data/Ubuntu.qcow2` before starting the Gym servers.
 
-## Mode A flow (using `bringup_local_host.sh`)
+## Omni Mini on an external B200 vLLM
+
+Keep inference separate from Gym/Ray so an OSWorld restart does not unload the
+model. On the allocated B200 node (vLLM must be exactly 0.20.0):
+
+```bash
+bash responses_api_agents/osworld_agent/scripts/launch_omni_mini_vllm.sh
+```
+
+On the Colossus Docker/KVM host, use an address reachable from that host:
+
+```bash
+OMNI_MINI_VLLM_BASE_URL=http://B200_NODE:8000/v1 \
+  bash responses_api_agents/osworld_agent/scripts/run_omni_mini_local_vllm.sh
+```
+
+The reference-aligned runner defaults to 361 no-GDrive inputs, four VMs, 100
+steps, five seconds after each action, internal prompt, full text history,
+current plus up to two historical screenshots, raw reward,
+and resume enabled. Set `LIMIT=1 NUM_ENVS=1 RECORD_VIDEO=1` for the first real
+smoke. Do not expose port 8000 broadly; use cluster routing or an SSH tunnel
+when the Prenyx compute network is not directly reachable from Colossus.
+
+Prenyx represents B200 as a node feature rather than a GPU GRES, so request a
+whole exclusive node with `--constraint=b200`. Once its allocation is running
+and the model/image caches are ready:
+
+```bash
+bash responses_api_agents/osworld_agent/scripts/start_omni_mini_vllm_prenyx.sh JOB_ID
+```
+
+This uses the complete eight-GPU B200 node with tensor parallel size 8, matching
+`../internal-osworld-adapter-nano-omni/computelab/launch_vllm_b300_tp8.sbatch`. The public BF16
+checkpoint could fit on one B200, but TP1 would no longer be that comparison.
+
+## Colossus/local Docker flow (using `bringup_local_host.sh`)
 
 ```bash
 # 1. On the box that will host ng_run + docker:
@@ -130,22 +170,24 @@ NUM_ENVS=4 LIMIT=4 NUM_REPEATS=2 MAX_STEPS=3 \
 bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
-## Mode B flow (using `bringup_remote_host.sh`)
+For long runs, enable rollout-cache resume so restarting the same command and
+output path skips rows already present in `rollouts.jsonl`:
 
 ```bash
-# 1. From your controller machine, prep the remote docker host:
-bash bringup_remote_host.sh user@remote-host /local/path/to/Ubuntu.qcow2
-
-# 2. On the controller, point the agent at the remote:
-export OSWORLD_REMOTE_HOST=user@remote-host
-# export OSWORLD_REMOTE_SSH_KEY=~/.ssh/id_ed25519   # optional
-
-# 3. In configs/osworld_agent.yaml, set:
-#    provider_name: remote_docker
-
-# 4. Run ng_run + ng_collect_rollouts as usual.
+INPUT_JSONL=responses_api_agents/osworld_agent/data/test_all.jsonl \
+LIMIT=null NUM_ENVS=4 RESUME_FROM_CACHE=1 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
-See the main [`README.md`](../README.md) "Deployment Modes" section for
-the architectural difference between Mode A and Mode B, including which
-ports flow where and why SSH was picked over docker-over-TCP.
+Keep `RUN_DIR`, `OUTPUT_JSONL`, input ordering, `NUM_REPEATS`, and the video
+sampling seed unchanged when resuming. The runner also writes per-task
+`worker.log`, `runtime.log`, `traj.jsonl`, screenshots, VM execution traces,
+and result metadata under `${RUN_DIR}/task-artifacts`. Set `TASK_ARTIFACTS=0`
+to disable this, or `TASK_ARTIFACT_ROOT=/shared/path` to move it.
+
+## Legacy remote-host helper
+
+`bringup_remote_host.sh` remains in the branch for historical deployments,
+but it is not part of the clean-upstream configuration: upstream OSWorld
+`main` has no `remote_docker` provider. The supported Colossus path runs the
+built-in `docker` provider on the same worker as Gym.

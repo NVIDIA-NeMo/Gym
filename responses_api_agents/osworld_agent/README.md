@@ -15,6 +15,7 @@ OS-level tasks).
 - [First-Run Cache Acquisition](#first-run-cache-acquisition)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Per-task logs and artifacts](#per-task-logs-and-artifacts)
 - [Recording rollout videos](#recording-rollout-videos)
 - [Troubleshooting](#troubleshooting)
 - [Reward Profiling](#reward-profiling)
@@ -23,8 +24,8 @@ OS-level tasks).
 
 ## Overview
 
-OSWorld ships with a complete agent harness: a VM provider (Docker /
-Apptainer / VMware / VirtualBox / AWS / Azure), a multi-step
+OSWorld ships with a complete agent harness: built-in VM providers including
+Docker, a multi-step
 observation→action loop, and a per-task evaluator. This agent wraps
 that harness at the `/run` boundary — one request runs one full rollout
 and returns the evaluator's score as a NeMo Gym `BaseVerifyResponse`.
@@ -70,9 +71,8 @@ ng_collect_rollouts
 ┌──────────────────────────────────────────────────────────┐
 │ run_osworld_task (sync, one Ray task per rollout)        │
 │                                                          │
-│   1. DesktopEnv(provider_name=…)                         │
-│      - Apptainer: `apptainer instance start desktop.sif` │
-│      - Docker:    `docker run happysixd/osworld-docker`  │
+│   1. DesktopEnv(provider_name="docker")                  │
+│      - `docker run happysixd/osworld-docker`             │
 │                                                          │
 │   2. env.reset(task_config)                              │
 │   3. Loop k ≤ max_steps:                                 │
@@ -89,12 +89,12 @@ ng_collect_rollouts
 
 ## Deployment Modes
 
-OSWorld can run in three configurations. Pick based on your hardware and
-scale needs. **For trying it out, use Mode A (local docker)** — `ng_run` +
-`ng_collect_rollouts` work out of the box with no SSH, no remote host, no
-helper scripts.
+The supported target for this adapter is a Colossus worker where Gym and the
+upstream OSWorld Docker provider use the same local Docker daemon. This keeps
+the OSWorld dependency on a clean `xlang-ai/OSWorld` main revision: no NVCF,
+Singularity, Apptainer, or `remote_docker` provider patches are required.
 
-### Mode A — Single machine, local docker (recommended for first run)
+### Colossus/local Docker
 
 Controller (`ng_run` + agent) and the docker VM host are the same box. The
 local Docker daemon is used directly via its unix socket; no SSH, no remote
@@ -152,126 +152,13 @@ This is the simplest path. OSWorld's `docker` provider automatically:
 
 Jump to [Quickstart](#quickstart) for the actual commands.
 
-### Mode B — Remote machine (controller + docker host on different machines)
+### Providers outside this target
 
-Controller node SSHes to a remote host that runs the docker container.
-Useful when:
-
-- Controller nodes can't run docker locally (security policy, no
-  `/dev/kvm`, nested-virt limits)
-- You have many cheap CPU controllers + a few specialized KVM-capable hosts
-- A lease/reservation model is used for VM hosts (HPC clusters, cloud
-  bare-metal)
-
-**Required — install the forked OSWorld that ships the `remote_docker`
-provider**. This provider is not in upstream OSWorld yet; we maintain it on
-a branch of a fork until the PR is merged upstream:
-
-- Fork: <https://github.com/JeffPengCoder/OSWorld>
-- Branch: [`nv-gym`](https://github.com/JeffPengCoder/OSWorld/tree/nv-gym)
-
-In `responses_api_agents/osworld_agent/pyproject.toml`:
-
-```
-osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@nv-gym
-```
-
-Once the upstream PR lands you can switch back to plain
-`xlang-ai/OSWorld`. Mode A (local docker) and any other built-in
-upstream provider do **not** need this fork.
-
-**Architecture**:
-
-```
-┌────────────────────────┐                  ┌──────────────────────────────┐
-│  Controller node       │                  │  Remote host (e.g. clusterX) │
-│  (ng_run + agent)      │                  │  (docker + qemu)             │
-│                        │                  │                              │
-│   1. ssh ──────────────┼─── outbound ─────┼─►  sshd:22                   │
-│   (single ControlMaster session)          │      ↓ (spawn docker run)    │
-│                        │                  │  ┌─────────────────────────┐ │
-│   2. ssh -L tunnels ───┼──── same socket ─┼─▶│ docker container        │ │
-│      (controller opens │                  │  │  qemu + Ubuntu VM       │ │
-│       local ports; ssh │                  │  │  pyautogui_server :5000 │ │
-│       multiplexes them │                  │  │  chromium debug :9222   │ │
-│       through the      │                  │  │  noVNC :8006            │ │
-│       single TCP)      │                  │  │  raw RFB :5900          │ │
-│   localhost:5000       │                  │  │                         │ │
-│   localhost:9222   ◄───┼──────────────────┼──┤  (all traffic via the   │ │
-│   localhost:8006       │   (responses     │  │   same ssh socket)      │ │
-│   localhost:5900       │    flow back     │  └─────────────────────────┘ │
-│                        │    through the   │                              │
-│                        │    same socket,  │   3. mp4 written to /tmp     │
-│                        │    multiplexed)  │      on remote (recording   │
-│   3. scp ◄─────────────┼─── same socket ──┼──   enabled), fetched on     │
-│                        │                  │      task end                │
-└────────────────────────┘                  └──────────────────────────────┘
-       SSH session = ONE outbound TCP        Remote sshd accepts; never
-       (firewall: controller → remote:22)    initiates back to controller
-```
-
-Key properties:
-
-- **All traffic on ONE outbound TCP socket**. Firewall only needs to allow
-  `controller → remote:22`. No other ports.
-- **Remote sshd accepts; never initiates back** to the controller. No
-  reverse callbacks, webhooks, or push messages — controller polls.
-- `pyautogui_server` / `noVNC` / raw RFB / chromium-debug all flow through
-  the SAME ssh `ControlMaster` session, multiplexed by the SSH protocol.
-- mp4 (if `OSWORLD_RECORD_VIDEO_DIR` is set) is recorded on the remote
-  host's `/tmp/` and pulled back via `scp` at task end (still in the same
-  ssh socket).
-
-**One-time setup on the remote host**:
-
-```bash
-# Idempotent helper (recommended) — does ssh-key push if needed, installs
-# docker + ffmpeg + xvfb + tigervnc-viewer, stages qcow2, docker-pulls the
-# image, and runs a pre-flight verify, all in one shot.
-bash responses_api_agents/osworld_agent/scripts/bringup_remote_host.sh \
-    user@remote-host /path/to/Ubuntu.qcow2
-```
-
-Or, if you'd rather run the steps manually:
-
-```bash
-ssh user@remote-host "
-  sudo apt-get install -y docker.io ffmpeg xvfb tigervnc-viewer
-  sudo usermod -aG docker \$USER
-  sudo systemctl enable --now docker
-  docker pull happysixd/osworld-docker:latest
-  mkdir -p ~/osworld-assets
-"
-# Stage the Ubuntu.qcow2 once (multi-GB):
-scp Ubuntu.qcow2 user@remote-host:~/osworld-assets/
-```
-
-**On the controller**:
-
-```bash
-export OSWORLD_REMOTE_HOST=user@remote-host
-# export OSWORLD_REMOTE_SSH_KEY=~/.ssh/id_ed25519  # optional; defaults to first existing id_*
-```
-
-**In `configs/osworld_agent.yaml`** (or via Hydra override on the CLI):
-
-```yaml
-provider_name: remote_docker
-```
-
-See the upstream `RemoteDockerProvider` README in
-`desktop_env/providers/remote_docker/README.md` for the full env-var
-reference, troubleshooting, and per-rollout port-allocation details.
-
-**Why SSH and not plain HTTP / docker-over-TCP?** Technically SSH is not
-required — alternatives include exposing the docker daemon over TLS
-(`tcp://host:2376`), or pre-deploying a long-lived container behind an
-HTTP reverse proxy. In practice SSH is simpler: every Linux host ships
-with `sshd`; one port (22) handles command exec + port forwarding + file
-transfer; no PKI / certificate management; no nginx/HAProxy config.
-docker-over-TCP needs TLS PKI to be safe, and the HTTP-reverse-proxy
-approach loses per-task container isolation.
-
+Remote Docker, NVCF, Singularity, and Apptainer are intentionally outside
+this clean-upstream configuration. The Colossus deployment runs the built-in
+`docker` provider locally; adding any of those providers would reintroduce a
+custom OSWorld dependency. WebArena is tracked as a separate next-step Gym
+integration rather than an OSWorld provider feature.
 ## Prerequisites
 
 ### Compute environment
@@ -279,11 +166,9 @@ approach loses per-task container isolation.
 - Linux x86_64 (the upstream `happysixd/osworld-docker` image is
   x86_64; aarch64 needs a separately-built image — see
   [Troubleshooting](#aarch64-clusters)).
-- One of:
-  - **Apptainer 1.3+** (recommended on HPC/SLURM clusters), OR
-  - **Docker 20+** with daemon access (recommended on standalone Linux).
-- Per-rollout compute: 1 CPU node, 16+ GB RAM (configurable via
-  `mem_limit_mb`). Hardware virtualization (`/dev/kvm`) is optional but
+- **Docker 20+** with local daemon access.
+- Per-rollout compute: 1 CPU node and 16+ GB host RAM. Hardware
+  virtualization (`/dev/kvm`) is optional but
   gives ~10× rollout speed-up vs software qemu.
 - Disk: ~30 GB free for the cache (one-time, persistent).
 - Network: outbound HTTPS to `docker.io` (for the OSWorld VM image) and
@@ -300,8 +185,15 @@ approach loses per-task container isolation.
 
 ```bash
 # 1) Repo setup (one time)
-git clone https://github.com/NVIDIA-NeMo/Gym.git && cd Gym
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+git clone --branch main --single-branch https://github.com/xlang-ai/OSWorld.git
+cd Gym
 uv venv && uv sync --extra dev
+
+# Verify the sibling checkout still exposes every API used by the adapter.
+python responses_api_agents/osworld_agent/scripts/check_upstream_contract.py \
+  --osworld-root ../OSWorld \
+  --expected-commit 83e8534451ba8b3ab6477448ef3f0a8e563f05be
 
 # 2) Provide the policy model endpoint
 cat > env.yaml <<EOF
@@ -325,6 +217,11 @@ ng_collect_rollouts \
 #    reward + verifier_metadata.osworld_steps (per-step action/observation)
 jq '{task: .verifier_metadata.task_id, reward}' results/osworld_example.jsonl
 ```
+
+The agent server dependency is pinned to that clean upstream main commit for
+reproducibility. The separate checkout is kept clean and is useful for task
+metadata, source inspection, and the API-contract check; no patch is applied
+to it.
 
 The first rollout takes longer than subsequent ones — see [First-Run
 Cache Acquisition](#first-run-cache-acquisition) for what happens and
@@ -369,8 +266,8 @@ two caches (on the worker's filesystem, persistent across runs):
 
 | Cache | Default Location | Size | Source | First-Run Time |
 | ----- | ---------------- | ---- | ------ | -------------- |
-| OSWorld VM image (qemu wrapper SIF / Docker image) | `cache/osworld-images/happysixd_osworld-docker_latest.sif` (Apptainer) or Docker daemon's image store | ~80 MB | `docker.io/happysixd/osworld-docker:latest` | ~30 s |
-| Ubuntu desktop qcow2 | `docker_vm_data/Ubuntu.qcow2` (Docker provider) / `cache/osworld-images/Ubuntu.qcow2` (Apptainer) | ~12 GB compressed, ~23 GB extracted | `huggingface.co/datasets/xlangai/ubuntu_osworld` | ~1–15 min depending on bandwidth |
+| OSWorld Docker image | Docker daemon's image store | ~80 MB | `docker.io/happysixd/osworld-docker:latest` | ~30 s |
+| Ubuntu desktop qcow2 | `docker_vm_data/Ubuntu.qcow2` | ~12 GB compressed, ~23 GB extracted | `huggingface.co/datasets/xlangai/ubuntu_osworld` | ~1–15 min depending on bandwidth |
 
 Subsequent rollouts on the same node skip both downloads and start in
 seconds.
@@ -391,7 +288,7 @@ seconds.
 Lower concurrency (`concurrency: 1`) avoids the race without prestage,
 but is much slower. Prestage is the default-correct path.
 
-#### Docker provider recipe (Mode A)
+#### Docker provider recipe
 
 ```bash
 # From the gym-osworld project root, before ng_run + ng_collect_rollouts:
@@ -406,27 +303,6 @@ ls -lh Ubuntu.qcow2
 
 That's it — the docker provider auto-discovers `docker_vm_data/Ubuntu.qcow2`.
 
-#### Apptainer provider recipe (Mode B / SLURM-style clusters)
-
-```bash
-# Pre-pull the Apptainer SIF
-apptainer pull \
-  $CACHE_DIR/osworld-images/happysixd_osworld-docker_latest.sif \
-  docker://happysixd/osworld-docker:latest
-
-# Pre-download the Ubuntu desktop qcow2
-mkdir -p $CACHE_DIR/osworld-images && cd $_
-curl -fL --retry 3 -O \
-  https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
-unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
-```
-
-Point the agent at the shared cache via env vars:
-
-```bash
-export OSWORLD_APPTAINER_SIF_CACHE=$CACHE_DIR/osworld-images
-export OSWORLD_APPTAINER_VMS_DIR=$CACHE_DIR/osworld-images
-```
 
 ## Usage
 
@@ -468,11 +344,8 @@ ng_reward_profile \
 
 ### Choosing the VM provider
 
-See [Deployment Modes](#deployment-modes) for the comparison of
-`docker` (single-machine, recommended for first run) and `remote_docker`
-(controller and VM host on different machines). Provider and runner
-settings are agent-server configuration, so set them when launching
-`ng_run`:
+The clean-upstream Colossus target uses `docker`. Provider and runner settings
+are agent-server configuration, so set them when launching `ng_run`:
 
 ```bash
 ng_run "+config_paths=[\
@@ -481,13 +354,11 @@ responses_api_models/openai_model/configs/openai_model.yaml]" \
     'osworld_simple_agent.responses_api_agents.osworld_agent.provider_name=docker'
 ```
 
-Both providers expose the same set of ports inside the VM (5000 for
-pyautogui HTTP, 8006 for noVNC, 9222 for Chromium DevTools, 5900 for
-raw RFB, 8080 for VLC) and share the same Ubuntu qcow2 — only the
-container runtime + how the controller reaches it differs.
+The Docker provider exposes the VM services needed by OSWorld: 5000 for the
+pyautogui HTTP server, 8006 for noVNC, 9222 for Chromium DevTools, and 8080
+for VLC.
 
-OSWorld also ships providers for VMware, VirtualBox, AWS, Azure, GCP,
-Aliyun, Volcengine, and Apptainer; see upstream
+OSWorld also ships other providers; see upstream
 [`xlang-ai/OSWorld`](https://github.com/xlang-ai/OSWorld) for details.
 
 ## Configuration
@@ -498,8 +369,8 @@ that wires the agent to a model server and the datasets. Key fields
 
 | Field                    | Default | Meaning                                                                          |
 | ------------------------ | ------- | -------------------------------------------------------------------------------- |
-| `provider_name`          | docker  | OSWorld VM provider (`docker` / `remote_docker` / `apptainer` / `vmware` / …) — see [Deployment Modes](#deployment-modes) |
-| `container_image`        | docker://happysixd/osworld-docker:latest | VM container image (consumed by the docker / apptainer provider) |
+| `provider_name`          | docker  | Clean-upstream target; the Colossus worker and Docker VM host are the same machine |
+| `container_image`        | docker://happysixd/osworld-docker:latest | Requested image name; upstream main currently starts `happysixd/osworld-docker` |
 | `headless`               | true    | Run VM without a window manager forwarding                                       |
 | `screen_width`/`_height` | 1920x1080 | VM resolution                                                                  |
 | `require_a11y_tree`      | false   | Pass the AT-SPI accessibility tree alongside the screenshot                      |
@@ -511,15 +382,16 @@ that wires the agent to a model server and the datasets. Key fields
 | `concurrency`            | 4       | `asyncio.Semaphore` bound on concurrent `/run` calls                             |
 | `max_tokens`             | 1500    | Model max-tokens override (request value wins if present)                        |
 | `temperature` / `top_p`  | 1.0 / 0.9 | Same — request value wins                                                      |
-| `runner_name`            | gym_pyautogui | Runner contract. `gym_pyautogui` preserves the Gym-built prompt path; `prompt_agent` uses OSWorld's native `PromptAgent` defaults; explicit `prompt_agent_*` names select concrete observation/action combinations; `pointer_agent` wraps OSWorld's native PointerAgent |
+| `runner_name`            | gym_pyautogui | Runner contract. `omni_mini_agent` is the single-image Nemotron 3 Nano Omni path; Qwen3-Omni has the separate `qwen3_omni_agent` path |
 | `action_space`           | null    | Optional override for compatible runners (`pyautogui` / `computer_13`)           |
 | `observation_type`       | null    | Optional override for compatible runners (`screenshot` / `a11y_tree` / `screenshot_a11y_tree` / `som`) |
 | `env_class_path`         | null    | Optional Python import path for a custom OSWorld environment class                |
 | `agent_class_path`       | null    | Optional Python import path for a custom native OSWorld agent class               |
 | `agent_kwargs`           | `{}`    | Extra kwargs merged into the native agent constructor                             |
-| `mem_limit_mb`           | 16384   | VM cgroup memory cap in MB (~16 GB; passed to provider)                          |
+| `mem_limit_mb`           | 0       | Reserved for custom providers; clean upstream Docker currently controls VM resources internally |
 | `step_timeout`           | 60      | Per-action subprocess timeout (advisory; provider-dependent)                     |
 | `task_timeout`           | 1800    | Whole-rollout wall-clock cap in seconds; trips `mask_sample=True` if exceeded    |
+| `evaluator_disable_gpu`  | true    | Hide CUDA while the inline evaluator runs, matching the internal branch's CPU-only EasyOCR behavior |
 
 The response includes a `mask_sample` boolean (NeMo-RL convention) — true if
 the rollout timed out, exhausted `max_steps` without the model emitting
@@ -565,6 +437,45 @@ LIMIT=4 NUM_ENVS=1 \
   bash responses_api_agents/osworld_agent/scripts/run_m3_multienv.sh
 ```
 
+### Omni Mini, Nemotron v3, and Qwen3-Omni adapters
+
+The internal `nemotron-v3` OSWorld branch carried its model scaffolds and
+direct vLLM HTTP calls inside OSWorld. Gym exposes equivalent runner contracts
+without requiring that patched checkout:
+
+- `configs/osworld_agent_omni_mini.yaml` is the production path for
+  Nemotron 3 Nano Omni. It sends exactly one current screenshot, retains the
+  last three interactions as bounded text, parses `## Action / ## Code`, and
+  converts the endpoint's observed 0–1 coordinates to OSWorld pixels.
+- `configs/osworld_agent_nemotron_v3.yaml` selects the adapter-owned Nemotron
+  prompt, bounded image history, reasoning/action parser, relative coordinate
+  projection, retry policy, and max-step failure behavior.
+- `configs/osworld_agent_qwen3_omni.yaml` selects OSWorld's existing Qwen3VL
+  scaffold while Gym supplies the policy transport, native-to-text tool-call
+  normalization, three-attempt validation, and compound PyAutoGUI execution.
+
+Omni Mini does **not** reuse the Qwen3-Omni scaffold. They share Gym's
+OpenAI-compatible model transport, but Qwen expects `<tool_call>`/
+`computer_use` output and carries image history, whereas the hosted Nemotron
+endpoint uses `## Action / ## Code` and rejects prompts containing more than
+one image.
+
+Stack the desired model overlay after the base OSWorld config. For Omni Mini:
+
+```bash
+ng_run "+config_paths=[\
+responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\
+responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml,\
+responses_api_models/openai_model/configs/openai_model.yaml]"
+```
+
+Pre-staged task files remain supported without changing `DesktopEnv`. Set
+`OSWORLD_SETUP_CACHE_DIR`, `OW_SETUP_CACHE_DIR`,
+`SPREADSHEETBENCH_SETUP_CACHE_DIR`, or `PPTC_SETUP_CACHE_DIR`; the adapter
+links matching artifacts into OSWorld's per-task cache before `env.reset()`.
+See [NEMOTRON_V3_MIGRATION.md](NEMOTRON_V3_MIGRATION.md) for the full porting
+matrix and the changes that intentionally remain outside this adapter.
+
 ### Pointer Agent
 
 Use `responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml`
@@ -584,6 +495,36 @@ Per-rollout values can be set three ways, in increasing priority:
 3. CLI overrides (`+responses_create_params={…}` on
    `ng_collect_rollouts`).
 
+## Per-task logs and artifacts
+
+`run_multienv_osworld_agent.sh` enables an internal-OSWorld-style evidence
+bundle under `${RUN_DIR}/task-artifacts` by default. Each rollout gets a
+collision-safe `${snapshot}/${task_id}` directory containing:
+
+- `worker.log`: DEBUG logs from the Gym adapter, native agent, OSWorld
+  environment, and evaluators;
+- `runtime.log`: task/agent runtime messages, including model responses and
+  parsed/executed actions;
+- `traj.jsonl`: initial state, every model/action step, and final evaluation;
+- `step_000.png`, `step_001.png`, ...: the exact VM observations around each
+  action;
+- `vm-exec.jsonl`: full Python controller commands and VM responses when the
+  provider exposes `execute_python_command`;
+- `task.json`, `run.json`, `result.json`, and `manifest.json`: reproducibility,
+  outcome, file size, and SHA-256 metadata.
+
+The artifact directory is also returned as
+`verifier_metadata.osworld_artifact_dir`. Ray workers remove and close all
+task-specific handlers in `finally`-equivalent teardown, so reused workers do
+not leak logs into the next task. Set `TASK_ARTIFACTS=0` on the launch script
+to disable these bundles, or set `OSWORLD_TASK_ARTIFACT_ROOT` explicitly when
+starting `ng_run` outside the script.
+
+For `omni_mini_agent`, `OMNI_MINI_VLLM_MODEL` is the runtime model source of
+truth. The adapter records it in `response.model`,
+`verifier_metadata.osworld_model_name`, and `run.json`; it warns and ignores a
+stale `policy_model_name` left in a copied `env.yaml`.
+
 ## Recording rollout videos
 
 Set `OSWORLD_RECORD_VIDEO_DIR` before launching `ng_run` to capture an mp4
@@ -599,17 +540,12 @@ ng_collect_rollouts ...
 ls $OSWORLD_RECORD_VIDEO_DIR/   # one mp4 per task, named {task_id}.mp4
 ```
 
-- Works for **every provider** that exposes the controller recording API
-  (verified on `docker`; same call path used in OSWorld's own
-  `lib_run_single.py`, so `apptainer` / `vmware` / `virtualbox` also work).
+- Verified on the clean-upstream `docker` provider used by this deployment.
 - File size is typically 1-10 MB per task at OSWorld's 1920x1080 default
   (verified: 5 example tasks → 1.5-5.2 MB each, 16 MB total).
 - Recording is best-effort — if `start_recording()` or `end_recording()`
   raises (e.g. ffmpeg-in-VM missing, network blip during mp4 download),
   the error is logged and the rollout still completes normally.
-- Mode B `remote_docker` users get the same env var honored, plus an
-  additional VNC-stream recording path on the bare-metal host (see
-  the existing description in the Mode B architecture diagram).
 
 ## Troubleshooting
 
@@ -651,12 +587,8 @@ commit a second time; the hook will report `Passed`.
 ### aarch64 clusters
 
 `happysixd/osworld-docker` is x86_64-only. On aarch64 hosts you can:
-- Use `apptainer pull --arch amd64` and run qemu in emulation mode (very
-  slow — software CPU only, no KVM).
-- Build a custom aarch64 SIF that wraps `qemu-system-aarch64` + the
-  upstream Ubuntu-arm qcow2
-  (`https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu-arm.zip`).
-- Submit to an x86_64 partition if the cluster is heterogeneous.
+- Submit to an x86_64 Colossus worker. The clean-upstream Docker target does
+  not maintain an alternate aarch64 container/provider path.
 
 ## Reward Profiling
 

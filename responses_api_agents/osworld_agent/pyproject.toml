@@ -19,9 +19,12 @@ version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    # Official OSWorld through fe8c78e1, plus the remote_docker provider and
-    # packaging fixes required by Gym's distributed runtime.
-    "osworld @ git+https://github.com/JeffPengCoder/OSWorld.git@4c155eb11fd2667cf9777c559a708ae1bf780f58",
+    # Clean xlang-ai/OSWorld main. Use the immutable commit archive instead of
+    # a git URL: uv recursively initializes git submodules, while upstream's
+    # optional SurferH submodules use private/SSH URLs and are not needed by
+    # this adapter. The archive keeps the runtime source reproducible without
+    # requiring those unrelated repositories.
+    "osworld @ https://github.com/xlang-ai/OSWorld/archive/83e8534451ba8b3ab6477448ef3f0a8e563f05be.tar.gz",
     "docker==7.1.0",
     # Needed by OSWorld's mm_agents.pointer implementation.
     "anthropic",
@@ -41,6 +44,10 @@ dependencies = [
     "cryptography",
     "cffi",
     "scipy",
+    "numpy<2",
+    "pynput",
+    "ag2",
+    "opencv-python-headless~=4.8.1.78",
     "Pillow~=11.0.0",
     "scikit-learn",
     "matplotlib~=3.7.4",
@@ -58,3 +65,10 @@ include = ["responses_api_agents.osworld_agent*"]
 
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
+
+[tool.uv]
+# Upstream's broad development dependency set includes the GUI OpenCV wheel
+# and a SurferH-only git submodule. The OSWorld Gym server is headless and does
+# not load SurferH, so keep those optional pieces outside the runtime while
+# supplying opencv-python-headless explicitly above.
+exclude-dependencies = ["opencv-python", "opencv-contrib-python", "agp-client"]

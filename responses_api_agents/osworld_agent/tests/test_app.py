@@ -8,6 +8,7 @@ boundary so the suite runs on a login node without OSWorld installed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,8 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldAgentConfig,
     OSWorldRunRequest,
     OSWorldVerifyResponse,
+    _normalize_chat_message,
+    _resolve_policy_model_name,
 )
 
 
@@ -39,6 +42,7 @@ DEFAULT_RUN_RESULT: Dict[str, Any] = {
     "score": 1.0,
     "finished": True,
     "error": None,
+    "artifact_dir": "/tmp/osworld-artifacts/chrome/test-task-001",
     "steps": [
         {
             "step": 0,
@@ -58,6 +62,236 @@ DEFAULT_RUN_RESULT: Dict[str, Any] = {
         },
     ],
 }
+
+
+def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("OMNI_MINI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
+    monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)
+
+    with caplog.at_level("WARNING"):
+        resolved = _resolve_policy_model_name(
+            {"policy_model_name": "azure/anthropic/claude-opus-4-7"},
+            "omni_mini_agent",
+        )
+
+    assert resolved == "nvidia/nemotron-3-nano-omni"
+    assert "stale global policy_model_name" in caplog.text
+
+
+def test_non_omni_runner_keeps_configured_policy_model(monkeypatch) -> None:
+    monkeypatch.setenv("OMNI_MINI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
+    monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)
+
+    assert (
+        _resolve_policy_model_name(
+            {"policy_model_name": "nvidia/minimaxai/minimax-m3"},
+            "m3_agent",
+        )
+        == "nvidia/minimaxai/minimax-m3"
+    )
+
+
+def test_normalize_chat_message_preserves_reasoning_and_native_tool_calls() -> None:
+    message = SimpleNamespace(
+        content="Action: Click the target.",
+        tool_calls=[
+            SimpleNamespace(
+                function=SimpleNamespace(
+                    name="computer_use",
+                    arguments='{"action":"left_click","coordinate":[500,250]}',
+                )
+            )
+        ],
+        model_extra={"reasoning_content": "Inspect the screenshot."},
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert "<tool_call>" in normalized["content"]
+    assert '"name": "computer_use"' in normalized["content"]
+    assert '"coordinate": [500, 250]' in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_vllm_wrapped_reasoning() -> None:
+    message = SimpleNamespace(
+        content="<think>\nInspect the screenshot.\n</think>## Action:\nClick.\n## Code:\n```python\npass\n```",
+        tool_calls=[],
+        model_extra={},
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert normalized["content"].startswith("## Action:")
+    assert "<think>" not in normalized["content"]
+
+
+def test_normalize_chat_message_extracts_one_text_part() -> None:
+    message = SimpleNamespace(
+        content=[
+            {
+                "type": "text",
+                "text": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
+            }
+        ],
+        tool_calls=[],
+        model_extra={},
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"].startswith("## Action:")
+    assert normalized["content"].endswith("pyautogui.click(1, 2)\n```")
+
+
+def test_normalize_chat_message_selects_first_action_from_multiple_text_parts() -> None:
+    message = SimpleNamespace(
+        content=[
+            {
+                "type": "text",
+                "text": "Click the first target.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
+            },
+            {
+                "type": "text",
+                "text": "Finish.\n## Code:\n```python\ncomputer.terminate(status='success')\n```",
+            },
+        ],
+        tool_calls=[],
+        model_extra={},
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"].startswith("## Action:\nClick the first target.")
+    assert "pyautogui.click(1, 2)" in normalized["content"]
+    assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_serialized_text_parts() -> None:
+    parts = [
+        {
+            "type": "text",
+            "text": "Click the first target.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
+        },
+        {
+            "type": "text",
+            "text": "Finish.\n## Code:\n```python\ncomputer.terminate(status='success')\n```",
+        },
+    ]
+    message = SimpleNamespace(content=repr(parts), tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"].startswith("## Action:\nClick the first target.")
+    assert "pyautogui.click(1, 2)" in normalized["content"]
+    assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_nested_serialized_text_parts() -> None:
+    inner_parts = [
+        {
+            "type": "text",
+            "text": "Click the first target.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
+        },
+        {
+            "type": "text",
+            "text": "Finish.\n## Code:\n```python\ncomputer.terminate(status='success')\n```",
+        },
+    ]
+    outer_parts = [{"type": "text", "text": repr(inner_parts)}]
+    message = SimpleNamespace(content=outer_parts, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"].startswith("## Action:\nClick the first target.")
+    assert "pyautogui.click(1, 2)" in normalized["content"]
+    assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_serialized_parts_after_think_wrapper() -> None:
+    parts = [
+        {
+            "type": "text",
+            "text": "Click the first target.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
+        },
+        {
+            "type": "text",
+            "text": "Finish.\n## Code:\n```python\ncomputer.terminate(status='success')\n```",
+        },
+    ]
+    content = "<think>\nInspect the screenshot.\n</think>" + repr(parts)
+    message = SimpleNamespace(content=content, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert normalized["content"].startswith("## Action:\nClick the first target.")
+    assert "pyautogui.click(1, 2)" in normalized["content"]
+    assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_malformed_serialized_parts() -> None:
+    malformed = (
+        "[{'type': 'text', 'text': 'Click user's target.\\n## Code:\\n"
+        "```python\\npyautogui.click(1, 2)\\n```'},"
+        " {'type': 'text', 'text': 'Finish.\\n## Code:\\n"
+        '```python\\ncomputer.terminate(status=\\"success\\")\\n```\'}]'
+    )
+    content = "<think>\nInspect the screenshot.\n</think>" + malformed
+    message = SimpleNamespace(content=content, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert normalized["content"].startswith("## Action:\nExecute the first generated action.")
+    assert "pyautogui.click(1, 2)" in normalized["content"]
+    assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_double_escaped_apostrophe() -> None:
+    malformed = (
+        "[{'type': 'text', 'text': 'GIMP\\\\'s theme is light.\\n## Action:\\n"
+        "Finish.\\n## Code:\\n```code\\n"
+        'computer.terminate(status=\\"success\\")\\n```\\n\'}]'
+    )
+    message = SimpleNamespace(content=malformed, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert not normalized["content"].startswith("[")
+    assert normalized["content"].startswith("## Action:\nExecute the first generated action.")
+    assert "computer.terminate" in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_truncated_serialized_parts() -> None:
+    malformed = (
+        "[{'type': 'text', 'text': 'GIMP\\\\'s theme is light.\\n## Action:\\n"
+        "Finish.\\n## Code:\\n```code\\n"
+        'computer.terminate(status=\\"success\\")\\n```\\n\'}'
+    )
+    message = SimpleNamespace(content=malformed, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert not normalized["content"].startswith("[")
+    assert normalized["content"].startswith("## Action:\nExecute the first generated action.")
+    assert "computer.terminate" in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_action_after_serialized_prefix() -> None:
+    malformed = (
+        "[{'type': 'text', 'text': \"The task is complete.\"}]\n"
+        "## Action:\nMark the task as successfully completed.\n"
+        "## Code:\n```code\ncomputer.terminate(status='success')\n```"
+    )
+    message = SimpleNamespace(content=malformed, tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert not normalized["content"].startswith("[")
+    assert normalized["content"].startswith("## Action:\nExecute the first generated action.")
+    assert "computer.terminate" in normalized["content"]
 
 
 def make_config(**overrides: Any) -> OSWorldAgentConfig:
@@ -175,6 +409,9 @@ class TestApp:
         assert response.verifier_metadata["osworld_score"] == 1.0
         assert response.verifier_metadata["osworld_finished"] is True
         assert response.verifier_metadata["osworld_error"] is None
+        assert response.verifier_metadata["osworld_artifact_dir"] == DEFAULT_RUN_RESULT["artifact_dir"]
+        assert response.verifier_metadata["osworld_model_name"] == "test-policy"
+        assert response.response.model == "test-policy"
         # Two model steps -> two output messages. ``response.response`` is a
         # ``NeMoGymResponse`` Pydantic model (coerced from the dict in app.py),
         # so use attribute access.
@@ -187,6 +424,7 @@ class TestApp:
         mock_remote.options.return_value.remote.assert_called_once()
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
+        assert positional_args[1]["evaluator_disable_gpu"] is True
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
