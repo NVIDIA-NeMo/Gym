@@ -423,6 +423,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
+        # OpenClaw's output envelope exposes no internal truncation / stop-reason signal (only the
+        # final text + usage), so — unlike hermes and claude_code — we cannot mark the response
+        # "incomplete" on an internal max-turns / context cutoff. Subprocess-timeout truncation is
+        # the observable case and is masked upstream by anyswe's agent_timed_out. If OpenClaw later
+        # surfaces a stop reason, set status="incomplete" here.
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),

@@ -1,0 +1,32 @@
+anyswe_claude_code:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by claude-code natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        # null -> the claude CLI uses the real Anthropic API (api.anthropic.com). Override with
+        # ++...agent_kwargs.anthropic_base_url=<url> to point at an Anthropic-compatible gateway.
+        anthropic_base_url: null
+        max_turns: 100
+        timeout: 1800
+        system_prompt: "You are fixing a bug in the repository at /testbed. Edit the source files to fix the root cause, then verify. You MUST actually apply the fix with your file-editing tools; do not just describe it."
+
+      container_formatter: docker://swebench/sweb.eval.x86_64.{instance_id}
+      swebench_agent_timeout: 2700
+      swebench_tests_timeout: 1800
+      concurrency: 18
+
+      # Claude Code calls anthropic_base_url directly.
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
