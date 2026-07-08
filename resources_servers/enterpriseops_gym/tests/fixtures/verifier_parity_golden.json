@@ -1,0 +1,103 @@
+{
+  "extraction": [
+    "h24x7",
+    {
+      "a": 1,
+      "b": 2
+    },
+    [
+      {
+        "a": 1
+      },
+      {
+        "a": 2
+      }
+    ],
+    [],
+    0,
+    5,
+    7,
+    [
+      1,
+      2
+    ],
+    [
+      {
+        "a": 1
+      },
+      {
+        "a": 2
+      }
+    ],
+    [],
+    "oops",
+    "plain",
+    42,
+    {
+      "other": 1
+    },
+    "scalar-string",
+    {},
+    "err",
+    null,
+    null
+  ],
+  "comparison": [
+    {
+      "passed": false,
+      "details": "Comparison equals: 0 vs 0"
+    },
+    {
+      "passed": true,
+      "details": "Comparison equals: 0 vs 0"
+    },
+    {
+      "passed": true,
+      "details": "Comparison equals: h24x7 vs h24x7"
+    },
+    {
+      "passed": false,
+      "details": "Comparison equals: 1 vs 1"
+    },
+    {
+      "passed": true,
+      "details": "Comparison equals: None vs None"
+    },
+    {
+      "passed": false,
+      "details": "Comparison equals: None vs 0"
+    },
+    {
+      "passed": true,
+      "details": "Comparison greater_than: 5 vs 3"
+    },
+    {
+      "passed": false,
+      "details": "Comparison error: '>' not supported between instances of 'str' and 'int'"
+    },
+    {
+      "passed": true,
+      "details": "Comparison less_than: 2 vs 3"
+    },
+    {
+      "passed": true,
+      "details": "Comparison contains: hello world vs world"
+    },
+    {
+      "passed": false,
+      "details": "Comparison error: 'in <string>' requires string as left operand, not int"
+    },
+    {
+      "passed": true,
+      "details": "Comparison contains: [1, 2] vs 1"
+    },
+    {
+      "passed": false,
+      "details": "Unknown comparison type: approximately"
+    },
+    {
+      "passed": true,
+      "details": "Comparison equals: {'a': 1} vs {'a': 1}"
+    }
+  ]
+}

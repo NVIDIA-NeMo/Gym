@@ -1,0 +1,4239 @@
+{
+  "gym_name": "sn-hr-internal",
+  "gym_url": "http://localhost:8008",
+  "snapshot_at": "2026-07-07T18:18:28.040573+00:00",
+  "tools": [
+    {
+      "name": "get_hr_service_by_name",
+      "title": null,
+      "description": "Get complete HR service details by unique service name. Returns full service information including all related entities (topic details with category, service template, and visibility criteria). Use this to understand service workflows, requirements, and configuration before creating HR cases.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_name": {
+            "type": "string",
+            "description": "The unique name of the HR service to retrieve. Examples: 'Employee Onboarding', 'Benefits Enrollment', 'Payroll Support', 'Performance Review', 'Policy Questions'. Must match exactly (case-sensitive)."
+          }
+        },
+        "required": [
+          "service_name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_hr_services",
+      "title": null,
+      "description": "Flexible search for HR services - at least ONE parameter must be provided. Search by ID, fulfillment type, topic, template, criteria, or active status. Returns matching services with all related entities (topic details, service templates, HR criteria) fully expanded.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_service_id": {
+            "type": "string",
+            "description": "Filter by exact service ID (optional)"
+          },
+          "fulfillment_type": {
+            "type": "string",
+            "description": "Filter by exact fulfillment type (optional)",
+            "enum": [
+              "manual",
+              "service_activity",
+              "workflow",
+              "lifecycle event",
+              "advanced",
+              "flow"
+            ]
+          },
+          "topic_detail": {
+            "type": "string",
+            "description": "Filter by topic detail name - partial match, case-insensitive (optional)"
+          },
+          "service_template": {
+            "type": "string",
+            "description": "Filter by service template name - partial match, case-insensitive (optional)"
+          },
+          "hr_criteria": {
+            "type": "string",
+            "description": "Filter by HR criteria name - partial match, case-insensitive (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_new_hr_service",
+      "title": null,
+      "description": "Create a new HR service with complete validation. Validates that service name is unique, fulfillment type is valid, and all referenced entities (topic detail, service template, HR criteria) exist in the database. Returns the created service with all relationships fully expanded. Use this to add new service offerings to the HR service catalog.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_name": {
+            "type": "string",
+            "description": "Unique service name (e.g., 'Leave of Absence Request', 'Equipment Request'). Must be unique across all services."
+          },
+          "fulfillment_type": {
+            "type": "string",
+            "description": "How the service request is fulfilled",
+            "enum": [
+              "manual",
+              "service_activity",
+              "workflow",
+              "lifecycle event",
+              "advanced",
+              "flow"
+            ]
+          },
+          "topic_detail": {
+            "type": "string",
+            "description": "Topic detail name (must exist in database). Example: 'Leave Management', 'New Employee Setup'. Optional."
+          },
+          "service_template": {
+            "type": "string",
+            "description": "Service template name (must exist in database). Example: 'Leave Request Template', 'Onboarding Template'. Optional."
+          },
+          "hr_criteria": {
+            "type": "string",
+            "description": "HR criteria name for visibility/approval (must exist in database). Example: 'HR Team Visibility', 'Admin Only Visibility'. Optional."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the service is active and available. Defaults to true.",
+            "default": true
+          }
+        },
+        "required": [
+          "service_name",
+          "fulfillment_type",
+          "active"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_hr_service",
+      "title": null,
+      "description": "Update an existing HR service with smart change detection. Validates all field changes and prevents unnecessary updates by detecting if fields are already set to the provided values. Updates only the fields provided and automatically sets the updated_at timestamp. Returns the updated service with all relationships fully expanded.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_service_id": {
+            "type": "string",
+            "description": "ID of the HR service to update (must exist in database). Example: 1"
+          },
+          "service_name": {
+            "type": "string",
+            "description": "New service name (any string, must be unique). Optional - only provide if changing."
+          },
+          "fulfillment_type": {
+            "type": "string",
+            "description": "New fulfillment type. Optional - only provide if changing.",
+            "enum": [
+              "manual",
+              "service_activity",
+              "workflow",
+              "lifecycle event",
+              "advanced",
+              "flow"
+            ]
+          },
+          "topic_detail": {
+            "type": "string",
+            "description": "New topic detail name (must exist in database). Optional - only provide if changing. Example: 'Health Insurance'"
+          },
+          "service_template": {
+            "type": "string",
+            "description": "New service template name (must exist in database). Optional - only provide if changing. Example: 'Benefits Template'"
+          },
+          "hr_criteria": {
+            "type": "string",
+            "description": "New HR criteria name (must exist in database). Optional - only provide if changing. Example: 'Manager Approval Required'"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status. Optional - only provide if changing."
+          }
+        },
+        "required": [
+          "hr_service_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "delete_hr_service",
+      "title": null,
+      "description": "Soft delete an HR service by setting its active status to False. Can be identified by either hr_service_id or service_name (or both if they match). If both provided, validates they reference the same service. Validates the service exists and is currently active before deletion. Returns the deactivated service with all relationships fully expanded. Use this to remove services from active catalog while preserving data for audit trail.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_service_id": {
+            "type": "string",
+            "description": "ID of the HR service to delete. Example: '1'. Provide either hr_service_id or service_name (or both if they match)."
+          },
+          "service_name": {
+            "type": "string",
+            "description": "Name of the HR service to delete. Example: 'Old Service'. Provide either hr_service_id or service_name (or both if they match)."
+          }
+        },
+        "required": [
+          "hr_service_id",
+          "service_name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_topic_details",
+      "title": null,
+      "description": "Flexible search for topic details. At least ONE parameter must be provided. Search by ID, name, active status, or topic category. Returns topic details with expanded topic_category relationship.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic_detail_id": {
+            "type": "string",
+            "description": "Topic detail ID for exact match (optional)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Topic detail name for partial matching (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "topic_category": {
+            "type": "string",
+            "description": "Filter by topic category name - partial match (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_topic_categories",
+      "title": null,
+      "description": "Flexible search for topic categories. At least ONE parameter must be provided. Search by ID, name, active status, or COE type. Returns topic categories with topic_details count.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic_category_id": {
+            "type": "string",
+            "description": "Topic category ID for exact match (optional)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Topic category name for partial matching (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "Filter by COE type - exact match (optional). Valid values: HRIT, Payroll, Talent Management, Total Rewards, Workforce Administration"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_topic_detail",
+      "title": null,
+      "description": "Create a new topic detail. Validates name is unique within organization and topic_category exists if provided. Returns created topic detail with expanded topic_category relationship.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Topic detail name (required, must be unique). Examples: 'New Employee Setup', 'Health Insurance', 'Payroll Changes'"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether topic detail is active (default: true)",
+            "default": true
+          },
+          "topic_category": {
+            "type": "string",
+            "description": "Topic category name (optional, must exist). Examples: 'Onboarding', 'Benefits', 'Payroll'"
+          }
+        },
+        "required": [
+          "name",
+          "active"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_topic_detail",
+      "title": null,
+      "description": "Update an existing topic detail with smart change detection. Only updates fields that have changed. Validates topic_detail_id exists, name is unique if changed, and topic_category exists if provided. Returns updated topic detail with list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic_detail_id": {
+            "type": "string",
+            "description": "Topic detail ID to update (required). Example: '1'"
+          },
+          "name": {
+            "type": "string",
+            "description": "New topic detail name (optional, must be unique if changed). Example: 'Updated Topic Name'"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Example: false",
+            "default": true
+          },
+          "topic_category": {
+            "type": "string",
+            "description": "New topic category name (optional, must exist). Example: 'Onboarding'"
+          }
+        },
+        "required": [
+          "topic_detail_id",
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_topic_category",
+      "title": null,
+      "description": "Create a new topic category. Validates name is unique within organization and coe_type is valid enum value. Returns created topic category with timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Topic category name (required, must be unique). Examples: 'Employee Relations', 'Compensation & Benefits', 'Talent Acquisition'"
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "COE type (required). Valid values: HRIT, Payroll, Talent Management, Total Rewards, Workforce Administration",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether topic category is active (default: true)",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "coe_type",
+          "active"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_topic_category",
+      "title": null,
+      "description": "Update an existing topic category with smart change detection. Only updates fields that have changed. Validates topic_category_id exists, name is unique if changed, and coe_type is valid if changed. Returns updated topic category with list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic_category_id": {
+            "type": "string",
+            "description": "Topic category ID to update (required). Example: '1'"
+          },
+          "name": {
+            "type": "string",
+            "description": "New topic category name (optional, must be unique if changed). Example: 'Updated Category Name'"
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "New COE type (optional, must be valid). Valid values: HRIT, Payroll, Talent Management, Total Rewards, Workforce Administration",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Example: false",
+            "default": true
+          }
+        },
+        "required": [
+          "topic_category_id",
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_service_template_by_name",
+      "title": null,
+      "description": "Get a service template by name (exact match, case-insensitive). Returns service template with name, change_request_values (JSON), active status, COE type, and org_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Service template name to search for (required, case-insensitive). Examples: 'Onboarding Template', 'Payroll Change Request'"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_service_templates",
+      "title": null,
+      "description": "Flexible search for service templates. At least ONE parameter must be provided. Search by ID, name, active status, or COE type. Returns service templates with change_request_values (JSON), COE type, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_template_id": {
+            "type": "string",
+            "description": "Service template ID for exact match (optional)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Service template name for partial matching (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "coe_type": {
+            "type": "string",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ],
+            "description": "Filter by COE (Center of Excellence) type (optional). Must be one of: HRIT, Payroll, Talent Management, Total Rewards, Workforce Administration"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_new_service_template",
+      "title": null,
+      "description": "Create a new service template with validation. Validates that name is unique within organization, coe_type is valid, and change_request_values contains required fields. Returns the created template with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Service template name (must be unique within organization)"
+          },
+          "change_request_values": {
+            "type": "object",
+            "description": "JSON object with change request default values",
+            "properties": {
+              "short_description": {
+                "type": "string",
+                "description": "Short description for the change request"
+              },
+              "category": {
+                "type": "string",
+                "description": "Category for the change request (e.g., 'hr', 'onboarding', 'payroll')"
+              }
+            },
+            "required": [
+              "short_description",
+              "category"
+            ]
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "Center of Excellence type",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether template is active (default: true)",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "change_request_values",
+          "coe_type"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_service_template",
+      "title": null,
+      "description": "Update an existing service template with smart change detection. At least one field must be provided to update. Validates name uniqueness, coe_type validity, and returns list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_template_id": {
+            "type": "string",
+            "description": "ID of service template to update (required)"
+          },
+          "name": {
+            "type": "string",
+            "description": "New service template name (optional, must be unique if changed)"
+          },
+          "change_request_values": {
+            "type": "object",
+            "description": "New change request values dictionary (optional)",
+            "properties": {
+              "short_description": {
+                "type": "string",
+                "description": "Short description for the change request"
+              },
+              "category": {
+                "type": "string",
+                "description": "Category for the change request"
+              }
+            }
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "New COE type (optional)",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional)"
+          }
+        },
+        "required": [
+          "service_template_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_user",
+      "title": null,
+      "description": "Get user by user ID. Returns complete user details including role, contact information, and status. User must exist in the requester's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "The unique ID of the user to retrieve. Example: '1', '42'"
+          }
+        },
+        "required": [
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_user_using_email",
+      "title": null,
+      "description": "Get user by email address. Searches for user with exact email match (case-insensitive) within the organization. Returns complete user details if found.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The email address of the user to find. Example: 'john.doe@company.com'",
+            "format": "email"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_user_using_name",
+      "title": null,
+      "description": "Get user by first and last name combination. Search is case-sensitive and requires exact match. Returns complete user details if exact name match is found within the organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "description": "User's first name (case-sensitive, must match exactly). Only letters, spaces, hyphens, apostrophes, and periods allowed. Example: 'John', 'Mary-Jane', 'O'Brien'",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "last_name": {
+            "type": "string",
+            "description": "User's last name (case-sensitive, must match exactly). Only letters, spaces, hyphens, apostrophes, and periods allowed. Example: 'Doe', 'O'Brien'",
+            "minLength": 1,
+            "maxLength": 60
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_users",
+      "title": null,
+      "description": "List users with filtering, pagination, and sorting. Supports text search (email_like, first_name_like, last_name_like), role filtering (roles array), and active status. Returns paginated results with metadata (total_count, returned_count, limit, offset).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "roles": {
+            "type": "array",
+            "description": "Filter by one or more roles. Example: ['admin'], ['admin', 'manager']",
+            "items": {
+              "type": "string",
+              "enum": [
+                "admin",
+                "agent",
+                "manager",
+                "employee"
+              ]
+            }
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status. Example: true"
+          },
+          "email_like": {
+            "type": "string",
+            "description": "Email contains text (case-insensitive partial match). Example: 'john' matches 'john@example.com' and 'johnny@test.com'"
+          },
+          "first_name_like": {
+            "type": "string",
+            "description": "First name contains text (case-insensitive). Example: 'jo'"
+          },
+          "last_name_like": {
+            "type": "string",
+            "description": "Last name contains text (case-insensitive). Example: 'sm'"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum results to return (default: 50, max: 100). Example: 20",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Skip N records for pagination (default: 0). Example: 20",
+            "default": 0,
+            "minimum": 0
+          },
+          "order_by": {
+            "type": "string",
+            "description": "Field to sort by (default: created_at)",
+            "enum": [
+              "user_id",
+              "first_name",
+              "last_name",
+              "email",
+              "phone",
+              "role",
+              "active",
+              "created_at",
+              "updated_at"
+            ],
+            "default": "created_at"
+          },
+          "order_direction": {
+            "type": "string",
+            "description": "Sort direction (default: asc). Example: 'desc'",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "asc"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_user",
+      "title": null,
+      "description": "Create a new user in the HR system. Validates email uniqueness within organization, name combination uniqueness, and role validity. User is automatically assigned to the requester's organization. Returns complete user details including auto-generated ID and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "description": "User's first name (1-60 characters). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*() are not allowed. Examples: 'John', 'Maria', 'Jos\u00e9', 'Mary-Jane', 'O'Brien'",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "last_name": {
+            "type": "string",
+            "description": "User's last name (1-60 characters). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*() are not allowed. Examples: 'Doe', 'Garcia', 'O'Brien', 'Van Der Berg'",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "email": {
+            "type": "string",
+            "description": "User's work email address (must be valid RFC-compliant email format and unique within organization). Invalid characters like *&^%#$ in email addresses are not allowed. Examples: 'john.doe@company.com', 'user+tag@example.org'",
+            "format": "email",
+            "maxLength": 120
+          },
+          "phone": {
+            "type": "string",
+            "description": "User's phone number (optional, max 30 characters). Examples: '+1-555-123-4567', '(555) 123-4567'",
+            "maxLength": 30
+          },
+          "role": {
+            "type": "string",
+            "description": "User's role in the system. Determines permissions.",
+            "enum": [
+              "admin",
+              "agent",
+              "manager",
+              "employee"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the user account is active. Defaults to true.",
+            "default": true
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name",
+          "email",
+          "role"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_user_details",
+      "title": null,
+      "description": "Update an existing user in the HR system with smart change detection. Only updates fields that have actually changed. Validates email uniqueness, name combination uniqueness, and role validity. User must exist in organization. Returns updated user details and list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "ID of the user to update (required). Must exist in the organization. Example: '1', '42'"
+          },
+          "email": {
+            "type": "string",
+            "description": "New email address (optional). Must be valid RFC-compliant email format and unique within organization. Invalid characters like *&^%#$ in email addresses are not allowed. Only provide if changing. Example: 'new.email@company.com'",
+            "format": "email",
+            "maxLength": 120
+          },
+          "first_name": {
+            "type": "string",
+            "description": "New first name (optional, 1-60 characters). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*() are not allowed. Only provide if changing. Example: 'NewFirstName', 'Mary-Jane'",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "last_name": {
+            "type": "string",
+            "description": "New last name (optional, 1-60 characters). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*() are not allowed. Only provide if changing. Example: 'NewLastName', 'O'Brien'",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "phone": {
+            "type": "string",
+            "description": "New phone number (optional, max 30 characters). Only provide if changing. Example: '+1-555-999-8888'",
+            "maxLength": 30
+          },
+          "role": {
+            "type": "string",
+            "description": "New role (optional). Only provide if changing. Valid values determine user permissions.",
+            "enum": [
+              "admin",
+              "agent",
+              "manager",
+              "employee"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Set to false to deactivate user. Only provide if changing."
+          }
+        },
+        "required": [
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_user_groups",
+      "title": null,
+      "description": "List user groups with optional filtering by group_id, name, active status, or type. All groups are automatically scoped to the requester's organization. Supports multiple filters (AND logic).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "integer",
+            "description": "Filter by exact group ID. Example: 1"
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by exact name (case-sensitive). Example: 'IT Support'"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status. Example: true"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ],
+            "description": "Filter by group type"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_group_by_name",
+      "title": null,
+      "description": "Find a group by exact name (case-sensitive). Returns the group if found in the organization. Name must match exactly including case.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Group name to search for (exact match, case-sensitive). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Example: 'IT Support' will NOT match 'it support'",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_group_members",
+      "title": null,
+      "description": "List all members of a specific group with optional filtering by member_id or user_id. Returns membership records.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "integer",
+            "description": "ID of the group to list members for (required). Example: 1, 42"
+          },
+          "member_id": {
+            "type": "integer",
+            "description": "Filter by exact member ID (optional). Example: 5"
+          },
+          "user_id": {
+            "type": "integer",
+            "description": "Filter by exact user ID (optional). Example: 10"
+          }
+        },
+        "required": [
+          "group_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_user_group",
+      "title": null,
+      "description": "Create a new user group in the HR system. Validates name uniqueness within organization and group type validity. Group is automatically assigned to the requester's organization. Returns complete group details including auto-generated ID and timestamps. Requires groups/crud permission.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Group name (1-80 characters, must be unique within organization). Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*()!~` are not permitted. Examples: 'IT Support Team', 'HR Service Desk', 'L1 Support'",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "type": {
+            "type": "string",
+            "description": "Group type - determines the group's purpose and capabilities",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the group is active. Defaults to true.",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_user_group",
+      "title": null,
+      "description": "Update an existing user group with smart change detection. Only updates fields that have actually changed. Validates name uniqueness and type validity. Group must exist in organization. Returns updated group details and list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "ID of the group to update (required). Must exist in the organization. Example: '1', '42'"
+          },
+          "name": {
+            "type": "string",
+            "description": "New group name (optional). Must be unique within organization. Only letters, spaces, hyphens (-), apostrophes ('), and periods (.) allowed. Special characters like @#$%^&*()!~` are not permitted. Only provide if changing. Example: 'Updated IT Support'",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "type": {
+            "type": "string",
+            "description": "New group type (optional). Only provide if changing.",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Set to false to deactivate group. Only provide if changing."
+          }
+        },
+        "required": [
+          "group_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_group_member",
+      "title": null,
+      "description": "Add a user to a group. Validates that both group and user exist in the same organization and that the user is not already a member. Returns the created membership details.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "ID of the group to add the user to. Example: '1', '42'"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "ID of the user to add to the group. Example: '5', '123'"
+          }
+        },
+        "required": [
+          "group_id",
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_group_membership",
+      "title": null,
+      "description": "Remove a user from a group. Requires only group_id and user_id since this pair uniquely identifies the membership. Validates that the user is currently a member of the group. Returns the removed membership details.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "ID of the group to remove the user from. Example: '1', '42'"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "ID of the user to remove from the group. Example: '5', '123'"
+          }
+        },
+        "required": [
+          "group_id",
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_hr_criteria",
+      "title": null,
+      "description": "Flexible search for HR criteria. At least ONE parameter must be provided. Search by ID, name, type, active status, user group, users, or creation dates. Returns HR criteria with type (case_visibility or approval), user_group, users array, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_criteria_id": {
+            "type": "string",
+            "description": "HR criteria ID for exact match (optional)"
+          },
+          "name": {
+            "type": "string",
+            "description": "HR criteria name for partial matching (optional)"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "case_visibility",
+              "approval"
+            ],
+            "description": "Filter by type: case_visibility or approval (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "user_group": {
+            "type": "string",
+            "description": "Filter by user group ID (optional)"
+          },
+          "users": {
+            "type": "string",
+            "description": "Filter by user IDs (comma-separated, e.g., '1,2,3'). Matches if any user ID exists in the criteria's users array (optional)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter by created before date. Use ISO format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (optional)"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter by created after date. Use ISO format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "register_hr_criteria",
+      "title": null,
+      "description": "Register a new HR criteria with validation. Name must be unique within organization. User group and users must exist if provided. Returns created HR criteria with type (case_visibility or approval), user_group, users array, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Criteria name (must be unique within organization, required)"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "case_visibility",
+              "approval"
+            ],
+            "description": "Type: case_visibility or approval (required)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Active status (default: true, optional)"
+          },
+          "user_group": {
+            "type": "string",
+            "description": "User group ID (optional, must exist in organization)"
+          },
+          "users": {
+            "type": "string",
+            "description": "User IDs (comma-separated, e.g., '1,2,3') (optional, must exist in organization)"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_hr_criteria",
+      "title": null,
+      "description": "Update an existing HR criteria with smart change detection. At least one field must be provided to update. Name must be unique within organization if changed. User group and users must exist if provided. Returns updated HR criteria and list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_criteria_id": {
+            "type": "string",
+            "description": "HR criteria ID to update (required, identifies the record)"
+          },
+          "name": {
+            "type": "string",
+            "description": "New criteria name (optional, must be unique within organization)"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "case_visibility",
+              "approval"
+            ],
+            "description": "New type: case_visibility or approval (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional)"
+          },
+          "user_group": {
+            "type": "string",
+            "description": "New user group ID (optional, must exist in organization)"
+          },
+          "users": {
+            "type": "string",
+            "description": "New user IDs (comma-separated, e.g., '1,2,3') (optional, must exist in organization)"
+          }
+        },
+        "required": [
+          "hr_criteria_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_skills",
+      "title": null,
+      "description": "Flexible search for skills. At least ONE parameter must be provided. Search by skill ID, name, active status, or creation dates. Returns skills with skill_id, name, active status, org_id, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "description": "Skill ID for exact match (optional)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Skill name for partial matching (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter by created before date. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (optional)"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter by created after date. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_user_skills",
+      "title": null,
+      "description": "Flexible search for user skills (skill-user assignments). At least ONE parameter must be provided. Search by user_skill_id, skill ID, user ID, or creation dates. Returns user skills with user_skill_id, skill, user, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_skill_id": {
+            "type": "string",
+            "description": "User skill ID for exact match (optional)"
+          },
+          "skill": {
+            "type": "string",
+            "description": "Filter by skill ID (optional)"
+          },
+          "user": {
+            "type": "string",
+            "description": "Filter by user ID (optional)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter by created before date. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (optional)"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter by created after date. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_skill",
+      "title": null,
+      "description": "Add a new skill to the organization. Skill name must be unique within the organization. The 'active' field is optional and defaults to True if not provided. Returns the created skill with skill_id, name, active status, and timestamps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Skill name (required, must be unique within organization)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Active status (optional)",
+            "default": true
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_skill",
+      "title": null,
+      "description": "Update an existing skill by skill_id. At least ONE field (name or active) must be provided for update. Smart change detection - only updates changed fields. Name must be unique within organization if changed. Returns updated skill with list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "description": "Skill ID to update (required)"
+          },
+          "name": {
+            "type": "string",
+            "description": "New skill name (optional, must be unique if changed)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional)"
+          }
+        },
+        "required": [
+          "skill_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_skill_to_user",
+      "title": null,
+      "description": "Assign a skill to a user by creating a user_skill record. Both skill and user must exist in the organization. Returns the created assignment with enhanced details including skill_name, user_email, user_first_name, and user_last_name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "skill": {
+            "type": "string",
+            "description": "Skill ID to assign (required, must exist in organization)"
+          },
+          "user": {
+            "type": "string",
+            "description": "User ID to assign skill to (required, must exist in organization)"
+          }
+        },
+        "required": [
+          "skill",
+          "user"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_user_skills",
+      "title": null,
+      "description": "Remove a user skill assignment (hard delete) by user_skill_id. Permanently deletes the skill-user assignment. Returns deleted assignment details including skill_name and user information.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_skill_id": {
+            "type": "string",
+            "description": "User skill ID to delete (required)"
+          }
+        },
+        "required": [
+          "user_skill_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_checklists",
+      "title": null,
+      "description": "Get checklists with flexible filtering options. Returns matching checklists with details including ID, description, checked status, and associated case task. All parameters are optional - returns all checklists if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "checklist_id": {
+            "type": "integer",
+            "description": "Filter by specific checklist ID (exact match, optional)"
+          },
+          "checklist_item_description": {
+            "type": "string",
+            "description": "Filter by description content (partial match, case-insensitive, optional)"
+          },
+          "checked": {
+            "type": "boolean",
+            "description": "Filter by checked status (exact match, optional)"
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "Filter by associated case task ID (exact match, optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_checklist",
+      "title": null,
+      "description": "Create a new checklist item with validation. Validates that the case task exists in the database. Returns the created checklist item with all details. Use this to add new checklist items to HR case tasks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "checklist_item_description": {
+            "type": "string",
+            "description": "Description of the checklist item. Example: 'Submit identification documents', 'Complete training sessions'"
+          },
+          "checked": {
+            "type": "boolean",
+            "description": "Whether the item is checked/completed. Defaults to false if not provided.",
+            "default": false
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "ID of the associated case task (must exist in database). Example: 1"
+          }
+        },
+        "required": [
+          "checklist_item_description",
+          "case_task_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_checklist",
+      "title": null,
+      "description": "Update an existing checklist item with smart change detection. Validates all field changes and prevents unnecessary updates by detecting if fields are already set to the provided values. Updates only the fields provided and automatically sets the updated_at timestamp. Returns the updated checklist with changes made listed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "checklist_id": {
+            "type": "integer",
+            "description": "ID of the checklist item to update (must exist in database). Example: 1"
+          },
+          "checklist_item_description": {
+            "type": "string",
+            "description": "New description of the checklist item. Optional - only provide if changing."
+          },
+          "checked": {
+            "type": "boolean",
+            "description": "New checked status. Optional - only provide if changing."
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "New associated case task ID (must exist in database). Optional - only provide if changing."
+          }
+        },
+        "required": [
+          "checklist_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_surveys",
+      "title": null,
+      "description": "Get surveys with flexible filtering options. Returns matching surveys with all question fields. All parameters are optional - returns all surveys if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "survey_id": {
+            "type": "integer",
+            "description": "Filter by specific survey ID (exact match, optional)"
+          },
+          "question_1": {
+            "type": "string",
+            "description": "Filter by question 1 content (partial match, case-insensitive, optional)"
+          },
+          "question_2": {
+            "type": "string",
+            "description": "Filter by question 2 content (partial match, case-insensitive, optional)"
+          },
+          "question_3": {
+            "type": "string",
+            "description": "Filter by question 3 content (partial match, case-insensitive, optional)"
+          },
+          "question_4": {
+            "type": "string",
+            "description": "Filter by question 4 content (partial match, case-insensitive, optional)"
+          },
+          "question_5": {
+            "type": "string",
+            "description": "Filter by question 5 content (partial match, case-insensitive, optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_survey",
+      "title": null,
+      "description": "Create a new survey with validation. At least one question must be provided. Returns the created survey with all fields and the assigned survey ID.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question_1": {
+            "type": "string",
+            "description": "Question 1 text (optional)"
+          },
+          "question_2": {
+            "type": "string",
+            "description": "Question 2 text (optional)"
+          },
+          "question_3": {
+            "type": "string",
+            "description": "Question 3 text (optional)"
+          },
+          "question_4": {
+            "type": "string",
+            "description": "Question 4 text (optional)"
+          },
+          "question_5": {
+            "type": "string",
+            "description": "Question 5 text (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_survey",
+      "title": null,
+      "description": "Update an existing survey with smart change detection. Only provides questions you want to modify; others will remain unchanged. Returns the updated survey with all fields and a list of which fields were changed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "survey_id": {
+            "type": "integer",
+            "description": "ID of the survey to update (required)"
+          },
+          "question_1": {
+            "type": "string",
+            "description": "New question 1 text (optional, provide only if changing)"
+          },
+          "question_2": {
+            "type": "string",
+            "description": "New question 2 text (optional, provide only if changing)"
+          },
+          "question_3": {
+            "type": "string",
+            "description": "New question 3 text (optional, provide only if changing)"
+          },
+          "question_4": {
+            "type": "string",
+            "description": "New question 4 text (optional, provide only if changing)"
+          },
+          "question_5": {
+            "type": "string",
+            "description": "New question 5 text (optional, provide only if changing)"
+          }
+        },
+        "required": [
+          "survey_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_survey_instances",
+      "title": null,
+      "description": "Get survey instances with flexible filtering options. Returns matching instances with details including responses to survey questions, assigned user, and other metadata. All parameters are optional - returns all survey instances if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "survey_instance_id": {
+            "type": "integer",
+            "description": "Filter by specific survey instance ID (exact match, optional)"
+          },
+          "survey_id": {
+            "type": "integer",
+            "description": "Filter by survey ID (exact match, optional)"
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "Filter by associated case task ID (exact match, optional)"
+          },
+          "assigned_to": {
+            "type": "integer",
+            "description": "Filter by assigned user ID (exact match, optional)"
+          },
+          "answer_1": {
+            "type": "string",
+            "description": "Filter by answer 1 content (partial match, case-insensitive, optional)"
+          },
+          "answer_2": {
+            "type": "string",
+            "description": "Filter by answer 2 content (partial match, case-insensitive, optional)"
+          },
+          "answer_3": {
+            "type": "string",
+            "description": "Filter by answer 3 content (partial match, case-insensitive, optional)"
+          },
+          "answer_4": {
+            "type": "string",
+            "description": "Filter by answer 4 content (partial match, case-insensitive, optional)"
+          },
+          "answer_5": {
+            "type": "string",
+            "description": "Filter by answer 5 content (partial match, case-insensitive, optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_survey_instance",
+      "title": null,
+      "description": "Create a new survey instance with validation. Assigns a user to complete a survey, optionally linking it to a case task. Can include answers to survey questions or leave them blank for later completion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "survey_id": {
+            "type": "integer",
+            "description": "ID of the survey this instance is for (required)"
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "ID of the associated case task (optional)"
+          },
+          "assigned_to": {
+            "type": "integer",
+            "description": "ID of the user assigned to complete this survey (optional)"
+          },
+          "answer_1": {
+            "type": "string",
+            "description": "Answer for question 1 (optional)"
+          },
+          "answer_2": {
+            "type": "string",
+            "description": "Answer for question 2 (optional)"
+          },
+          "answer_3": {
+            "type": "string",
+            "description": "Answer for question 3 (optional)"
+          },
+          "answer_4": {
+            "type": "string",
+            "description": "Answer for question 4 (optional)"
+          },
+          "answer_5": {
+            "type": "string",
+            "description": "Answer for question 5 (optional)"
+          }
+        },
+        "required": [
+          "survey_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_survey_instance",
+      "title": null,
+      "description": "Update an existing survey instance with smart change detection. Can update assignment, associated case task, or survey responses. Only updates fields that are explicitly provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "survey_instance_id": {
+            "type": "integer",
+            "description": "ID of the survey instance to update (required)"
+          },
+          "survey_id": {
+            "type": "integer",
+            "description": "New ID of the survey this instance is for (optional)"
+          },
+          "case_task_id": {
+            "type": "integer",
+            "description": "New ID of the associated case task (optional)"
+          },
+          "assigned_to": {
+            "type": "integer",
+            "description": "New ID of the user assigned to complete this survey (optional)"
+          },
+          "answer_1": {
+            "type": "string",
+            "description": "New answer for question 1 (optional)"
+          },
+          "answer_2": {
+            "type": "string",
+            "description": "New answer for question 2 (optional)"
+          },
+          "answer_3": {
+            "type": "string",
+            "description": "New answer for question 3 (optional)"
+          },
+          "answer_4": {
+            "type": "string",
+            "description": "New answer for question 4 (optional)"
+          },
+          "answer_5": {
+            "type": "string",
+            "description": "New answer for question 5 (optional)"
+          }
+        },
+        "required": [
+          "survey_instance_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_hr_case_by_number",
+      "title": null,
+      "description": "Get complete HR case details by unique case number. Returns full case information including all related entities (HR service, profiles, user assignments, approval criteria). Use this to retrieve comprehensive case details for review, update, or reference.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "The unique case number to retrieve. Must match exactly the number column value in format HRC####### where ####### is a zero-padded 7-digit number. Examples: 'HRC0000001', 'HRC0000002', 'HRC0000770'",
+            "pattern": "^HRC\\d{7}$",
+            "minLength": 10,
+            "maxLength": 10
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_my_cases_to_approve",
+      "title": null,
+      "description": "Find all HR cases awaiting approval by a specific user. Returns cases where the user is listed as approver and request_status is 'requested'. Use this to get a user's approval queue or pending approvals workload. The Cases are returned based on the user token",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_hr_cases",
+      "title": null,
+      "description": "Search and filter HR cases by multiple criteria. Returns a list of matching cases with all related entities (HR services, profiles, users, groups, criteria) fully expanded. All parameters are optional - use any combination to filter results. Perfect for discovering cases, generating reports, or finding cases with specific characteristics.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_id": {
+            "type": "string",
+            "description": "Filter by specific case ID. Example: '1'"
+          },
+          "number": {
+            "type": "string",
+            "description": "Filter by case number (exact match). Must match exactly the number column value in format HRC####### where ####### is a zero-padded 7-digit number. Examples: 'HRC0000001', 'HRC0000002', 'HRC0000770'",
+            "pattern": "^HRC\\d{7}$",
+            "minLength": 10,
+            "maxLength": 10
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by case status",
+            "enum": [
+              "draft",
+              "ready",
+              "awaiting_approval",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "awaiting_acceptance",
+              "suspended",
+              "cancelled"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "Filter by HR service name"
+          },
+          "opened_for": {
+            "type": "string",
+            "description": "Filter by opened_for user name 'first_name last_name'"
+          },
+          "opened_by": {
+            "type": "string",
+            "description": "Filter by opened_by user name 'first_name last_name'"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Filter by priority level",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Filter by how the case was created",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent"
+            ]
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name'"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group name (example: `IT Support`)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Filter by short description (partial match, case-insensitive). Example: 'payroll'"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Filter by worknotes content (partial match, case-insensitive). Example: 'urgent'"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Filter by required skill IDs. Example: [1, 2, 3]"
+          },
+          "approval_criteria": {
+            "type": "string",
+            "description": "Filter by approval criteria name"
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "Filter by Center of Excellence type",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "approver": {
+            "type": "string",
+            "description": "Filter by approver user name 'first_name last_name'"
+          },
+          "request_status": {
+            "type": "string",
+            "description": "Filter by approval request status",
+            "enum": [
+              "approved",
+              "rejected",
+              "requested"
+            ]
+          },
+          "account_number": {
+            "type": "string",
+            "description": "Filter by account number (partial match). Example: '1234'"
+          },
+          "account_type": {
+            "type": "string",
+            "description": "Filter by account type",
+            "enum": [
+              "checking",
+              "savings",
+              "other"
+            ]
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter cases created after this date (ISO format). Example: '2024-01-01T00:00:00Z'"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter cases created before this date (ISO format). Example: '2024-12-31T23:59:59Z'"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of results to return (default: 50, max: 100)",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_cases_assigned_to",
+      "title": null,
+      "description": "Find all HR cases assigned to a specific group or user. Returns cases matching the assignment criteria with all related entities expanded. Provide either assignment_group, assigned_to, or both. Use this to see a group's or individual's current caseload.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group name (optional, but one parameter required, example: `IT Support`)"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name' (optional, but one parameter required)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_new_hr_case",
+      "title": null,
+      "description": "Create a new HR case with complete validation. Validates that all referenced entities (hr_service, profiles, users, groups, criteria) exist in the database. Automatically generates a unique case number in format HRC#######. Returns the created case with all relationships fully expanded. Use this to initiate new HR service requests, incidents, or support cases.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Initial case status. Defaults to 'draft' if not provided.",
+            "enum": [
+              "draft",
+              "ready",
+              "awaiting_approval",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "awaiting_acceptance",
+              "suspended",
+              "cancelled"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "HR service ID this case relates to (must exist in database). Example: '5'. Optional."
+          },
+          "opened_for": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name' for person case is opened for. Optional."
+          },
+          "priority": {
+            "type": "string",
+            "description": "Case priority. Defaults to 'planning' if not provided.",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "How the case was created. Optional.",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent"
+            ]
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name'"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group name (example: `IT Support`)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Brief description of the case (required, max 120 characters). Example: 'Payroll correction needed for employee'"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Work notes for the case (max 120 characters). Optional."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Array of skill IDs required for the case. Example: [1, 2, 3]. Optional."
+          },
+          "approval_criteria": {
+            "type": "string",
+            "description": "HR criteria ID for approval rules (must exist). Example: '2'. Optional."
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "Center of Excellence type (required)",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "approver": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name' for the approver. Optional."
+          },
+          "request_status": {
+            "type": "string",
+            "description": "Approval request status. Optional.",
+            "enum": [
+              "approved",
+              "rejected",
+              "requested"
+            ]
+          },
+          "account_number": {
+            "type": "string",
+            "description": "Account number for payroll-related cases (optional, max 120 characters). Typically used for direct deposit setup or bank account changes. Example: '123456789'"
+          },
+          "account_type": {
+            "type": "string",
+            "description": "Account type for payroll. Optional.",
+            "enum": [
+              "checking",
+              "savings",
+              "other"
+            ]
+          }
+        },
+        "required": [
+          "short_description",
+          "coe_type"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_hr_case",
+      "title": null,
+      "description": "Update an existing HR case with smart change detection. Validates all field changes and prevents unnecessary updates by detecting if fields are already set to the provided values. Can update a single case by ID/number or batch update multiple cases with filters. Updates only the fields provided and automatically sets the updated_at timestamp. Returns the updated case(s) with all relationships fully expanded and a list of fields changed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_id": {
+            "type": "string",
+            "description": "ID of the case to update (must exist in database). Example: '1'. Use for single case updates."
+          },
+          "number": {
+            "type": "string",
+            "description": "Case number for verification (exact match). Must match exactly the number column value in format HRC####### where ####### is a zero-padded 7-digit number. Examples: 'HRC0000001', 'HRC0000002', 'HRC0000770'. Optional.",
+            "pattern": "^HRC\\d{7}$",
+            "minLength": 10,
+            "maxLength": 10
+          },
+          "status": {
+            "type": "string",
+            "description": "New case status. Optional - only provide if changing.",
+            "enum": [
+              "draft",
+              "ready",
+              "awaiting_approval",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "awaiting_acceptance",
+              "suspended",
+              "cancelled"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "New HR service ID (must exist in database). Optional - only provide if changing."
+          },
+          "opened_for": {
+            "type": "string",
+            "description": "New opened_for user name (must exist and should be in format 'first_name last_name'). Optional - only provide if changing."
+          },
+          "priority": {
+            "type": "string",
+            "description": "New priority level. Optional - only provide if changing.",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "New source. Optional - only provide if changing.",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent"
+            ]
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name' (must exist). Optional - only provide if changing."
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group name (example: `IT Support`)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "New short description (max 120 characters). Optional - only provide if changing."
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "New work notes (max 120 characters). Optional - only provide if changing."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "New array of skill IDs. Optional - only provide if changing."
+          },
+          "approval_criteria": {
+            "type": "string",
+            "description": "New approval criteria ID (must exist). Optional - only provide if changing."
+          },
+          "coe_type": {
+            "type": "string",
+            "description": "New COE type. Optional - only provide if changing.",
+            "enum": [
+              "HRIT",
+              "Payroll",
+              "Talent Management",
+              "Total Rewards",
+              "Workforce Administration"
+            ]
+          },
+          "approver": {
+            "type": "string",
+            "description": "User name in format 'first_name last_name' (must exist). Optional - only provide if changing."
+          },
+          "request_status": {
+            "type": "string",
+            "description": "New request status. Optional - only provide if changing.",
+            "enum": [
+              "approved",
+              "rejected",
+              "requested"
+            ]
+          },
+          "account_number": {
+            "type": "string",
+            "description": "New account number (max 120 characters). Optional - only provide if changing."
+          },
+          "account_type": {
+            "type": "string",
+            "description": "New account type. Optional - only provide if changing.",
+            "enum": [
+              "checking",
+              "savings",
+              "other"
+            ]
+          },
+          "created_before": {
+            "type": "string",
+            "description": "For batch updates: update cases created before this date (ISO format). Example: '2024-12-31T23:59:59Z'"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "For batch updates: update cases created after this date (ISO format). Example: '2024-01-01T00:00:00Z'"
+          }
+        },
+        "required": [
+          "hr_case_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "onboard_new_hr_profile",
+      "title": null,
+      "description": "Create a new HR profile for a user. Auto-generates profile number (HR-001, HR-002, etc.). Validates user exists, doesn't have existing profile, and all uniqueness constraints (personal_email, national_tax_id). Establishes 1:1 relationship with User.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "ID of user to create profile for (must exist in organization and not have existing profile). Example: '1', '5'"
+          },
+          "personal_email": {
+            "type": "string",
+            "description": "Personal email address (must be unique within organization). Example: 'john.doe.personal@gmail.com'"
+          },
+          "national_tax_id": {
+            "type": "string",
+            "description": "National tax ID - provide 3-digit number (e.g., '123'). Will be auto-formatted as TAX-{org_id}-{input}. Example: '123', '456'"
+          },
+          "gender": {
+            "type": "string",
+            "description": "Gender (optional)",
+            "enum": [
+              "Male",
+              "Female",
+              "Other"
+            ]
+          },
+          "marital_status": {
+            "type": "string",
+            "description": "Marital status (optional)",
+            "enum": [
+              "Single",
+              "Married",
+              "Divorced"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "Employment type (optional)",
+            "enum": [
+              "full-time",
+              "part-time",
+              "contractor"
+            ]
+          },
+          "dob": {
+            "type": "string",
+            "description": "Date of birth in ISO format: YYYY-MM-DD (optional). Example: '1990-01-15'"
+          },
+          "nationality": {
+            "type": "string",
+            "description": "Nationality code (optional)",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "employment_start_date": {
+            "type": "string",
+            "description": "Employment start date in ISO format: YYYY-MM-DD (optional). Example: '2024-01-01'"
+          },
+          "employment_end_date": {
+            "type": "string",
+            "description": "Employment end date in ISO format: YYYY-MM-DD (optional). Example: '2025-12-31'"
+          },
+          "manager": {
+            "type": "string",
+            "description": "Manager's hr_profile_id. User must have 'manager' role (must exist in same organization) (optional). Example: '1', '5'"
+          },
+          "location_type": {
+            "type": "string",
+            "description": "Work location type (optional)",
+            "enum": [
+              "Hotdesk",
+              "Office Based",
+              "Remote"
+            ]
+          },
+          "position": {
+            "type": "string",
+            "description": "Job position (optional)",
+            "enum": [
+              "Software Engineer",
+              "QA",
+              "Manager",
+              "HR",
+              "IT Support",
+              "Administration",
+              "Sales"
+            ]
+          }
+        },
+        "required": [
+          "user_id",
+          "personal_email",
+          "national_tax_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_hr_profile",
+      "title": null,
+      "description": "Update an existing HR profile with smart change detection. Can identify profile by hr_profile_id, number, personal_email, or user_id. Only updates fields that have changed. Returns list of changes made.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_profile_id": {
+            "type": "string",
+            "description": "HR Profile ID to update (optional identifier). Example: '1', '42'"
+          },
+          "number": {
+            "type": "string",
+            "description": "Profile number to update (optional identifier). Example: 'HR-001', 'HR-042'"
+          },
+          "personal_email": {
+            "type": "string",
+            "description": "Personal email to identify profile (optional identifier, can also be updated). Example: 'john.doe@gmail.com'"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "User ID to identify profile (optional identifier). Example: '1', '5'"
+          },
+          "gender": {
+            "type": "string",
+            "description": "New gender (optional)",
+            "enum": [
+              "Male",
+              "Female",
+              "Other"
+            ]
+          },
+          "marital_status": {
+            "type": "string",
+            "description": "New marital status (optional)",
+            "enum": [
+              "Single",
+              "Married",
+              "Divorced"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "New employment type (optional)",
+            "enum": [
+              "full-time",
+              "part-time",
+              "contractor"
+            ]
+          },
+          "dob": {
+            "type": "string",
+            "description": "New date of birth in ISO format: YYYY-MM-DD (optional). Example: '1990-01-15'"
+          },
+          "nationality": {
+            "type": "string",
+            "description": "New nationality code (optional)",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "employment_start_date": {
+            "type": "string",
+            "description": "New employment start date in ISO format: YYYY-MM-DD (optional). Example: '2024-06-01'"
+          },
+          "employment_end_date": {
+            "type": "string",
+            "description": "New employment end date in ISO format: YYYY-MM-DD (optional). Example: '2026-12-31'"
+          },
+          "manager": {
+            "type": "string",
+            "description": "New manager's hr_profile_id. User must have 'manager' role (must exist in same organization, cannot be self) (optional). Example: '2', '10'"
+          },
+          "location_type": {
+            "type": "string",
+            "description": "New work location type (optional)",
+            "enum": [
+              "Hotdesk",
+              "Office Based",
+              "Remote"
+            ]
+          },
+          "position": {
+            "type": "string",
+            "description": "New job position (optional)",
+            "enum": [
+              "Software Engineer",
+              "QA",
+              "Manager",
+              "HR",
+              "IT Support",
+              "Administration",
+              "Sales"
+            ]
+          },
+          "national_tax_id": {
+            "type": "string",
+            "description": "New national tax ID - provide 3-digit number (e.g., '123'). Will be auto-formatted as TAX-{org_id}-{input} (must be unique within organization) (optional). Example: '456', '789'"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "offboard_hr_profile",
+      "title": null,
+      "description": "Offboard a single HR profile by setting employment_end_date to today. Can identify by hr_profile_id, number, personal_email, or user_id. Idempotent operation - can be called multiple times safely.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_profile_id": {
+            "type": "string",
+            "description": "HR Profile ID to offboard (optional identifier). Example: '1', '5'"
+          },
+          "number": {
+            "type": "string",
+            "description": "Profile number to offboard (optional identifier). Example: 'HR-001', 'HR-005'"
+          },
+          "personal_email": {
+            "type": "string",
+            "description": "Personal email to identify profile (optional identifier). Example: 'john.doe@gmail.com'"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "User ID to identify profile (optional identifier). Example: '1', '5'"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "offboard_hr_profiles",
+      "title": null,
+      "description": "Bulk offboard HR profiles matching filter criteria. Sets employment_end_date to today for all matching profiles. Returns count and list of offboarded profiles. All filters are optional and combined with AND logic. Note: 1) If you include yourself in the filter, it silently avoids self-offboarding. 2) Already offboarded profiles are automatically skipped - only active profiles will be offboarded.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_profile_id": {
+            "type": "string",
+            "description": "Filter by HR Profile ID"
+          },
+          "number": {
+            "type": "string",
+            "description": "Filter by profile number. Example: 'HR-001'"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Filter by user ID"
+          },
+          "personal_email": {
+            "type": "string",
+            "description": "Filter by personal email"
+          },
+          "gender": {
+            "type": "string",
+            "description": "Filter by gender",
+            "enum": [
+              "Male",
+              "Female",
+              "Other"
+            ]
+          },
+          "marital_status": {
+            "type": "string",
+            "description": "Filter by marital status",
+            "enum": [
+              "Single",
+              "Married",
+              "Divorced"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "Filter by employment type. Example: offboard all contractors",
+            "enum": [
+              "full-time",
+              "part-time",
+              "contractor"
+            ]
+          },
+          "dob": {
+            "type": "string",
+            "description": "Filter by date of birth (ISO format: YYYY-MM-DD)"
+          },
+          "nationality": {
+            "type": "string",
+            "description": "Filter by nationality",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "employment_start_date": {
+            "type": "string",
+            "description": "Filter by employment start date (ISO format)"
+          },
+          "employment_end_date": {
+            "type": "string",
+            "description": "Filter by employment end date (ISO format). Use null to exclude already-offboarded"
+          },
+          "manager": {
+            "type": "string",
+            "description": "Filter by manager hr_profile_id. Example: offboard all employees under manager 1"
+          },
+          "location_type": {
+            "type": "string",
+            "description": "Filter by location type",
+            "enum": [
+              "Hotdesk",
+              "Office Based",
+              "Remote"
+            ]
+          },
+          "national_tax_id": {
+            "type": "string",
+            "description": "Filter by national tax ID"
+          },
+          "position": {
+            "type": "string",
+            "description": "Filter by position. Example: offboard all QA",
+            "enum": [
+              "Software Engineer",
+              "QA",
+              "Manager",
+              "HR",
+              "IT Support",
+              "Administration",
+              "Sales"
+            ]
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter profiles created before this date (ISO format: YYYY-MM-DD). Example: '2024-01-01'"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter profiles created after this date (ISO format: YYYY-MM-DD). Example: '2023-01-01'"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_hr_profile_by_id",
+      "title": null,
+      "description": "Get HR profile by its primary key ID (hr_profile_id). Direct lookup by database ID. Returns complete profile details.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_profile_id": {
+            "type": "string",
+            "description": "The unique hr_profile_id primary key. Example: '1', '42'"
+          }
+        },
+        "required": [
+          "hr_profile_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_hr_profile_by_personal_email",
+      "title": null,
+      "description": "Get HR profile by personal email address (case-insensitive lookup). Returns complete profile details if email exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "personal_email": {
+            "type": "string",
+            "description": "Personal email address to search. Case-insensitive. Example: 'john.doe@gmail.com'"
+          }
+        },
+        "required": [
+          "personal_email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_users_hr_profile",
+      "title": null,
+      "description": "Get HR profile by user_id (uses 1:1 relationship between User and HRProfile). Returns the user's HR profile if it exists.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "The user's ID to get profile for. Example: '1', '5'"
+          }
+        },
+        "required": [
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "fetch_hr_profile_by_number",
+      "title": null,
+      "description": "Get a single HR profile by its profile number (e.g., HR-001, HR-042). Returns complete profile details including employment dates, manager, and all attributes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "Profile number to retrieve. Example: 'HR-001', 'HR-042'"
+          }
+        },
+        "required": [
+          "number"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "fetch_hr_profiles",
+      "title": null,
+      "description": "Search/list HR profiles with flexible filtering. All filters are optional and combined with AND logic. Returns list of matching profiles. Useful for finding employees by department, role, status, manager, etc.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "gender": {
+            "type": "string",
+            "description": "Filter by gender",
+            "enum": [
+              "Male",
+              "Female",
+              "Other"
+            ]
+          },
+          "marital_status": {
+            "type": "string",
+            "description": "Filter by marital status",
+            "enum": [
+              "Single",
+              "Married",
+              "Divorced"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "Filter by employment type. Example: find all contractors",
+            "enum": [
+              "full-time",
+              "part-time",
+              "contractor"
+            ]
+          },
+          "dob": {
+            "type": "string",
+            "description": "Filter by date of birth (ISO format: YYYY-MM-DD)"
+          },
+          "nationality": {
+            "type": "string",
+            "description": "Filter by nationality code",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "employment_start_date": {
+            "type": "string",
+            "description": "Filter by employment start date (ISO format: YYYY-MM-DD)"
+          },
+          "employment_end_date": {
+            "type": "string",
+            "description": "Filter by employment end date (ISO format: YYYY-MM-DD). Use 'null' to find active employees only"
+          },
+          "manager": {
+            "type": "string",
+            "description": "Filter by manager's hr_profile_id. Example: find all employees under manager 1"
+          },
+          "location_type": {
+            "type": "string",
+            "description": "Filter by work location type",
+            "enum": [
+              "Hotdesk",
+              "Office Based",
+              "Remote"
+            ]
+          },
+          "national_tax_id": {
+            "type": "string",
+            "description": "Filter by national tax ID"
+          },
+          "position": {
+            "type": "string",
+            "description": "Filter by job position. Example: find all Software Engineers",
+            "enum": [
+              "Software Engineer",
+              "QA",
+              "Manager",
+              "HR",
+              "IT Support",
+              "Administration",
+              "Sales"
+            ]
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "retrieve_knowledge_articles",
+      "title": null,
+      "description": "Retrieve knowledge articles with optional filters, scoped to user's organization.\n        \n        Use this tool to retrieve a list of knowledge articles. Without filters, returns all articles in the organization.\n        With filters, returns only articles matching the specified criteria.\n        \n        Optional Filters:\n        - knowledge_id: Filter by knowledge ID (exact match)\n        - kb_number: Filter by KB number (exact match)\n        - title: Filter by title (partial match, case-insensitive)\n        - body: Filter by body content (partial match, case-insensitive)\n        - state: Filter by state (draft, published, retired)\n        - visibility: Filter by visibility (internal, external)\n        - owner_id: Filter by owner user ID\n        - created_before: Filter articles created before date (ISO 8601 format: 2024-01-15 or 2024-01-15T09:00:00)\n        - created_after: Filter articles created after date (ISO 8601 format)\n        \n        Returns a list of knowledge article objects matching the filters, or all articles if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "knowledge_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by knowledge ID (exact match)"
+          },
+          "kb_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by KB number (exact match)"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by title (partial match, case-insensitive)"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by body content (partial match, case-insensitive)"
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by state",
+            "enum": [
+              "draft",
+              "published",
+              "retired"
+            ]
+          },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by visibility",
+            "enum": [
+              "internal",
+              "external"
+            ]
+          },
+          "owner_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by owner user ID"
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter articles created before this date (ISO 8601 format)"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter articles created after this date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_knowledge_article",
+      "title": null,
+      "description": "Create a new knowledge article in the system.\n        \n        Use this tool to add a new knowledge article. The system automatically generates kb_number \n        (KB-001, KB-002, etc.) if not provided. KB numbers are unique within an organization.\n        \n        Required Parameters:\n        - title: Article title (1-120 characters)\n        \n        Optional Parameters:\n        - body: Article body content\n        - state: Article state (draft, published, retired) - defaults to published\n        - visibility: Article visibility (internal, external) - defaults to internal\n        - owner_id: Owner user ID (must belong to same organization)\n        \n        Auto-Generated Fields:\n        - kb_number: KB number (KB-001, KB-002, etc.) if not provided\n        - knowledge_id: Auto-incremented ID\n        - created_at and updated_at timestamps\n        \n        Returns the newly created knowledge article object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Article title (required, 1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Article body content"
+          },
+          "state": {
+            "type": "string",
+            "description": "Article state (defaults to 'published')",
+            "enum": [
+              "draft",
+              "published",
+              "retired"
+            ],
+            "default": "published"
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Article visibility (defaults to 'internal')",
+            "enum": [
+              "internal",
+              "external"
+            ],
+            "default": "internal"
+          },
+          "owner_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Owner user ID (must belong to same organization)"
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_knowledge_article",
+      "title": null,
+      "description": "Update specific fields of an existing knowledge article.\n        \n        Use this tool to update one or more fields of a knowledge article identified by knowledge_id or kb_number.\n        At least one field (besides identifiers) must be provided. The tool validates that the new values \n        are different from current values (idempotency check).\n        \n        Required Parameter (one of):\n        - knowledge_id: Knowledge article ID\n        - kb_number: KB number\n        \n        Optional Parameters (at least one required):\n        - title: Updated article title (1-120 characters)\n        - body: Updated article body content\n        - state: Updated article state (draft, published, retired)\n        - visibility: Updated article visibility (internal, external)\n        - owner_id: Updated owner user ID (must belong to same organization)\n        \n        Note: Updating a field to its current value will result in an error (no changes detected).\n        \n        Returns the updated knowledge article object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "knowledge_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Knowledge article ID (alternative to kb_number)"
+          },
+          "kb_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "KB number (alternative to knowledge_id)"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated article title (1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated article body content"
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated article state",
+            "enum": [
+              "draft",
+              "published",
+              "retired"
+            ]
+          },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated article visibility",
+            "enum": [
+              "internal",
+              "external"
+            ]
+          },
+          "owner_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Updated owner user ID (must belong to same organization)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "link_knowledge_to_hr_case",
+      "title": null,
+      "description": "Link a knowledge article to an HR case.\n        \n        Use this tool to associate a knowledge article with an HR case. The link specifies how \n        the knowledge article is used (suggested, applied, or as resolution).\n        \n        Required Parameters:\n        - hr_case_id: HR case ID\n        - knowledge_id: Knowledge article ID\n        \n        Optional Parameters:\n        - used_as: Usage type (suggested, applied, resolution) - defaults to suggested\n        \n        Both HR case and knowledge article must belong to the same organization.\n        A knowledge article can only be linked once to the same HR case.\n        \n        Returns the created link object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_id": {
+            "type": "integer",
+            "description": "HR case ID (required)"
+          },
+          "knowledge_id": {
+            "type": "integer",
+            "description": "Knowledge article ID (required)"
+          },
+          "used_as": {
+            "type": "string",
+            "description": "Usage type (defaults to 'suggested')",
+            "enum": [
+              "suggested",
+              "applied",
+              "resolution"
+            ],
+            "default": "suggested"
+          }
+        },
+        "required": [
+          "hr_case_id",
+          "knowledge_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_hr_case_knowledge_links",
+      "title": null,
+      "description": "Find HR case knowledge links with optional filters, scoped to user's organization.\n        \n        Use this tool to retrieve links between HR cases and knowledge articles. Without filters, \n        returns all links in the organization. With filters, returns only links matching the criteria.\n        \n        Optional Filters:\n        - hr_case_kb_id: Filter by link ID (exact match)\n        - hr_case_id: Filter by HR case ID (exact match)\n        - knowledge_id: Filter by knowledge ID (exact match)\n        - used_as: Filter by usage type (suggested, applied, resolution)\n        \n        Returns a list of link objects matching the filters, or all links if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_kb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by link ID (exact match)"
+          },
+          "hr_case_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by HR case ID (exact match)"
+          },
+          "knowledge_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by knowledge ID (exact match)"
+          },
+          "used_as": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by usage type",
+            "enum": [
+              "suggested",
+              "applied",
+              "resolution"
+            ]
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_knowledge_link_to_hr_case",
+      "title": null,
+      "description": "Remove knowledge link(s) from HR case(s), scoped to user's organization.\n        \n        Use this tool to remove links between knowledge articles and HR cases. You can remove:\n        - A specific link by its ID (hr_case_kb_id)\n        - A specific link by case and knowledge (hr_case_id + knowledge_id)\n        - All links for a specific case (hr_case_id only)\n        \n        Required Parameter (one of):\n        - hr_case_kb_id: Specific link ID (takes precedence)\n        - hr_case_id + knowledge_id: Specific link by case and knowledge\n        - hr_case_id: All links for this case\n        \n        Returns the number of links removed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_kb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Specific link ID (takes precedence over other filters)"
+          },
+          "hr_case_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "HR case ID (required if hr_case_kb_id not provided)"
+          },
+          "knowledge_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Knowledge article ID (required if hr_case_kb_id not provided and hr_case_id provided)"
+          },
+          "used_as": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by usage type (not used for deletion, kept for compatibility)",
+            "enum": [
+              "suggested",
+              "applied",
+              "resolution"
+            ]
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_assignment_rules",
+      "title": null,
+      "description": "Search and list assignment rules with flexible filtering. At least one search parameter must be provided. Supports filtering by ID, name (partial match), skills (ANY match), country, priority, active status, user group, and users (ANY match). All filters combined with AND logic.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_rule_id": {
+            "type": "integer",
+            "description": "Filter by exact assignment rule ID. Example: 1"
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by name (partial match, case-insensitive). Example: 'IT Support'"
+          },
+          "based_on_skills": {
+            "type": "string",
+            "description": "Filter by skill IDs (comma-separated). Matches if ANY skill is in rule's skills. Example: '1,2,3'"
+          },
+          "based_on_country": {
+            "type": "string",
+            "description": "Filter by country code. Valid values: US, GB, CA, IN, DE, FR, JP, CN, AU, BR. Example: 'US'",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "based_on_priority": {
+            "type": "string",
+            "description": "Filter by priority level. Valid values: critical, high, moderate, low, planning. Example: 'high'",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status. Example: true"
+          },
+          "user_group": {
+            "type": "integer",
+            "description": "Filter by user group ID. Example: 5"
+          },
+          "users": {
+            "type": "string",
+            "description": "Filter by user IDs (comma-separated). Matches if ANY user is in rule's users. Example: '10,11,12'"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum results to return (default: 50, max: 100). Example: 20",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_assignment_rule",
+      "title": null,
+      "description": "Create a new assignment rule with validation. Assignment rules define how HR cases are automatically routed to teams or individuals based on skills, country, priority, etc. The rule name must be unique within the organization. Skills, users, and user groups are validated against the database.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Assignment rule name (required, 1-120 characters, unique within organization). Example: 'IT Support Rules'",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "based_on_skills": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "List of skill IDs that trigger this rule (optional, validated). Example: [1, 2, 3]"
+          },
+          "based_on_country": {
+            "type": "string",
+            "description": "Country code that triggers this rule (optional). Valid values: US, GB, CA, IN, DE, FR, JP, CN, AU, BR. Example: 'US'",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "based_on_priority": {
+            "type": "string",
+            "description": "Priority level that triggers this rule (optional, defaults to 'planning'). Valid values: critical, high, moderate, low, planning. Example: 'high'",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ],
+            "default": "planning"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the rule is active (default: False). Inactive rules are not applied. Example: true",
+            "default": false
+          },
+          "user_group": {
+            "type": "integer",
+            "description": "User group ID to assign cases to (optional, must exist in organization). Example: 5"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "List of user IDs to assign cases to (optional, validated). Example: [10, 11, 12]"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_assignment_rules",
+      "title": null,
+      "description": "Update an existing assignment rule with smart change detection. Only updates fields that have actually changed. Returns the updated rule and a list of changes made. Skills, users, and user groups are validated if provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_rule_id": {
+            "type": "integer",
+            "description": "ID of the assignment rule to update (required). Must exist in organization. Example: 1"
+          },
+          "name": {
+            "type": "string",
+            "description": "New rule name (optional, 1-120 characters, must be unique if changed). Example: 'Updated IT Support Rules'",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "based_on_skills": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "New list of skill IDs (optional, replaces existing, validated). Example: [1, 2, 3, 4]"
+          },
+          "based_on_country": {
+            "type": "string",
+            "description": "New country code (optional). Valid values: US, GB, CA, IN, DE, FR, JP, CN, AU, BR. Example: 'GB'",
+            "enum": [
+              "US",
+              "GB",
+              "CA",
+              "IN",
+              "DE",
+              "FR",
+              "JP",
+              "CN",
+              "AU",
+              "BR"
+            ]
+          },
+          "based_on_priority": {
+            "type": "string",
+            "description": "New priority level (optional). Valid values: critical, high, moderate, low, planning. Example: 'critical'",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Example: true"
+          },
+          "user_group": {
+            "type": "integer",
+            "description": "New user group ID (optional, must exist if provided). Example: 6"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "New list of user IDs (optional, replaces existing, validated). Example: [10, 11, 12, 13]"
+          }
+        },
+        "required": [
+          "assignment_rule_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_escalation_rules",
+      "title": null,
+      "description": "Flexible search for escalation rules. At least ONE parameter must be provided. Search by escalation_rule_id, escalate_from (source group ID), or escalate_to (target group ID). Returns escalation rules with escalation_rule_id, escalate_from, escalate_to, org_id, escalate_from_group_name, and escalate_to_group_name for easy reference.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "escalation_rule_id": {
+            "type": "string",
+            "description": "Escalation rule ID for exact match (optional)"
+          },
+          "escalate_from": {
+            "type": "string",
+            "description": "Filter by source group ID (optional)"
+          },
+          "escalate_to": {
+            "type": "string",
+            "description": "Filter by target group ID (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_escalation_rule",
+      "title": null,
+      "description": "Add a new escalation rule by specifying source group (escalate_from) and target group (escalate_to). Both groups must exist in the organization. Returns the created escalation rule with escalation_rule_id, escalate_from, escalate_to, escalate_from_group_name, escalate_to_group_name, created_at timestamp, and org_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "escalate_from": {
+            "type": "string",
+            "description": "Source group ID (required, must exist in organization)"
+          },
+          "escalate_to": {
+            "type": "string",
+            "description": "Target group ID (required, must exist in organization)"
+          }
+        },
+        "required": [
+          "escalate_from",
+          "escalate_to"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_escalation_rule",
+      "title": null,
+      "description": "Remove an escalation rule by its ID. Returns the removed rule details including escalation_rule_id, escalate_from, escalate_to, group names, and org_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "escalation_rule_id": {
+            "type": "string",
+            "description": "Escalation rule ID to remove (required)"
+          }
+        },
+        "required": [
+          "escalation_rule_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_count_of_case_priority_wise",
+      "title": null,
+      "description": "Get count of cases grouped by priority, scoped to user's organization.\n        \n        Returns an object with priority as the key and the count of cases which has that priority value as the value.\n        Example: {'critical': 5, 'high': 3, 'low': 2}\n        \n        Optional parameter:\n        - priority_list: List of priorities to filter. If provided, only those priorities are considered for output.\n          Valid priorities: critical, high, moderate, low, planning (all lowercase, case-sensitive).\n        \n        If a priority list is given, the output will only include those priorities (with count 0 if not found).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "priority_list": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of priorities to filter (critical, high, moderate, low, planning)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_case_for_assignment_group",
+      "title": null,
+      "description": "Count cases assigned to an assignment group with optional filters, scoped to user's organization.\n        \n        Returns an object where assignment_group_id is the key and the number of cases assigned to it is the count value.\n        Example: {'assignment_group_id': 1, 'count': 5}\n        \n        Required parameter:\n        - assignment_group_id: Assignment group ID\n        \n        Optional parameters (for filtering):\n        - statuses: List of case statuses to filter. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled (all lowercase, case-sensitive)\n        - priority_list: List of priorities to filter. Valid priorities: critical, high, moderate, low, planning (all lowercase, case-sensitive)\n        - source: Source to filter. Valid sources: self-service, phone, email, chat, walk-in, virtual-agent (all lowercase, case-sensitive)\n        \n        All filters are applied with AND logic.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group_id": {
+            "type": "integer",
+            "description": "Assignment group ID (required)"
+          },
+          "statuses": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of case statuses to filter"
+          },
+          "priority_list": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of priorities to filter"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional source to filter"
+          }
+        },
+        "required": [
+          "assignment_group_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_case_task_for_assignment_group",
+      "title": null,
+      "description": "Count case tasks assigned to an assignment group with optional status filter, scoped to user's organization.\n        \n        Returns an object where assignment_group_id is the key and the number of case tasks assigned to it is the count value.\n        Example: {'assignment_group_id': 1, 'count': 3}\n        \n        Required parameter:\n        - assignment_group_id: Assignment group ID\n        \n        Optional parameters (for filtering):\n        - statuses: List of task statuses to filter. Valid statuses: draft, ready, work_in_progress, closed_complete, closed_incomplete, cancelled (all lowercase, case-sensitive)\n        \n        All filters are applied with AND logic.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group_id": {
+            "type": "integer",
+            "description": "Assignment group ID (required)"
+          },
+          "statuses": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of task statuses to filter"
+          }
+        },
+        "required": [
+          "assignment_group_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_status",
+      "title": null,
+      "description": "Count notifications grouped by status, scoped to user's organization.\n        \n        Returns status-wise notifications count as an object with status as key and count as value.\n        Example: {'draft': 5, 'ready': 3, 'work_in_progress': 2}\n        \n        Optional parameter:\n        - status: List of statuses to filter. If provided, only those statuses are considered for output.\n          Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled (lowercase, case-sensitive).\n          If a status list is given, the output will only include those statuses (with count 0 if not found).\n          If not provided or null, returns counts for all statuses.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of statuses to filter. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_case",
+      "title": null,
+      "description": "Count notifications for cases, scoped to user's organization.\n        \n        Returns the total count of notifications.\n        If case_ids are provided, counts notifications for those specific cases only.\n        If case_ids are not provided, counts all notifications in the organization.\n        \n        Optional parameter:\n        - case_ids: List of case IDs to filter (if not provided, counts all notifications)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "case_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer"
+            },
+            "description": "Optional list of case IDs to filter"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "avg_notifications_by_case",
+      "title": null,
+      "description": "Calculate average number of notifications per case, scoped to user's organization.\n        \n        Returns the average notifications count by cases as a float.\n        Example: 2.5 (meaning on average each case has 2.5 notifications)\n        \n        Optional parameter:\n        - case_ids: List of case IDs to filter (if not provided, calculates for all cases in organization)\n        \n        Note: If no cases exist, returns 0.0",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "case_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer"
+            },
+            "description": "Optional list of case IDs to filter"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_type",
+      "title": null,
+      "description": "Count notifications grouped by type, scoped to user's organization.\n        \n        Returns type-wise notification count as an object with type as key and count as value.\n        Example: {'report': 5, 'update': 3, 'alert': 2}\n        \n        Optional parameter:\n        - type: List of notification types to filter. If provided, only those types are considered for output.\n          Valid types: report, update, alert, reminder, solution_proposal, other (case-sensitive, lowercase).\n        \n        If a type list is given, the output will only include those types (with count 0 if not found).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of notification types to filter. Valid types: report, update, alert, reminder, solution_proposal, other"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications_for_email",
+      "title": null,
+      "description": "Find notifications for a specific email address, scoped to user's organization.\n        \n        Returns a list of notifications sent to the specified email address.\n        \n        Required parameter:\n        - email: Email address to filter by (exact match)\n        \n        All notifications are scoped to the user's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email address to filter by (required)"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications_sent_for_incident",
+      "title": null,
+      "description": "Find notifications sent for a specific HR case, scoped to user's organization.\n        \n        Returns a list of notifications sent for the specified HR case.\n        \n        Required parameter:\n        - hr_case_id: HR case ID to filter by (exact match)\n        \n        All notifications are scoped to the user's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_id": {
+            "type": "integer",
+            "description": "HR case ID to filter by (required)"
+          }
+        },
+        "required": [
+          "hr_case_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications",
+      "title": null,
+      "description": "Find notifications with optional filters, scoped to user's organization.\n        \n        Returns a list of notifications matching all provided filters (AND logic).\n        \n        Optional filters:\n        - notification_id: Exact match on notification ID\n        - hr_case_id: Exact match on HR case ID\n        - email: Exact match on email address\n        - type: Exact match on notification type. Valid types: report, update, alert, reminder, solution_proposal, other (all lowercase, case-sensitive)\n        - status: Exact match on notification status. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled (all lowercase, case-sensitive)\n        - sys_created_on: Exact match on created date/time (ISO 8601 format, e.g., '2024-01-15' or '2024-01-15T09:00:00')\n        \n        All notifications are scoped to the user's organization.\n        If no filters are provided, returns all notifications for the user's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by notification ID (exact match)"
+          },
+          "hr_case_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by HR case ID (exact match)"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by email address (exact match)"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification type (report, update, alert, reminder, solution_proposal, other)"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification status (draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled)"
+          },
+          "sys_created_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by created date/time (ISO 8601 format, exact match, e.g., '2024-01-15' or '2024-01-15T09:00:00')"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "send_notification",
+      "title": null,
+      "description": "Send a new notification, scoped to user's organization.\n        \n        Creates a new notification for the specified HR case and email address.\n        \n        Required parameters:\n        - hr_case_id: HR case ID (must belong to user's organization)\n        - email: Recipient email address (must belong to a user in the same organization)\n        \n        Optional parameters:\n        - type: Notification type. Valid types: report, update, alert, reminder, solution_proposal, other (default: other). All lowercase, case-sensitive.\n        - status: Notification status. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled. All lowercase, case-sensitive.\n        \n        Example payload:\n        {\n            \"hr_case_id\": 1,\n            \"email\": \"user@example.com\",\n            \"type\": \"alert\",\n            \"status\": \"ready\"\n        }",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_id": {
+            "type": "integer",
+            "description": "HR case ID (required)"
+          },
+          "email": {
+            "type": "string",
+            "description": "Recipient email address (required)"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Notification type (report, update, alert, reminder, solution_proposal, other). Default: other"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Notification status (draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled)"
+          }
+        },
+        "required": [
+          "hr_case_id",
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_notification",
+      "title": null,
+      "description": "Update an existing notification, scoped to user's organization.\n        \n        Updates one or more fields of an existing notification.\n        \n        Required parameter:\n        - notification_id: Notification ID to update\n        \n        Optional parameters (at least one required):\n        - hr_case_id: Updated HR case ID (must belong to user's organization)\n        - email: Updated recipient email address\n        - type: Updated notification type. Valid types: report, update, alert, reminder, solution_proposal, other (all lowercase, case-sensitive)\n        - status: Updated notification status. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled (all lowercase, case-sensitive)\n        \n        Example payload:\n        {\n            \"notification_id\": 1,\n            \"status\": \"ready\",\n            \"type\": \"alert\"\n        }",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "integer",
+            "description": "Notification ID to update (required)"
+          },
+          "hr_case_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Updated HR case ID"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated recipient email address"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated notification type (report, update, alert, reminder, solution_proposal, other)"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated notification status (draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled)"
+          }
+        },
+        "required": [
+          "notification_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "delete_notifications",
+      "title": null,
+      "description": "Delete notifications with optional filters, scoped to user's organization.\n        \n        Deletes notifications matching all provided filters (AND logic).\n        \n        Required filters (at least one):\n        - notification_id: Exact match on notification ID (unique identifier)\n        - hr_case_id: Exact match on HR case ID\n        - email: Exact match on email address\n        - type: Exact match on notification type. Valid types: report, update, alert, reminder, solution_proposal, other (all lowercase, case-sensitive)\n        - status: Exact match on notification status. Valid statuses: draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled (all lowercase, case-sensitive)\n        - sys_created_on: Exact match on created date/time (ISO 8601 format)\n        - created_before: Filter notifications created before date (ISO 8601 format)\n        - created_after: Filter notifications created after date (ISO 8601 format)\n        \n        Returns the number of notifications deleted.\n        If no notifications match the filters, returns an error.\n        \n        Example:\n        {\n            \"notification_id\": 1\n        }\n        \n        or\n        \n        {\n            \"hr_case_id\": 1,\n            \"status\": \"cancelled\"\n        }",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by notification ID (exact match, unique identifier)"
+          },
+          "hr_case_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by HR case ID (exact match)"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by email address (exact match)"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification type (report, update, alert, reminder, solution_proposal, other)"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification status (draft, ready, awaiting_approval, work_in_progress, closed_complete, closed_incomplete, awaiting_acceptance, suspended, cancelled)"
+          },
+          "sys_created_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by created date/time (ISO 8601 format, exact match)"
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter notifications created before date (ISO 8601 format)"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter notifications created after date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_hr_case_tasks",
+      "title": null,
+      "description": "Flexible search for HR case tasks with multiple filter options. Returns matching tasks with all related entities (assigned user, assignment group, HR service, and parent case) fully expanded. All filters use AND logic. Results are automatically scoped to the authenticated user's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_task_id": {
+            "type": "string",
+            "description": "Filter by exact task ID (optional)"
+          },
+          "number": {
+            "type": "string",
+            "description": "Filter by exact task number (optional)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by exact task status (optional)",
+            "enum": [
+              "draft",
+              "ready",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "cancelled"
+            ]
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Filter by assigned user name in format 'first_name last_name' (optional)"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Filter by assignment group name (optional)"
+          },
+          "task_type": {
+            "type": "string",
+            "description": "Filter by exact task type (optional)",
+            "enum": [
+              "checklist",
+              "survey",
+              "hr service",
+              "mark when complete",
+              "url"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "Filter by HR service name (optional)"
+          },
+          "external_url": {
+            "type": "string",
+            "description": "Filter by external URL - partial match, case-insensitive (optional)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Filter by short description - partial match, case-insensitive (optional)"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Filter by worknotes - partial match, case-insensitive (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          },
+          "parent_case": {
+            "type": "string",
+            "description": "Filter by exact parent case ID (optional)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_hr_case_task",
+      "title": null,
+      "description": "Create a new HR case task with complete validation. Validates all referenced entities (parent case, assigned user, assignment group, HR service) exist in the database and belong to the organization. Automatically generates a unique task number in format TASK-YYYYMMDD-XXXX. The task is automatically scoped to the authenticated user's organization. short_description must contain at least one non-whitespace character. Returns the created task with all relationships fully expanded.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Task status (required)",
+            "enum": [
+              "draft",
+              "ready",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "cancelled"
+            ]
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Short description of the task (required, must contain at least one non-whitespace character)"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Assigned user name in format 'first_name last_name' - must exist in database (optional)"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group name - must exist in database (optional)"
+          },
+          "task_type": {
+            "type": "string",
+            "description": "Task type (optional)",
+            "enum": [
+              "checklist",
+              "survey",
+              "hr service",
+              "mark when complete",
+              "url"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "HR service name - must exist in database (optional)"
+          },
+          "external_url": {
+            "type": "string",
+            "description": "External URL (optional)"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Worknotes (optional)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether task is active and available. Defaults to true.",
+            "default": true
+          },
+          "parent_case": {
+            "type": "string",
+            "description": "Parent case ID - must exist in database (optional)"
+          }
+        },
+        "required": [
+          "status",
+          "short_description"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_hr_case_task",
+      "title": null,
+      "description": "Update an existing HR case task with smart change detection. Validates all field changes and prevents unnecessary updates by detecting if fields are already set to the provided values. Validates that referenced entities exist and belong to the organization. The task must belong to the authenticated user's organization. Updates only the fields provided and automatically sets the updated_at timestamp. If updating short_description, it must contain at least one non-whitespace character. Returns the updated task with all relationships fully expanded.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "hr_case_task_id": {
+            "type": "string",
+            "description": "ID of the HR case task to update (must exist in database). Example: 1"
+          },
+          "number": {
+            "type": "string",
+            "description": "New task number - must be unique (optional). Only provide if changing."
+          },
+          "status": {
+            "type": "string",
+            "description": "New task status (optional). Only provide if changing.",
+            "enum": [
+              "draft",
+              "ready",
+              "work_in_progress",
+              "closed_complete",
+              "closed_incomplete",
+              "cancelled"
+            ]
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "New assigned user name in format 'first_name last_name' - must exist in database (optional). Only provide if changing."
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "New assignment group name - must exist in database (optional). Only provide if changing."
+          },
+          "task_type": {
+            "type": "string",
+            "description": "New task type (optional). Only provide if changing.",
+            "enum": [
+              "checklist",
+              "survey",
+              "hr service",
+              "mark when complete",
+              "url"
+            ]
+          },
+          "hr_service": {
+            "type": "string",
+            "description": "New HR service name - must exist in database (optional). Only provide if changing."
+          },
+          "external_url": {
+            "type": "string",
+            "description": "New external URL (optional). Only provide if changing."
+          },
+          "short_description": {
+            "type": "string",
+            "description": "New short description (optional). Only provide if changing. Must contain at least one non-whitespace character if provided."
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "New worknotes (optional). Only provide if changing."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "New active status (optional). Only provide if changing."
+          },
+          "parent_case": {
+            "type": "string",
+            "description": "New parent case ID - must exist in database (optional). Only provide if changing."
+          }
+        },
+        "required": [
+          "hr_case_task_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    }
+  ]
+}
