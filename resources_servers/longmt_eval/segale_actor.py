@@ -142,9 +142,17 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
         # Ray thinks this node has 0 GPUs; preserve physical CUDA_VISIBLE_DEVICES
         # so the actor can still access its assigned GPU directly.
         env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_CACHE", "LASER_HOME", "ERSATZ", "TRANSFORMERS_CACHE"):
+    # HF_HOME: root HuggingFace cache dir; hub cache derives from it.
+    # HF_HUB_OFFLINE: when 1, blocks all HF Hub network calls.
+    # HF_HUB_CACHE: overrides just the hub model-cache location.
+    # TRANSFORMERS_CACHE: legacy transformers cache dir (deprecated; forwarded for compat).
+    # LASER_HOME: dir for LASER2 weights
+    # ERSATZ: dir for ersatz segmenter weights
+    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_CACHE", "TRANSFORMERS_CACHE"):
         if os.environ.get(key):
             env_vars[key] = os.environ[key]
+    env_vars["LASER_HOME"] = os.environ.get("LASER_HOME", "/opt/Gym/.cache/longmt-laser")
+    env_vars["ERSATZ"] = os.environ.get("ERSATZ", "/opt/Gym/.cache/longmt-ersatz")
 
     gpu_fraction = 1 / actors_per_gpu
     if use_extra_gpu:
