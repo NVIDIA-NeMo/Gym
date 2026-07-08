@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import time
 from asyncio import Future
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,34 @@ from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollecti
 
 
 class TestRolloutCollection:
+    async def test_run_examples_can_return_request_timing(self) -> None:
+        response_payload = orjson.dumps(
+            {"response": {"created_at": int(time.time())}, "reward": 1.0}
+        )
+        mock_response = MagicMock(ok=True)
+        mock_response.read = AsyncMock(return_value=response_payload)
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return mock_server_client
+
+        row = {"agent_ref": {"name": "agent"}}
+        futures = MockHelper().run_examples(
+            [row], include_request_timing=True
+        )
+        actual_row, result, request_timing = await next(iter(futures))
+
+        assert actual_row is row
+        assert result["reward"] == 1.0
+        assert request_timing["response_body_bytes"] == len(response_payload)
+        assert request_timing["request_to_headers_seconds"] >= 0
+        assert request_timing["response_body_read_seconds"] >= 0
+        assert request_timing["response_json_decode_seconds"] >= 0
+        assert request_timing["request_total_seconds"] >= 0
+        assert "server_ready_to_headers_seconds" in request_timing
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"

@@ -1,0 +1,426 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -65,6 +65,7 @@
+         )
+         self.model_server_cookies = None
+         self.llm = llm
++        self._pending_streaming_prompt_reuse_id: str | None = None
+ 
+     async def model_call(
+         self,
+@@ -105,6 +106,11 @@
+         if tools:
+             params["tools"] = tools
+ 
++        streaming_prompt_reuse_id = self._pending_streaming_prompt_reuse_id
++        self._pending_streaming_prompt_reuse_id = None
++        if streaming_prompt_reuse_id is not None:
++            params["streaming_prompt_reuse_id"] = streaming_prompt_reuse_id
++
+         fields_to_remove = [
+             "prompt_token_ids",
+             "generation_token_ids",
+@@ -132,12 +138,24 @@
+         )
+         await raise_for_status(model_response)
+         model_response_json = await get_response_json(model_response)
++        streaming_prompt_reuse_status = model_response_json.pop(
++            "streaming_prompt_reuse_status", None
++        )
++        streaming_prompt_reuse_match_kind = model_response_json.pop(
++            "streaming_prompt_reuse_match_kind", None
++        )
+         latency = time.perf_counter() - latency_start
+         self.llm.metrics.add_response_latency(
+             latency, model_response_json.get("id", "unknown")
+         )
+         self.model_server_cookies = model_response.cookies
+ 
++        if streaming_prompt_reuse_id is not None:
++            self._update_streaming_prompt_reuse_metrics(
++                streaming_prompt_reuse_status,
++                streaming_prompt_reuse_match_kind,
++            )
++
+         response: ModelResponse = ModelResponse.model_validate(model_response_json)
+ 
+         response_message_dict = model_response_json["choices"][0]["message"]
+@@ -161,6 +179,10 @@
+ 
+         return response
+ 
++    def register_streaming_prompt_reuse(self, reuse_id: str) -> None:
++        """Attach an exact, one-shot tokenized prompt to the next model call."""
++        self._pending_streaming_prompt_reuse_id = reuse_id
++
+     def _register_streaming_tool_call_context(
+         self,
+         *,
+@@ -178,7 +200,24 @@
+ 
+         tool_call = tool_calls[0]
+         chat_completion = deepcopy(params)
+-        chat_completion["messages"].append(deepcopy(response_message_dict))
++        # Match OpenHands' Message serializer. Provider response models can
++        # contain optional null/default fields that are absent from the next
++        # request even though they do not affect the rendered prompt.
++        assistant_message = {
++            key: deepcopy(response_message_dict[key])
++            for key in (
++                "role",
++                "content",
++                "tool_calls",
++                "prompt_token_ids",
++                "generation_token_ids",
++                "generation_log_probs",
++            )
++            if key in response_message_dict
++        }
++        if assistant_message.get("content") is None:
++            assistant_message["content"] = ""
++        chat_completion["messages"].append(assistant_message)
+         _STREAMING_TOOL_CALL_CONTEXTS[response.id] = StreamingToolCallContext(
+             client=self,
+             response_id=response.id,
+@@ -196,6 +235,7 @@
+         context: StreamingToolCallContext | None = None,
+         sequence_no: int | None = None,
+         tool_output: str | None = None,
++        final: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
+         payload: dict = {"session_id": session_id}
+@@ -214,6 +254,14 @@
+             payload["chat_completion"] = chat_completion
+         if sequence_no is not None:
+             payload["sequence_no"] = sequence_no
++        if final:
++            if context is None:
++                raise ValueError("final tokenizer request requires context")
++            payload["final"] = True
++            payload["max_candidates"] = context.config["max_sessions"]
++            payload["candidate_ttl_seconds"] = context.config[
++                "session_ttl_seconds"
++            ]
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
+@@ -280,3 +328,35 @@
+ 
+         with open(metrics_fpath, "w") as f:
+             json.dump(existing_dict, f)
++
++    @staticmethod
++    def _update_streaming_prompt_reuse_metrics(
++        status: str | None,
++        match_kind: str | None,
++    ) -> None:
++        metrics_fpath = os.environ["NEMO_GYM_METRICS_FPATH"]
++        with open(metrics_fpath) as f:
++            existing_dict = json.loads(f.read())
++
++        existing_dict["streaming_tool_call_prompt_reuse_requests"] = (
++            existing_dict.get("streaming_tool_call_prompt_reuse_requests", 0) + 1
++        )
++        metric_name = {
++            "matched": "streaming_tool_call_prompt_reuse_matches",
++            "mismatch": "streaming_tool_call_prompt_reuse_mismatches",
++            "missing": "streaming_tool_call_prompt_reuse_missing",
++        }.get(status, "streaming_tool_call_prompt_reuse_missing")
++        existing_dict[metric_name] = existing_dict.get(metric_name, 0) + 1
++        match_kind_metric_name = {
++            "exact": "streaming_tool_call_prompt_reuse_exact_matches",
++            "token_equivalent": (
++                "streaming_tool_call_prompt_reuse_token_equivalent_matches"
++            ),
++        }.get(match_kind)
++        if match_kind_metric_name is not None:
++            existing_dict[match_kind_metric_name] = (
++                existing_dict.get(match_kind_metric_name, 0) + 1
++            )
++
++        with open(metrics_fpath, "w") as f:
++            json.dump(existing_dict, f)
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -35,6 +35,7 @@ from openhands.events.serialization import (
+     event_to_dict,
+     observation_from_dict,
+ )
++from openhands.events.serialization.event import truncate_content
+ from openhands.integrations.provider import PROVIDER_TOKEN_TYPE
+ from openhands.llm.llm_registry import LLMRegistry
+ from openhands.runtime.impl.action_execution.action_execution_client import (
+@@ -622,7 +622,9 @@
+                 ),
+             }
+ 
+-        async def tokenize_snapshot(tool_output: str) -> None:
++        async def tokenize_snapshot(
++            tool_output: str, *, final: bool = False
++        ) -> dict:
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+             nonlocal tokenizer_tokens
+@@ -635,11 +637,13 @@
+                 context=context,
+                 sequence_no=sequence_no,
+                 tool_output=tool_output,
++                final=final,
+                 http_session=streaming_http_session,
+             )
+             streaming_request_seconds += time.monotonic() - request_start_time
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
++            return tokenize_result
+ 
+         try:
+             while not post_task.done():
+@@ -766,7 +771,23 @@
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
++            observation = observation_from_dict(response.json())
++            raw_final_tool_output = observation.to_agent_observation()
+             if tokenizer_only:
++                assert streaming_http_session is not None
++                # ConversationMemory applies this same truncation before the
++                # observation becomes the next tool message. Tokenize that
++                # authoritative prompt, not the longer runtime observation.
++                final_tool_output = truncate_content(
++                    raw_final_tool_output,
++                    context.client.llm.config.max_message_chars,
++                )
++                final_tokenize_result = await tokenize_snapshot(
++                    final_tool_output, final=True
++                )
++                context.client.register_streaming_prompt_reuse(
++                    final_tokenize_result["reuse_id"]
++                )
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
+                 metrics.update(
+@@ -776,6 +797,7 @@
+                         "streaming_tool_call_prefill_tokens": 0,
+                         "streaming_tool_call_tokenizer_only_actions": 1,
+                         "streaming_tool_call_valid_tokenizer_actions": 1,
++                        "streaming_tool_call_prompt_reuse_candidates": 1,
+                         "streaming_tool_call_incremental_tokenizer_requests": (
+                             tokenizer_requests
+                         ),
+@@ -793,19 +815,18 @@
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
+-            observation = observation_from_dict(response.json())
+-            final_tool_output = observation.to_agent_observation()
+-            if not final_tool_output.startswith(last_sent_content):
++            if not raw_final_tool_output.startswith(last_sent_content):
+                 raise RuntimeError(
+                     "final tool output changed a previously streamed prefix"
+                 )
++
+             assert streaming_http_session is not None
+             request_start_time = time.monotonic()
+             close_result = await context.client.streaming_tool_call_request(
+                 action="close",
+                 session_id=session_id,
+                 context=context,
+-                tool_output=final_tool_output,
++                tool_output=raw_final_tool_output,
+                 http_session=streaming_http_session,
+             )
+             streaming_request_seconds += time.monotonic() - request_start_time
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -7,9 +7,42 @@ from openhands.agenthub import nemo_gym_client as client_module
+ from openhands.agenthub.nemo_gym_client import (
+     NemoGymClient,
+     StreamingToolCallContext,
++    _STREAMING_TOOL_CALL_CONTEXTS,
+ )
+ 
+ 
++def test_streaming_context_matches_empty_assistant_content_serializer(monkeypatch):
++    client = NemoGymClient.__new__(NemoGymClient)
++    monkeypatch.setattr(
++        client_module,
++        "get_global_config_dict",
++        lambda: {"streaming_tool_call": {"enabled": True}},
++    )
++    response = MagicMock()
++    response.id = "response"
++    params = {"messages": [{"role": "user", "content": "hello"}]}
++    response_message = {
++        "role": "assistant",
++        "content": None,
++        "tool_calls": [
++            {
++                "id": "call",
++                "type": "function",
++                "function": {"name": "execute_bash", "arguments": "{}"},
++            }
++        ],
++    }
++
++    client._register_streaming_tool_call_context(
++        response=response,
++        response_message_dict=response_message,
++        params=params,
++    )
++
++    context = _STREAMING_TOOL_CALL_CONTEXTS.pop("response")
++    assert context.chat_completion["messages"][-1]["content"] == ""
++
++
+ @pytest.mark.asyncio
+ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     client = NemoGymClient.__new__(NemoGymClient)
+@@ -56,7 +89,11 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+             ],
+             "tools": [],
+         },
+-        config={"enabled": True},
++        config={
++            "enabled": True,
++            "max_sessions": 256,
++            "session_ttl_seconds": 900,
++        },
+     )
+ 
+     result = await client.streaming_tool_call_request(
+@@ -85,3 +122,67 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     assert request["json"]["chat_completion"]["messages"][-2][
+         "generation_token_ids"
+     ] == [3]
++
++    await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="session",
++        context=context,
++        sequence_no=1,
++        tool_output="final output",
++        final=True,
++        http_session=http_session,
++    )
++    final_request = http_session.post.await_args.kwargs["json"]
++    assert final_request["max_candidates"] == 256
++    assert final_request["candidate_ttl_seconds"] == 900
++
++
++@pytest.mark.asyncio
++async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
++    client = NemoGymClient.__new__(NemoGymClient)
++    client.ng_server_client = MagicMock()
++    response = MagicMock()
++    response.cookies = {"session": "sticky"}
++    client.ng_server_client.post = AsyncMock(return_value=response)
++    client.model_server_cookies = None
++    client._pending_streaming_prompt_reuse_id = None
++    client.llm = MagicMock()
++    client.llm._nemo_gym_llm_kwargs = {}
++    client._log_completion = MagicMock()
++    client._update_streaming_prompt_reuse_metrics = MagicMock()
++    monkeypatch.setattr(client_module, "raise_for_status", AsyncMock())
++    monkeypatch.setattr(
++        client_module,
++        "get_response_json",
++        AsyncMock(
++            return_value={
++                "id": "completion",
++                "object": "chat.completion",
++                "created": 1,
++                "model": "model",
++                "choices": [
++                    {
++                        "index": 0,
++                        "finish_reason": "stop",
++                        "message": {"role": "assistant", "content": "done"},
++                    }
++                ],
++                "streaming_prompt_reuse_status": "matched",
++                "streaming_prompt_reuse_match_kind": "token_equivalent",
++            }
++        ),
++    )
++    monkeypatch.setattr(client_module, "get_global_config_dict", lambda: {})
++    monkeypatch.setenv("NEMO_GYM_MODEL_SERVER_NAME", "policy_model")
++    message = MagicMock()
++    message.model_dump.return_value = {"role": "user", "content": "hello"}
++
++    client.register_streaming_prompt_reuse("reuse")
++    await client._post_completion([message])
++
++    request = client.ng_server_client.post.await_args.kwargs
++    assert request["json"]["streaming_prompt_reuse_id"] == "reuse"
++    assert client._pending_streaming_prompt_reuse_id is None
++    client._update_streaming_prompt_reuse_metrics.assert_called_once_with(
++        "matched", "token_equivalent"
++    )
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -18,6 +18,7 @@ from openhands.events.action import CmdRunAction
+ from openhands.events.observation import CmdOutputObservation
+ from openhands.events.observation.commands import CmdOutputMetadata
+ from openhands.events.serialization import event_from_dict, event_to_dict
++from openhands.events.serialization.event import truncate_content
+ from openhands.events.tool import ToolCallMetadata
+ from openhands.runtime.impl.action_execution.action_execution_client import (
+     ActionExecutionClient,
+@@ -529,12 +530,19 @@
+         session.post.side_effect = post
+         session.get.side_effect = get
+         streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 20
+ 
+         async def tokenize_request(**kwargs):
+             assert kwargs["action"] == "tokenize"
+             if kwargs["sequence_no"] == 1:
+                 release_post.set()
+-            return {"sequence_no": kwargs["sequence_no"], "token_count": 17}
++            result = {
++                "sequence_no": kwargs["sequence_no"],
++                "token_count": 17,
++            }
++            if kwargs["final"]:
++                result["reuse_id"] = "runtime-session:response:call"
++            return result
+ 
+         streaming_client.streaming_tool_call_request = AsyncMock(
+             side_effect=tokenize_request
+@@ -584,7 +592,7 @@
+             call.kwargs["action"]
+             for call in streaming_client.streaming_tool_call_request.await_args_list
+         ]
+-        assert actions == ["tokenize", "tokenize"]
++        assert actions == ["tokenize", "tokenize", "tokenize"]
+         assert all(
+             action not in {"start", "append", "close", "abort"}
+             for action in actions
+@@ -595,8 +603,20 @@
+         assert metrics["streaming_tool_call_prefill_tokens"] == 0
+         assert metrics["streaming_tool_call_tokenizer_only_actions"] == 1
+         assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
+-        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
+-        assert metrics["streaming_tool_call_incremental_tokenizer_tokens"] == 34
++        assert metrics["streaming_tool_call_prompt_reuse_candidates"] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 3
++        assert metrics["streaming_tool_call_incremental_tokenizer_tokens"] == 51
++        final_call = (
++            streaming_client.streaming_tool_call_request.await_args_list[-1]
++        )
++        assert final_call.kwargs["final"] is True
++        assert final_call.kwargs["tool_output"] == truncate_content(
++            final_observation.to_agent_observation(),
++            streaming_client.llm.config.max_message_chars,
++        )
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call"
++        )
+ 
+     def test_execute_action_skips_streaming_for_short_completed_output(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)

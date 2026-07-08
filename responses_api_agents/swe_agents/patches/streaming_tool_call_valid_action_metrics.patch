@@ -1,0 +1,41 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -743,6 +743,7 @@ class LocalRuntime(ActionExecutionClient):
+                         "streaming_tool_call_prefill_requests": 0,
+                         "streaming_tool_call_prefill_tokens": 0,
+                         "streaming_tool_call_tokenizer_only_actions": 1,
++                        "streaming_tool_call_valid_tokenizer_actions": 1,
+                         "streaming_tool_call_incremental_tokenizer_requests": (
+                             tokenizer_requests
+                         ),
+@@ -795,6 +796,10 @@ class LocalRuntime(ActionExecutionClient):
+                     "streaming_tool_call_prefix_matches": int(
+                         close_result["prefix_matched"]
+                     ),
++                    "streaming_tool_call_valid_prefill_actions": int(
++                        close_result["prefix_matched"]
++                        and close_result["completed_chunks"] > 0
++                    ),
+                     "streaming_tool_call_fallbacks": int(
+                         not close_result["prefix_matched"]
+                     ),
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -406,5 +406,8 @@ class TestLocalRuntime:
+             "streaming_tool_call_snapshots_at_or_above_min_chunk_chars"
+         ] == 1
++        assert update_metrics.call_args_list[-1].args[0][
++            "streaming_tool_call_valid_prefill_actions"
++        ] == 1
+         actions = [
+             call.kwargs["action"]
+             for call in streaming_client.streaming_tool_call_request.await_args_list
+@@ -535,5 +538,6 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_prefill_requests"] == 0
+         assert metrics["streaming_tool_call_prefill_tokens"] == 0
+         assert metrics["streaming_tool_call_tokenizer_only_actions"] == 1
++        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
+         assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
+         assert metrics["streaming_tool_call_incremental_tokenizer_tokens"] == 34

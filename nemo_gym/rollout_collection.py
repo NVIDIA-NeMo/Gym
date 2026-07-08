@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import time
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -420,6 +421,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        include_request_timing: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -427,11 +429,48 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+        async def _post_subroutine(row: Dict):
             async with semaphore:
+                request_started_time_unix_s = time.time()
+                request_started_time = time.perf_counter()
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                headers_received_time_unix_s = time.time()
+                headers_received_time = time.perf_counter()
                 await raise_for_status(res)
-                return row, await get_response_json(res)
+                if not include_request_timing:
+                    return row, await get_response_json(res)
+
+                response_body = await res.read()
+                body_read_time = time.perf_counter()
+                result = orjson.loads(response_body)
+                json_decoded_time = time.perf_counter()
+                json_decoded_time_unix_s = time.time()
+                request_timing = {
+                    "request_started_time_unix_s": request_started_time_unix_s,
+                    "headers_received_time_unix_s": headers_received_time_unix_s,
+                    "json_decoded_time_unix_s": json_decoded_time_unix_s,
+                    "request_to_headers_seconds": (
+                        headers_received_time - request_started_time
+                    ),
+                    "response_body_read_seconds": (
+                        body_read_time - headers_received_time
+                    ),
+                    "response_json_decode_seconds": (
+                        json_decoded_time - body_read_time
+                    ),
+                    "request_total_seconds": (
+                        json_decoded_time - request_started_time
+                    ),
+                    "response_body_bytes": len(response_body),
+                }
+                response_created_at = result.get("response", {}).get("created_at")
+                if isinstance(response_created_at, (int, float)) and not isinstance(
+                    response_created_at, bool
+                ):
+                    request_timing["server_ready_to_headers_seconds"] = (
+                        headers_received_time_unix_s - response_created_at
+                    )
+                return row, result, request_timing
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

@@ -1633,6 +1633,364 @@ class TestApp:
         }
         assert mock_client.create_streaming_tool_call.await_args_list[1].args == ("close",)
 
+    def test_streaming_tool_call_tokenize_does_not_start_prefill(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_streaming_tool_call = AsyncMock()
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"sequence_no": 4, "token_count": 3}
+        mock_client.create_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        mock_client.create_streaming_tool_call.assert_not_awaited()
+
+    def test_streaming_tool_call_final_tokens_are_reused_once(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-reuse",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        chat_completion = {
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        tokenize_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": chat_completion,
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        completion_response = client.post(
+            "/v1/chat/completions",
+            json=chat_completion | {"streaming_prompt_reuse_id": "session"},
+        )
+        second_completion_response = client.post(
+            "/v1/chat/completions",
+            json=chat_completion | {"streaming_prompt_reuse_id": "session"},
+        )
+
+        assert tokenize_response.status_code == 200
+        assert tokenize_response.json() == {
+            "sequence_no": 4,
+            "token_count": 3,
+            "reuse_id": "session",
+        }
+        assert completion_response.status_code == 200
+        assert completion_response.json()["streaming_prompt_reuse_status"] == ("matched")
+        assert completion_response.json()["streaming_prompt_reuse_match_kind"] == "exact"
+        assert second_completion_response.status_code == 200
+        assert second_completion_response.json()["streaming_prompt_reuse_status"] == "missing"
+        assert mock_client.create_chat_completion.await_args_list[0].kwargs == {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "required_full_prompt_token_ids": [1, 2, 3],
+        }
+        assert "required_full_prompt_token_ids" not in (mock_client.create_chat_completion.await_args_list[1].kwargs)
+
+    def test_streaming_prompt_canonicalization_keeps_latest_logging_token_fields(self):
+        body = {
+            "model": "model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "old",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "tool", "content": "result"},
+                {
+                    "role": "assistant",
+                    "content": "latest",
+                    "prompt_token_ids": [3],
+                    "generation_token_ids": [4],
+                    "generation_log_probs": [-0.2],
+                },
+            ],
+        }
+
+        tokenize_body = VLLMModel._streaming_prompt_tokenize_body(body)
+        assert tokenize_body == {
+            "model": "model",
+            "messages": [
+                {"role": "assistant", "content": "old"},
+                {"role": "tool", "content": "result"},
+                {
+                    "role": "assistant",
+                    "content": "latest",
+                    "prompt_token_ids": [3],
+                    "generation_token_ids": [4],
+                    "generation_log_probs": [-0.2],
+                },
+            ],
+        }
+        assert VLLMModel._streaming_prompt_comparison_body(tokenize_body) == {
+            "model": "model",
+            "messages": [
+                {"role": "assistant", "content": "old"},
+                {"role": "tool", "content": "result"},
+                {"role": "assistant", "content": "latest"},
+            ],
+        }
+        assert body["messages"][0]["prompt_token_ids"] == [1]
+        assert body["messages"][2]["prompt_token_ids"] == [3]
+
+    def test_streaming_prompt_exact_reuse_preserves_latest_logging_token_fields(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-exact-with-prefix",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        old_assistant = {
+            "role": "assistant",
+            "content": "old",
+            "prompt_token_ids": [10],
+            "generation_token_ids": [11],
+            "generation_log_probs": [-0.1],
+        }
+        latest_assistant = {
+            "role": "assistant",
+            "content": "latest",
+            "prompt_token_ids": [20],
+            "generation_token_ids": [21],
+            "generation_log_probs": [-0.2],
+        }
+
+        tokenize_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": {
+                    "messages": [old_assistant, latest_assistant],
+                },
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        completion_response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "assistant", "content": "old"},
+                    latest_assistant,
+                ],
+                "streaming_prompt_reuse_id": "session",
+            },
+        )
+
+        assert tokenize_response.status_code == 200
+        assert completion_response.status_code == 200
+        assert completion_response.json()["streaming_prompt_reuse_status"] == "matched"
+        assert completion_response.json()["streaming_prompt_reuse_match_kind"] == ("exact")
+        assert mock_client.create_tokenize.await_count == 1
+        assert mock_client.create_tokenize.await_args.kwargs["messages"] == [
+            {"role": "assistant", "content": "old"},
+            latest_assistant,
+        ]
+        assert mock_client.create_chat_completion.await_args.kwargs["required_full_prompt_token_ids"] == [1, 2, 3]
+
+    def test_streaming_prompt_reuse_skips_prompt_logging_tokenize(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        server.config.return_token_id_information = True
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-reuse-logging",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                        "logprobs": {"content": [{"token": "token_id:9", "logprob": -0.1}]},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        chat_completion = {
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": chat_completion,
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        completion_response = client.post(
+            "/v1/chat/completions",
+            json=chat_completion | {"streaming_prompt_reuse_id": "session"},
+        )
+
+        assert completion_response.status_code == 200
+        assert completion_response.json()["choices"][0]["message"]["prompt_token_ids"] == [1, 2, 3]
+        assert mock_client.create_tokenize.await_count == 1
+        assert mock_client.create_chat_completion.await_args.kwargs == {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "logprobs": True,
+            "return_tokens_as_token_ids": True,
+            "required_full_prompt_token_ids": [1, 2, 3],
+        }
+
+    def test_streaming_tool_call_token_reuse_requires_exact_prompt(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(side_effect=[{"tokens": [1, 2, 3]}, {"tokens": [4, 5]}])
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-mismatch",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        completion_response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "changed"}],
+                "streaming_prompt_reuse_id": "session",
+            },
+        )
+
+        assert completion_response.status_code == 200
+        assert completion_response.json()["streaming_prompt_reuse_status"] == ("mismatch")
+        assert "required_full_prompt_token_ids" not in (mock_client.create_chat_completion.await_args.kwargs)
+
+    def test_streaming_tool_call_token_reuse_accepts_token_equivalent_prompt(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-token-equivalent",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 4,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        completion_response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "changed"}],
+                "streaming_prompt_reuse_id": "session",
+            },
+        )
+
+        assert completion_response.status_code == 200
+        assert completion_response.json()["streaming_prompt_reuse_status"] == "matched"
+        assert completion_response.json()["streaming_prompt_reuse_match_kind"] == ("token_equivalent")
+        assert mock_client.create_chat_completion.await_args.kwargs["required_full_prompt_token_ids"] == [1, 2, 3]
+
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True
