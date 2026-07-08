@@ -13,13 +13,14 @@ deployment profiles via ``--environment-type``:
 
 Examples::
 
-  # Download (if needed) + materialize a 2-task smoke slice, docker profile
+  # Download (if needed) + materialize an example, docker profile
   python environments/biomnibench_da/prepare.py \\
     --download \\
+    --build-docker-image \\
     --environment-type docker \\
-    --tasks da-1-3 da-1-4 \\
+    --tasks da-10-1 \\
     --include-singletons --include-uncovered \\
-    --output-dir environments/biomnibench_da/data/tasks_smoke_docker \\
+    --output-dir environments/biomnibench_da/data/example \\
     --overwrite
 
   # Materialize the full default (train+test) split, singularity profile,
@@ -42,6 +43,7 @@ import json
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tomllib
 from collections import Counter, defaultdict
@@ -171,6 +173,11 @@ def parse_args() -> argparse.Namespace:
         help=f"Pre-built runtime image (Harbor [environment].docker_image; default: {DEFAULT_DOCKER_IMAGE}).",
     )
     parser.add_argument(
+        "--build-docker-image",
+        action="store_true",
+        help="Build --docker-image before materializing Docker tasks.",
+    )
+    parser.add_argument(
         "--data-mount-root",
         type=Path,
         default=None,
@@ -182,7 +189,7 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 # Download
 # --------------------------------------------------------------------------- #
-def download_dataset(repo_id: str, local_dir: Path) -> None:
+def download_dataset(repo_id: str, local_dir: Path, allow_patterns: list[str] | None = None) -> None:
     """Download the BiomniBench-DA dataset repo from HuggingFace into local_dir."""
     try:
         from huggingface_hub import snapshot_download
@@ -191,8 +198,26 @@ def download_dataset(repo_id: str, local_dir: Path) -> None:
 
     local_dir.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {repo_id} -> {local_dir} ...", file=sys.stderr)
-    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=str(local_dir))
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=str(local_dir),
+        allow_patterns=allow_patterns,
+    )
     print("Download complete.", file=sys.stderr)
+
+
+def requested_download_patterns(args: argparse.Namespace) -> list[str] | None:
+    patterns = [f"{task}/**" for task in args.tasks or []]
+    patterns.extend(f"{paper}-*/**" for paper in args.papers or [])
+    return sorted(set(patterns)) or None
+
+
+def build_docker_image(image: str) -> None:
+    subprocess.run(
+        ["docker", "build", "-t", image, "-f", DEFAULT_DOCKERFILE, str(ENV_ROOT)],
+        check=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +366,7 @@ def write_docker_compose_yaml(
         "services:",
         "  main:",
         f"    image: {_yaml_quote(image)}",
+        "    pull_policy: never",
         '    command: ["sh", "-c", "sleep infinity"]',
         "    network_mode: ${NETWORK_MODE:-bridge}",
         "    environment:",
@@ -1177,10 +1203,14 @@ def main() -> None:
         raise SystemExit("--n-repeats must be >= 1.")
 
     local_dir_has_tasks = args.local_dir.is_dir() and any(args.local_dir.glob("da-*"))
-    if args.download and not local_dir_has_tasks:
-        download_dataset(args.hf_repo_id, args.local_dir)
+    download_patterns = requested_download_patterns(args)
+    if args.download and (download_patterns or not local_dir_has_tasks):
+        download_dataset(args.hf_repo_id, args.local_dir, download_patterns)
     elif not args.local_dir.is_dir():
         raise SystemExit(f"--local-dir does not exist: {args.local_dir} (pass --download to fetch it).")
+
+    if args.build_docker_image:
+        build_docker_image(args.docker_image)
 
     prepare_output_dir(args.output_dir, args.overwrite)
 
@@ -1305,9 +1335,7 @@ def main() -> None:
     print("Judge: upstream logic, OpenAI-compatible endpoint only")
     if is_docker_bind(args):
         print(f"Data: bind mount -> {DEFAULT_CONTAINER_DATA_DIR} via docker-compose.yaml")
-        print(
-            f"Runtime image: {args.docker_image} (build with environments/biomnibench_da/docker/build_biomnibench_runtime_image.sh)"
-        )
+        print(f"Runtime image: {args.docker_image}")
     else:
         print("Data: copied to environment/files/data with setup.sh staging for Singularity")
         print(f"Runtime image: {args.docker_image}")

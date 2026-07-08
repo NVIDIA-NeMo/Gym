@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from environments.biomnibench_da import prepare
+
 
 ENV_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ENV_ROOT.parents[1]
@@ -94,6 +96,7 @@ def test_prepare_docker_bind_compose(minimal_source: Path, tmp_path: Path) -> No
     assert compose.is_file()
     text = compose.read_text(encoding="utf-8")
     assert "/app/data" in text
+    assert "pull_policy: never" in text
     assert str((minimal_source / "da-1-3" / "environment" / "data").resolve()) in text
 
     toml = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
@@ -143,3 +146,26 @@ def test_prepare_requires_local_dir_or_download(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "--download" in result.stderr
+
+
+def test_requested_download_patterns() -> None:
+    args = type("Args", (), {"tasks": ["da-10-1"], "papers": ["da-11"]})()
+    assert prepare.requested_download_patterns(args) == ["da-10-1/**", "da-11-*/**"]
+
+
+def test_build_docker_image_uses_requested_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(prepare.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    prepare.build_docker_image("custom-runtime:test")
+
+    assert calls[0][0][0] == [
+        "docker",
+        "build",
+        "-t",
+        "custom-runtime:test",
+        "-f",
+        prepare.DEFAULT_DOCKERFILE,
+        str(prepare.ENV_ROOT),
+    ]
+    assert calls[0][1]["check"] is True
