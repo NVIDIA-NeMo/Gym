@@ -11,7 +11,9 @@ from nemo_gym.agent_modules import (
     SkillAdaptationConfig,
     SkillLibraryAgentModule,
     SkillLibraryModuleConfig,
+    SkillLibraryModuleSettings,
     TrajectoryEvent,
+    WorkingMemoryModuleSettings,
     activate_agent_context,
     adapt_agent_modules,
     build_agent_modules,
@@ -173,7 +175,7 @@ class TestBuildAndActivate:
         prompt_path = tmp_path / "prompt.yaml"
         prompt_path.write_text(yaml.dump({"user": "Solve {problem}"}))
 
-        modules = build_agent_modules([PromptModuleConfig(path=str(prompt_path))])
+        modules = build_agent_modules([PromptModuleConfig(config=WorkingMemoryModuleSettings(path=str(prompt_path)))])
         row = {"problem": "1+1"}
         rcp = NeMoGymResponseCreateParamsNonStreaming(input="")
 
@@ -188,7 +190,9 @@ class TestBuildAndActivate:
         skill_dir.mkdir(parents=True)
         (skill_dir / SKILL_MD_FILENAME).write_text("---\nname: demo\ndescription: test\n---\n")
 
-        modules = build_agent_modules([SkillLibraryModuleConfig(path=str(skills_root))])
+        modules = build_agent_modules(
+            [SkillLibraryModuleConfig(config=SkillLibraryModuleSettings(path=str(skills_root)))]
+        )
         assert len(modules) == 1
         assert isinstance(modules[0], SkillLibraryAgentModule)
 
@@ -198,7 +202,7 @@ class TestAdaptAgentModules:
     async def test_default_adapt_returns_empty(self, tmp_path):
         prompt_path = tmp_path / "prompt.yaml"
         prompt_path.write_text(yaml.dump({"user": "{x}"}))
-        modules = build_agent_modules([PromptModuleConfig(path=str(prompt_path))])
+        modules = build_agent_modules([PromptModuleConfig(config=WorkingMemoryModuleSettings(path=str(prompt_path)))])
         event = TrajectoryEvent(kind="terminated", reward=1.0, row={"x": "hi"})
         updates = await adapt_agent_modules(modules, event)
         assert updates == []

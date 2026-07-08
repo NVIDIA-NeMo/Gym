@@ -189,10 +189,14 @@ class PromptAgentModule(AgentModule):
         return result
 
 
+class WorkingMemoryModuleSettings(BaseModel):
+    path: str
+
+
 class PromptModuleConfig(BaseModel):
     type: Literal["working_memory"] = "working_memory"
     name: str = "working_memory"
-    path: str
+    config: WorkingMemoryModuleSettings
 
 
 class SkillAdaptationConfig(BaseModel):
@@ -215,9 +219,7 @@ class SkillAdaptationConfig(BaseModel):
     )
 
 
-class SkillLibraryModuleConfig(BaseModel):
-    type: Literal["skill_library"] = "skill_library"
-    name: str = "skill_library"
+class SkillLibraryModuleSettings(BaseModel):
     path: Optional[str] = None
     injection_mode: Literal["none", "context"] = Field(
         default="none",
@@ -227,6 +229,12 @@ class SkillLibraryModuleConfig(BaseModel):
         ),
     )
     adaptation: Optional[SkillAdaptationConfig] = None
+
+
+class SkillLibraryModuleConfig(BaseModel):
+    type: Literal["skill_library"] = "skill_library"
+    name: str = "skill_library"
+    config: SkillLibraryModuleSettings = Field(default_factory=SkillLibraryModuleSettings)
 
 
 class SkillLibraryAgentModule(AgentModule):
@@ -365,14 +373,14 @@ def build_agent_modules(configs: Optional[Sequence[AgentModuleConfig]]) -> List[
     modules: List[AgentModule] = []
     for cfg in configs:
         if cfg.type == "working_memory":
-            modules.append(PromptAgentModule(name=cfg.name, path=cfg.path))
+            modules.append(PromptAgentModule(name=cfg.name, path=cfg.config.path))
         elif cfg.type == "skill_library":
             modules.append(
                 SkillLibraryAgentModule(
                     name=cfg.name,
-                    path=cfg.path,
-                    injection_mode=cfg.injection_mode,
-                    adaptation=cfg.adaptation,
+                    path=cfg.config.path,
+                    injection_mode=cfg.config.injection_mode,
+                    adaptation=cfg.config.adaptation,
                 )
             )
     return modules

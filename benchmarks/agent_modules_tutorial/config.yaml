@@ -39,11 +39,13 @@ agent_modules_tutorial_simple_agent:
       modules:
         - type: working_memory
           name: answer_format_prompt
-          path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+          config:
+            path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         - type: skill_library
           name: tutorial_skills
-          injection_mode: context
-          adaptation:
-            enabled: true
-            target_skill: cot_enhanced
-            reward_threshold: 1.0
+          config:
+            injection_mode: context
+            adaptation:
+              enabled: true
+              target_skill: cot_enhanced
+              reward_threshold: 1.0

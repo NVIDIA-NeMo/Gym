@@ -1,6 +1,6 @@
 # Example: simple_agent with an Agent-side working_memory module.
 #
-# The working_memory module injects instructions at Agent prepare time and stamps
+# The working_memory module injects instructions at Agent activation time and stamps
 # agent_module_refs on rollout results. Pair with a resources server config
 # that supplies tools and verify logic.
 #
@@ -19,4 +19,5 @@ simple_agent_with_prompt_module:
       modules:
         - type: working_memory
           name: answer_format_prompt
-          path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+          config:
+            path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
