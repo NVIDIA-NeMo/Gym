@@ -21,7 +21,7 @@ finance_sec_search_web_search_benchmark_agent:
       resources_server:
         name: finance_sec_search_web_search_benchmark_resources_server
       datasets:
-      - name: finance_sec_search
+      - name: finance_sec_search_web_search
         type: benchmark
         jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_web_search.jsonl
         prompt_config: null
