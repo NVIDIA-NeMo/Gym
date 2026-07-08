@@ -469,3 +469,98 @@ class TestBuildSegaleActorClass:
 
         with pytest.raises(RuntimeError, match="not found"):
             _build_segale_actor_class()
+
+
+class TestErsatzWeightsOnlyLoad:
+    """The ersatz judge checkpoint pickles an ``argparse.Namespace`` ('args'), which
+    torch>=2.6's ``weights_only=True`` default rejects. The pinned ersatz fork
+    (>= d21f404) allowlists Namespace via ``torch.serialization.add_safe_globals`` so the
+    judge loads WITHOUT a ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`` global override.
+
+    These guard that contract with a tiny synthetic checkpoint — no multi-GB model
+    download. If the pin regresses to an ersatz without the allowlist (or someone drops
+    the ``add_safe_globals`` call), ``load_model`` raises ``UnpicklingError`` and these fail.
+    """
+
+    def _write_namespace_checkpoint(self, tmp_path: Path):
+        import argparse
+
+        import torch
+
+        # Mirror the real checkpoint shape: a pickled argparse.Namespace under 'args'
+        # (the part weights_only=True refuses), plus opaque tokenizer bytes and a
+        # here-empty 'weights' state dict. Real weights are irrelevant to the load gate.
+        ckpt = {
+            "args": argparse.Namespace(vocab_size=8, transformer_nlayers=1, foo="bar"),
+            "tokenizer": b"<sentencepiece-bytes>",
+            "weights": {},
+        }
+        path = tmp_path / "ersatz_ckpt.pt"
+        torch.save(ckpt, str(path))
+        return path
+
+    def _stub_model_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Exercise only load_model's torch.load path; stub the heavy tokenizer/model build.
+        import ersatz.split as split
+
+        class _FakeModel:
+            def load_state_dict(self, *_a, **_k):
+                pass
+
+            def eval(self):
+                return self
+
+        monkeypatch.setattr(split, "SentencePiece", lambda **_k: object())
+        monkeypatch.setattr(split, "ErsatzTransformer", lambda *_a, **_k: _FakeModel())
+
+    def test_loads_namespace_checkpoint_without_env_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("ersatz.split")
+        import ersatz.split as split
+        import torch
+
+        # Ensure we're testing the real torch default, not the global escape hatch.
+        monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
+        self._stub_model_construction(monkeypatch)
+        ckpt = self._write_namespace_checkpoint(tmp_path)
+
+        # add_safe_globals is process-global and sticky, so clear it first (restoring
+        # after) to force load_model to perform the registration itself — otherwise a
+        # regression that dropped the call could pass on residue from another test.
+        ser = torch.serialization
+        prior = list(ser.get_safe_globals()) if hasattr(ser, "get_safe_globals") else None
+        if prior is not None:
+            ser.clear_safe_globals()
+        try:
+            # Must NOT raise UnpicklingError under torch>=2.6 weights_only=True default.
+            model = split.load_model(str(ckpt))
+            assert model is not None
+        finally:
+            if prior is not None:
+                ser.clear_safe_globals()
+                if prior:
+                    ser.add_safe_globals(prior)
+
+    def test_does_not_disable_weights_only(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """The fix must be add_safe_globals + the safe default, NOT weights_only=False."""
+        pytest.importorskip("ersatz.split")
+        import ersatz.split as split
+        import torch
+
+        monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
+        self._stub_model_construction(monkeypatch)
+        ckpt = self._write_namespace_checkpoint(tmp_path)
+
+        captured: dict = {}
+        real_load = torch.load
+
+        def _spy_load(*args, **kwargs):
+            captured["weights_only"] = kwargs.get("weights_only")
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(torch, "load", _spy_load)
+        split.load_model(str(ckpt))
+        # weights_only=False would defeat the protection wholesale; the allowlist keeps
+        # the default (True on torch>=2.6). Absent kwarg (None) is also acceptable.
+        assert captured.get("weights_only") is not False
