@@ -22,6 +22,19 @@ context) passed per call instead of mutated on the client — the original mutat
 
 Return shapes intentionally mirror the EOG client 1:1 ({"success": ..., "result": ...,
 "error": ...}) so the verifier engine port stays line-for-line comparable.
+
+Why not the official MCP Python SDK (a core Gym dependency since #1682)? Evaluated and
+rejected 2026-07-08: (1) the SDK's streamable-HTTP client rides on httpx, which this repo
+bans for high-concurrency async paths — we'd need an aiohttp transport adapter anyway;
+(2) it binds headers at session level, but per-rollout isolation here requires PER-CALL
+``x-database-id``/context headers on a shared client (a session per rollout would
+reintroduce the per-task handshake overhead this port removed); (3) roughly half of this
+module talks to the gyms' NON-MCP REST endpoints (/api/seed-database, /api/delete-database,
+/api/sql-runner) which no MCP client covers; (4) the upstream gym containers are frozen at
+protocolVersion 2024-11-05, so SDK protocol-evolution tracking buys nothing. Note #1682's
+``MCPResourcesServer`` solves the INVERSE problem (exposing Gym-owned tools AS an MCP
+server to MCP-native agents) — see PARITY.md follow-ups for how that could let MCP-native
+agents like Claude Code run against these EnterpriseOps tools.
 """
 
 import asyncio
