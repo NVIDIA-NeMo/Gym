@@ -1,0 +1,3139 @@
+{
+  "gym_name": "gym-email-mcp",
+  "gym_url": "http://localhost:8004",
+  "snapshot_at": "2026-07-07T18:18:26.710188+00:00",
+  "tools": [
+    {
+      "name": "get_user_profile",
+      "description": "Get profile for a Email user",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "stop_user_watch",
+      "description": "Stop receiving push notifications for the given user mailbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "watch_user_mailbox",
+      "description": "Set up or update a push notification watch on the given user mailbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topicName": {
+            "type": "string",
+            "description": "A fully qualified Google Cloud Pub/Sub API topic name. Should be a valid Pub/Sub",
+            "pattern": "^projects\\/[a-z0-9\\-]+\\/topics\\/[a-zA-Z0-9\\-_]+$"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of labelIds to restrict notifications about"
+          },
+          "labelFilterBehavior": {
+            "type": "string",
+            "enum": [
+              "include",
+              "exclude"
+            ],
+            "description": "Filtering behavior of labelIds list"
+          }
+        },
+        "required": [
+          "topicName",
+          "userId",
+          "labelIds"
+        ]
+      }
+    },
+    {
+      "name": "create_draft",
+      "description": "Creates a new draft with the DRAFT label",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "message": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The ID of the message"
+              },
+              "threadId": {
+                "type": "string",
+                "description": "The ID of the thread the message belongs to"
+              },
+              "labelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of IDs of labels to apply to this message",
+                "default": []
+              },
+              "snippet": {
+                "type": "string",
+                "description": "A short snippet of the message content"
+              },
+              "historyId": {
+                "type": "string",
+                "description": "The ID of the last history record that modified this message"
+              },
+              "internalDate": {
+                "type": "string",
+                "description": "The internal date of the message in UNIX ms timestamp format"
+              },
+              "payload": {
+                "type": "object",
+                "description": "The parsed email structure in the message parts",
+                "properties": {
+                  "partId": {
+                    "type": "string",
+                    "description": "The MIME part ID"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "The MIME type of the message part"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "description": "The filename of the attachment (if any)"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "body": {
+                    "type": "object",
+                    "properties": {
+                      "attachmentId": {
+                        "type": "string",
+                        "description": "The ID of the attachment"
+                      },
+                      "size": {
+                        "type": "integer",
+                        "description": "Size of the body in bytes, must be greater than 0"
+                      },
+                      "data": {
+                        "type": "string",
+                        "description": "The body data of the message part, required"
+                      }
+                    },
+                    "required": [
+                      "data",
+                      "size"
+                    ]
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "Child message parts (for multipart messages)"
+                    }
+                  }
+                }
+              },
+              "sizeEstimate": {
+                "type": "integer",
+                "description": "Estimated size of the message in bytes"
+              },
+              "raw": {
+                "type": "string",
+                "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+              }
+            },
+            "required": [],
+            "oneOf": [
+              {
+                "required": [
+                  "raw"
+                ]
+              },
+              {
+                "required": [
+                  "payload"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    {
+      "name": "delete_draft",
+      "description": "Immediately and permanently deletes the specified draft",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the draft to delete"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "get_draft",
+      "description": "Gets the specified draft",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the draft to retrieve"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "minimal",
+              "full",
+              "raw",
+              "metadata"
+            ],
+            "description": "The format to return the draft in",
+            "default": "full"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "list_drafts",
+      "description": "Lists the drafts in the user's mailbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "maxResults": {
+            "type": "integer",
+            "description": "Maximum number of drafts to return (default: 100, max: 500)",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Page token to retrieve a specific page of results"
+          },
+          "q": {
+            "type": "string",
+            "description": "Only return draft messages matching the specified query"
+          },
+          "includeSpamTrash": {
+            "type": "boolean",
+            "description": "Include drafts from SPAM and TRASH in the results",
+            "default": false
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "send_draft",
+      "description": "Sends the specified, existing draft to the recipients",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the draft to send"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "message": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The ID of the message"
+              },
+              "threadId": {
+                "type": "string",
+                "description": "The ID of the thread the message belongs to"
+              },
+              "labelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of IDs of labels to apply to this message",
+                "default": []
+              },
+              "snippet": {
+                "type": "string",
+                "description": "A short snippet of the message content"
+              },
+              "historyId": {
+                "type": "string",
+                "description": "The ID of the last history record that modified this message"
+              },
+              "internalDate": {
+                "type": "string",
+                "description": "The internal date of the message in UNIX ms timestamp format"
+              },
+              "payload": {
+                "type": "object",
+                "description": "The parsed email structure in the message parts",
+                "properties": {
+                  "partId": {
+                    "type": "string",
+                    "description": "The MIME part ID"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "The MIME type of the message part"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "description": "The filename of the attachment (if any)"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "body": {
+                    "type": "object",
+                    "properties": {
+                      "attachmentId": {
+                        "type": "string",
+                        "description": "The ID of the attachment"
+                      },
+                      "size": {
+                        "type": "integer",
+                        "description": "Size of the body in bytes, must be greater than 0"
+                      },
+                      "data": {
+                        "type": "string",
+                        "description": "The body data of the message part, required"
+                      }
+                    },
+                    "required": [
+                      "data",
+                      "size"
+                    ]
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "Child message parts (for multipart messages)"
+                    }
+                  }
+                }
+              },
+              "sizeEstimate": {
+                "type": "integer",
+                "description": "Estimated size of the message in bytes"
+              },
+              "raw": {
+                "type": "string",
+                "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+              }
+            },
+            "required": [],
+            "oneOf": [
+              {
+                "required": [
+                  "raw"
+                ]
+              },
+              {
+                "required": [
+                  "payload"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "message"
+        ]
+      }
+    },
+    {
+      "name": "update_draft",
+      "description": "Replaces a draft's content",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the draft to update"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "message": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The ID of the message"
+              },
+              "threadId": {
+                "type": "string",
+                "description": "The ID of the thread the message belongs to"
+              },
+              "labelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of IDs of labels to apply to this message",
+                "default": []
+              },
+              "snippet": {
+                "type": "string",
+                "description": "A short snippet of the message content"
+              },
+              "historyId": {
+                "type": "string",
+                "description": "The ID of the last history record that modified this message"
+              },
+              "internalDate": {
+                "type": "string",
+                "description": "The internal date of the message in UNIX/Epoch ms timestamp format"
+              },
+              "payload": {
+                "type": "object",
+                "description": "The parsed email structure in the message parts",
+                "properties": {
+                  "partId": {
+                    "type": "string",
+                    "description": "The MIME part ID"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "The MIME type of the message part"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "description": "The filename of the attachment (if any)"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "body": {
+                    "type": "object",
+                    "properties": {
+                      "attachmentId": {
+                        "type": "string",
+                        "description": "The ID of the attachment"
+                      },
+                      "size": {
+                        "type": "integer",
+                        "description": "Size of the body in bytes, must be greater than 0"
+                      },
+                      "data": {
+                        "type": "string",
+                        "description": "The body data of the message part, required"
+                      }
+                    },
+                    "required": [
+                      "data",
+                      "size"
+                    ]
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "Child message parts (for multipart messages)"
+                    }
+                  }
+                }
+              },
+              "sizeEstimate": {
+                "type": "integer",
+                "description": "Estimated size of the message in bytes"
+              },
+              "raw": {
+                "type": "string",
+                "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "message"
+        ]
+      }
+    },
+    {
+      "name": "list_history",
+      "description": "Lists the history of all changes to the given mailbox. History results are returned in chronological order (increasing historyId).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "startHistoryId": {
+            "type": "string",
+            "description": "Returns history records after the specified startHistoryId. If not provided or empty, returns all history from the beginning. The startHistoryId should be obtained from the historyId of a message, thread, or previous list response"
+          },
+          "maxResults": {
+            "type": "integer",
+            "description": "Maximum number of history records to return. This field defaults to 100. The maximum allowed value for this field is 500",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Page token to retrieve a specific page of results in the list"
+          },
+          "labelId": {
+            "type": "string",
+            "description": "Only return messages with a label matching the ID"
+          },
+          "historyTypes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "messageAdded",
+                "messageDeleted",
+                "labelAdded",
+                "labelRemoved"
+              ]
+            },
+            "description": "History types to be returned by the function"
+          }
+        },
+        "required": [
+          "userId",
+          "startHistoryId"
+        ]
+      }
+    },
+    {
+      "name": "create_label",
+      "description": "Creates a new label",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name of the label"
+          },
+          "messageListVisibility": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide"
+            ],
+            "description": "The visibility of messages with this label in the message list",
+            "default": "show"
+          },
+          "labelListVisibility": {
+            "type": "string",
+            "enum": [
+              "labelShow",
+              "labelShowIfUnread",
+              "labelHide"
+            ],
+            "description": "The visibility of the label in the label list",
+            "default": "labelShow"
+          },
+          "color": {
+            "type": "object",
+            "description": "Color settings for the label (user labels only)",
+            "properties": {
+              "textColor": {
+                "type": "string",
+                "description": "The text color of the label, represented as hex string. This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              },
+              "backgroundColor": {
+                "type": "string",
+                "description": "The background color represented as hex string #RRGGBB (ex #000000). This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              }
+            }
+          }
+        },
+        "required": [
+          "name",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "delete_label",
+      "description": "Immediately and permanently deletes the specified label and removes it from any messages and threads",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the label to delete"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "get_label",
+      "description": "Gets the specified label",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the label to retrieve"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "list_labels",
+      "description": "Lists all labels in the user's mailbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "patch_label",
+      "description": "Patch the specified label (partial update)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the label to update"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name of the label"
+          },
+          "messageListVisibility": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide"
+            ],
+            "description": "The visibility of messages with this label in the message list",
+            "default": "show"
+          },
+          "labelListVisibility": {
+            "type": "string",
+            "enum": [
+              "labelShow",
+              "labelShowIfUnread",
+              "labelHide"
+            ],
+            "description": "The visibility of the label in the label list",
+            "default": "labelShow"
+          },
+          "color": {
+            "type": "object",
+            "description": "Color settings for the label (user labels only)",
+            "properties": {
+              "textColor": {
+                "type": "string",
+                "description": "The text color of the label, represented as hex string. This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              },
+              "backgroundColor": {
+                "type": "string",
+                "description": "The background color represented as hex string #RRGGBB (ex #000000). This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_label",
+      "description": "Updates the specified label (full update)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the label to update"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name of the label"
+          },
+          "messageListVisibility": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide"
+            ],
+            "description": "The visibility of messages with this label in the message list",
+            "default": "show"
+          },
+          "labelListVisibility": {
+            "type": "string",
+            "enum": [
+              "labelShow",
+              "labelShowIfUnread",
+              "labelHide"
+            ],
+            "description": "The visibility of the label in the label list",
+            "default": "labelShow"
+          },
+          "color": {
+            "type": "object",
+            "description": "Color settings for the label (user labels only)",
+            "properties": {
+              "textColor": {
+                "type": "string",
+                "description": "The text color of the label, represented as hex string. This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              },
+              "backgroundColor": {
+                "type": "string",
+                "description": "The background color represented as hex string #RRGGBB (ex #000000). This field is required in order to set the color of a label. Only the following predefined set of color values are allowed: #000000, #434343, #666666, #999999, #cccccc, #efefef, #f3f3f3, #ffffff, #fb4c2f, #ffad47, #fad165, #16a766, #43d692, #4a86e8, #a479e2, #f691b3, #f6c5be, #ffe6c7, #fef1d1, #b9e4d0, #c6f3de, #c9daf8, #e4d7f5, #fcdee8, #efa093, #ffd6a2, #fce8b3, #89d3b2, #a0eac9, #a4c2f4, #d0bcf1, #fbc8d9, #e66550, #ffbc6b, #fcda83, #44b984, #68dfa9, #6d9eeb, #b694e8, #f7a7c0, #cc3a21, #eaa041, #f2c960, #149e60, #3dc789, #3c78d8, #8e63ce, #e07798, #ac2b16, #cf8933, #d5ae49, #0b804b, #2a9c68, #285bac, #653e9b, #b65775, #822111, #a46a21, #aa8831, #076239, #1a764d, #1c4587, #41236d, #83334c, #464646, #e7e7e7, #0d3472, #b6cff5, #0d3b44, #98d7e4, #3d188e, #e3d7ff, #711a36, #fbd3e0, #8a1c0a, #f2b2a8, #7a2e0b, #ffc8af, #7a4706, #ffdeb5, #594c05, #fbe983, #684e07, #fdedc1, #0b4f30, #b3efd3, #04502e, #a2dcc1, #c2c2c2, #4986e7, #2da2bb, #b99aff, #994a64, #f691b2, #ff7537, #ffad46, #662e37, #ebdbde, #cca6ac, #094228, #42d692, #16a765"
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "messageListVisibility",
+          "labelListVisibility",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "batch_delete_messages",
+      "description": "Delete many messages by message ID. Provides no guarantees that messages were not already deleted or even existed at all.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The IDs of the messages to delete",
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "userId",
+          "ids"
+        ]
+      }
+    },
+    {
+      "name": "batch_modify_messages",
+      "description": "Modify the labels on the specified messages",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The IDs of the messages to modify. There is a limit of 1000 ids per request",
+            "maxItems": 1000
+          },
+          "addLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list of label IDs to add to messages",
+            "default": []
+          },
+          "removeLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list of label IDs to remove from messages",
+            "default": []
+          }
+        },
+        "required": [
+          "ids"
+        ]
+      }
+    },
+    {
+      "name": "delete_message",
+      "description": "Immediately and permanently delete the specified message. This operation cannot be undone. Prefer trash_message instead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the message to delete"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "get_message",
+      "description": "Get the specified message",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the message to retrieve"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "minimal",
+              "full",
+              "raw",
+              "metadata"
+            ],
+            "description": "The format to return the message in",
+            "default": "full"
+          },
+          "metadataHeaders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "When given and format is METADATA, only include headers specified",
+            "default": []
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "import_message",
+      "description": "Import a message into this user's mailbox (like receiving via SMTP). Provide exactly ONE message source: ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "threadId": {
+            "type": "string",
+            "description": "The ID of the thread the message belongs to"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of IDs of labels to apply to this message",
+            "default": []
+          },
+          "snippet": {
+            "type": "string",
+            "description": "A short snippet of the message content"
+          },
+          "historyId": {
+            "type": "string",
+            "description": "The ID of the last history record that modified this message"
+          },
+          "internalDate": {
+            "type": "string",
+            "description": "The internal date of the message in UNIX ms timestamp format"
+          },
+          "payload": {
+            "type": "object",
+            "description": "The parsed email structure in the message parts",
+            "properties": {
+              "partId": {
+                "type": "string",
+                "description": "The MIME part ID"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "The MIME type of the message part"
+              },
+              "filename": {
+                "type": "string",
+                "description": "The filename of the attachment (if any)"
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "attachmentId": {
+                    "type": "string",
+                    "description": "The ID of the attachment"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Size of the body in bytes, must be greater than 0"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "The body data of the message part, required"
+                  }
+                },
+                "required": [
+                  "data",
+                  "size"
+                ]
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "description": "Child message parts (for multipart messages)"
+                }
+              }
+            }
+          },
+          "sizeEstimate": {
+            "type": "integer",
+            "description": "Estimated size of the message in bytes"
+          },
+          "raw": {
+            "type": "string",
+            "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+          },
+          "internalDateSource": {
+            "type": "string",
+            "enum": [
+              "receivedTime",
+              "dateHeader"
+            ],
+            "description": "Source for Email's internal date of the message",
+            "default": "receivedTime"
+          },
+          "neverMarkSpam": {
+            "type": "boolean",
+            "description": "Ignore the Email spam classifier decision and never mark this email as SPAM",
+            "default": false
+          },
+          "processForCalendar": {
+            "type": "boolean",
+            "description": "Process calendar invites in the email and add any extracted meetings to the Google Calendar",
+            "default": false
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "Mark the email as permanently deleted (not TRASH) and only visible in Google Vault",
+            "default": false
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "insert_message",
+      "description": "Directly insert a message into only this user's mailbox similar to IMAP APPEND, bypassing most scanning and classification. Does not send a message.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "threadId": {
+            "type": "string",
+            "description": "The ID of the thread the message belongs to"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of IDs of labels to apply to this message",
+            "default": []
+          },
+          "snippet": {
+            "type": "string",
+            "description": "A short snippet of the message content"
+          },
+          "historyId": {
+            "type": "string",
+            "description": "The ID of the last history record that modified this message"
+          },
+          "internalDate": {
+            "type": "string",
+            "description": "The internal date of the message in UNIX ms timestamp format"
+          },
+          "payload": {
+            "type": "object",
+            "description": "The parsed email structure in the message parts",
+            "properties": {
+              "partId": {
+                "type": "string",
+                "description": "The MIME part ID"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "The MIME type of the message part"
+              },
+              "filename": {
+                "type": "string",
+                "description": "The filename of the attachment (if any)"
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "attachmentId": {
+                    "type": "string",
+                    "description": "The ID of the attachment"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Size of the body in bytes, must be greater than 0"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "The body data of the message part, required"
+                  }
+                },
+                "required": [
+                  "data",
+                  "size"
+                ]
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "description": "Child message parts (for multipart messages)"
+                }
+              }
+            }
+          },
+          "sizeEstimate": {
+            "type": "integer",
+            "description": "Estimated size of the message in bytes"
+          },
+          "raw": {
+            "type": "string",
+            "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+          },
+          "internalDateSource": {
+            "type": "string",
+            "enum": [
+              "receivedTime",
+              "dateHeader"
+            ],
+            "description": "Source for Email's internal date of the message",
+            "default": "receivedTime"
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "Mark the email as permanently deleted (not TRASH) and only visible in Google Vault",
+            "default": false
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "list_messages",
+      "description": "List the messages in the user's mailbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "maxResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "description": "Maximum number of messages to return. This field defaults to 100",
+            "default": 100
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Page token to retrieve a specific page of results in the list"
+          },
+          "q": {
+            "type": "string",
+            "description": "Only return messages matching the specified query. Supports the same query format as the Email search box"
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only return messages with labels that match all of the specified label IDs",
+            "default": []
+          },
+          "includeSpamTrash": {
+            "type": "boolean",
+            "description": "Include messages from SPAM and TRASH in the results",
+            "default": false
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "modify_message",
+      "description": "Modify the labels on the specified message",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the message to modify"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "addLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list of IDs of labels to add to this message. You can add up to 100 labels with each update",
+            "maxItems": 100,
+            "default": []
+          },
+          "removeLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list IDs of labels to remove from this message. You can remove up to 100 labels with each update",
+            "maxItems": 100,
+            "default": []
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "send_message",
+      "description": "Send an email from this user. Provide exactly ONE message source: (1) 'raw' (RFC 2822 base64url), (2) 'payload' (Email-like parts with non-empty headers), or ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "threadId": {
+            "type": "string",
+            "description": "The ID of the thread the message belongs to"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of IDs of labels to apply to this message",
+            "default": []
+          },
+          "snippet": {
+            "type": "string",
+            "description": "A short snippet of the message content"
+          },
+          "historyId": {
+            "type": "string",
+            "description": "The ID of the last history record that modified this message"
+          },
+          "internalDate": {
+            "type": "string",
+            "description": "The internal date of the message in UNIX ms timestamp format"
+          },
+          "payload": {
+            "type": "object",
+            "description": "The parsed email structure in the message parts",
+            "properties": {
+              "partId": {
+                "type": "string",
+                "description": "The MIME part ID"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "The MIME type of the message part"
+              },
+              "filename": {
+                "type": "string",
+                "description": "The filename of the attachment (if any)"
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "attachmentId": {
+                    "type": "string",
+                    "description": "The ID of the attachment"
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Size of the body in bytes, must be greater than 0"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "The body data of the message part, required"
+                  }
+                },
+                "required": [
+                  "data",
+                  "size"
+                ]
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "description": "Child message parts (for multipart messages)"
+                }
+              }
+            }
+          },
+          "sizeEstimate": {
+            "type": "integer",
+            "description": "Estimated size of the message in bytes"
+          },
+          "raw": {
+            "type": "string",
+            "description": "The entire email message in an RFC 2822 formatted and base64url encoded string"
+          }
+        },
+        "required": [
+          "userId"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "raw"
+            ]
+          },
+          {
+            "required": [
+              "payload"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "trash_message",
+      "description": "Move the specified message to the trash",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the message to Trash"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "untrash_message",
+      "description": "Remove the specified message from the trash",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The ID of the message to remove from Trash"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "get_attachment",
+      "description": "Get the specified attachment from a message",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The ID of the message containing the attachment"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The ID of the attachment to retrieve"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "messageId",
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "get_auto_forwarding",
+      "description": "Get the auto-forwarding setting for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_auto_forwarding",
+      "description": "Update the auto-forwarding setting for the specified account. A verified forwarding address must be specified when auto-forwarding is enabled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether all incoming mail is automatically forwarded to another address",
+            "default": false
+          },
+          "emailAddress": {
+            "type": "string",
+            "description": "Email address to which all incoming messages are forwarded. This email address must be a verified member of the forwarding addresses"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "leaveInInbox",
+              "archive",
+              "trash",
+              "markRead"
+            ],
+            "description": "The state that a message should be left in after it has been forwarded",
+            "default": "leaveInInbox"
+          }
+        },
+        "required": [
+          "userId",
+          "emailAddress",
+          "enabled",
+          "disposition"
+        ]
+      }
+    },
+    {
+      "name": "get_imap_settings",
+      "description": "Get IMAP settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_imap_settings",
+      "description": "Update IMAP settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether IMAP is enabled for the account",
+            "default": true
+          },
+          "autoExpunge": {
+            "type": "boolean",
+            "description": "If this value is true, Email will immediately expunge a message when it is marked as deleted in IMAP",
+            "default": true
+          },
+          "expungeBehavior": {
+            "type": "string",
+            "enum": [
+              "archive",
+              "trash",
+              "deleteForever"
+            ],
+            "description": "The action that will be executed on a message when it is marked as deleted and expunged from the last visible IMAP folder",
+            "default": "archive"
+          },
+          "maxFolderSize": {
+            "type": "string",
+            "enum": [
+              "0",
+              "1000",
+              "2000",
+              "5000",
+              "10000"
+            ],
+            "description": "An optional limit on the number of messages that an IMAP folder may contain. A value of zero is interpreted to mean that there is no limit",
+            "default": "0"
+          }
+        },
+        "required": [
+          "userId",
+          "enabled",
+          "autoExpunge",
+          "expungeBehavior",
+          "maxFolderSize"
+        ]
+      }
+    },
+    {
+      "name": "get_language_settings",
+      "description": "Get language settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_language_settings",
+      "description": "Update language settings for the specified account. The language to display Email in, formatted as an RFC 3066 Language Tag",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "displayLanguage": {
+            "type": "string",
+            "description": "The language to display Email in, formatted as an RFC 3066 Language Tag (for example en-GB, fr or ja for British English, French, or Japanese respectively)",
+            "pattern": "^[a-z]{2,3}(-[A-Z]{2})?(-[a-zA-Z0-9]{1,8})*$",
+            "default": "en"
+          }
+        },
+        "required": [
+          "userId",
+          "displayLanguage"
+        ]
+      }
+    },
+    {
+      "name": "get_pop_settings",
+      "description": "Get POP settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_pop_settings",
+      "description": "Update POP settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "accessWindow": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "fromNowOn",
+              "allMail"
+            ],
+            "description": "The range of messages which are accessible via POP",
+            "default": "disabled"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "leaveInInbox",
+              "archive",
+              "trash",
+              "markRead"
+            ],
+            "description": "The action that will be executed on a message after it has been fetched via POP",
+            "default": "leaveInInbox"
+          }
+        },
+        "required": [
+          "userId",
+          "accessWindow",
+          "disposition"
+        ]
+      }
+    },
+    {
+      "name": "get_vacation_settings",
+      "description": "Get vacation responder settings for the specified account",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_vacation_settings",
+      "description": "Update vacation responder settings for the specified account. These settings correspond to the 'Vacation responder' feature in the web interface",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "enableAutoReply": {
+            "type": "boolean",
+            "description": "Flag that controls whether Email automatically replies to messages (required field)",
+            "default": false
+          },
+          "responseSubject": {
+            "type": "string",
+            "description": "Optional text to prepend to the subject line in vacation responses. Required if enableAutoReply is true and responseBodyPlainText/responseBodyHtml are not provided"
+          },
+          "responseBodyPlainText": {
+            "type": "string",
+            "description": "Response body in plain text format. Required if enableAutoReply is true and responseSubject/responseBodyHtml are not provided"
+          },
+          "responseBodyHtml": {
+            "type": "string",
+            "description": "Response body in HTML format. Required if enableAutoReply is true and responseSubject/responseBodyPlainText are not provided. If both responseBodyPlainText and responseBodyHtml are specified, responseBodyHtml will be used"
+          },
+          "restrictToContacts": {
+            "type": "boolean",
+            "description": "Flag that determines whether responses are sent to recipients who are not in the user's list of contacts. Optional, defaults to false",
+            "default": true
+          },
+          "restrictToDomain": {
+            "type": "boolean",
+            "description": "Flag that determines whether responses are sent to recipients who are outside of the user's domain. This feature is only available for Google Workspace users. Optional, defaults to false",
+            "default": true
+          },
+          "startTime": {
+            "type": "string",
+            "description": "An optional start time for sending auto-replies in ISO 8601 format (e.g., '2025-08-30T09:00:00Z'). When this is specified, Email will automatically reply only to messages that it receives after the start time"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "An optional end time for sending auto-replies in ISO 8601 format (e.g., '2025-09-05T18:00:00Z'). When this is specified, Email will automatically reply only to messages that it receives before the end time"
+          }
+        },
+        "required": [
+          "userId",
+          "enableAutoReply",
+          "responseSubject",
+          "responseBodyPlainText",
+          "responseBodyHtml",
+          "restrictToContacts",
+          "restrictToDomain",
+          "startTime",
+          "endTime"
+        ]
+      }
+    },
+    {
+      "name": "create_cse_identity",
+      "description": "Creates and configures a client-side encryption identity that's authorized to send mail from the user account. Email publishes the S/MIME certificate to a shared domain-wide directory so that people within a Google Workspace organization can encrypt and send mail to the identity",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me."
+          },
+          "emailAddress": {
+            "type": "string",
+            "description": "The email address for the sending identity. The email address must be the primary email address of the authenticated user.",
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+          },
+          "primaryKeyPairId": {
+            "type": "string",
+            "description": "If a key pair is associated, the ID of the key pair, CseKeyPair"
+          },
+          "signAndEncryptKeyPairs": {
+            "type": "object",
+            "description": "The configuration of a CSE identity that uses different key pairs for signing and encryption.",
+            "properties": {
+              "signingKeyPairId": {
+                "type": "string",
+                "description": "The ID of the CseKeyPair that signs outgoing mail."
+              },
+              "encryptionKeyPairId": {
+                "type": "string",
+                "description": "The ID of the CseKeyPair that encrypts signed outgoing mail."
+              }
+            }
+          }
+        },
+        "required": [
+          "emailAddress",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "delete_cse_identity",
+      "description": "Deletes a client-side encryption identity. The authenticated user can no longer use the identity to send encrypted messages. You cannot restore the identity after you delete it",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me."
+          },
+          "cseEmailAddress": {
+            "type": "string",
+            "description": "The primary email address associated with the client-side encryption identity configuration that's removed."
+          }
+        },
+        "required": [
+          "cseEmailAddress",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "get_cse_identity",
+      "description": "Retrieves a client-side encryption identity configuration",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me."
+          },
+          "cseEmailAddress": {
+            "type": "string",
+            "description": "The primary email address associated with the client-side encryption identity configuration that's removed."
+          }
+        },
+        "required": [
+          "cseEmailAddress",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "list_cse_identities",
+      "description": "Lists the client-side encrypted identities for an authenticated user",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me."
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Pagination token indicating which page of identities to return. If the token is not supplied, then the API will return the first page of results."
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The number of identities to return. If not provided, the page size will default to 20 entries.",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "patch_cse_identity",
+      "description": "Associates a different key pair with an existing client-side encryption identity. The updated key pair must validate against Google's S/MIME certificate profiles",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me."
+          },
+          "emailAddress": {
+            "type": "string",
+            "description": "The email address for the sending identity. The email address must be the primary email address of the authenticated user."
+          },
+          "primaryKeyPairId": {
+            "type": "string",
+            "description": "If a key pair is associated, the ID of the key pair, CseKeyPair"
+          },
+          "signAndEncryptKeyPairs": {
+            "type": "object",
+            "description": "The configuration of a CSE identity that uses different key pairs for signing and encryption.",
+            "properties": {
+              "signingKeyPairId": {
+                "type": "string",
+                "description": "The ID of the CseKeyPair that signs outgoing mail."
+              },
+              "encryptionKeyPairId": {
+                "type": "string",
+                "description": "The ID of the CseKeyPair that encrypts signed outgoing mail."
+              }
+            }
+          }
+        },
+        "required": [
+          "emailAddress",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "email_create_cse_keypair",
+      "description": "Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for the authenticated user",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "pkcs7": {
+            "type": "string",
+            "description": "The public key and its certificate chain in PKCS#7 format, PEM encoding. Must include -----BEGIN and -----END headers."
+          },
+          "privateKeyMetadata": {
+            "type": "array",
+            "description": "Metadata for private key instances (optional)",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kaclsKeyMetadata": {
+                  "type": "object",
+                  "properties": {
+                    "kaclsUri": {
+                      "type": "string",
+                      "description": "The kaclsUri of the key access control list service (should be a valid url)",
+                      "pattern": "^https://.*"
+                    },
+                    "kaclsData": {
+                      "type": "string",
+                      "description": "Opaque data generated by the key access control list service"
+                    }
+                  },
+                  "required": [
+                    "kaclsUri",
+                    "kaclsData"
+                  ]
+                },
+                "hardwareKeyMetadata": {
+                  "type": "object",
+                  "properties": {
+                    "description": {
+                      "type": "string",
+                      "description": "Description about the hardware key",
+                      "minLength": 10
+                    }
+                  },
+                  "required": [
+                    "description"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "userId",
+          "pkcs7"
+        ]
+      }
+    },
+    {
+      "name": "email_disable_cse_keypair",
+      "description": "Turns off a client-side encryption key pair. The authenticated user can no longer use the key pair to decrypt incoming CSE message texts or sign outgoing CSE mail.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "keyPairId": {
+            "type": "string",
+            "description": "The identifier of the key pair to turn off"
+          }
+        },
+        "required": [
+          "userId",
+          "keyPairId"
+        ]
+      }
+    },
+    {
+      "name": "email_enable_cse_keypair",
+      "description": "Turns on a client-side encryption key pair that was turned off. The key pair becomes active again for any associated client-side encryption identities.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "keyPairId": {
+            "type": "string",
+            "description": "The identifier of the key pair to turn on"
+          }
+        },
+        "required": [
+          "userId",
+          "keyPairId"
+        ]
+      }
+    },
+    {
+      "name": "email_get_cse_keypair",
+      "description": "Retrieves an existing client-side encryption key pair.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "keyPairId": {
+            "type": "string",
+            "description": "The identifier of the key pair to retrieve"
+          }
+        },
+        "required": [
+          "userId",
+          "keyPairId"
+        ]
+      }
+    },
+    {
+      "name": "email_list_cse_keypairs",
+      "description": "Lists client-side encryption key pairs for an authenticated user.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Pagination token indicating which page of key pairs to return. If the token is not supplied, then the API will return the first page of results."
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The number of key pairs to return. If not provided, the page size will default to 20 entries.",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "email_obliterate_cse_keypair",
+      "description": "Deletes a client-side encryption key pair permanently and immediately. You can only permanently delete key pairs that have been turned off for more than 30 days.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The requester's primary email address. To indicate the authenticated user, you can use the special value me.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "keyPairId": {
+            "type": "string",
+            "description": "The identifier of the key pair to obliterate"
+          }
+        },
+        "required": [
+          "userId",
+          "keyPairId"
+        ]
+      }
+    },
+    {
+      "name": "email_create_delegate",
+      "description": "Adds a delegate with its verification status automatically set to accepted, without sending any verification email. The delegate user must be a member of the same Google Workspace organization as the delegator user.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user."
+          },
+          "delegateEmail": {
+            "type": "string",
+            "description": "The email address of the delegate."
+          }
+        },
+        "required": [
+          "userId",
+          "delegateEmail"
+        ]
+      }
+    },
+    {
+      "name": "email_delete_delegate",
+      "description": "Removes the specified delegate (which can be of any verification status), and revokes any verification that may have been required for using it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user."
+          },
+          "delegateEmail": {
+            "type": "string",
+            "description": "The email address of the delegate."
+          }
+        },
+        "required": [
+          "userId",
+          "delegateEmail"
+        ]
+      }
+    },
+    {
+      "name": "email_get_delegate",
+      "description": "Gets the specified delegate. Note that a delegate user must be referred to by their primary email address, and not an email alias.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user."
+          },
+          "delegateEmail": {
+            "type": "string",
+            "description": "The email address of the delegate."
+          }
+        },
+        "required": [
+          "userId",
+          "delegateEmail"
+        ]
+      }
+    },
+    {
+      "name": "email_list_delegates",
+      "description": "Lists the delegates for the specified account. Returns delegates with any verification status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "create_filter",
+      "description": "Creates a filter. Note: you can only create a maximum of 1,000 filters",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "criteria": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "The sender's display name or email address"
+              },
+              "to": {
+                "type": "string",
+                "description": "The recipient's display name or email address"
+              },
+              "subject": {
+                "type": "string",
+                "description": "Case-insensitive phrase found in the message's subject"
+              },
+              "query": {
+                "type": "string",
+                "description": "Only return messages matching the specified query"
+              },
+              "negatedQuery": {
+                "type": "string",
+                "description": "Only return messages not matching the specified query"
+              },
+              "hasAttachment": {
+                "type": "boolean",
+                "description": "Whether the message has any attachment",
+                "default": true
+              },
+              "excludeChats": {
+                "type": "boolean",
+                "description": "Whether the response should exclude chats",
+                "default": true
+              },
+              "size": {
+                "type": "integer",
+                "description": "The size of the entire RFC822 message in bytes"
+              },
+              "sizeComparison": {
+                "type": "string",
+                "enum": [
+                  "unspecified",
+                  "smaller",
+                  "larger"
+                ],
+                "description": "How the message size should be compared to the size field"
+              }
+            },
+            "description": "Message matching criteria for the filter",
+            "required": [
+              "from",
+              "to",
+              "subject",
+              "query",
+              "negatedQuery",
+              "hasAttachment",
+              "excludeChats",
+              "size",
+              "sizeComparison"
+            ]
+          },
+          "action": {
+            "type": "object",
+            "properties": {
+              "addLabelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of labels to add to the message"
+              },
+              "removeLabelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of labels to remove from the message"
+              },
+              "forward": {
+                "type": "string",
+                "description": "Email address that the message should be forwarded to"
+              }
+            },
+            "description": "Action that the filter performs"
+          }
+        },
+        "required": [
+          "userId",
+          "criteria",
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "delete_filter",
+      "description": "Immediately and permanently deletes the specified filter",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the filter to delete"
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "get_filter",
+      "description": "Gets a filter",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the filter to retrieve"
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "list_filters",
+      "description": "Lists the message filters of a Email user",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "create_forwarding_address",
+      "description": "Creates a forwarding address. If ownership verification is required, a message will be sent to the recipient and the resource's verification status will be set to pending; otherwise, the resource will be created with verification status set to accepted. The verification status is determined automatically by the system based on domain ownership.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "forwardingEmail": {
+            "type": "string",
+            "description": "An email address to which messages can be forwarded",
+            "format": "email"
+          }
+        },
+        "required": [
+          "userId",
+          "forwardingEmail"
+        ]
+      }
+    },
+    {
+      "name": "delete_forwarding_address",
+      "description": "Deletes the specified forwarding address and revokes any verification that may have been required.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "forwardingEmail": {
+            "type": "string",
+            "description": "The forwarding address to be deleted.",
+            "format": "email"
+          }
+        },
+        "required": [
+          "userId",
+          "forwardingEmail"
+        ]
+      }
+    },
+    {
+      "name": "get_forwarding_address",
+      "description": "Gets the specified forwarding address.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "forwardingEmail": {
+            "type": "string",
+            "description": "The forwarding address to be retrieved.",
+            "format": "email"
+          }
+        },
+        "required": [
+          "userId",
+          "forwardingEmail"
+        ]
+      }
+    },
+    {
+      "name": "list_forwarding_addresses",
+      "description": "Lists the forwarding addresses for the specified account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value \"me\" can be used to indicate the authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "create_send_as_alias",
+      "description": "Creates a custom \"from\" send-as alias. Note: If an SMTP MSA is specified, Email will attempt to connect to the SMTP service to validate the configuration before creating the alias. If ownership verification is required for the alias, a message will be sent to the email address and the resource's verification status will be set to pending; otherwise, the resource will be created with verification status set to accepted. If a signature is provided, Email will sanitize the HTML before saving it with the alias. This method is only available to service account clients that have been delegated domain-wide authority.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias. This is read-only for all operations except create."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "A name that appears in the \"From:\" header for mail sent using this alias. For custom \"from\" addresses, when this is empty, Email will populate the \"From:\" header with the name that is used for the primary address associated with the account."
+          },
+          "replyToAddress": {
+            "type": "string",
+            "description": "An optional email address that is included in a \"Reply-To:\" header for mail sent using this alias. If this is empty, Email will not generate a \"Reply-To:\" header.",
+            "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+          },
+          "signature": {
+            "type": "string",
+            "description": "An optional HTML signature that is included in messages composed with this alias in the Email web UI. This signature is added to new emails only."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this address is selected as the default \"From:\" address in situations such as composing a new message or sending a vacation auto-reply. Every Email account has exactly one default send-as address, so the only legal value that clients may write to this field is true."
+          },
+          "treatAsAlias": {
+            "type": "boolean",
+            "description": "Whether Email should treat this address as an alias for the user's primary email address. This setting only applies to custom \"from\" aliases."
+          },
+          "smtpMsa": {
+            "type": "object",
+            "description": "An optional SMTP service that will be used as an outbound relay for mail sent using this alias. If this is empty, outbound mail will be sent directly from Email's servers to the destination SMTP service. This setting only applies to custom \"from\" aliases.",
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "The hostname of the SMTP service. Required."
+              },
+              "port": {
+                "type": "integer",
+                "description": "The port of the SMTP service. Required."
+              },
+              "username": {
+                "type": "string",
+                "description": "The username that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "password": {
+                "type": "string",
+                "description": "The password that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "securityMode": {
+                "type": "string",
+                "enum": [
+                  "securityModeUnspecified",
+                  "none",
+                  "ssl",
+                  "starttls"
+                ],
+                "description": "The protocol that will be used to secure communication with the SMTP service. Required."
+              }
+            },
+            "required": [
+              "host",
+              "port",
+              "securityMode"
+            ]
+          }
+        },
+        "required": [
+          "sendAsEmail"
+        ]
+      }
+    },
+    {
+      "name": "delete_send_as_alias",
+      "description": "Deletes the specified send-as alias. Revokes any verification that may have been required for using it. This method is only available to service account clients that have been delegated domain-wide authority.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The send-as alias to be deleted."
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId",
+          "sendAsEmail"
+        ]
+      }
+    },
+    {
+      "name": "get_send_as_alias",
+      "description": "Gets the specified send-as alias. Fails with an HTTP 404 error if the specified address is not a member of the collection.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The send-as alias to be retrieved."
+          },
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          }
+        },
+        "required": [
+          "userId",
+          "sendAsEmail"
+        ]
+      }
+    },
+    {
+      "name": "list_send_as_aliases",
+      "description": "Lists the send-as aliases for the specified account. The result includes the primary send-as address associated with the account as well as any custom \"from\" aliases.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value 'me' can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "patch_send_as_alias",
+      "description": "Patch the specified send-as alias. Only the fields that are provided will be updated.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The send-as alias to be updated"
+          },
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value 'me' can be used to indicate the authenticated user."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "A name that appears in the 'From:' header for mail sent using this alias. For custom 'from' addresses, when this is empty, Gmail will populate the 'From:' header with the name that is used for the primary address associated with the account. If the admin has disabled the ability for users to update their name format, requests to update this field for the primary login will silently fail."
+          },
+          "replyToAddress": {
+            "type": "string",
+            "description": "An optional email address that is included in a 'Reply-To:' header for mail sent using this alias. If this is empty, Gmail will not generate a 'Reply-To:' header."
+          },
+          "signature": {
+            "type": "string",
+            "description": "An optional HTML signature that is included in messages composed with this alias in the Gmail web UI. This signature is added to new emails only."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this address is selected as the default 'From:' address in situations such as composing a new message or sending a vacation auto-reply. Every Gmail account has exactly one default send-as address, so the only legal value that clients may write to this field is true. Changing this from false to true for an address will result in this field becoming false for the other previous default address."
+          },
+          "treatAsAlias": {
+            "type": "boolean",
+            "description": "Whether Gmail should treat this address as an alias for the user's primary email address. This setting only applies to custom 'from' aliases."
+          },
+          "smtpMsa": {
+            "type": "object",
+            "description": "An optional SMTP service that will be used as an outbound relay for mail sent using this alias. If this is empty, outbound mail will be sent directly from Gmail's servers to the destination SMTP service. This setting only applies to custom 'from' aliases.",
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "The hostname of the SMTP service. Required."
+              },
+              "port": {
+                "type": "integer",
+                "description": "The port of the SMTP service. Required."
+              },
+              "username": {
+                "type": "string",
+                "description": "The username that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "password": {
+                "type": "string",
+                "description": "The password that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "securityMode": {
+                "type": "string",
+                "enum": [
+                  "securityModeUnspecified",
+                  "none",
+                  "ssl",
+                  "starttls"
+                ],
+                "description": "The protocol that will be used to secure communication with the SMTP service. Required."
+              }
+            },
+            "required": [
+              "host",
+              "port",
+              "securityMode"
+            ]
+          },
+          "verificationStatus": {
+            "type": "string",
+            "enum": [
+              "verificationStatusUnspecified",
+              "accepted",
+              "pending"
+            ],
+            "description": "Indicates whether this address has been verified for use as a send-as alias. Read-only. This setting only applies to custom 'from' aliases."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "update_send_as_alias",
+      "description": "Updates a send-as alias. If a signature is provided, Email will sanitize the HTML before saving it with the alias. Addresses other than the primary address for the account can only be updated by service account clients that have been delegated domain-wide authority.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The send-as alias to be updated"
+          },
+          "userId": {
+            "type": "string",
+            "description": "User's email address. The special value 'me' can be used to indicate the authenticated user."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "A name that appears in the 'From:' header for mail sent using this alias. For custom 'from' addresses, when this is empty, Gmail will populate the 'From:' header with the name that is used for the primary address associated with the account. If the admin has disabled the ability for users to update their name format, requests to update this field for the primary login will silently fail."
+          },
+          "replyToAddress": {
+            "type": "string",
+            "description": "An optional email address that is included in a 'Reply-To:' header for mail sent using this alias. If this is empty, Gmail will not generate a 'Reply-To:' header."
+          },
+          "signature": {
+            "type": "string",
+            "description": "An optional HTML signature that is included in messages composed with this alias in the Gmail web UI. This signature is added to new emails only."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this address is selected as the default 'From:' address in situations such as composing a new message or sending a vacation auto-reply. Every Gmail account has exactly one default send-as address, so the only legal value that clients may write to this field is true. Changing this from false to true for an address will result in this field becoming false for the other previous default address."
+          },
+          "treatAsAlias": {
+            "type": "boolean",
+            "description": "Whether Gmail should treat this address as an alias for the user's primary email address. This setting only applies to custom 'from' aliases."
+          },
+          "smtpMsa": {
+            "type": "object",
+            "description": "An optional SMTP service that will be used as an outbound relay for mail sent using this alias. If this is empty, outbound mail will be sent directly from Gmail's servers to the destination SMTP service. This setting only applies to custom 'from' aliases.",
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "The hostname of the SMTP service. Required."
+              },
+              "port": {
+                "type": "integer",
+                "description": "The port of the SMTP service. Required."
+              },
+              "username": {
+                "type": "string",
+                "description": "The username that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "password": {
+                "type": "string",
+                "description": "The password that will be used for authentication with the SMTP service. This is a write-only field that can be specified in requests to create or update SendAs settings; it is never populated in responses."
+              },
+              "securityMode": {
+                "type": "string",
+                "enum": [
+                  "securityModeUnspecified",
+                  "none",
+                  "ssl",
+                  "starttls"
+                ],
+                "description": "The protocol that will be used to secure communication with the SMTP service. Required."
+              }
+            },
+            "required": [
+              "host",
+              "port",
+              "securityMode"
+            ]
+          },
+          "verificationStatus": {
+            "type": "string",
+            "enum": [
+              "verificationStatusUnspecified",
+              "accepted",
+              "pending"
+            ],
+            "description": "Indicates whether this address has been verified for use as a send-as alias. Read-only. This setting only applies to custom 'from' aliases."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "userId",
+          "displayName",
+          "replyToAddress",
+          "signature",
+          "isDefault",
+          "treatAsAlias",
+          "smtpMsa",
+          "verificationStatus"
+        ]
+      }
+    },
+    {
+      "name": "verify_send_as_alias",
+      "description": "Sends a verification email to the specified send-as alias address. The verification status must be pending. This method is only available to service account clients that have been delegated domain-wide authority.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The send-as alias to be verified."
+          }
+        },
+        "required": [
+          "userId",
+          "sendAsEmail"
+        ]
+      }
+    },
+    {
+      "name": "delete_smime_config",
+      "description": "Deletes the specified S/MIME config for the specified send-as alias.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias."
+          },
+          "id": {
+            "type": "string",
+            "description": "The immutable ID for the SmimeInfo."
+          },
+          "userId": {
+            "type": "string",
+            "description": "The user's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "get_smime_config",
+      "description": "Gets the specified S/MIME config for the specified send-as alias.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias."
+          },
+          "id": {
+            "type": "string",
+            "description": "The immutable ID for the SmimeInfo."
+          },
+          "userId": {
+            "type": "string",
+            "description": "The user's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "insert_smime_config",
+      "description": "Insert (upload) the given S/MIME config for the specified send-as alias. Note that pkcs12 format is required for the key.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias."
+          },
+          "issuerCn": {
+            "type": "string",
+            "description": "The S/MIME certificate issuer's common name."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this SmimeInfo is the default one for this user's send-as address."
+          },
+          "expiration": {
+            "type": "string",
+            "description": "When the certificate expires (in milliseconds since epoch)."
+          },
+          "encryptedKeyPassword": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Encrypted key password, when key is encrypted."
+          },
+          "pem": {
+            "type": "string",
+            "description": "PEM formatted X509 concatenated certificate string (standard base64 encoding). Format used for returning key, which includes public key as well as certificate chain (not private key)."
+          },
+          "pkcs12": {
+            "type": "string",
+            "description": "PKCS#12 format containing a single private/public key pair and certificate chain. This format is only accepted from client for creating a new SmimeInfo and is never returned, because the private key is not intended to be exported. PKCS#12 may be encrypted, in which case encryptedKeyPassword should be set appropriately. A base64-encoded string."
+          },
+          "userId": {
+            "type": "string",
+            "description": "The user's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "issuerCn",
+          "expiration",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "list_smime_configs",
+      "description": "Lists S/MIME configs for the specified send-as alias.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias."
+          },
+          "userId": {
+            "type": "string",
+            "description": "The user's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "set_default_smime_config",
+      "description": "Sets the default S/MIME config for the specified send-as alias.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sendAsEmail": {
+            "type": "string",
+            "description": "The email address that appears in the \"From:\" header for mail sent using this alias."
+          },
+          "id": {
+            "type": "string",
+            "description": "The immutable ID for the SmimeInfo."
+          },
+          "userId": {
+            "type": "string",
+            "description": "The user's email address. The special value \"me\" can be used to indicate the authenticated user."
+          }
+        },
+        "required": [
+          "sendAsEmail",
+          "id",
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "delete_thread",
+      "description": "Immediately and permanently deletes the specified thread. Any messages that belong to the thread are also deleted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "ID of the Thread to delete."
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "get_thread",
+      "description": "Gets the specified thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the thread to retrieve."
+          },
+          "format": {
+            "type": "string",
+            "description": "The format to return the messages in.",
+            "enum": [
+              "minimal",
+              "full",
+              "metadata"
+            ],
+            "default": "full"
+          },
+          "metadataHeaders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "When given and format is METADATA, only include headers specified."
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "list_threads",
+      "description": "Lists the threads in the user's mailbox.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "maxResults": {
+            "type": "integer",
+            "description": "Maximum number of threads to return. Defaults to 100, max 500.",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Page token to retrieve a specific page of results in the list."
+          },
+          "q": {
+            "type": "string",
+            "description": "Only return threads matching the specified query. Supports Email search syntax."
+          },
+          "labelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only return threads with labels that match all of the specified label IDs."
+          },
+          "includeSpamTrash": {
+            "type": "boolean",
+            "description": "Include threads from SPAM and TRASH in the results.",
+            "default": false
+          }
+        },
+        "required": [
+          "userId"
+        ]
+      }
+    },
+    {
+      "name": "modify_thread",
+      "description": "Modifies the labels applied to the thread. This applies to all messages in the thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the thread to modify."
+          },
+          "addLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list of IDs of labels to add to this thread. You can add up to 100 labels with each update.",
+            "maxItems": 100
+          },
+          "removeLabelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A list of IDs of labels to remove from this thread. You can remove up to 100 labels with each update.",
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "trash_thread",
+      "description": "Moves the specified thread to the trash. Any messages that belong to the thread are also moved to the trash.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the thread to Trash."
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "untrash_thread",
+      "description": "Removes the specified thread from the trash. Any messages that belong to the thread are also removed from the trash.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Specifies the userId by email address or uses me to refer to the currently authenticated user.",
+            "pattern": "^(?:me|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})$"
+          },
+          "id": {
+            "type": "string",
+            "description": "The ID of the thread to remove from Trash."
+          }
+        },
+        "required": [
+          "userId",
+          "id"
+        ]
+      }
+    }
+  ]
+}

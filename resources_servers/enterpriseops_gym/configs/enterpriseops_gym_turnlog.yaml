@@ -1,0 +1,23 @@
+# EnterpriseOps-Gym with the per-turn-telemetry agent (eval-team logging schema).
+# Adds a turn_logging_agent alongside the standard stack; collect with
+#   ng_collect_rollouts +agent_name=enterpriseops_gym_turn_logging_agent ...
+# then export via export_eval_telemetry.py.
+config_paths:
+  - resources_servers/enterpriseops_gym/configs/enterpriseops_gym.yaml
+
+enterpriseops_gym_turn_logging_agent:
+  responses_api_agents:
+    turn_logging_agent:
+      entrypoint: app.py
+      # EOG parity: same max_steps as the standard agent.
+      max_steps: 50
+      resources_server:
+        type: resources_servers
+        name: enterpriseops_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/enterpriseops_gym/data/example.jsonl
