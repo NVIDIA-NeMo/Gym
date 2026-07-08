@@ -13,8 +13,8 @@
 # limitations under the License.
 """Unit tests for the qwen3_coder tool-call text parser (SGLang /generate path).
 
-Fixtures mirror the canonical example embedded in the Nemotron Nano V3.5
-chat template (``chat_template.jinja``), which instructs the model to emit::
+Fixtures mirror the canonical tool-call example embedded in Qwen3-Coder-style
+chat templates, which instruct the model to emit::
 
     <tool_call>
     <function=example_function_name>

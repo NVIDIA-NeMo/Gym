@@ -21,8 +21,8 @@ engine's ``tool_call_parser`` would have produced on a chat endpoint.
 This module is deliberately dependency-free (stdlib only) so it can be
 unit-tested without the server stack.
 
-Currently implemented: the ``qwen3_coder`` XML-ish format used by e.g.
-Nemotron Nano V3.5 chat templates::
+Currently implemented: the ``qwen3_coder`` XML-ish format (as emitted by
+Qwen3-Coder-style chat templates)::
 
     <tool_call>
     <function=example_function_name>

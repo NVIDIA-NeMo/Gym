@@ -104,7 +104,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # tool calls from raw text client-side, so this must match the model's chat template.
     # "hermes": <tool_call>{json}</tool_call> (e.g. Qwen3 thinking models).
     # "qwen3_coder": <tool_call><function=NAME><parameter=KEY>VALUE</parameter>...</function>
-    #                </tool_call> (e.g. Nemotron Nano V3.5 templates).
+    #                </tool_call> (Qwen3-Coder-style templates).
     sglang_tool_format: Literal["hermes", "qwen3_coder"] = "hermes"
 
     def model_post_init(self, context):
@@ -745,7 +745,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         begins INSIDE the reasoning block (no opening ``<think>``). Everything up to the first
         ``</think>`` is therefore reasoning; tool calls are parsed out of the remainder in the
         format selected by ``config.sglang_tool_format`` ("hermes" JSON, e.g. Qwen3-thinking;
-        or "qwen3_coder" XML-ish, e.g. Nemotron Nano V3.5 — see sglang_tool_parsers.py).
+        or "qwen3_coder" XML-ish, e.g. Qwen3-Coder-style templates — see sglang_tool_parsers.py).
         This mirrors what the serving engine's reasoning/tool parsers would have produced on
         /v1/chat/completions, so downstream Responses marshaling is identical to the vLLM path.
         ``tools`` (the request's tools list) enables schema-aware argument type coercion.
