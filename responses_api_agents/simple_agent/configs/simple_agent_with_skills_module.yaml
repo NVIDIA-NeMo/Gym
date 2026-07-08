@@ -1,4 +1,4 @@
-# simple_agent with prompt + skill_library modules (context injection + adaptation).
+# simple_agent with working_memory + skill_library modules (context injection + adaptation).
 #
 # Run with skills.path so Processor stamps skills_ref on each row:
 #
@@ -19,7 +19,7 @@ simple_agent_with_skills_module:
         type: responses_api_models
         name: policy_model
       modules:
-        - type: prompt
+        - type: working_memory
           name: answer_format_prompt
           path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         - type: skill_library

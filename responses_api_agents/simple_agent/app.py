@@ -19,14 +19,14 @@ from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.agent_modules import (
-    AGENT_ARTIFACT_REFS_KEY,
+    AGENT_MODULE_REFS_KEY,
     AGENT_UPDATE_EVENTS_KEY,
     AgentModuleConfig,
     TrajectoryEvent,
+    activate_agent_context,
+    adapt_agent_modules,
     build_agent_modules,
-    collect_artifact_refs,
-    observe_agent_modules,
-    prepare_agent_context,
+    collect_module_refs,
 )
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -58,7 +58,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = None
     modules: Optional[List[AgentModuleConfig]] = Field(
         default=None,
-        description="Agent modules applied at prepare/observe time (prompt, skill_library, …).",
+        description="Agent modules activated/adapted during /run (working_memory, skill_library, …).",
     )
 
 
@@ -201,7 +201,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        agent_ctx = await prepare_agent_context(modules, row, body.responses_create_params)
+        agent_ctx = await activate_agent_context(modules, row, body.responses_create_params)
         responses_create_params = agent_ctx.responses_create_params
 
         response = await self.server_client.post(
@@ -234,12 +234,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             task_index=row.get("_ng_task_index"),
             rollout_index=row.get("_ng_rollout_index"),
         )
-        update_events = await observe_agent_modules(modules, trajectory_event)
+        update_events = await adapt_agent_modules(modules, trajectory_event)
 
         result = verify_response_json
-        artifact_refs = collect_artifact_refs(modules)
-        if artifact_refs:
-            result[AGENT_ARTIFACT_REFS_KEY] = [ref.model_dump() for ref in artifact_refs]
+        module_refs = collect_module_refs(modules)
+        if module_refs:
+            result[AGENT_MODULE_REFS_KEY] = [ref.model_dump() for ref in module_refs]
         if update_events:
             result[AGENT_UPDATE_EVENTS_KEY] = [event.model_dump() for event in update_events]
 

@@ -1,12 +1,12 @@
 ---
 title: "Agent Modules Walkthrough"
-description: "Run prompt and skill_library Agent modules on simple_agent with MCQA — inspect prepare, observe, and provenance fields."
+description: "Run working_memory and skill Agent modules on simple_agent with MCQA — inspect activate, adapt, and provenance fields."
 position: 4
 ---
 
-This walkthrough runs the **Agent modules** reference implementation end-to-end: a `prompt` module injects the answer format, a `skill_library` module injects skill content into the system message, and optional **adaptation** appends lessons to skills after failed rollouts.
+This walkthrough runs the **Agent modules** reference implementation end-to-end: a `working_memory` module injects the answer format, a `skill_library` module injects skill content into the system message, and optional **adaptation** appends lessons to skills after failed rollouts.
 
-Use it to see the `prepare` → harness → `verify` → `observe` flow before scaling to GEPA, ACE, or full benchmarks.
+Use it to see the `activate` → harness → `verify` → `adapt` flow before scaling to GEPA, ACE, or full benchmarks.
 
 <Info>
 
@@ -41,12 +41,12 @@ sequenceDiagram
     P->>P: stamp skills_ref on each row
     P->>A: POST /run
     A->>E: seed_session
-    A->>M: prepare (prompt + skills → system/user messages)
+    A->>M: activate (working_memory + skill_library → system/user messages)
     A->>H: ReAct tool loop (no tools on these tasks)
     H-->>A: model response
     A->>E: verify → reward
-    A->>M: observe (adapt skill if reward < 1.0)
-    A-->>P: reward + agent_artifact_refs + agent_update_events
+    A->>M: adapt (update skill if reward < 1.0)
+    A-->>P: reward + agent_module_refs + agent_update_events
 ```
 
 ## Prerequisites
@@ -106,7 +106,7 @@ gym eval run --no-serve \
   +num_repeats=1
 ```
 
-The run stamps `skills_ref` on each row (Processor) and applies Agent modules inside `/run` (Agent).
+The run stamps `skills_ref` on each row during rollout collection and applies Agent modules inside `/run`.
 
 ## Step 4 — Inspect outputs
 
@@ -130,23 +130,18 @@ Look for these fields:
 | Field | Meaning |
 | --- | --- |
 | `reward` | Environment verifier score (`1.0` = correct MCQ answer) |
-| `skills_ref` | Run-level skills directory + content hash (Processor stamp) |
-| `agent_artifact_refs` | Active module artifacts (`prompt` hash, `skill_library` hash) |
+| `skills_ref` | Run-level skills directory + content hash stamped by rollout collection |
+| `agent_module_refs` | Active module refs (`working_memory` hash, `skill_library` hash) |
 | `agent_update_events` | Skill adaptations after failed rollouts (`before_hash` → `after_hash`) |
 
-Example `agent_artifact_refs` entry:
+Example `agent_module_refs` entry:
 
 ```json
 {
   "type": "skill_library",
   "name": "tutorial_skills",
   "hash": "a1b2c3d4e5f6",
-  "path": "/tmp/agent_modules_skills_variant_a",
-  "metadata": {
-    "injection_mode": "context",
-    "adaptation_enabled": true,
-    "skills": [{"name": "baseline", "description": "..."}, {"name": "cot_enhanced", "description": "..."}]
-  }
+  "path": "/tmp/agent_modules_skills_variant_a"
 }
 ```
 
@@ -157,7 +152,7 @@ grep -o '"agent_update_events":\[[^]]*\]' results/agent_modules_tutorial_rollout
 cat /tmp/agent_modules_skills_variant_a/cot_enhanced/SKILL.md
 ```
 
-A `## Lesson` section at the bottom of `cot_enhanced/SKILL.md` means `observe` appended an adaptation stub.
+A `## Lesson` section at the bottom of `cot_enhanced/SKILL.md` means `adapt` appended an adaptation stub.
 
 ## Step 5 — Compare skill variants (optional)
 
@@ -176,17 +171,17 @@ gym eval run --no-serve \
   +num_repeats=1
 ```
 
-Compare `skills_ref.hash` or `agent_artifact_refs[].hash` between files — different skill bytes produce different hashes even at the same path pattern ([#1256](https://github.com/NVIDIA-NeMo/Gym/issues/1256)).
+Compare `skills_ref.hash` or `agent_module_refs[].hash` between files — different skill bytes produce different hashes even at the same path pattern ([#1256](https://github.com/NVIDIA-NeMo/Gym/issues/1256)).
 
 ## Step 6 — Prompt-only baseline (optional)
 
-To see modules in isolation, temporarily disable skills on the command line by omitting `+skills.path` and removing the `skill_library` block from `benchmarks/agent_modules_tutorial/config.yaml`, then restart servers. The `prompt` module alone still materializes `responses_create_params.input` from each row's `problem` field.
+To see modules in isolation, temporarily disable skills on the command line by omitting `+skills.path` and removing the `skill_library` block from `benchmarks/agent_modules_tutorial/config.yaml`, then restart servers. The `working_memory` module alone still materializes `responses_create_params.input` from each row's `problem` field.
 
 ## Files to read in the repo
 
 | Path | Role |
 | --- | --- |
-| `nemo_gym/agent_modules.py` | `AgentModule`, `prepare` / `observe`, `artifact_refs` |
+| `nemo_gym/agent_modules.py` | `AgentModule`, `activate` / `adapt`, `module_refs` |
 | `responses_api_agents/simple_agent/app.py` | `/run` wiring |
 | `nemo_gym/skills.py` | `format_skills_for_context`, `apply_skill_adaptation` |
 | `benchmarks/agent_modules_tutorial/config.yaml` | Tutorial server + module config |
@@ -196,4 +191,4 @@ To see modules in isolation, temporarily disable skills on the command line by o
 
 - Scale up: [GPQA](/evaluation/environment-list) with the same module pattern on a full benchmark config.
 - Native skills: [Claude Code agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) + `injection_mode: none`.
-- Optimizers: replace rule-based `adaptation` with GEPA (prompt) or ACE (playbook) drivers — see [Agent Modules research note](/researchnotes/agent-modules).
+- Optimizers: replace rule-based `adaptation` with GEPA (working memory) or ACE (skill/playbook) drivers — see [Agent Modules research note](/researchnotes/agent-modules).

@@ -6,7 +6,15 @@ position: 3
 
 Skills are reusable units of operational knowledge an agent can load at runtime, following the open [Agent Skills standard](https://agentskills.io/specification) used by Claude Code and Codex CLI. A skill is a **directory** containing a `SKILL.md` file (YAML frontmatter + markdown body) plus optional supporting files.
 
-NeMo Gym treats skills as an **environment-level variable you can sweep**, the same way it treats prompts. You point a run at a directory of skills, the agent loads them with its own native mechanism, and each rollout result is tagged so you can compare variants. NeMo Gym does not interpret or activate skills — it sets up the skill environment and measures the outcome.
+NeMo Gym treats skills as a **run-level variable you can sweep**, the same way it treats `prompt_config`. You pass `+skills.path=…` on `gym eval run` — not in dataset rows — reuse the same task JSONL across skill variants, and compare runs using the content-hashed `skills_ref` on each result.
+
+<Note>
+
+**Run-level, not Environment.** In Gym terminology, the **Environment** is the resources server (`seed_session`, tools, `verify`, reward). Skills are not owned by the Environment. `RolloutCollectionHelper` resolves `skills.path`, stamps `skills_ref` on each row, and the Agent makes skills available during `/run` (native discovery, staging, or a `skill_library` module).
+
+</Note>
+
+For agents with native skill runtimes (Claude Code, Codex), Gym core does not parse or activate skills — it records provenance and the agent stages the directory. For agents without discovery (`simple_agent`), a `skill_library` module with `injection_mode: context` can inject `SKILL.md` bodies into the system message. See [Agent Modules Walkthrough](/evaluation-tutorials/agent-modules-walkthrough).
 
 ## Skills are a run-level knob, not a dataset field
 

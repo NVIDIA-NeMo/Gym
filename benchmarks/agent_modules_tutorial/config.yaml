@@ -1,4 +1,4 @@
-# Agent modules tutorial — MCQA + simple_agent with prompt and skill_library modules.
+# Agent modules tutorial — MCQA + simple_agent with working_memory and skill_library modules.
 #
 # Start (from repo root, after configuring env.yaml — see tutorial doc):
 #
@@ -37,7 +37,7 @@ agent_modules_tutorial_simple_agent:
         type: responses_api_models
         name: policy_model
       modules:
-        - type: prompt
+        - type: working_memory
           name: answer_format_prompt
           path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         - type: skill_library

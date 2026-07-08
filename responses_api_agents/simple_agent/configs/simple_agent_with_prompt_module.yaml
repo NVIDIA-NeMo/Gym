@@ -1,7 +1,7 @@
-# Example: simple_agent with an Agent-side prompt module.
+# Example: simple_agent with an Agent-side working_memory module.
 #
-# The prompt module injects instructions at Agent prepare time and stamps
-# agent_artifact_refs on rollout results. Pair with a resources server config
+# The working_memory module injects instructions at Agent prepare time and stamps
+# agent_module_refs on rollout results. Pair with a resources server config
 # that supplies tools and verify logic.
 #
 #   gym env start --config responses_api_agents/simple_agent/configs/simple_agent_with_prompt_module.yaml ...
@@ -17,6 +17,6 @@ simple_agent_with_prompt_module:
         type: responses_api_models
         name: policy_model
       modules:
-        - type: prompt
+        - type: working_memory
           name: answer_format_prompt
           path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
