@@ -228,20 +228,6 @@ def _resource_gpu_env(resources: SandboxResources) -> dict[str, str]:
     return {"NVIDIA_VISIBLE_DEVICES": ",".join(str(i) for i in range(resources.gpu))}
 
 
-def _to_sandbox_status(state: str | None) -> SandboxStatus:
-    """Map an enroot-reported state string to the neutral status enum."""
-    normalized = str(state or "").lower()
-    if normalized in {"running", "active", "ready", "s", "r", "d"}:
-        return SandboxStatus.RUNNING
-    if normalized in {"starting", "creating", "pending"}:
-        return SandboxStatus.STARTING
-    if normalized in {"stopped", "exited", "terminated", "z", "t", "x"}:
-        return SandboxStatus.STOPPED
-    if normalized in {"error", "failed", "unhealthy"}:
-        return SandboxStatus.ERROR
-    return SandboxStatus.UNKNOWN
-
-
 def _path_under_mount(mount_point: str, path: str) -> str | None:
     """If `path` is inside the mount, return its path relative to the mount; else None."""
     if not path.startswith("/"):

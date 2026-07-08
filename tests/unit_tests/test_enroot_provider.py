@@ -224,15 +224,6 @@ def test_resource_gpu_env() -> None:
     assert enroot_provider._resource_gpu_env(SandboxResources(gpu=2)) == {"NVIDIA_VISIBLE_DEVICES": "0,1"}
 
 
-def test_to_sandbox_status() -> None:
-    to_status = enroot_provider._to_sandbox_status
-    assert to_status("running") is SandboxStatus.RUNNING
-    assert to_status("starting") is SandboxStatus.STARTING
-    assert to_status("stopped") is SandboxStatus.STOPPED
-    assert to_status("failed") is SandboxStatus.ERROR
-    assert to_status(None) is SandboxStatus.UNKNOWN
-
-
 def test_path_under_mount() -> None:
     under = enroot_provider._path_under_mount
     assert under("/sandbox", "/sandbox/a/b.txt") == "a/b.txt"
