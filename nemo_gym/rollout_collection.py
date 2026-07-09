@@ -44,7 +44,11 @@ from nemo_gym.global_config import (
     get_wandb_run,
     peek_global_config_dict,
 )
-from nemo_gym.observability import capture_dirs_from_config, clear_captures_for_rollouts, merge_capture_into_record
+from nemo_gym.observability import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
@@ -450,7 +454,7 @@ class RolloutCollectionHelper(BaseModel):
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
         # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
-        # captured trajectory is keyed separately from the prior attempt's (see
+        # captured model calls are keyed separately from the prior attempt's (see
         # rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
         for row in input_rows:
             attempt = attempts_by_key.get(get_key(row), 0)
@@ -514,17 +518,17 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = _failures_path_for(output_fpath)
 
-        # Resolve capture dirs once so each rollout's captured model-call trajectory can be folded
+        # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         try:
-            capture_dirs = capture_dirs_from_config(peek_global_config_dict() or {})
+            capture_dirs = model_call_capture_dirs_from_config(peek_global_config_dict() or {})
         except Exception:
             capture_dirs = []
 
         # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
         # same rollout ids, so clear the capture files this run is about to (re)write.
         if capture_dirs and not config.resume_from_cache:
-            clear_captures_for_rollouts(input_rows, capture_dirs)
+            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -541,11 +545,11 @@ class RolloutCollectionHelper(BaseModel):
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
 
-            # Fold this rollout's captured trajectory into its record (uniform across agents; no-op
+            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_dirs:
                 try:
-                    merge_capture_into_record(result, capture_dirs)
+                    merge_model_call_capture_into_record(result, capture_dirs)
                 except Exception:
                     pass
 

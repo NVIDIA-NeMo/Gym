@@ -773,7 +773,7 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-# Per-rollout capture correlation (shared protocol). A caller tags its model calls by setting
+# Per-rollout model-call correlation. A caller tags its model calls by setting
 # ROLLOUT_HEADER or using a /ng-rollout/<rollout_id>/v1 base_url. Producer: apply_rollout_prefix;
 # consumer: the capture middleware in observability.py.
 ROLLOUT_HEADER = "x-nemo-gym-rollout-id"
@@ -799,12 +799,12 @@ def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
 
 
 def rollout_id_from_run_body(body: Any) -> Optional[str]:
-    """Per-rollout capture id from a run-request's task/rollout indices (``None`` when absent).
+    """Per-rollout model-call capture id from a run-request's task/rollout indices.
 
     Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
     rollout_collection ships to an agent's ``/run``. When a resume re-dispatch attempt is present
-    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured trajectory
-    stays separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
+    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured model calls
+    stay separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
     key for backward compatibility.
     """
     if hasattr(body, "model_dump"):

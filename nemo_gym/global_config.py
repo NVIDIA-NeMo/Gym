@@ -118,7 +118,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
-# (task, rollout) so their captured trajectories stay separable.
+# (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
@@ -814,7 +814,7 @@ def get_global_config_dict(
 def peek_global_config_dict() -> Optional[DictConfig]:
     """Return the cached global config if already loaded, else ``None`` (never triggers a CLI parse).
 
-    Lets best-effort consumers (e.g. the trajectory-capture merge) read the config when it is
+    Lets best-effort consumers (e.g. model-call capture) read the config when it is
     available without forcing a Hydra argv parse when it is not (unit tests / non-CLI callers).
     """
     return _GLOBAL_CONFIG_DICT

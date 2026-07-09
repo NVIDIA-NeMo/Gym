@@ -12,11 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end capture contract check through a real Gym model server.
+"""End-to-end model-call capture checks through a real Gym model server.
 
 Drives the actual SimpleModelServer.setup_webserver() install path (only the upstream OpenAI
 client mocked), so the captured response is a real NeMoGymResponse that went through
-model_validate + serialization -- proving the contract fields survive the canonical type.
+model validation and serialization.
 """
 
 import asyncio
@@ -24,13 +24,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.trajectory_capture import (
+from nemo_gym.model_call_capture import (
     CaptureStore,
-    aggregate_rollout_metrics,
-    assemble_rollout,
-    assemble_step_records,
+    aggregate_model_call_metrics,
+    read_model_call_records,
 )
+from nemo_gym.observability import merge_model_call_capture_into_record
+from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,
@@ -48,7 +48,7 @@ def _server(tmp_path, *, enabled: bool = True) -> SimpleModelServer:
         entrypoint="",
         name="srv-e2e",
         observability_enabled=enabled,
-        trajectory_capture_dir=str(tmp_path),
+        model_call_capture_dir=str(tmp_path),
     )
     return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -97,9 +97,9 @@ def _response(text, *, tool=None, reasoning=None, cached=0, reasoning_tokens=0, 
     }
 
 
-def test_e2e_full_contract_through_real_model_server(tmp_path):
+def test_e2e_model_call_capture_through_real_model_server(tmp_path):
     server = _server(tmp_path)
-    app = server.setup_webserver()  # real install path -> install_trajectory_capture(app, config)
+    app = server.setup_webserver()  # real install path -> install_model_call_capture(app, config)
     client = TestClient(app)
 
     server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -118,7 +118,7 @@ def test_e2e_full_contract_through_real_model_server(tmp_path):
         ]
     )
 
-    h = {"x-nemo-gym-rollout-id": "r1"}
+    h = {"x-nemo-gym-rollout-id": "0-0"}
     r1 = client.post("/v1/responses", json={"input": "solve"}, headers=h)
     r2 = client.post(
         "/v1/responses",
@@ -128,36 +128,33 @@ def test_e2e_full_contract_through_real_model_server(tmp_path):
     assert r1.status_code == 200 and r2.status_code == 200
 
     store = CaptureStore(tmp_path)
-    steps = assemble_step_records(store, "r1", run_id="run-e2e")
+    calls = read_model_call_records(store, "0-0")
 
     # indices + attribution survive the round trip
-    assert [s.step_index for s in steps] == [0, 1]
-    assert all(s.model_server == "srv-e2e" and s.dialect == "responses" for s in steps)
-    assert [s.turn_index for s in steps] == [0, 0]  # one user turn (the tool-result call stays in turn 0)
+    assert [call.call_index for call in calls] == [0, 1]
+    assert all(call.model_server == "srv-e2e" and call.dialect == "responses" for call in calls)
 
-    # token stats survive NeMoGymResponse validation + serialization (the real point of this test)
-    assert (steps[0].tokens_in, steps[0].tokens_out, steps[0].tokens_total) == (12, 7, 19)
-    assert steps[0].tokens_reasoning == 2
-    assert steps[0].cache_hit is True and steps[0].cached_tokens == 4
-    assert steps[0].reasoning_content == "weigh the options"
-    assert steps[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
-    assert steps[0].latency_total_ms is not None
-    assert steps[1].tokens_in == 20
+    # Token statistics survive NeMoGymResponse validation and serialization.
+    assert (calls[0].tokens_in, calls[0].tokens_out, calls[0].tokens_total) == (12, 7, 19)
+    assert calls[0].tokens_reasoning == 2
+    assert calls[0].cache_hit is True and calls[0].cached_tokens == 4
+    assert calls[0].reasoning_content == "weigh the options"
+    assert calls[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
+    assert calls[0].latency_total_ms is not None
+    assert calls[1].tokens_in == 20
+    assert calls[1].request == {"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]}
 
     # per-rollout aggregates
-    agg = aggregate_rollout_metrics(store, "r1")
+    agg = aggregate_model_call_metrics(store, "0-0")
     assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
-    assert agg["num_steps"] == 2 and agg["num_turns"] == 1
+    assert agg["num_calls"] == 2
 
-    # eval-only ordered trajectory (no token-ids surfaced)
-    items = assemble_rollout(store, "r1")
-    assert [type(i).__name__ for i in items] == [
-        "NeMoGymResponseOutputMessage",
-        "NeMoGymResponseFunctionToolCall",
-        "NeMoGymFunctionCallOutput",
-        "NeMoGymResponseOutputMessage",
-    ]
-    assert not hasattr(items[0], "generation_token_ids")
+    rollout = {"_ng_task_index": 0, "_ng_rollout_index": 0, "response": {"preserved": True}, "reward": 1.0}
+    merge_model_call_capture_into_record(rollout, [tmp_path])
+    assert rollout["response"] == {"preserved": True} and rollout["reward"] == 1.0
+    assert rollout["ng_model_call_capture"]["metrics"]["num_calls"] == 2
+    assert [call["call_index"] for call in rollout["ng_model_call_capture"]["calls"]] == [0, 1]
+    assert "request" not in rollout["ng_model_call_capture"]["calls"][0]
 
 
 def test_e2e_error_category_through_real_model_server(tmp_path):
@@ -171,8 +168,8 @@ def test_e2e_error_category_through_real_model_server(tmp_path):
     r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-timeout"})
     assert r.status_code == 500  # response unchanged for the caller
 
-    steps = assemble_step_records(CaptureStore(tmp_path), "r-timeout")
-    assert len(steps) == 1 and steps[0].error_category == "timeout"
+    calls = read_model_call_records(CaptureStore(tmp_path), "r-timeout")
+    assert len(calls) == 1 and calls[0].error_category == "timeout"
 
 
 def test_e2e_off_by_default_writes_nothing(tmp_path):
@@ -213,9 +210,9 @@ def test_e2e_per_rollout_url_prefix(tmp_path):
     )
     assert r.status_code == 200
 
-    steps = assemble_step_records(CaptureStore(tmp_path), "task9-roll3")
-    assert len(steps) == 1
-    assert steps[0].dialect == "chat" and steps[0].tokens_total == 7
+    calls = read_model_call_records(CaptureStore(tmp_path), "task9-roll3")
+    assert len(calls) == 1
+    assert calls[0].dialect == "chat" and calls[0].tokens_total == 7
 
 
 def test_e2e_streaming_messages_is_captured_and_correlated(tmp_path):
@@ -249,8 +246,8 @@ def test_e2e_streaming_messages_is_captured_and_correlated(tmp_path):
     assert records[0]["request"]["stream"] is True  # request captured
     assert records[0]["response"] is not None  # streamed SSE reassembled into the final response
 
-    # the streamed call surfaces a full step record with token stats reassembled from the SSE
-    steps = assemble_step_records(CaptureStore(tmp_path), "task5-roll2")
-    assert len(steps) == 1 and steps[0].dialect == "messages"
-    assert steps[0].tokens_in == 12 and steps[0].tokens_out == 7  # _response defaults, recovered via SSE
-    assert steps[0].latency_ttft_ms is not None
+    # the streamed call surfaces a full call record with token stats reassembled from the SSE
+    calls = read_model_call_records(CaptureStore(tmp_path), "task5-roll2")
+    assert len(calls) == 1 and calls[0].dialect == "messages"
+    assert calls[0].tokens_in == 12 and calls[0].tokens_out == 7  # _response defaults, recovered via SSE
+    assert calls[0].latency_ttft_ms is not None

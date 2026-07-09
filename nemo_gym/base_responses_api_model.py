@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import Field
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.observability import install_trajectory_capture
+from nemo_gym.observability import install_model_call_capture
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -39,14 +39,14 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     observability_enabled: bool = Field(
         default=False,
         description=(
-            "Capture per-rollout model-call trajectories (token stats, tool calls, "
+            "Capture per-rollout model-call evidence (token stats, tool calls, "
             "messages, reasoning). Opt-in; off by default."
         ),
     )
-    trajectory_capture_dir: Optional[str] = Field(
+    model_call_capture_dir: Optional[str] = Field(
         default=None,
         description=(
-            "Directory for per-rollout trajectory-capture JSONL. Defaults to $NEMO_GYM_TRAJECTORY_DIR, "
+            "Directory for per-rollout model-call JSONL. Defaults to $NEMO_GYM_MODEL_CALL_CAPTURE_DIR, "
             "else a per-server dir under the system temp dir."
         ),
     )
@@ -72,10 +72,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # model server directly.
         app.post("/v1/messages")(self.messages)
 
-        # Opt-in per-rollout trajectory capture (off by default; enable via observability_enabled).
+        # Opt-in per-rollout model-call capture (off by default; enable via observability_enabled).
         # An exchange-capturing middleware, independent of each server's handler signature; never
         # alters the response.
-        install_trajectory_capture(app, self.config)
+        install_model_call_capture(app, self.config)
 
         return app
 
