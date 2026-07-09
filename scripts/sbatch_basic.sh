@@ -9,9 +9,7 @@ set -euo pipefail
 # Get the Ray head node IP
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
-head_node_hostname=${nodes_array[0]}
-head_node_ip=$(getent hosts $head_node_hostname | awk '{print $1}')
-RAY_HEAD_NODE_IP=$head_node_ip:6379
+RAY_HEAD_NODE_IP=${nodes_array[0]}:6379
 echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 
 # Start Ray cluster using symmetric_run.py on all nodes.
@@ -22,11 +20,16 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
-    echo "Running from $SLURM_SUBMIT_DIR" && source .venv/bin/activate \
-    && ray symmetric-run \
-    --address $RAY_HEAD_NODE_IP \
-    --min-nodes $SLURM_JOB_NUM_NODES \
-    --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
-    --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
-    -- \
-    bash $@
+  bash -lc '
+    echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
+    cd "$SLURM_SUBMIT_DIR"
+    source .venv/bin/activate
+
+    ray symmetric-run \
+      --address "'"$RAY_HEAD_NODE_IP"'" \
+      --min-nodes "'"$SLURM_JOB_NUM_NODES"'" \
+      --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
+      --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
+      -- \
+      bash "$@"
+  ' bash "$@"    
