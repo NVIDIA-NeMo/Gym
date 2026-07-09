@@ -4,7 +4,7 @@
 # against any OpenAI-compatible endpoint — swap via ``ARENA_JUDGE_*``
 # overrides (or set the env vars at launch). The ``MISSING`` fallback
 # on the api_key keeps config-load green for judge-unrelated jobs
-# (``ng_prepare_data``, ``ng_dump_config``, ``ng_test``); live
+# (``gym dataset collate``, ``gym env resolve``, ``gym env test``); live
 # ``verify()`` calls will fail loudly if the key is actually unset.
 
 arena_judge_judge_model:

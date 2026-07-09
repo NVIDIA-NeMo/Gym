@@ -18,10 +18,9 @@ import json
 import pytest
 import yaml
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.prompt import (
     PromptConfig,
-    _resolve_path,
     apply_prompt_to_row,
     fill_prompt,
     load_prompt_config,
@@ -73,21 +72,29 @@ class TestLoadPromptConfig:
         assert result1 is result2
 
 
-class TestResolvePath:
-    def test_absolute_path(self, tmp_path):
-        p = tmp_path / "prompt.yaml"
-        p.write_text("")
-        assert _resolve_path(str(p)) == p
+class TestResolveUnderCwdOrInstall:
+    def test_absolute_returned_unchanged(self, tmp_path):
+        assert _resolve_under_cwd_or_install(str(tmp_path / "x.yaml")) == tmp_path / "x.yaml"
 
-    def test_relative_path_resolves_to_parent_dir(self, tmp_path):
-        # Create a file relative to PARENT_DIR to test resolution
-        test_file = PARENT_DIR / "test_resolve_path_temp.yaml"
-        test_file.write_text("user: '{q}'")
+    def test_cwd_preferred_over_install_root(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "rel.yaml").write_text("{}")
+        assert _resolve_under_cwd_or_install("rel.yaml") == tmp_path / "rel.yaml"
+
+    def test_falls_back_to_install_root(self, tmp_path, monkeypatch):
+        # cwd lacks the file; a file present under the install root resolves there.
+        monkeypatch.chdir(tmp_path)
+        rel = "test_resolve_install_fallback.yaml"
+        install_file = PARENT_DIR / rel
+        install_file.write_text("{}")
         try:
-            resolved = _resolve_path("test_resolve_path_temp.yaml")
-            assert resolved.exists()
+            assert _resolve_under_cwd_or_install(rel) == install_file
         finally:
-            test_file.unlink()
+            install_file.unlink()
+
+    def test_missing_returns_cwd_candidate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_under_cwd_or_install("nope.yaml") == tmp_path / "nope.yaml"
 
 
 class TestFillPrompt:

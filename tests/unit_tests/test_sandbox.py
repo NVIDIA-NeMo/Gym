@@ -17,6 +17,7 @@ import importlib.util
 import threading
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -36,10 +37,15 @@ from nemo_gym.sandbox import (
     get_provider_class,
     list_providers,
     register_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
+
+
+pytestmark = pytest.mark.sandbox
 
 
 def _has_module(module_name: str) -> bool:
@@ -383,6 +389,59 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     assert builtin_name in list_providers()
 
 
+def _fake_entry_point(name: str, provider: type, dist_name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, load=lambda: provider, dist=SimpleNamespace(name=dist_name))
+
+
+def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    ep_name = f"ep-{uuid4().hex}"
+
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    def fake_entry_points(*, group: str) -> list[SimpleNamespace]:
+        assert group == provider_registry.ENTRY_POINT_GROUP
+        return [_fake_entry_point(ep_name, EntryPointProvider, "pkg-a")]
+
+    monkeypatch.setattr(provider_registry, "entry_points", fake_entry_points)
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+
+    assert ep_name in list_providers()
+    assert get_provider_class(ep_name) is EntryPointProvider
+
+
+def test_provider_entry_point_collisions(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    # Two distributions publishing the same name raise, naming both packages.
+    dup_name = f"ep-{uuid4().hex}"
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-a"),
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-b"),
+        ],
+    )
+    with pytest.raises(ValueError, match=r"Duplicate sandbox provider entry point.*pkg-a.*pkg-b"):
+        list_providers()
+
+    # An entry point shadowed by a built-in is warned (at discovery) and ignored.
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [_fake_entry_point("opensandbox", EntryPointProvider, "pkg-a")],
+    )
+    with caplog.at_level("WARNING", logger=provider_registry.__name__):
+        list_providers()
+    assert any("shadowed" in message for message in caplog.messages)
+    # Built-in still wins on lookup.
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
+
+
 def test_create_provider_validation_and_constructor_cleanup() -> None:
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
@@ -405,6 +464,73 @@ def test_create_provider_validation_and_constructor_cleanup() -> None:
     register_provider(failing_provider_name, FailingProvider)
     with pytest.raises(RuntimeError, match="provider constructor failed"):
         Sandbox({failing_provider_name: {}})
+
+
+def test_resolve_provider_config_named_reference() -> None:
+    global_config = {
+        "policy_model_name": "test_model",
+        "sandbox_main": {"opensandbox": {"connection": {"domain": "sandbox.example"}}},
+    }
+
+    resolved = resolve_provider_config("sandbox_main", global_config)
+    assert resolved == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+
+    # An OmegaConf DictConfig block resolves to a plain dict.
+    from omegaconf import OmegaConf
+
+    omega_config = OmegaConf.create(global_config)
+    resolved_from_omega = resolve_provider_config("sandbox_main", omega_config)
+    assert resolved_from_omega == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert isinstance(resolved_from_omega["opensandbox"], dict)
+
+
+def test_resolve_provider_config_inline_mapping() -> None:
+    inline = {"opensandbox": {"connection": {}}}
+    assert resolve_provider_config(inline) == inline
+    # The result is a fresh dict, not the same object.
+    assert resolve_provider_config(inline) is not inline
+
+
+def test_resolve_provider_config_errors() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        resolve_provider_config("", {})
+
+    with pytest.raises(ValueError, match="is not defined in the merged config"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    # Error lists available single-key sandbox blocks as candidates.
+    with pytest.raises(ValueError, match="'sandbox_main'"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    with pytest.raises(TypeError, match="must be a name reference"):
+        resolve_provider_config(123)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config({"opensandbox": {}, "extra": {}})
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config("sandbox_main", {"sandbox_main": {}})
+
+
+def test_resolve_provider_metadata() -> None:
+    block = {
+        "opensandbox": {"connection": {"domain": "sandbox.example"}},
+        "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+    }
+
+    # default_metadata is excluded from the provider config and read separately.
+    assert resolve_provider_config(block) == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert resolve_provider_metadata(block) == {"sandbox-api": "opensandbox-sdk"}
+
+    # A named reference works the same way.
+    global_config = {"sandbox": block}
+    assert resolve_provider_metadata("sandbox", global_config) == {"sandbox-api": "opensandbox-sdk"}
+
+    # No default_metadata key -> empty dict.
+    assert resolve_provider_metadata({"opensandbox": {}}) == {}
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:

@@ -25,6 +25,13 @@ selected via ``reward_mode`` config:
 
 Scoring internals live in ``scoring.py`` (rubric) and ``comparison.py``
 (pairwise judge + ELO math).
+
+Both modes grade with a multi-judge *panel* (``judge_panel``): a set of frontier
+judges (e.g. GPT-5.5, Gemini 3.1 Pro Preview, Claude Opus 4.8, each at their own
+reasoning settings) that are sampled per comparison/scoring call. Panel sampling
++ seeding lives in ``judge_panel.py``. A single judge is just the degenerate
+one-member panel synthesized from ``judge_model_server`` when ``judge_panel`` is
+unset — there is one panel-based code path either way.
 """
 
 from __future__ import annotations
@@ -44,6 +51,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.server_utils import get_server_url
+from resources_servers.gdpval.judge_panel import (
+    ResolvedJudge,
+    dir_contains_audio_video,
+    make_rng,
+    panel_summary,
+    select_av_judges,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -109,6 +123,36 @@ class ReferenceModelConfig(BaseModel):
     elo: float = _DEFAULT_REFERENCE_ELO
 
 
+class JudgePanelMember(BaseModel):
+    """One judge in a multi-judge panel.
+
+    Each member is a distinct frontier model + reasoning configuration. For every
+    comparison/scoring call one member is sampled (see
+    ``judge_panel.sample_judge``). Members may share the single
+    ``judge_model_server`` proxy and differ only by ``model`` + reasoning knobs,
+    or point at distinct servers via ``model_server``.
+    """
+
+    # Human-readable label used in logs and the per-judge metrics breakdown,
+    # e.g. "gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8". Defaults to ``model``.
+    name: Optional[str] = None
+    # Upstream model id as the judge endpoint expects (e.g. "openai/gpt-5.5").
+    # Falls back to ``create_params_overrides.model`` then the legacy default.
+    model: Optional[str] = None
+    # Defaults to the server-level ``judge_model_server`` when omitted.
+    model_server: Optional[ModelServerRef] = None
+    # Provider-specific generation/reasoning knobs merged into
+    # ``chat.completions.create`` (e.g. ``{reasoning_effort: high}`` or
+    # ``{extra_body: {...}}``). A ``None`` value drops the matching default.
+    create_params_overrides: Dict[str, Any] = {}
+    # Relative sampling weight; defaults to equal weighting across the panel.
+    weight: float = 1.0
+    # Set True for a member that natively reads audio/video (e.g. Gemini 3.1 Pro
+    # Preview). Tasks whose deliverables/references contain audio or video files
+    # are routed to the AV-capable member(s) instead of the sampled panel.
+    handles_audio_video: bool = False
+
+
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     reward_mode: Literal["rubric", "comparison"] = "rubric"
 
@@ -149,6 +193,20 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params_overrides: Dict[str, Any] = {}
     judge_prompt_template_fpath: Optional[str] = None
 
+    # Multi-judge panel. Every comparison/scoring call samples one member. A
+    # single judge is just the degenerate case: when this is None a one-member
+    # panel is synthesized from ``judge_model_server`` +
+    # ``judge_responses_create_params_overrides`` (see ``_effective_panel``), so
+    # there is a single panel-based code path with no separate single-judge
+    # branch. Applies to every judge mode (rubric text/visual/structured and
+    # pairwise comparison, including multi-stage ELO).
+    judge_panel: Optional[List[JudgePanelMember]] = None
+    # Seed for reproducible per-call judge sampling. The RNG is seeded per
+    # (task_id, mode/ref_repeat) so reruns of the same task draw the same
+    # judges. Leave None to seed only on those identity parts (still stable per
+    # task); set an int to additionally shift the whole stream.
+    judge_sampling_seed: Optional[int] = None
+
     # Rubric-mode scoring backend:
     # - ``"binary"`` (default, legacy): judge emits a JSON ``{criteria_scores:
     #   [{score: 0|1, ...}], overall_score: float}``; reward is the overall
@@ -184,6 +242,12 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     rubric_pretty: Optional[str] = None
     reference_file_urls: Optional[List[str]] = None
     deliverables_dir: Optional[str] = None
+    # Optional per-request filter (comparison mode): judge the eval deliverable
+    # only against this subset of the configured ``reference_models``. Unknown
+    # ids are ignored; ``None`` (default) judges against every configured
+    # reference. Used by the multi-stage ELO driver to select a different set of
+    # reference models per judgementstage without reconfiguring the server.
+    reference_ids: Optional[List[str]] = None
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
@@ -243,6 +307,57 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 )
         super().model_post_init(context)
 
+    def _effective_panel(self) -> List[JudgePanelMember]:
+        """The panel to grade with — always a non-empty list of members.
+
+        A single judge is just the degenerate case: when ``judge_panel`` is unset
+        we synthesize a one-member panel from the legacy single-judge fields
+        (``judge_model_server`` + ``judge_responses_create_params_overrides``), so
+        every code path downstream is panel-based.
+        """
+        if self.config.judge_panel:
+            return self.config.judge_panel
+        # Degenerate 1-member panel: inherit the legacy create-params overrides
+        # (model/api_key are split out during resolution, the rest become the
+        # member's reasoning/generation knobs).
+        return [
+            JudgePanelMember(create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}))
+        ]
+
+    def _resolve_judges(self) -> List[ResolvedJudge]:
+        """Resolve the (always non-empty) panel to concrete upstream coordinates.
+
+        Every judge — including the single-judge special case (see
+        :meth:`_effective_panel`) — is resolved through this one loop. Members may
+        share ``judge_model_server`` (differing only by model + reasoning) or
+        point at their own ``model_server``. Per-member ``model`` / ``api_key``
+        fall back to the legacy ``judge_responses_create_params_overrides`` then to
+        sane defaults.
+        """
+        legacy_overrides = dict(self.config.judge_responses_create_params_overrides or {})
+
+        def _url(server: ModelServerRef) -> str:
+            return get_server_url(server.name) + "/v1"
+
+        judges: List[ResolvedJudge] = []
+        for i, member in enumerate(self._effective_panel()):
+            server = member.model_server or self.config.judge_model_server
+            overrides = dict(member.create_params_overrides or {})
+            model = member.model or overrides.pop("model", None) or legacy_overrides.get("model", "judge")
+            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "dummy")
+            judges.append(
+                ResolvedJudge(
+                    name=member.name or model or f"judge_{i}",
+                    base_url=_url(server),
+                    model=model,
+                    api_key=api_key,
+                    create_overrides=overrides or None,
+                    weight=member.weight,
+                    handles_audio_video=member.handles_audio_video,
+                )
+            )
+        return judges
+
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
@@ -258,13 +373,21 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 invalid_judge_response=True,
             )
 
-        overrides = dict(self.config.judge_responses_create_params_overrides or {})
-        judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.pop("model", "judge")
-        judge_api_key = overrides.pop("api_key", "dummy")
-        # Anything left in `overrides` (max_tokens, temperature, top_p, …) is
-        # merged into the judge's chat.completions.create kwargs.
-        judge_create_overrides = overrides or None
+        judges = self._resolve_judges()
+        # Route tasks with audio/video deliverables to the AV-capable judge(s) —
+        # most judges can't read those modalities natively.
+        if dir_contains_audio_video(body.deliverables_dir):
+            av_judges = select_av_judges(judges)
+            if [j.name for j in av_judges] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {body.task_id} has audio/video deliverables; routing to "
+                    f"{[j.name for j in av_judges]}",
+                    flush=True,
+                )
+            judges = av_judges
+        # Seed per task so a rerun samples the same judge(s); the ``rubric`` tag
+        # keeps the stream distinct from the comparison path.
+        rng = make_rng(self.config.judge_sampling_seed, body.task_id, "rubric")
 
         deliverable_text = _safe_output_text(body.response)
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
@@ -297,9 +420,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_json=body.rubric_json,
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
+                judges=judges,
+                rng=rng,
                 num_trials=self.config.rubric_structured_num_trials,
                 formatting_retries=self.config.rubric_structured_formatting_retries,
                 deliverable_content_blocks=deliverable_content_blocks,
@@ -314,10 +436,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
                 judge_prompt_template=self._judge_prompt_fpath,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
-                create_overrides=judge_create_overrides,
+                judges=judges,
+                rng=rng,
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
         else:
@@ -329,10 +449,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 rubric_pretty=rubric_pretty,
                 task_prompt=task_prompt,
                 judge_prompt_template=self._judge_prompt_fpath,
-                model_base_url=judge_base_url,
-                model_name=judge_model_name,
-                api_key=judge_api_key,
-                create_overrides=judge_create_overrides,
+                judges=judges,
+                rng=rng,
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
@@ -361,6 +479,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         from resources_servers.gdpval.comparison import (
             JUDGE_REQUEST_TIMEOUT_SECONDS,
+            Judge,
             build_file_section,
             clean_up_paths,
             run_trials,
@@ -369,11 +488,18 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         eval_task_dir = Path(body.deliverables_dir) if body.deliverables_dir else None
 
+        # Optional per-request reference subset (multi-stage ELO). When set, only
+        # the named references are judged this call; unknown ids are ignored.
+        active_references = self._references
+        if body.reference_ids is not None:
+            requested = set(body.reference_ids)
+            active_references = {rid: cfg for rid, cfg in self._references.items() if rid in requested}
+
         # Resolve, per reference model, the available (attempted) repeat dirs
         # for this task. A reference that has no deliverable for this task is
         # simply skipped — the eval model just isn't judged against it here.
         ref_dirs_by_id: Dict[str, List[Path]] = {}
-        for ref_id, ref_cfg in self._references.items():
+        for ref_id, ref_cfg in active_references.items():
             ref_task_root = Path(ref_cfg.deliverables_dir) / f"task_{body.task_id}"
             dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
             if dirs:
@@ -405,15 +531,49 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     await self._preconvert_and_log(ref_dir, label=f"ref/{ref_id}/{body.task_id}/{ref_dir.name}")
 
         clean_up_list: List[Path] = []
-        overrides = dict(self.config.judge_responses_create_params_overrides or {})
-        judge_base_url = get_server_url(self.config.judge_model_server.name) + "/v1"
-        judge_model_name = overrides.get("model", "judge")
-        judge_api_key = overrides.get("api_key", "dummy")
-        client = OpenAI(
-            base_url=judge_base_url,
-            api_key=judge_api_key,
-            timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        # Build the judge panel. Members may share a single proxy server (so we
+        # reuse one OpenAI client per distinct upstream) and differ only by model
+        # + reasoning settings. run_trials samples one member per trial.
+        resolved_judges = self._resolve_judges()
+        client_cache: Dict[tuple, Any] = {}
+
+        def _client_for(judge: ResolvedJudge) -> Any:
+            key = (judge.base_url, judge.api_key)
+            if key not in client_cache:
+                client_cache[key] = OpenAI(
+                    base_url=judge.base_url,
+                    api_key=judge.api_key,
+                    timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                )
+            return client_cache[key]
+
+        judges = [
+            Judge(
+                name=rj.name,
+                client=_client_for(rj),
+                model=rj.model,
+                create_overrides=rj.create_overrides or None,
+                weight=rj.weight,
+                handles_audio_video=rj.handles_audio_video,
+            )
+            for rj in resolved_judges
+        ]
+
+        # Route tasks with audio/video files (in the eval submission or any
+        # reference) to the AV-capable judge(s) — most judges can't read those
+        # modalities natively. Detection peeks into zip archives too.
+        av_routed = dir_contains_audio_video(eval_task_dir) or any(
+            dir_contains_audio_video(d) for dirs in ref_dirs_by_id.values() for d in dirs
         )
+        if av_routed:
+            av_judges = select_av_judges(judges)
+            if [j.name for j in av_judges] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {body.task_id} has audio/video files; routing comparison to "
+                    f"{[j.name for j in av_judges]}",
+                    flush=True,
+                )
+            judges = av_judges
 
         total_wins = 0
         total_losses = 0
@@ -422,6 +582,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
         per_ref_results: List[Dict[str, Any]] = []
+        # eval-perspective per-judge tally pooled across every reference × repeat.
+        per_judge_totals: Dict[str, Dict[str, int]] = {}
         # Per-reference judge failures (timeouts, upstream 5xx, oversize/context
         # payloads). With multiple references a single failed matchup must NOT
         # discard the whole rollout — we skip just that (ref × repeat) and keep
@@ -447,17 +609,21 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     )
                     ref_submission = build_file_section(str(ref_dir), clean_up_list)
                     attempted_matchups += 1
+                    # Seed per (task, ref_id, ref_repeat) so judge sampling is
+                    # reproducible and each reference subset draws independently —
+                    # this makes multi-stage ELO reruns replayable per stage.
+                    rng = make_rng(self.config.judge_sampling_seed, body.task_id, ref_id, ref_dir.name)
                     try:
                         result = await asyncio.to_thread(
                             run_trials,
-                            client=client,
-                            model=judge_model_name,
+                            judges=judges,
                             task_prompt=body.prompt or "",
                             refs=refs,
                             submission_a=ref_submission,
                             submission_b=eval_submission,
                             num_trials=self.config.num_comparison_trials,
                             return_raw_responses=self.config.persist_raw_judge_responses,
+                            rng=rng,
                         )
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
@@ -473,6 +639,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
                     ref_judged_repeats += 1
+                    # Fold per-judge counts into eval-perspective panel totals
+                    # (B=eval, A=ref) so the per-member balance is auditable.
+                    for jname, jc in (result.get("per_judge") or {}).items():
+                        agg = per_judge_totals.setdefault(jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0})
+                        agg["wins"] += jc.get("win_count_b", 0)
+                        agg["losses"] += jc.get("win_count_a", 0)
+                        agg["ties"] += jc.get("tie_count", 0)
+                        agg["trials"] += jc.get("trials", 0)
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
                 # Only record references that produced at least one valid matchup;
@@ -525,6 +699,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 # References (and their repeats) whose judge calls failed and
                 # were skipped. Empty when every matchup succeeded.
                 "ref_errors": ref_errors,
+                # Multi-judge panel that graded this rollout + the pooled
+                # per-member vote tally (eval-perspective).
+                "judge_panel": panel_summary(judges),
+                "per_judge": per_judge_totals,
+                # True when this task's audio/video content forced routing to the
+                # AV-capable judge subset (``judge_panel`` above reflects it).
+                "av_routed": av_routed,
             },
             win=reward == 1.0,
             loss=reward == 0.0,
@@ -556,35 +737,78 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 return int(tw or 0), int(tl or 0), int(tt or 0)
             return int(bool(vr.get("win"))), int(bool(vr.get("loss"))), int(bool(vr.get("tie")))
 
-        # Pooled (total) win stats across all references.
-        wins = losses = ties = 0
-        # Per-reference-model win stats: ref_id -> [wins, losses, ties, ref_elo].
-        per_ref_totals: Dict[str, List[Any]] = {}
-        for vr in body.verify_responses:
-            w, ls, t = _votes(vr)
-            wins += w
-            losses += ls
-            ties += t
+        # Pool a set of verify responses into total win stats + per-reference
+        # battle totals (ref_id -> [wins, losses, ties, ref_elo]). Factored out
+        # so it can be applied to all rollouts (descriptive metrics) and, for
+        # multi-stage runs, to each stage's rollouts independently.
+        def _accumulate(verify_responses: List[Dict[str, Any]]) -> tuple[int, int, int, Dict[str, List[Any]]]:
+            w_total = l_total = t_total = 0
+            ref_totals: Dict[str, List[Any]] = {}
+            for vr in verify_responses:
+                w, ls, t = _votes(vr)
+                w_total += w
+                l_total += ls
+                t_total += t
+                for ref_id, counts in (vr.get("per_reference") or {}).items():
+                    entry = ref_totals.setdefault(ref_id, [0, 0, 0, None])
+                    entry[0] += int(counts.get("wins", 0) or 0)
+                    entry[1] += int(counts.get("losses", 0) or 0)
+                    entry[2] += int(counts.get("ties", 0) or 0)
+                    if entry[3] is None:
+                        # Prefer the ELO from config; fall back to whatever the
+                        # verify response recorded at judging time.
+                        cfg_ref = self._references.get(ref_id)
+                        entry[3] = cfg_ref.elo if cfg_ref is not None else counts.get("reference_elo")
+            return w_total, l_total, t_total, ref_totals
 
-            per_reference = vr.get("per_reference") or {}
-            for ref_id, counts in per_reference.items():
-                entry = per_ref_totals.setdefault(ref_id, [0, 0, 0, None])
-                entry[0] += int(counts.get("wins", 0) or 0)
-                entry[1] += int(counts.get("losses", 0) or 0)
-                entry[2] += int(counts.get("ties", 0) or 0)
-                if entry[3] is None:
-                    # Prefer the ELO from config; fall back to whatever the
-                    # verify response recorded at judging time.
-                    cfg_ref = self._references.get(ref_id)
-                    entry[3] = cfg_ref.elo if cfg_ref is not None else counts.get("reference_elo")
+        # Fit the anchored Bradley-Terry MLE over a per-reference battle table.
+        # Returns ``(eval_elo, normalized_elo, num_references)``; the elos are
+        # ``None`` when no reference had both a known anchor ELO and a judged
+        # game, or when the MLE could not produce a rating.
+        def _fit_mle(ref_totals: Dict[str, List[Any]]) -> tuple[Optional[float], Optional[float], int]:
+            stage_battles = [
+                (float(ref_elo), rw, rl, rt)
+                for (rw, rl, rt, ref_elo) in ref_totals.values()
+                if ref_elo is not None and (rw + rl + rt) > 0
+            ]
+            if not stage_battles:
+                return None, None, 0
+            fit = calculate_mle_elo(stage_battles)
+            if fit is None:
+                return None, None, len(stage_battles)
+            return fit[0], fit[1], len(stage_battles)
+
+        # Multi-stage runs tag each rollout with the stage that produced it
+        # (``stage_index``, stamped by the multi-stage orchestrator). Detect them
+        # up front: a task may recur across stages (judged against a different
+        # reference subset each time), so the same ``(task_index, rollout_index)``
+        # appears once per stage — distinguished only by ``stage_index``.
+        staged: Dict[int, List[Dict[str, Any]]] = {}
+        for vr in body.verify_responses:
+            stage_index = vr.get("stage_index")
+            if stage_index is not None:
+                staged.setdefault(int(stage_index), []).append(vr)
+
+        # RewardProfiler (the base aggregation) keys rollouts by
+        # ``(task_index, rollout_index)`` and rejects duplicates. Multi-stage
+        # rollouts collide on that key by design, so feed the base profiler the
+        # LAST stage alone — the headline stage, whose keys are unique — instead
+        # of the pooled set. Single-stage / untagged runs use the full body.
+        base_body = body
+        if staged:
+            base_body = AggregateMetricsRequest(verify_responses=staged[max(staged)])
+
+        # Pooled (across every stage / reference) win stats — always emitted as
+        # descriptive metrics regardless of staging.
+        wins, losses, ties, per_ref_totals = _accumulate(list(body.verify_responses))
 
         judged = wins + losses + ties
         if judged == 0:
-            return await super().aggregate_metrics(body)
+            return await super().aggregate_metrics(base_body)
 
         win_rate = (wins + 0.5 * ties) / judged
 
-        base = await super().aggregate_metrics(body)
+        base = await super().aggregate_metrics(base_body)
         # Total win stats (always emitted).
         extra: Dict[str, Any] = {
             "comparison/wins": wins,
@@ -608,35 +832,71 @@ class GDPValResourcesServer(SimpleResourcesServer):
             if ref_elo is not None:
                 extra[f"comparison/ref/{ref_id}/reference_elo"] = ref_elo
 
-        # ELO estimate. With per-reference battles we fit an anchored
-        # Bradley-Terry MLE across all references; otherwise fall back to the
-        # legacy single-anchor closed form.
-        battles = [
-            (float(ref_elo), rw, rl, rt)
-            for (rw, rl, rt, ref_elo) in per_ref_totals.values()
-            if ref_elo is not None and (rw + rl + rt) > 0
-        ]
-        mle = calculate_mle_elo(battles) if battles else None
-        if mle is not None:
-            eval_elo, normalized_elo = mle
-            extra["comparison/eval_elo"] = eval_elo
-            extra["comparison/normalized_elo"] = normalized_elo
-            # Number of references the MLE was fit over (>1 ⇒ multi-reference
-            # Bradley-Terry). All metric values must stay numeric — downstream
-            # coerces each into a float ``Score`` — so we encode the method as a
-            # count rather than a descriptive string.
-            extra["comparison/num_references"] = len(battles)
-            # Predicted (model-implied) win rate vs each reference, useful to
-            # eyeball MLE fit against the observed per-reference win rate.
-            for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
-                if ref_elo is not None:
-                    extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(eval_elo, float(ref_elo))
+        # When stages are present, fit each stage's ELO independently and report
+        # the LAST stage's fit as the headline ``comparison/eval_elo`` (the
+        # multi-stage design refines on a larger task set vs nearby references in
+        # later stages), while exposing every stage's estimate as a
+        # ``comparison/stage_<k>/*`` extra for visibility. Untagged runs keep the
+        # original single-pass behavior below.
+        if staged:
+            extra["comparison/num_stages"] = len(staged)
+            headline: Optional[tuple[Optional[float], Optional[float], int]] = None
+            last_index = max(staged)
+            for stage_index in sorted(staged):
+                stage_responses = staged[stage_index]
+                _, _, _, stage_ref_totals = _accumulate(stage_responses)
+                stage_elo, stage_norm, stage_nref = _fit_mle(stage_ref_totals)
+                prefix = f"comparison/stage_{stage_index}"
+                if stage_elo is not None:
+                    extra[f"{prefix}/eval_elo"] = stage_elo
+                    extra[f"{prefix}/normalized_elo"] = stage_norm
+                extra[f"{prefix}/num_references"] = stage_nref
+                extra[f"{prefix}/num_tasks"] = len({vr.get("task_id") for vr in stage_responses})
+                if stage_index == last_index:
+                    headline = (stage_elo, stage_norm, stage_nref)
+
+            # Headline = last stage's fit. Fall back to the pooled MLE only if
+            # the last stage failed to produce a rating, so the run still
+            # surfaces a number.
+            if headline is not None and headline[0] is not None:
+                eval_elo, normalized_elo, num_references = headline
+            else:
+                eval_elo, normalized_elo, num_references = _fit_mle(per_ref_totals)
+            if eval_elo is not None:
+                extra["comparison/eval_elo"] = eval_elo
+                extra["comparison/normalized_elo"] = normalized_elo
+                extra["comparison/num_references"] = num_references
+                for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
+                    if ref_elo is not None:
+                        extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(
+                            eval_elo, float(ref_elo)
+                        )
         else:
-            eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
-            extra["comparison/eval_elo"] = eval_elo
-            extra["comparison/normalized_elo"] = normalized_elo
-            extra["comparison/reference_elo"] = self.config.reference_elo
-            extra["comparison/num_references"] = 1
+            # ELO estimate. With per-reference battles we fit an anchored
+            # Bradley-Terry MLE across all references; otherwise fall back to the
+            # legacy single-anchor closed form.
+            eval_elo, normalized_elo, num_references = _fit_mle(per_ref_totals)
+            if eval_elo is not None:
+                extra["comparison/eval_elo"] = eval_elo
+                extra["comparison/normalized_elo"] = normalized_elo
+                # Number of references the MLE was fit over (>1 ⇒ multi-reference
+                # Bradley-Terry). All metric values must stay numeric — downstream
+                # coerces each into a float ``Score`` — so we encode the method as a
+                # count rather than a descriptive string.
+                extra["comparison/num_references"] = num_references
+                # Predicted (model-implied) win rate vs each reference, useful to
+                # eyeball MLE fit against the observed per-reference win rate.
+                for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
+                    if ref_elo is not None:
+                        extra[f"comparison/ref/{ref_id}/predicted_win_rate"] = predict_win_rate(
+                            eval_elo, float(ref_elo)
+                        )
+            else:
+                eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
+                extra["comparison/eval_elo"] = eval_elo
+                extra["comparison/normalized_elo"] = normalized_elo
+                extra["comparison/reference_elo"] = self.config.reference_elo
+                extra["comparison/num_references"] = 1
 
         merged_agent = {**base.agent_metrics, **extra}
         merged_key = {**base.key_metrics, **extra}

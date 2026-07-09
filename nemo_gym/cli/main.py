@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nemo_gym import WORKING_DIR
+from nemo_gym import PARENT_DIR, WORKING_DIR
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
@@ -43,7 +43,10 @@ class _GymArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         match = re.search(r"invalid choice: '([^']+)' \(choose from (.+)\)", message)
         if match:
-            typo, choices = match.group(1), re.findall(r"'([^']+)'", match.group(2))
+            typo = match.group(1)
+            choices = re.findall(r"'([^']+)'", match.group(2))
+            if not choices:
+                choices = [choice.strip() for choice in match.group(2).split(",")]
             message += _did_you_mean(typo, choices)
         super().error(message)
 
@@ -127,6 +130,7 @@ MODEL = _value_flag(
 MODEL_URL = _value_flag("model-url", "policy_base_url", "Model server base URL.")
 MODEL_API_KEY = _value_flag("model-api-key", "policy_api_key", "Model server API key.")
 
+
 # Shared flag: select a single resources server by name. Reused by `env test`, `env init`, and `env packages`.
 RESOURCES_SERVER = Flag(
     register=lambda p: p.add_argument("--resources-server", metavar="NAME", help="Name of the resources server."),
@@ -138,7 +142,7 @@ RESOURCES_SERVER = Flag(
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
-JSON = _bool_flag("json", "json", "Output as JSON for programmatic use.")
+JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
 
 # Positional search query for `gym search`; surfaced to the listing command as the `query` config key.
 QUERY = Flag(
@@ -160,7 +164,10 @@ _ASSETS = {
 def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ()) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches WORKING_DIR (built-ins) first, then any user-registered --search-dir roots.
+    Searches the Gym install root (`PARENT_DIR` — where the built-in asset trees live in both
+    editable and wheel installs), then the current working directory (the user's project), then
+    any user-registered --search-dir roots. Searching `PARENT_DIR` is what lets built-ins resolve
+    by name from an arbitrary cwd (e.g. a wheel install), not just from inside the repo checkout.
     """
     parent, subdir, default_flavor = _ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
@@ -168,14 +175,23 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
     config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
     path = f"{config_dir}/{config_flavor}.yaml"
 
-    # Match in WORKING_DIR (built-ins) and every --search-dir root; dedupe roots that resolve to the same file.
-    roots = [WORKING_DIR, *(Path(d) for d in search_dirs)]
+    # Search the install root (built-ins) and the user's cwd / --search-dir roots; dedupe roots that
+    # resolve to the same directory so an editable install run from the repo root isn't searched twice.
+    seen_roots: set[Path] = set()
+    roots: list[Path] = []
+    for root in (PARENT_DIR, WORKING_DIR, Path.cwd(), *(Path(d) for d in search_dirs)):
+        resolved_root = root.resolve()
+        if resolved_root not in seen_roots:
+            seen_roots.add(resolved_root)
+            roots.append(root)
     matches: list[Path] = []
 
     for root in roots:
         candidate = root / path
         if candidate.exists():
-            matches.append(candidate.resolve())
+            resolved = candidate.resolve()
+            if resolved not in matches:
+                matches.append(resolved)
 
     if len(matches) > 1:
         matches_str = ", ".join(f"`{m}`" for m in matches)
@@ -292,6 +308,8 @@ GROUPS = {
     "dev": "Contributor helpers.",
 }
 
+
+# NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
@@ -381,6 +399,7 @@ COMMANDS = {
         flags=(
             CONFIG,
             RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
             SEARCH_DIR,
             _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
             _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
@@ -510,7 +529,9 @@ COMMANDS = {
         summary="Compute a reward profile from rollouts.",
         flags=(
             _value_flag(
-                "inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL fed to rollout collection."
+                "inputs",
+                "materialized_inputs_jsonl_fpath",
+                "Materialized inputs JSONL fed to rollout collection.",
             ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
@@ -556,6 +577,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> None:
+    # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
+    # pydantic sets ValidationError.title to the validated
+    # model's name, so we match it against the CLI config classes.
+    from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+    config_names = {BaseNeMoGymCLIConfig.__name__}
+    stack = [BaseNeMoGymCLIConfig]
+    while stack:
+        cls = stack.pop()
+        for sub in cls.__subclasses__():
+            if sub.__name__ not in config_names:
+                config_names.add(sub.__name__)
+                stack.append(sub)
+    if exc.title not in config_names:
+        # if this is not a user's config validation error, raise the original error
+        raise
+
+    # For user's config validation, raise a descriptive error message
+    missing: list[str] = []
+    invalid: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<config>"
+        if error["type"] == "missing":
+            missing.append(location)
+        else:
+            invalid.append(f"{location} ({error['msg']})")
+
+    parts: list[str] = []
+    if missing:
+        parts.append(
+            f"missing required configuration: {', '.join(missing)}. "
+            f"Provide each via its flag (see --help) or as a +{missing[0]}=<value> override."
+        )
+    if invalid:
+        parts.append(f"invalid configuration: {'; '.join(invalid)}.")
+    parser.error(" ".join(parts) if parts else str(exc))
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -580,15 +640,22 @@ def main() -> None:
     try:
         translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
     except ValueError as exc:
-        sys.stderr.write(f"{getattr(args, '_parser', parser).prog}: error: {exc}\n")
-        sys.exit(2)
+        getattr(args, "_parser", parser).error(str(exc))
 
     # --config and the asset selectors all emit +config_paths; coalesce them into one token.
     overrides = _merge_config_paths(translated + overrides)
     # --verbose flows through the config (as +verbose=true) so it reaches spun-up servers, not just this process.
     if getattr(args, "verbose", False):
         overrides = ["+verbose=true", *overrides]
-    if callable(command.target):
-        command.target(args, overrides)
-    else:
-        dispatch(command.target, overrides)
+
+    # Local import keeps `gym --help` (which returns before this point) free of pydantic's import cost;
+    # any real command loads pydantic anyway via its config's model_validate.
+    from pydantic import ValidationError
+
+    try:
+        if callable(command.target):
+            command.target(args, overrides)
+        else:
+            dispatch(command.target, overrides)
+    except ValidationError as exc:
+        _handle_pydantic_validation_error(exc, getattr(args, "_parser", parser))
