@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import asyncio
+import json
 import math
 import time
+from contextlib import contextmanager
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import HTTPException, Request
 from pytest import fixture, mark, raises
 
@@ -35,6 +39,7 @@ from resources_servers.newton_bench.app import (
     NewtonBenchVerifyResponse,
     RunExperimentResponse,
 )
+from resources_servers.newton_bench.newton_bench_utils.schemas import MODULE_REQUEST_CLASSES_MAPPING
 
 
 class TestApp:
@@ -142,13 +147,13 @@ class TestApp:
             ),
         )
         request_body = ExecutePythonRequest(code="x = 5")
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
         assert response.success is True
 
         session_id = mock_request.session[SESSION_ID_KEY]
         assert session_id in server._sessions
 
-        end_response = await server.end_session(mock_request, NewtonBenchEndSessionRequest())
+        end_response = await server.end_session(mock_request.session[SESSION_ID_KEY], NewtonBenchEndSessionRequest())
 
         assert isinstance(end_response, NewtonBenchEndSessionResponse)
         assert session_id not in server._sessions
@@ -157,7 +162,7 @@ class TestApp:
     @mark.asyncio
     async def test_end_session_nonexistent(self, server: NewtonBenchResourcesServer, mock_request: Request) -> None:
         """Test that end_session handles non-existent sessions gracefully."""
-        end_response = await server.end_session(mock_request, NewtonBenchEndSessionRequest())
+        end_response = await server.end_session(mock_request.session[SESSION_ID_KEY], NewtonBenchEndSessionRequest())
 
         assert isinstance(end_response, NewtonBenchEndSessionResponse)
 
@@ -172,20 +177,20 @@ class TestApp:
         from resources_servers.newton_bench.app import ExecutePythonRequest
 
         exec_request = ExecutePythonRequest(code="a = 1\na")
-        exec_resp = await server.execute_python(mock_request, exec_request)
+        exec_resp = await server.execute_python(mock_request.session[SESSION_ID_KEY], exec_request)
         assert exec_resp.success is True
 
         end_req = NewtonBenchEndSessionRequest()
-        res1 = await server.end_session(mock_request, end_req)
+        res1 = await server.end_session(mock_request.session[SESSION_ID_KEY], end_req)
         assert isinstance(res1, NewtonBenchEndSessionResponse)
 
-        res2 = await server.end_session(mock_request, end_req)
+        res2 = await server.end_session(mock_request.session[SESSION_ID_KEY], end_req)
         assert isinstance(res2, NewtonBenchEndSessionResponse)
 
         from fastapi import HTTPException
 
         with raises(HTTPException):
-            await server.execute_python(mock_request, exec_request)
+            await server.execute_python(mock_request.session[SESSION_ID_KEY], exec_request)
 
     @mark.asyncio
     async def test_concurrent_end_session_race(
@@ -200,13 +205,13 @@ class TestApp:
         from resources_servers.newton_bench.app import ExecutePythonRequest
 
         exec_request = ExecutePythonRequest(code="x = 42\nx")
-        exec_resp = await server.execute_python(mock_request, exec_request)
+        exec_resp = await server.execute_python(mock_request.session[SESSION_ID_KEY], exec_request)
         assert exec_resp.success is True
 
         end_req = NewtonBenchEndSessionRequest()
 
         async def call_end():
-            await server.end_session(mock_request, end_req)
+            await server.end_session(mock_request.session[SESSION_ID_KEY], end_req)
 
         tasks = [asyncio.create_task(call_end()) for _ in range(20)]
         tasks.append(asyncio.create_task(asyncio.to_thread(server._cleanup_sessions)))
@@ -293,22 +298,22 @@ class TestApp:
         sid = mock_request.session[SESSION_ID_KEY]
         initial_time = server.session_metadata[sid]["last_used"]
         await asyncio.sleep(0.05)
-        await server.execute_python(mock_request, ExecutePythonRequest(code="x = 1"))
+        await server.execute_python(mock_request.session[SESSION_ID_KEY], ExecutePythonRequest(code="x = 1"))
         updated_time = server.session_metadata[sid]["last_used"]
         assert updated_time > initial_time
 
     # ============================================================================
     # 3. Experiment Execution Tests
     # ============================================================================
-    def test_create_module_handler_missing_request_class(self, server: NewtonBenchResourcesServer) -> None:
-        """Test _create_module_handler() when module not in MODULE_REQUEST_CLASSES_MAPPING."""
+    def test_create_module_tool_missing_request_class(self, server: NewtonBenchResourcesServer) -> None:
+        """Test _create_module_tool() when module not in MODULE_REQUEST_CLASSES_MAPPING."""
         with patch("resources_servers.newton_bench.app.MODULE_REQUEST_CLASSES_MAPPING", {}):
             with raises(RuntimeError) as exc_info:
-                server._create_module_handler("nonexistent_module")
+                server._create_module_tool("nonexistent_module")
             assert "Missing request class" in str(exc_info.value)
 
     @mark.asyncio
-    async def test_create_module_handler_import_error(
+    async def test_create_module_tool_import_error(
         self, server: NewtonBenchResourcesServer, mock_request: Request
     ) -> None:
         """Test dynamic handler when module import fails."""
@@ -322,11 +327,11 @@ class TestApp:
                 law_version="v0",
             ),
         )
-        handler = server._create_module_handler("m0_gravity")
+        handler = server._create_module_tool("m0_gravity")
         with patch("resources_servers.newton_bench.app._load_module") as mock_load:
             mock_load.side_effect = ImportError("Module not found")
             with raises(HTTPException) as exc_info:
-                await handler(mock_request, {"mass1": 10.0, "mass2": 20.0, "distance": 5.0})
+                await handler(mock_request.session[SESSION_ID_KEY], {"mass1": 10.0, "mass2": 20.0, "distance": 5.0})
             assert exc_info.value.status_code == 500
             assert "Module not found" in exc_info.value.detail
 
@@ -344,10 +349,10 @@ class TestApp:
         with patch("resources_servers.newton_bench.app._load_module") as mock_load:
             mock_load.return_value = {"core": mock_core, "param_description": None}
 
-            handler = server._create_module_handler("m0_gravity")
+            handler = server._create_module_tool("m0_gravity")
             run_body = {"mass1": 10.0, "mass2": 20.0, "distance": 5.0}
 
-            response = await handler(mock_request, run_body)
+            response = await handler(mock_request.session[SESSION_ID_KEY], run_body)
 
             assert isinstance(response, RunExperimentResponse)
             assert response.result == {"mocked_key": "mocked_value"}
@@ -375,10 +380,10 @@ class TestApp:
         )
         await server.seed_session(mock_request, seed_request)
 
-        handler = server._create_module_handler("m1_coulomb_force")
+        handler = server._create_module_tool("m1_coulomb_force")
 
         with raises(HTTPException) as exc_info:
-            await handler(mock_request, {})
+            await handler(mock_request.session[SESSION_ID_KEY], {})
 
         assert exc_info.value.status_code == 400
         assert "Session configured for 'm0_gravity'" in exc_info.value.detail
@@ -388,9 +393,9 @@ class TestApp:
         self, server: NewtonBenchResourcesServer, mock_request: Request
     ) -> None:
         """Test that calling run_experiment without seeding session first."""
-        handler = server._create_module_handler("m0_gravity")
+        handler = server._create_module_tool("m0_gravity")
         with raises(HTTPException) as exc_info:
-            await handler(mock_request, {})
+            await handler(mock_request.session[SESSION_ID_KEY], {})
 
         assert exc_info.value.status_code == 400
         assert "Session not initialized" in exc_info.value.detail
@@ -411,10 +416,10 @@ class TestApp:
             ),
         )
 
-        handler = server._create_module_handler("m0_gravity")
+        handler = server._create_module_tool("m0_gravity")
         invalid_body = {"mass1": 10.0, "distance": 5.0}  # mass2 missing
 
-        response = await handler(mock_request, invalid_body)
+        response = await handler(mock_request.session[SESSION_ID_KEY], invalid_body)
 
         assert isinstance(response, RunExperimentResponse)
         assert isinstance(response.result, dict)
@@ -447,10 +452,10 @@ class TestApp:
             module_name=module_name, difficulty="easy", system="vanilla_equation", noise_level=0.0, law_version="v0"
         )
         await server.seed_session(mock_request, seed_request)
-        handler = server._create_module_handler(module_name)
+        handler = server._create_module_tool(module_name)
 
         try:
-            response = await handler(mock_request, input_data)
+            response = await handler(mock_request.session[SESSION_ID_KEY], input_data)
         except Exception as e:
             raise e
 
@@ -478,12 +483,12 @@ class TestApp:
         )
         await server.seed_session(mock_request, seed_request)
 
-        handler = server._create_module_handler(module_name)
+        handler = server._create_module_tool(module_name)
 
         base_input = {"mass1": 10.0, "mass2": 10.0, "distance": 2.0}
         input_data = {**base_input, **extra_inputs}
 
-        response = await handler(mock_request, input_data)
+        response = await handler(mock_request.session[SESSION_ID_KEY], input_data)
         assert isinstance(response, RunExperimentResponse)
         if system_mode == "vanilla_equation":
             assert isinstance(response.result, (float, int))
@@ -527,18 +532,18 @@ class TestApp:
             ),
         )
 
-        handler_m0 = server._create_module_handler("m0_gravity")
-        res_a = await handler_m0(req_a, {"mass1": 10.0, "mass2": 10.0, "distance": 2.0})
+        handler_m0 = server._create_module_tool("m0_gravity")
+        res_a = await handler_m0(req_a.session[SESSION_ID_KEY], {"mass1": 10.0, "mass2": 10.0, "distance": 2.0})
         assert isinstance(res_a, RunExperimentResponse)
         assert isinstance(res_a.result, (float, int))
 
-        handler_m1 = server._create_module_handler("m1_coulomb_force")
-        res_b = await handler_m1(req_b, {"q1": 1.0, "q2": -1.0, "distance": 1.0})
+        handler_m1 = server._create_module_tool("m1_coulomb_force")
+        res_b = await handler_m1(req_b.session[SESSION_ID_KEY], {"q1": 1.0, "q2": -1.0, "distance": 1.0})
         assert isinstance(res_b, RunExperimentResponse)
         assert isinstance(res_b.result, (float, int))
 
         with raises(HTTPException) as exc:
-            await handler_m0(req_b, {"mass1": 10.0, "mass2": 10.0, "distance": 2.0})
+            await handler_m0(req_b.session[SESSION_ID_KEY], {"mass1": 10.0, "mass2": 10.0, "distance": 2.0})
         assert "Session configured for 'm1_coulomb_force'" in exc.value.detail
 
     # ============================================================================
@@ -559,7 +564,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="x = 5\ny = 10\nx + y")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -583,7 +588,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="import numpy as np\narr = np.array([1, 2, 3])\narr.sum()")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -607,12 +612,12 @@ class TestApp:
         )
         # First call: define variable
         request_body1 = ExecutePythonRequest(code="x = 42")
-        response1 = await server.execute_python(mock_request, request_body1)
+        response1 = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body1)
         assert response1.success is True
 
         # Second call: use variable from first call
         request_body2 = ExecutePythonRequest(code="x * 2")
-        response2 = await server.execute_python(mock_request, request_body2)
+        response2 = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body2)
 
         assert isinstance(response2, ExecutePythonResponse)
         assert response2.success is True
@@ -633,7 +638,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="print('Hello, World!')\nprint('Test output')")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -658,7 +663,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="import math\nmath.sqrt(16)")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -681,7 +686,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="x = 5\ny = 10\nz = x + y")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -704,7 +709,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="x = 5 +\n  # Invalid syntax")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is False
@@ -728,7 +733,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="import os\nos.system('ls')")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is False
@@ -752,7 +757,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="eval('1+1')")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is False
@@ -776,7 +781,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="f = open('test.txt', 'w')")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is False
@@ -800,7 +805,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="x = 5 / 0")  # Division by zero
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is False
@@ -824,7 +829,7 @@ class TestApp:
         )
         request_body = ExecutePythonRequest(code="x = 42")
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -842,7 +847,7 @@ class TestApp:
         await server.seed_session(mock_request, seed_request)
 
         request_body = ExecutePythonRequest(code="x = 100\ny = 200\nx + y")
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -856,7 +861,7 @@ class TestApp:
         request_body = ExecutePythonRequest(code="import math\nmath.pi * 2")
 
         with raises(HTTPException) as exc_info:
-            await server.execute_python(mock_request, request_body)
+            await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert exc_info.value.status_code == 400
         assert "Session not initialized" in exc_info.value.detail
@@ -875,20 +880,20 @@ class TestApp:
         await server.seed_session(request2, seed)
 
         body1 = ExecutePythonRequest(code="x = 10")
-        response1 = await server.execute_python(request1, body1)
+        response1 = await server.execute_python(request1.session[SESSION_ID_KEY], body1)
         assert response1.success is True
 
         body2 = ExecutePythonRequest(code="x = 20")
-        response2 = await server.execute_python(request2, body2)
+        response2 = await server.execute_python(request2.session[SESSION_ID_KEY], body2)
         assert response2.success is True
 
         body1_check = ExecutePythonRequest(code="x")
-        response1_check = await server.execute_python(request1, body1_check)
+        response1_check = await server.execute_python(request1.session[SESSION_ID_KEY], body1_check)
         assert response1_check.success is True
         assert response1_check.result == "10"
 
         body2_check = ExecutePythonRequest(code="x")
-        response2_check = await server.execute_python(request2, body2_check)
+        response2_check = await server.execute_python(request2.session[SESSION_ID_KEY], body2_check)
         assert response2_check.success is True
         assert response2_check.result == "20"
 
@@ -918,7 +923,7 @@ result
 """
         )
 
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert isinstance(response, ExecutePythonResponse)
         assert response.success is True
@@ -943,11 +948,11 @@ result
         )
 
         body1 = ExecutePythonRequest(code="def add(a, b):\n    return a + b")
-        response1 = await server.execute_python(mock_request, body1)
+        response1 = await server.execute_python(mock_request.session[SESSION_ID_KEY], body1)
         assert response1.success is True
 
         body2 = ExecutePythonRequest(code="add(15, 25)")
-        response2 = await server.execute_python(mock_request, body2)
+        response2 = await server.execute_python(mock_request.session[SESSION_ID_KEY], body2)
 
         assert isinstance(response2, ExecutePythonResponse)
         assert response2.success is True
@@ -969,7 +974,7 @@ result
 
         server.config.max_execution_time = 2
         request_body = ExecutePythonRequest(code="while True: pass")
-        response = await server.execute_python(mock_request, request_body)
+        response = await server.execute_python(mock_request.session[SESSION_ID_KEY], request_body)
 
         assert response.success is False
         assert response.error_message is not None
@@ -1240,3 +1245,229 @@ result
         mock_response = self._make_response_with_law("<final_law></final_law>")
         extracted = server._extract_law_from_response(mock_response)
         assert extracted == ""
+
+
+# ================================================================================
+# Dual-registration wire-format tests (HTTP replay, MCP round-trip, transport parity)
+# ================================================================================
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+EXPECTED_TOOLS = {"execute_python", "end_session"} | {
+    f"run_experiment_{module_name}" for module_name in MODULE_REQUEST_CLASSES_MAPPING
+}
+
+SEED_BODY = {
+    "module_name": "m0_gravity",
+    "difficulty": "easy",
+    "system": "vanilla_equation",
+    "noise_level": 0.0,
+    "law_version": "v0",
+}
+
+
+def _json_bytes(payload: Any) -> bytes:
+    """Starlette JSONResponse byte encoding (compact separators, non-ASCII preserved)."""
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
+
+
+@contextmanager
+def _wire_client():
+    """In-memory TestClient over the full app; never triggers the NewtonBench download."""
+    pytest.importorskip("mcp")
+    from fastapi.testclient import TestClient
+
+    server = NewtonBenchResourcesServer(
+        config=NewtonBenchResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="newton_bench"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    with patch("resources_servers.newton_bench.app.ensure_newton_bench"):
+        app = server.setup_webserver()
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        yield server, app, client
+
+
+def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if method.startswith("notifications/"):
+        payload["params"] = params or {}
+    else:
+        payload["id"] = rpc_id
+        payload["params"] = params or {}
+    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
+
+
+def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
+    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+    assert resp.status_code == 200, resp.text
+    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+
+
+def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
+    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+def _seed(client, body: Optional[dict] = None) -> str:
+    resp = client.post("/seed_session", json=body or SEED_BODY)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
+
+
+def _mock_module(result: Any = 42.0, error: Optional[Exception] = None) -> dict:
+    core = MagicMock()
+    if error is not None:
+        core.run_experiment_for_module.side_effect = error
+    else:
+        core.run_experiment_for_module.return_value = result
+    return {"core": core, "param_description": None}
+
+
+class TestHTTPReplay:
+    """Byte-equal replay of the pre-migration HTTP wire format."""
+
+    def test_run_experiment_success_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)
+            with patch("resources_servers.newton_bench.app._load_module", return_value=_mock_module(42.0)):
+                resp = client.post("/run_experiment_m0_gravity", json={"mass1": 10.0, "mass2": 20.0, "distance": 5.0})
+            assert resp.status_code == 200
+            assert resp.content == _json_bytes({"result": 42.0})
+
+    def test_run_experiment_unseeded_session_is_400_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            resp = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
+            assert resp.status_code == 400
+            assert resp.content == _json_bytes({"detail": "Session not initialized. Please call seed_session first."})
+
+    def test_run_experiment_wrong_module_is_400_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)  # session seeded for m0_gravity
+            resp = client.post("/run_experiment_m1_coulomb_force", json={"q1": 1.0, "q2": 1.0, "distance": 1.0})
+            assert resp.status_code == 400
+            assert resp.content == _json_bytes(
+                {
+                    "detail": "Session configured for 'm0_gravity', "
+                    "but received run_experiment call for 'm1_coulomb_force'."
+                }
+            )
+
+    def test_run_experiment_core_error_keeps_soft_200_contract(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)
+            with patch(
+                "resources_servers.newton_bench.app._load_module",
+                return_value=_mock_module(error=ValueError("boom")),
+            ):
+                resp = client.post("/run_experiment_m0_gravity", json={"mass1": 10.0, "mass2": 20.0, "distance": 5.0})
+            assert resp.status_code == 200
+            assert resp.content == _json_bytes({"result": {"error": "boom"}})
+
+    def test_run_experiment_bad_args_is_422(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)
+            resp = client.post("/run_experiment_m0_gravity", json={"mass1": 10.0})  # mass2 + distance missing
+            assert resp.status_code == 422
+            missing = {error["loc"][-1] for error in resp.json()["detail"]}
+            assert {"mass2", "distance"} <= missing
+
+    def test_execute_python_replay_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)
+            resp = client.post("/execute_python", json={"code": "x = 5\ny = 10\nx + y"})
+            assert resp.status_code == 200
+            assert resp.content == _json_bytes(
+                {"success": True, "stdout": "", "stderr": "", "error_message": None, "result": "15"}
+            )
+
+    def test_execute_python_unseeded_session_is_400_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            resp = client.post("/execute_python", json={"code": "1 + 1"})
+            assert resp.status_code == 400
+            assert resp.content == _json_bytes({"detail": "Session not initialized. Please call seed_session first."})
+
+    def test_end_session_bytes_and_state_cleanup(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            _seed(client)
+            resp = client.post("/end_session", json={})
+            assert resp.status_code == 200
+            assert resp.content == _json_bytes({})
+            # Session metadata is gone: the next tool call hits the seeded-session guard again.
+            resp = client.post("/execute_python", json={"code": "1 + 1"})
+            assert resp.status_code == 400
+
+    def test_seed_session_invalid_module_is_400_bytes(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            resp = client.post("/seed_session", json={**SEED_BODY, "module_name": "bogus"})
+            assert resp.status_code == 400
+            assert resp.content == _json_bytes({"detail": "Invalid module_name 'bogus'."})
+
+    def test_seed_session_now_carries_mcp_metadata(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            body = client.post("/seed_session", json=SEED_BODY).json()
+            assert body["mcp"]["url_path"] == "/mcp"
+            assert TOKEN_HEADER in body["mcp"]["headers"]
+
+    def test_unknown_tool_lists_available_tools(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            resp = client.post("/run_experiment_bogus", json={})
+            assert resp.status_code == 404
+            assert "Available tools" in resp.json()["error"]
+            assert "run_experiment_m0_gravity" in resp.json()["error"]
+
+
+class TestMCPRoundTrip:
+    def test_tools_list_names_and_call(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            token = _seed(client)
+            tools = _list_tools(client, token=token)
+            assert set(tools) == EXPECTED_TOOLS
+            # session_id is never model-visible in the advertised schemas.
+            assert "session_id" not in tools["run_experiment_m0_gravity"]["inputSchema"].get("properties", {})
+
+            with patch("resources_servers.newton_bench.app._load_module", return_value=_mock_module(42.0)):
+                result = _call(
+                    client,
+                    "run_experiment_m0_gravity",
+                    {"mass1": 10.0, "mass2": 20.0, "distance": 5.0},
+                    token=token,
+                )
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"result": 42.0}
+
+    def test_wrong_module_guard_is_tool_error_over_mcp(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            token = _seed(client)  # seeded for m0_gravity
+            result = _call(
+                client, "run_experiment_m1_coulomb_force", {"q1": 1.0, "q2": 1.0, "distance": 1.0}, token=token
+            )
+            assert result["isError"] is True
+            assert "m0_gravity" in result["content"][0]["text"]
+
+    def test_call_without_token_is_clean_tool_error(self) -> None:
+        with _wire_client() as (_server, _app, client):
+            result = _call(client, "execute_python", {"code": "1 + 1"}, token=None)
+            assert result["isError"] is True
+            assert TOKEN_HEADER in result["content"][0]["text"]
+
+
+class TestTransportParity:
+    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+    def test_tool_sets_identical_across_transports(self) -> None:
+        with _wire_client() as (_server, app, client):
+            mcp_names = set(_list_tools(client))
+
+            http_names = set()
+            for route in app.router.routes:
+                path = getattr(route, "path", None)
+                methods = getattr(route, "methods", None) or set()
+                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
+                    http_names.add(path.lstrip("/"))
+
+            assert mcp_names == http_names == EXPECTED_TOOLS

@@ -14,7 +14,6 @@
 
 import asyncio
 import importlib
-import inspect
 import logging
 import math
 import os
@@ -34,6 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
@@ -146,6 +146,21 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
     session_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     _sessions: Dict[str, SessionHandle] = PrivateAttr(default_factory=dict)
 
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+
+        # Register one gym tool per NewtonBench module, driven by the request-class mapping (not a
+        # directory scan of the cloned repo): every mapped module is always registered, and the same
+        # request class validates the HTTP body exactly as the old hand-written routes did.
+        for module_name, model_cls in MODULE_REQUEST_CLASSES_MAPPING.items():
+            gym_tool(
+                self._create_module_tool(module_name),
+                name=f"run_experiment_{module_name}",
+                description=f"Run a physics experiment for the {module_name} module to gather data.",
+                input_schema=model_cls,
+                owner=self,
+            )
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
@@ -178,24 +193,6 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 "No API key found for evaluation. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in the environment variables and restart the server."
             )
 
-        modules_dir = NEWTON_BENCH_PATH / "modules"
-        try:
-            if modules_dir.exists() and modules_dir.is_dir():
-                for child in sorted(modules_dir.iterdir()):
-                    if not child.is_dir():
-                        continue
-                    module_name = child.name
-                    if module_name == "common":
-                        continue
-
-                    route_path = f"/run_experiment_{module_name}"
-                    app.add_api_route(route_path, self._create_module_handler(module_name), methods=["POST"])
-        except Exception:
-            logging.exception("Failed to dynamically register module endpoints")
-
-        app.post("/execute_python")(self.execute_python)
-        app.post("/end_session")(self.end_session)
-
         return app
 
     async def seed_session(self, request: Request, body: NewtonBenchSeedSessionRequest) -> BaseSeedSessionResponse:
@@ -215,9 +212,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         }
         return BaseSeedSessionResponse()
 
-    async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
+    @gym_tool(input_schema=ExecutePythonRequest)
+    async def execute_python(self, session_id: str, body: ExecutePythonRequest) -> ExecutePythonResponse:
         """Execute Python code in a session-based environment."""
-        sid = request.session[SESSION_ID_KEY]
+        sid = session_id
         metadata = self.session_metadata.get(sid)
         if not metadata:
             raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
@@ -389,10 +387,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         finally:
             self._close_session(session_id)
 
-    async def end_session(self, request: Request, body: NewtonBenchEndSessionRequest) -> NewtonBenchEndSessionResponse:
+    @gym_tool(input_schema=NewtonBenchEndSessionRequest)
+    async def end_session(self, session_id: str, body: NewtonBenchEndSessionRequest) -> NewtonBenchEndSessionResponse:
         """Clean up session handle for Python execution and metadata."""
-        sid = request.session[SESSION_ID_KEY]
-        self._close_session(sid)
+        self._close_session(session_id)
         return NewtonBenchEndSessionResponse()
 
     def _close_session(self, sid: str):
@@ -402,13 +400,12 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
             handle.close()
         self.session_metadata.pop(sid, None)
 
-    def _create_module_handler(self, module_name: str):
+    def _create_module_tool(self, module_name: str):
         model_cls = MODULE_REQUEST_CLASSES_MAPPING.get(module_name)
         if model_cls is None:
             raise RuntimeError(f"Missing request class for NewtonBench module '{module_name}'")
 
-        async def handler(request: Request, body: Any):
-            session_id = request.session.get(SESSION_ID_KEY)
+        async def handler(session_id: str, body: Any):
             metadata = self.session_metadata.get(session_id)
             if not metadata:
                 raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
@@ -453,16 +450,6 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 return RunExperimentResponse(result={"error": str(e)})
 
         handler.__name__ = f"run_experiment_{module_name}"
-
-        try:
-            params = [
-                inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
-                inspect.Parameter("body", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=model_cls),
-            ]
-            handler.__signature__ = inspect.Signature(parameters=params)
-        except Exception:
-            logging.debug("Failed to set dynamic signature for handler %s", handler.__name__)
-
         return handler
 
     async def _background_cleanup_task(self):
