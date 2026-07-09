@@ -27,16 +27,18 @@ always fails.
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[resources_servers/mrcr/configs/mrcr.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server mrcr \
+    --model-type vllm_model
 ```
 
 ## Collect example rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=mrcr_simple_agent \
-    +input_jsonl_fpath=resources_servers/mrcr/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/mrcr/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent mrcr_simple_agent \
+    --input resources_servers/mrcr/data/example.jsonl \
+    --output resources_servers/mrcr/data/example_rollouts.jsonl
 ```
 
 For the full benchmark run see

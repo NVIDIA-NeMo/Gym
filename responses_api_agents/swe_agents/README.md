@@ -17,7 +17,6 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
 - [Configuration reference](#configuration-reference)
 - [Quick Start](#quick-start)
 - [Batch evaluation / data collection](#batch-evaluation--data-collection)
-- [Golden-patch validation](#golden-patch-validation)
 - [Output format](#output-format)
 - [GRPO masking and failure modes](#grpo-masking-and-failure-modes)
 - [Debug / profiling](#debug--profiling)
@@ -79,7 +78,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
 8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
 
-If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`). See [Golden-patch validation](#golden-patch-validation).
+If `verify_golden_patch=true` (currently only for `swe-bench-ext`), step 2–4 are skipped: the dataset's golden patch is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval.
 
 ---
 
@@ -196,7 +195,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
-| `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
+| `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch (currently `swe-bench-ext` only). |
 | `agent_prompt_overrides`           | `null`                                            | List of `AgentPromptOverride` entries. See above.                       |
 | `agent_prompt_override_random`     | `false`                                           | `false` = deterministic per `instance_id`; `true` = random per run.     |
 | `openhands_should_log`             | `false`                                           | If true, sets `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, etc.               |
@@ -252,15 +251,12 @@ policy_model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct
 ### Step 2 — start the SWE-agents server
 
 ```bash
-# OpenHands single-prompt
-config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-# Or full prompt × agent-class × tool-name diversity
-config_paths="responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-ng_run "+config_paths=[$config_paths]" \
+# OpenHands single-prompt (swap to
+# responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml for full
+# prompt × agent-class × tool-name diversity)
+gym env start \
+    --config responses_api_agents/swe_agents/configs/swebench_openhands.yaml \
+    --model-type vllm_model \
     +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \
     +swe_agents.responses_api_agents.swe_agents.model_server.name=vllm_model
 ```
@@ -285,92 +281,26 @@ python responses_api_agents/swe_agents/client.py
 ## Batch evaluation / data collection
 
 ```bash
-ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=swebench-verified-converted.jsonl \
-    +output_jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl \
-    +model=Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    +temperature=0.7 +top_p=0.8
+gym eval run --no-serve \
+    --agent swe_agents \
+    --input swebench-verified-converted.jsonl \
+    --output swebench-verified.openhands.qwen3-30b-coder.jsonl \
+    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    --temperature 0.7 \
+    --top-p 0.8
 ```
 
-`ng_collect_rollouts` defaults to a concurrency of 100; tune to your hardware. View the results with:
+`gym eval run` defaults to a concurrency of 100; tune to your hardware. View the results with:
 
 ```bash
-ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
-```
-
----
-
-## Golden-patch validation
-
-`verify_golden_patch=true` bypasses the agent entirely and runs only the dataset's evaluation harness against the sample's **own** golden patch (`instance_dict["patch"]`). Use it to:
-
-- Verify that a dataset sample is well-formed — i.e. its stored golden patch actually `resolves` under our local eval harness.
-- Smoke-test container images, SIF mounts, and harness setup without paying the agent's wall-clock cost.
-- Triage failing samples — if the golden patch itself does not resolve, the agent's failure on the same sample is not the agent's fault.
-
-Supported datasets:
-
-| `dataset_name`                           | Processor                            |
-|------------------------------------------|--------------------------------------|
-| `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`        |
-| `princeton-nlp/SWE-bench*` (e.g. `_Verified`, `_Lite`) | `SweBenchDatasetProcessor`           |
-| `SWE-bench/SWE-bench_Multilingual` (any name containing `SWE-bench_Multilingual`) | `SweBenchMultilingualDatasetProcessor` |
-
-For each supported dataset, the wrapper:
-
-1. Extracts the golden patch from `instance_dict["patch"]`.
-2. Writes it into the predictions JSONL (`output_for_eval.jsonl`) in standard SWE-bench format (`{"instance_id", "model_patch", "model_name_or_path": "golden_patch_verification"}`) and also as a `.diff` file (used by `swe-bench-ext`).
-3. Launches only the eval container; the agent container is skipped.
-4. Returns `reward=1.0` iff the harness reports `resolved=true` for that instance.
-
-### Running it
-
-Start the server with `verify_golden_patch=true`:
-
-```bash
-# SWE-bench Verified
-ng_run "+config_paths=[responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +swe_agents.responses_api_agents.swe_agents.verify_golden_patch=true \
-    +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \
-    +swe_agents.responses_api_agents.swe_agents.model_server.name=vllm_model
-```
-
-Then collect rollouts against the dataset of interest:
-
-```bash
-# SWE-bench Verified
-ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_public_datasets_val_swebench.jsonl \
-    +output_jsonl_fpath=results/swebench_verified.golden.jsonl \
-    +num_repeats=1
-
-# SWE-bench Multilingual
-ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_swebench_multilingual_test.jsonl \
-    +output_jsonl_fpath=results/swebench_multilingual.golden.jsonl \
-    +num_repeats=1
-```
-
-`num_repeats=1` is sufficient since the golden patch is deterministic — the only variance is harness-side flakiness.
-
-A healthy dataset should report `reward=1.0` (i.e. `resolved=true`) on (close to) 100% of samples. Any sample that fails is either malformed (bad `FAIL_TO_PASS` / `PASS_TO_PASS`, wrong `base_commit`, stale `test_patch`) or its container image diverges from the harness expectation — fix those before training/eval'ing the agent against them.
-
-### Aggregating results
-
-```bash
-ng_reward_profile +input_jsonl_fpath=<dataset.jsonl> \
-    +rollouts_jsonl_fpath=results/<dataset>.golden.jsonl \
-    +output_jsonl_fpath=results/<dataset>.golden.profiled.jsonl \
-    +pass_threshold=1.0
-python scripts/print_aggregate_results.py +jsonl_fpath=results/<dataset>.golden.profiled.jsonl
+jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 ```
 
 ---
 
 ## Output format
 
-Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`.
+Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. The same metrics are written incrementally to `<persistent_dir>/nemo_gym_metrics.json` for profiling and post-run inspection.
 
 `run` wraps that in `SWEBenchVerifyResponse`:
 
@@ -387,7 +317,45 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "eval_timed_out": false,
   "ray_queue_time": 0.12,
   "openhands_run_time": 412.3,
+  "generation_start_timestamp": "2026-07-01T12:00:00.000000+00:00",
+  "evaluation_start_timestamp": "2026-07-01T12:07:00.000000+00:00",
+  "per_turn_metrics": {
+    "response_latencies": [
+      {
+        "model": "model-name",
+        "latency": 12.34,
+        "response_id": "chatcmpl-123",
+        "timestamp": "2026-07-01T12:01:00.000000+00:00"
+      }
+    ],
+    "action_execution_latencies": [
+      {
+        "observation_type": "CmdOutputObservation",
+        "observation_id": "42",
+        "latency": 0.31,
+        "message": "Command finished successfully.",
+        "timestamp": "2026-07-01T12:01:01.000000+00:00"
+      }
+    ],
+    "token_usages": [
+      {
+        "model": "model-name",
+        "prompt_tokens": 4096,
+        "completion_tokens": 512,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "context_window": 0,
+        "per_turn_token": 4608,
+        "response_id": "chatcmpl-123"
+      }
+    ]
+  },
   "generation_apptainer_spinup_time": 11.4,
+  "create_runtime_time": 2.1,
+  "connect_to_runtime_time": 0.8,
+  "initialize_runtime_time": 3.2,
+  "total_command_exec_time": 48.6,
+  "total_model_call_time": 301.7,
   "final_eval_apptainer_spinup_time":  9.7,
   "final_eval_time": 87.2,
   "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ }
@@ -422,3 +390,14 @@ Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then 
 Set `openhands_should_log=true` to flip OpenHands to `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, and write per-event logs. Otherwise the wrapper aggressively quiets OpenHands (`LOG_LEVEL=CRITICAL`, all `DEBUG_*` flags off).
 
 Per-instance Apptainer stdout/stderr is always streamed to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log` regardless of these flags.
+
+To inspect a completed run as a timeline, convert the precise per-rollout metrics to Chrome Trace Event Format:
+
+```bash
+python responses_api_agents/swe_agents/scripts/swe_trace_converter.py \
+    --log-dir /path/to/swebench_results_<run_session_id>
+```
+
+`--log-dir` must directly contain the completed `<instance_id>_<timestamp>_<uuid>/` rollout directories and their `nemo_gym_metrics.json` files.
+
+Open the generated `.json` file in [Perfetto](https://ui.perfetto.dev/) to explore rollout concurrency and per-turn timing.

@@ -235,7 +235,10 @@ Compare multiple candidate responses.
 
 ### POST `/verify`
 
-Stub endpoint for base class compatibility. Returns the default score.
+Cohort-based verification endpoint used during rollout collection.
+
+- When `num_rollouts_per_prompt <= 1`, returns `default_score`
+- When `num_rollouts_per_prompt > 1`, buffers rollouts by task/prompt identity plus principle, waits for a full cohort, then assigns relative rewards to that cohort
 
 ## Error Handling
 
@@ -269,13 +272,13 @@ The `comparison_strategies.py` module provides the infrastructure for integratin
 - **`ComparisonStrategy` Protocol**: Interface for comparison strategies
 - **`GenRMStrategy`**: Implementation that calls this Resources Server
 - **`GenRMStrategyConfig`**: Configuration for strategy behavior
-- **Utility functions**: For prompt grouping, text extraction, response generation
+- **Utility functions**: For cohort grouping, text extraction, response generation
 
 **Integration with Rollout Collection:**
 
 When configured in `rollout_collection.py`, the strategy:
 1. Generates N responses per prompt using the policy model
-2. Buffers responses by prompt+principle
+2. Buffers responses by task/prompt identity plus principle
 3. Calls this Resources Server's `/compare` endpoint
 4. Attaches rewards and metrics to results
 

@@ -26,6 +26,7 @@ import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
@@ -131,17 +132,10 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default=False,
         description=(
             "If True, skip the agent run and use the sample's golden patch "
-            "(instance_dict['patch']) as the model patch."
-        ),
-    )
-
-    skip_eval: bool = Field(
-        default=False,
-        description=(
-            "If True, run the agent normally but skip the eval container "
-            "entirely. The reward is forced to 0 since the patch is never "
-            "graded. Useful for collecting agent trajectories without paying "
-            "the eval cost."
+            "(instance_dict['patch']) as the model patch. The eval container "
+            "still runs, so this verifies that the dataset sample actually "
+            "resolves when its golden patch is applied. Currently supported "
+            "for dataset_name == 'swe-bench-ext'."
         ),
     )
 
@@ -243,6 +237,9 @@ class SWEBenchMetrics(BaseModel):
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
     openhands_run_time: Optional[float] = None
+    generation_start_timestamp: Optional[str] = None
+    evaluation_start_timestamp: Optional[str] = None
+    per_turn_metrics: Optional[dict] = None
     generation_apptainer_spinup_time: Optional[float] = None
     create_runtime_time: Optional[float] = None
     connect_to_runtime_time: Optional[float] = None
@@ -1439,16 +1436,15 @@ class RunOpenHandsAgent(BaseModel):
         metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
 
         metrics.openhands_run_time = -time.time()
+        metrics.generation_start_timestamp = datetime.now(timezone.utc).isoformat()
         metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
         metrics.final_eval_apptainer_spinup_time = metrics.openhands_run_time
 
         openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
-        eval_active_command = (
-            None
-            if self.config.skip_eval
-            else await self._start_container_command(self.config.eval_command, self.config.eval_apptainer_command_str)
+        eval_active_command = await self._start_container_command(
+            self.config.eval_command, self.config.eval_apptainer_command_str
         )
 
         try:
@@ -1462,8 +1458,7 @@ class RunOpenHandsAgent(BaseModel):
                 self._openhands_dir_copy_from_host(output_file_path=None)
             except Exception:
                 pass
-            if eval_active_command is not None:
-                await self._kill_active_command(eval_active_command)
+            await self._kill_active_command(eval_active_command)
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
@@ -1487,6 +1482,7 @@ class RunOpenHandsAgent(BaseModel):
         with open(out_file, "r") as f:
             out_dict = json.loads(f.read().strip())
 
+        metrics.per_turn_metrics = out_dict.get("metrics")
         metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
 
         patch = out_dict["test_result"]["git_patch"] or None
@@ -1528,8 +1524,7 @@ class RunOpenHandsAgent(BaseModel):
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
 
-            if eval_active_command is not None:
-                await self._kill_active_command(eval_active_command)
+            await self._kill_active_command(eval_active_command)
 
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
@@ -1537,18 +1532,8 @@ class RunOpenHandsAgent(BaseModel):
         with open(self.config.model_patch_path, "w") as f:
             f.write(patch)
 
-        if self.config.skip_eval:
-            # Eval is intentionally skipped — record that the patch exists,
-            # leave eval timings unset, and return None so the caller treats
-            # this sample as unresolved (reward = 0).
-            metrics.final_eval_apptainer_spinup_time = None
-            metrics.final_eval_time = None
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
-            if self.config.debug:
-                profiler.stop()
-            return None
-
         metrics.final_eval_time = -time.time()
+        metrics.evaluation_start_timestamp = datetime.now(timezone.utc).isoformat()
         try:
             report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
         except Exception as e:
@@ -1581,19 +1566,14 @@ class RunOpenHandsAgent(BaseModel):
 
     async def _run_golden_patch_verification(self) -> Optional[Path]:
         instance_id = self.config.instance_id
-        dataset_name = self.config.problem_info.get("dataset_name") or ""
-        supported = dataset_name == "swe-bench-ext" or (
-            "SWE-bench" in dataset_name and "SWE-rebench" not in dataset_name
-        )
-        if not supported:
+        dataset_name = self.config.problem_info.get("dataset_name")
+        # TODO(sugam): add support for other datasets
+        if dataset_name != "swe-bench-ext":
             raise NotImplementedError(
-                "verify_golden_patch is only supported for dataset_name=='swe-bench-ext' "
-                "or the SWE-bench / SWE-bench_Multilingual families "
-                f"(got {dataset_name!r})."
+                f"verify_golden_patch is only supported for dataset_name=='swe-bench-ext' (got {dataset_name!r})."
             )
 
-        raw_instance_dict = self.config.problem_info["instance_dict"]
-        instance_dict = json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else raw_instance_dict
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
         golden_patch = instance_dict.get("patch") or ""
         if not golden_patch.strip():
             raise ValueError(f"No golden patch found in instance_dict['patch'] for {instance_id}.")
@@ -1711,7 +1691,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         provider_specific_fields = data.get("provider_specific_fields", {})
         final_assistant_message = data["response"]["choices"][0]["message"]
 
-        for key in ["prompt_token_ids", "generation_token_ids", "generation_log_probs"]:
+        for key in [
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ]:
             if key in provider_specific_fields:
                 final_assistant_message[key] = provider_specific_fields[key]
 

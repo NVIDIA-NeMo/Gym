@@ -92,6 +92,10 @@ async def test_extracts_openai_shape():
 async def test_extracts_nemo_proxy_shape():
     """Token IDs and logprobs embedded in the message dict, string token_id format."""
     llm = _make_llm(collect_rollout_details=True)
+    routed_experts = [
+        [[0, 1]],
+        [[2, 3]],
+    ]
     response, _ = await _call(
         llm,
         _mock_response(
@@ -100,6 +104,7 @@ async def test_extracts_nemo_proxy_shape():
                 "prompt_token_ids": [11, 12],
                 "generation_token_ids": ["token_id:13", "token_id:14"],
                 "generation_log_probs": [-0.3, -0.4],
+                "routed_experts": routed_experts,
             },
         ),
         prompt="hello",
@@ -108,6 +113,20 @@ async def test_extracts_nemo_proxy_shape():
     assert response.prompt_token_ids == [11, 12]
     assert response.completion_token_ids == [13, 14]
     assert response.logprobs == [-0.3, -0.4]
+    assert llm.pop_routed_experts_for_rollout_details([11, 12], [13, 14], [-0.3, -0.4]) == routed_experts
+    assert llm.pop_routed_experts_for_rollout_details([11, 12], [13, 14], [-0.3, -0.4]) is None
+
+
+def test_duplicate_rollout_details_keys_do_not_guess_routed_experts():
+    """Duplicate token/logprob keys are ambiguous, so they fail closed instead of guessing."""
+    llm = _make_llm(collect_rollout_details=True)
+    route_1 = [[[1]]]
+    route_2 = [[[2]]]
+
+    llm._store_routed_experts_for_rollout_details([1], [2], [-0.1], route_1)
+    llm._store_routed_experts_for_rollout_details([1], [2], [-0.1], route_2)
+
+    assert llm.pop_routed_experts_for_rollout_details([1], [2], [-0.1]) is None
 
 
 @pytest.mark.asyncio
@@ -142,13 +161,17 @@ async def test_collect_rollout_details_false_skips_extraction():
 async def test_on_policy_correction_attaches_token_ids():
     """After a call with rollout details, next call attaches token IDs to the last assistant message."""
     llm = _make_llm(collect_rollout_details=True)
+    routed_experts = [
+        [[0, 1]],
+        [[2, 3]],
+    ]
 
     # First call — stores token IDs.
     await _call(
         llm,
         _mock_response(
             content="first",
-            extra_message={"generation_token_ids": [10, 11]},
+            extra_message={"generation_token_ids": [10, 11], "routed_experts": routed_experts},
             prompt_token_ids=[1, 2, 3],
         ),
         prompt="hello",
@@ -169,6 +192,7 @@ async def test_on_policy_correction_attaches_token_ids():
     assistant_msg = [m for m in payload["messages"] if m["role"] == "assistant"][0]
     assert assistant_msg["prompt_token_ids"] == [1, 2, 3]
     assert assistant_msg["generation_token_ids"] == [10, 11]
+    assert assistant_msg["routed_experts"] == routed_experts
 
 
 # ---------------------------------------------------------------------------
