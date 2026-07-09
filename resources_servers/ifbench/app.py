@@ -59,10 +59,31 @@ class IFBenchVerifyRequest(IFBenchRunRequest, BaseVerifyRequest):
 class IFBenchVerifyResponse(BaseVerifyResponse):
     follow_all_instructions: bool
     follow_instruction_list: List[bool]
+    follow_all_instructions_loose: bool
+    follow_instruction_list_loose: List[bool]
+    reward_loose: float
     kwargs: List
     instruction_id_list: List[str]
     prompt: str
     grading_mode: Literal["binary", "fraction"] = "fraction"
+
+
+def _loose_response_variants(response: str) -> List[str]:
+    """Response variants for loose scoring (see AllenAI IFBench evaluation_lib)."""
+    r = response.split("\n")
+    remove_first = "\n".join(r[1:]).strip()
+    remove_last = "\n".join(r[:-1]).strip()
+    remove_both = "\n".join(r[1:-1]).strip()
+    return [
+        response,
+        response.replace("*", ""),
+        remove_first,
+        remove_last,
+        remove_both,
+        remove_first.replace("*", ""),
+        remove_last.replace("*", ""),
+        remove_both.replace("*", ""),
+    ]
 
 
 class IFBenchResourcesServer(SimpleResourcesServer):
@@ -85,19 +106,25 @@ class IFBenchResourcesServer(SimpleResourcesServer):
         kwargs_list: List,
         prompt: str,
         response: str,
-    ) -> List[bool]:
-        """Evaluate each instruction against the response.
+    ) -> tuple[List[bool], List[bool]]:
+        """Evaluate each instruction, returning (strict, loose) follow lists.
 
+        Strict checks the raw response; loose passes if any response variant
+        (the first of which is the raw response) satisfies the instruction.
         Individual instruction failures should never crash the server.
         """
         INSTRUCTION_DICT = self._instructions_registry.INSTRUCTION_DICT
 
         # Empty response: skip evaluation and fail all instructions
         if not response.strip():
-            return [False] * len(instruction_id_list)
+            fail = [False] * len(instruction_id_list)
+            return fail, list(fail)
 
-        is_following_list = []
+        variants = _loose_response_variants(response)
+
+        strict_list, loose_list = [], []
         for instruction_id, kwargs in zip(instruction_id_list, kwargs_list):
+            strict = loose = False
             try:
                 instruction_cls = INSTRUCTION_DICT[instruction_id]
                 instruction = instruction_cls(instruction_id)
@@ -111,19 +138,32 @@ class IFBenchResourcesServer(SimpleResourcesServer):
                 if args and "prompt" in args:
                     instruction.build_description(prompt=prompt)
 
-                try:
-                    follows = bool(instruction.check_following(response))
-                except Exception:
-                    logger.exception("check_following failed for instruction %s", instruction_id)
-                    follows = False
-
-                is_following_list.append(follows)
+                for index, variant in enumerate(variants):
+                    if not variant.strip():
+                        continue
+                    try:
+                        follows = bool(instruction.check_following(variant))
+                    except Exception:
+                        logger.exception("check_following failed for instruction %s", instruction_id)
+                        follows = False
+                    if index == 0:  # variant[0] is the raw response -> strict
+                        strict = follows
+                    if follows:
+                        loose = True
+                        break
 
             except Exception:
                 logger.exception("Error processing instruction %s", instruction_id)
-                is_following_list.append(False)
 
-        return is_following_list
+            strict_list.append(strict)
+            loose_list.append(loose)
+
+        return strict_list, loose_list
+
+    def _reward(self, is_following_list: List[bool], grading_mode: str) -> float:
+        if grading_mode == "binary":
+            return float(all(is_following_list))
+        return float(sum(is_following_list) / len(is_following_list)) if is_following_list else 0.0
 
     async def verify(self, body: IFBenchVerifyRequest) -> IFBenchVerifyResponse:
         # Extract final response text from the last output item
@@ -135,7 +175,7 @@ class IFBenchResourcesServer(SimpleResourcesServer):
 
         loop = asyncio.get_event_loop()
         async with self._semaphore:
-            is_following_list = await loop.run_in_executor(
+            strict_list, loose_list = await loop.run_in_executor(
                 None,
                 self._check_instructions,
                 body.instruction_id_list,
@@ -144,16 +184,14 @@ class IFBenchResourcesServer(SimpleResourcesServer):
                 final_response_text,
             )
 
-        if body.grading_mode == "binary":
-            reward = float(all(is_following_list))
-        else:
-            reward = float(sum(is_following_list) / len(is_following_list)) if is_following_list else 0.0
-
         return IFBenchVerifyResponse(
             **body.model_dump(),
-            reward=reward,
-            follow_all_instructions=all(is_following_list),
-            follow_instruction_list=is_following_list,
+            reward=self._reward(strict_list, body.grading_mode),
+            follow_all_instructions=all(strict_list),
+            follow_instruction_list=strict_list,
+            reward_loose=self._reward(loose_list, body.grading_mode),
+            follow_all_instructions_loose=all(loose_list),
+            follow_instruction_list_loose=loose_list,
         )
 
 
