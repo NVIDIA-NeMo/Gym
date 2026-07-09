@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Per-rollout trajectory capture for model servers.
+"""Per-rollout model-call capture for model servers.
 
 Opt-in, off by default. A pure-ASGI middleware records every /v1/responses,
 /v1/chat/completions, and /v1/messages exchange -- including failed calls -- into a
@@ -34,8 +34,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from nemo_gym.model_call_capture import CaptureStore, aggregate_model_call_records, read_model_call_records
 from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
-from nemo_gym.trajectory_capture import CaptureStore, aggregate_step_records, assemble_step_records
 
 
 logger = logging.getLogger(__name__)
@@ -68,25 +68,25 @@ def _headers_content_type(headers: list) -> bytes:
 _ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
 
 
-# --- Full per-rollout exchange capture (the canonical trajectory source) ---
+# --- Model-call exchange capture ---
 def _default_capture_dir(server_name: str) -> str:
-    env_dir = os.environ.get("NEMO_GYM_TRAJECTORY_DIR")
+    env_dir = os.environ.get("NEMO_GYM_MODEL_CALL_CAPTURE_DIR")
     if env_dir:
         return env_dir
-    return str(Path(tempfile.gettempdir()) / "nemo_gym_trajectories" / server_name)
+    return str(Path(tempfile.gettempdir()) / "nemo_gym_model_calls" / server_name)
 
 
 def make_capture_store(config: Any) -> Optional[CaptureStore]:
     """Build a CaptureStore when observability is enabled; otherwise None."""
     if not getattr(config, "observability_enabled", False):
         return None
-    root = getattr(config, "trajectory_capture_dir", None) or _default_capture_dir(
+    root = getattr(config, "model_call_capture_dir", None) or _default_capture_dir(
         getattr(config, "name", None) or "model_server"
     )
     try:
         return CaptureStore(root)
     except Exception:
-        logger.warning("Could not initialize trajectory capture at %s; disabling it.", root, exc_info=True)
+        logger.warning("Could not initialize model-call capture at %s; disabling it.", root, exc_info=True)
         return None
 
 
@@ -297,7 +297,7 @@ def _record(
             },
         )
     except Exception:
-        logger.warning("Trajectory capture failed for one %s call.", dialect, exc_info=True)
+        logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
 
 
 class _CaptureMiddleware:
@@ -396,11 +396,11 @@ class _CaptureMiddleware:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
             # malformed body can never surface as an ASGI error after the response was already sent.
             #
-            # Ordering: the response is forwarded before this fsynced write runs, so a step becomes
-            # durable slightly after its bytes reach the agent. The capture JSONL (not memory) is the
-            # source of truth the rollout merge re-reads, and the agent -> orchestrator /run round-trip
-            # that precedes any merge dominates this sub-fsync window, so the final step is present in
-            # practice; num_steps is always recomputed from the durable file.
+            # Ordering: the response is forwarded before this fsynced write runs, so a call becomes
+            # durable slightly after its bytes reach the agent. The rollout merge re-reads the capture
+            # JSONL, and the agent -> orchestrator /run round-trip
+            # that precedes any merge dominates this sub-fsync window, so the final call is present in
+            # practice; num_calls is always recomputed from the durable file.
             response_body = None
             if body_bytes:
                 try:
@@ -430,8 +430,8 @@ class _CaptureMiddleware:
         await asyncio.to_thread(_parse_and_record)
 
 
-def install_trajectory_capture(app: Any, config: Any) -> None:
-    """Install the per-rollout capture middleware.
+def install_model_call_capture(app: Any, config: Any) -> None:
+    """Install model-call capture middleware.
 
     Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
     regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
@@ -443,32 +443,31 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
 
 
 # --- Consumer read: fold per-rollout capture into the rollout record (uniform across agents) ---
-_capture_dirs_warned = False
+_model_call_capture_dirs_warned = False
 
 
-def _warn_capture_dirs_unresolved() -> None:
+def _warn_model_call_capture_dirs_unresolved() -> None:
     """Warn once when capture is enabled but no readable capture dir was resolved (silent no-op guard)."""
-    global _capture_dirs_warned
-    if _capture_dirs_warned:
+    global _model_call_capture_dirs_warned
+    if _model_call_capture_dirs_warned:
         return
-    _capture_dirs_warned = True
+    _model_call_capture_dirs_warned = True
     logger.warning(
-        "Trajectory capture is enabled but no capture directory was resolved to merge from -- "
-        "per-rollout trajectories will not be attached. Set NEMO_GYM_TRAJECTORY_DIR (shared by the "
+        "Model-call capture is enabled but no capture directory was resolved to merge from -- "
+        "per-rollout calls will not be attached. Set NEMO_GYM_MODEL_CALL_CAPTURE_DIR (shared by the "
         "model server and rollout collection) for a deterministic location."
     )
 
 
-def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, str]] = None) -> list[Path]:
+def model_call_capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, str]] = None) -> list[Path]:
     """Candidate directories to read per-rollout captures from.
 
-    Collects ``$NEMO_GYM_TRAJECTORY_DIR`` (the shared sink) plus the resolved directory of every
-    observability-enabled model server in the global config (its ``trajectory_capture_dir``, else the
-    shared dir, else the per-server temp default). Deduped; existing dirs only. Best-effort.
+    Collects ``$NEMO_GYM_MODEL_CALL_CAPTURE_DIR`` plus the resolved directory of every
+    observability-enabled model server in the global config. Deduped; existing dirs only.
     """
     environ = env if env is not None else os.environ
     dirs: list[Path] = []
-    shared = environ.get("NEMO_GYM_TRAJECTORY_DIR")
+    shared = environ.get("NEMO_GYM_MODEL_CALL_CAPTURE_DIR")
     if shared:
         dirs.append(Path(shared))
 
@@ -493,7 +492,7 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
                 # top-level server-instance key (== server_name), not the leaf impl key the node sits
                 # under. Resolve off that instance key so the consumer reads the producer's directory.
                 resolved = (
-                    node.get("trajectory_capture_dir")
+                    node.get("model_call_capture_dir")
                     or shared
                     or _default_capture_dir(instance_key or node.get("name") or key or "model_server")
                 )
@@ -509,6 +508,9 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
     except Exception:
         logger.debug("Could not resolve capture dirs from the global config.", exc_info=True)
 
+    if not saw_enabled:
+        return []
+
     seen: set[Path] = set()
     unique: list[Path] = []
     for directory in dirs:
@@ -516,7 +518,7 @@ def capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, st
             seen.add(directory)
             unique.append(directory)
     if saw_enabled and not unique:
-        _warn_capture_dirs_unresolved()
+        _warn_model_call_capture_dirs_unresolved()
     return unique
 
 
@@ -528,12 +530,12 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
     return None
 
 
-def clear_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
+def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
     """Remove stale per-rollout capture files for these records before a fresh (non-resume) run.
 
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
     re-run would append onto the previous run's capture for the same id. Best-effort; run-scopes the
-    capture so each run's trajectory stays isolated.
+    capture so each run's model-call evidence stays isolated.
     """
     if not capture_dirs:
         return
@@ -548,17 +550,16 @@ def clear_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) ->
                 store.path_for(rollout_id).unlink(missing_ok=True)
 
 
-def merge_capture_into_record(
+def merge_model_call_capture_into_record(
     record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
 ) -> dict[str, Any]:
-    """Attach a rollout's captured model-call trajectory to its rollout record, in place.
+    """Attach captured model-call observability data to a rollout record in place.
 
     Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
     shape is identical for every agent harness. Adds
-    ``ng_trajectory_capture = {rollout_id, metrics, steps}`` where ``steps`` are typed StepRecords
-    (raw request/response excluded unless ``include_payloads`` -- they remain in the capture store).
-    No-op when no capture exists. The harness output + reward on the record are never modified: the
-    capture is authoritative for per-step model-call stats, the harness for reward.
+    ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
+    records. Raw request and response payloads remain in the capture store unless ``include_payloads``
+    is true. No-op when no capture exists. The harness output and reward are not modified.
     """
     if not capture_dirs:
         return record
@@ -568,13 +569,13 @@ def merge_capture_into_record(
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         return record
-    steps = assemble_step_records(store, rollout_id)
-    if not steps:
+    calls = read_model_call_records(store, rollout_id)
+    if not calls:
         return record
     exclude = None if include_payloads else {"request", "response"}
-    record["ng_trajectory_capture"] = {
+    record["ng_model_call_capture"] = {
         "rollout_id": rollout_id,
-        "metrics": aggregate_step_records(steps),  # reuse steps already read above (no second read)
-        "steps": [step.model_dump(exclude=exclude) for step in steps],
+        "metrics": aggregate_model_call_records(calls),
+        "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
     return record

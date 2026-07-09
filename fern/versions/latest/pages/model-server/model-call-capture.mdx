@@ -1,0 +1,100 @@
+---
+title: "Model-call capture"
+description: "Optional per-rollout model-call evidence for evaluation and debugging"
+position: 5
+---
+
+Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
+errors at a Gym model server. It does not assemble an agent trajectory or define a training data
+representation.
+
+Capture is opt-in and off by default. It does not modify the model response, the agent response, or
+the rollout reward.
+
+## Enable capture
+
+Set `observability_enabled: true` on a `SimpleResponsesAPIModel` configuration:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      observability_enabled: true
+      # model_call_capture_dir: /data/model-calls
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `observability_enabled` | `bool` | `false` | Enables model-call capture for this server. |
+| `model_call_capture_dir` | `str` | `None` | Capture directory. Defaults to `$NEMO_GYM_MODEL_CALL_CAPTURE_DIR`, then to a per-server directory under the system temporary directory. |
+
+Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
+and fsynced. Capture failures are logged and do not fail model requests.
+
+## Correlate calls with a rollout
+
+Clients can provide the rollout id in either form:
+
+1. Set the `x-nemo-gym-rollout-id` request header.
+2. Use `/ng-rollout/<rollout_id>/v1` as the model base URL. The model server removes the prefix
+   before routing the request to the standard `/v1/...` endpoint.
+
+Correlation is caller-supplied. A call without a rollout id is stored under the default `rollout`
+key and cannot be attached to a specific rollout record.
+
+The producer and `rollout_collection` must use the same capture directory. The temporary-directory
+default works only when they share a filesystem. For separate pods or nodes, mount a shared volume
+and set `NEMO_GYM_MODEL_CALL_CAPTURE_DIR` consistently.
+
+Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id.
+Concurrent collection jobs with overlapping indices must use separate capture directories.
+
+## Read captured calls
+
+```python
+from nemo_gym.model_call_capture import (
+    CaptureStore,
+    aggregate_model_call_metrics,
+    read_model_call_records,
+)
+
+store = CaptureStore("/data/model-calls")
+calls = read_model_call_records(store, rollout_id)
+totals = aggregate_model_call_metrics(store, rollout_id)
+```
+
+`ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
+contains a `call_index`, model server and API dialect, token and cache usage, latency, error details,
+tool calls, reasoning content, and the captured request and response. `call_index` reflects durable
+append order; it is not a causal or semantic ordering guarantee for concurrent calls. The request
+and response payloads remain the model-call evidence. The record does not infer turns, tool
+execution, subagent relationships, or other agent-level semantics.
+
+Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
+Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
+status, correlation, and latency data remain available.
+
+## Rollout-record attachment
+
+`rollout_collection` attaches available model-call data under:
+
+```text
+ng_model_call_capture = {
+  rollout_id,
+  metrics,
+  calls,
+}
+```
+
+`metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
+response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
+data does not mix with an earlier attempt.
+
+The attachment is evaluation and observability side information. No training code consumes or
+depends on it; `NeMoGymResponse` and token-id and log-prob structures are unchanged.
+
+## Limitations
+
+The model-server boundary does not provide tool execution, environment events, compaction events,
+semantic turns, or subagent structure. Those belong to the agent and rollout layers.

@@ -18,23 +18,21 @@ from types import SimpleNamespace
 from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 
-from nemo_gym.observability import install_trajectory_capture, make_capture_store
-from nemo_gym.trajectory_capture import (
+from nemo_gym.model_call_capture import (
     CaptureStore,
-    StepRecord,
-    aggregate_rollout_metrics,
-    assemble_rollout,
-    assemble_step_records,
-    build_step_record,
+    ModelCallRecord,
+    aggregate_model_call_metrics,
+    build_model_call_record,
+    read_model_call_records,
 )
+from nemo_gym.observability import install_model_call_capture, make_capture_store
 
 
 def test_make_capture_store_disabled_returns_none():
     assert make_capture_store(SimpleNamespace(observability_enabled=False)) is None
 
 
-# --- StepRecord contract ---
-def test_build_step_record_from_exchange():
+def test_build_model_call_record_from_exchange():
     exchange = {
         "dialect": "responses",
         "model_server": "srv",
@@ -56,9 +54,9 @@ def test_build_step_record_from_exchange():
             ],
         },
     }
-    rec = build_step_record(exchange, step_index=3, run_id="run-1")
-    assert rec.step_index == 3  # turn_index is assigned by assemble_step_records, not build
-    assert rec.run_id == "run-1" and rec.model_server == "srv" and rec.dialect == "responses"
+    rec = build_model_call_record(exchange, call_index=3)
+    assert rec.call_index == 3
+    assert rec.model_server == "srv" and rec.dialect == "responses"
     assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
     assert rec.cache_hit is True and rec.cached_tokens == 4
     assert rec.reasoning_content == "thinking..."
@@ -66,11 +64,10 @@ def test_build_step_record_from_exchange():
     assert rec.latency_total_ms == 18.4
 
 
-def test_step_record_json_schema_has_contract_fields():
-    props = StepRecord.model_json_schema()["properties"]
+def test_model_call_record_schema_has_observability_fields():
+    props = ModelCallRecord.model_json_schema()["properties"]
     for field in (
-        "step_index",
-        "turn_index",
+        "call_index",
         "tokens_in",
         "tokens_out",
         "tokens_reasoning",
@@ -87,11 +84,9 @@ def test_step_record_json_schema_has_contract_fields():
         assert field in props
 
 
-# --- full per-rollout capture + assembly (trajectory + StepRecords) ---
-def test_capture_assembles_trajectory_and_step_records(tmp_path):
-    """Capture two model calls and assemble both the eval-only trajectory (no token-ids) and the
-    typed StepRecords; also exercises request-body replay."""
-    turns = [
+def test_capture_records_model_calls(tmp_path):
+    """Capture two model calls and preserve their requests and observability fields."""
+    responses = [
         {
             "model": "m",
             "usage": {
@@ -134,10 +129,10 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     @app.post("/v1/responses")
     async def _responses(body: dict = Body()) -> dict:
         seen_requests.append(body)
-        return turns[len(seen_requests) - 1]
+        return responses[len(seen_requests) - 1]
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
     headers = {"x-nemo-gym-rollout-id": "rollout-x"}
 
@@ -151,37 +146,25 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     assert r1.status_code == 200 and r2.status_code == 200
     assert seen_requests[0] == {"input": "solve it"}  # request-body replay worked
 
-    # Eval-only NeMoGym trajectory (ordered content view; token-ids deliberately not surfaced —
-    # on-policy RL trajectory assembly is the RL side's, WIP).
-    items = assemble_rollout(CaptureStore(tmp_path), "rollout-x")
-    assert [type(i).__name__ for i in items] == [
-        "NeMoGymResponseOutputMessage",
-        "NeMoGymResponseFunctionToolCall",
-        "NeMoGymFunctionCallOutput",
-        "NeMoGymResponseOutputMessage",
-    ]
-    assert not hasattr(items[0], "generation_token_ids")  # eval view carries no token-ids
-
-    # Typed StepRecords.
-    steps = assemble_step_records(CaptureStore(tmp_path), "rollout-x", run_id="run-1")
-    assert [s.step_index for s in steps] == [0, 1]
-    assert all(s.run_id == "run-1" and s.model_server == "srv" for s in steps)
-    assert [s.turn_index for s in steps] == [0, 0]  # one user turn; the tool-result call stays in turn 0
-    assert (steps[0].tokens_in, steps[0].tokens_out, steps[0].tokens_total) == (12, 7, 19)
-    assert steps[0].cache_hit is True and steps[0].cached_tokens == 4
-    assert steps[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
-    assert steps[0].latency_total_ms is not None
-    assert steps[1].tokens_in == 20
+    calls = read_model_call_records(CaptureStore(tmp_path), "rollout-x")
+    assert [call.call_index for call in calls] == [0, 1]
+    assert all(call.model_server == "srv" for call in calls)
+    assert (calls[0].tokens_in, calls[0].tokens_out, calls[0].tokens_total) == (12, 7, 19)
+    assert calls[0].cache_hit is True and calls[0].cached_tokens == 4
+    assert calls[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
+    assert calls[0].latency_total_ms is not None
+    assert calls[1].tokens_in == 20
+    assert calls[1].request == {"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]}
 
     # Per-rollout aggregates for the rollout record.
-    agg = aggregate_rollout_metrics(CaptureStore(tmp_path), "rollout-x")
+    agg = aggregate_model_call_metrics(CaptureStore(tmp_path), "rollout-x")
     assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
-    assert agg["num_steps"] == 2 and agg["num_turns"] == 1
+    assert agg["num_calls"] == 2
 
 
 def test_failed_call_is_captured_with_error_category(tmp_path):
     """A non-2xx model call is captured (replacing generic exception catching) with a
-    normalized error_category + status_code on the StepRecord."""
+    normalized error_category + status_code on the ModelCallRecord."""
     from fastapi.responses import JSONResponse
 
     app = FastAPI()
@@ -190,17 +173,17 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     async def _boom(body: dict = Body()) -> JSONResponse:
         return JSONResponse(content={"error": "boom"}, status_code=500)
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
 
     r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-err"})
     assert r.status_code == 500  # response unchanged
 
-    steps = assemble_step_records(CaptureStore(tmp_path), "r-err")
-    assert len(steps) == 1
-    assert steps[0].error_category == "upstream_error"
-    assert steps[0].status_code == 500
+    calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
+    assert len(calls) == 1
+    assert calls[0].error_category == "upstream_error"
+    assert calls[0].status_code == 500
 
 
 def test_raised_call_is_captured_then_reraised(tmp_path):
@@ -212,17 +195,17 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     async def _boom(body: dict = Body()) -> dict:
         raise RuntimeError("kaboom")
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app, raise_server_exceptions=False)
 
     r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-raise"})
     assert r.status_code == 500  # error propagated, response unchanged
 
-    steps = assemble_step_records(CaptureStore(tmp_path), "r-raise")
-    assert len(steps) == 1
-    assert steps[0].error_category == "exception" and steps[0].response is None
-    assert steps[0].latency_ttft_ms is None  # nothing streamed before the raise
+    calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
+    assert len(calls) == 1
+    assert calls[0].error_category == "exception" and calls[0].response is None
+    assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
 
 
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
@@ -235,28 +218,28 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     async def _responses(body: dict = Body()) -> dict:
         return {"output": [], "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
 
     # Prefixed base_url: routes to /v1/responses AND correlates capture by the path id (no header).
     r = client.post("/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"})
     assert r.status_code == 200 and r.json()["usage"]["total_tokens"] == 4
-    steps = assemble_step_records(CaptureStore(tmp_path), "task7-roll2")
-    assert len(steps) == 1 and steps[0].tokens_total == 4
+    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
+    assert len(calls) == 1 and calls[0].tokens_total == 4
 
     # Explicit header wins when both are present.
     r2 = client.post(
         "/ng-rollout/path-id/v1/responses", json={"input": "hi"}, headers={"x-nemo-gym-rollout-id": "hdr-id"}
     )
     assert r2.status_code == 200
-    assert len(assemble_step_records(CaptureStore(tmp_path), "hdr-id")) == 1
-    assert assemble_step_records(CaptureStore(tmp_path), "path-id") == []
+    assert len(read_model_call_records(CaptureStore(tmp_path), "hdr-id")) == 1
+    assert read_model_call_records(CaptureStore(tmp_path), "path-id") == []
 
     # Plain /v1 URL is unaffected (back-compat: capture falls back to the default key).
     r3 = client.post("/v1/responses", json={"input": "hi"})
     assert r3.status_code == 200
-    assert len(assemble_step_records(CaptureStore(tmp_path), "rollout")) == 1
+    assert len(read_model_call_records(CaptureStore(tmp_path), "rollout")) == 1
 
 
 def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
@@ -268,8 +251,8 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     async def _models() -> dict:
         return {"object": "list", "data": []}
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
 
     r = client.get("/ng-rollout/abc/v1/models")
@@ -356,10 +339,10 @@ def test_scope_header_parsing():
 def test_default_capture_dir(monkeypatch):
     from nemo_gym.observability import _default_capture_dir
 
-    monkeypatch.setenv("NEMO_GYM_TRAJECTORY_DIR", "/tmp/custom_traj")
-    assert _default_capture_dir("srv") == "/tmp/custom_traj"
-    monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
-    assert _default_capture_dir("srv").endswith("nemo_gym_trajectories/srv")
+    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", "/tmp/custom_model_calls")
+    assert _default_capture_dir("srv") == "/tmp/custom_model_calls"
+    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
+    assert _default_capture_dir("srv").endswith("nemo_gym_model_calls/srv")
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
@@ -369,7 +352,7 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
         raise OSError("cannot create")
 
     monkeypatch.setattr(obs, "CaptureStore", _boom)
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir="/tmp/x", name="srv")
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir="/tmp/x", name="srv")
     assert obs.make_capture_store(config) is None
 
 
@@ -409,8 +392,8 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     async def _r(body: dict = Body()) -> PlainTextResponse:
         return PlainTextResponse("not json")
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
 
     r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "rnj"})
@@ -421,18 +404,8 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     assert records[0]["error_category"] == "capture_parse_error"
 
 
-# --- trajectory_capture helpers ---
-def test_content_text():
-    from nemo_gym.trajectory_capture import _content_text
-
-    assert _content_text("hi") == "hi"
-    assert _content_text([{"text": "a"}, {"text": "b"}]) == "ab"
-    assert _content_text(None) == ""
-    assert _content_text(123) == "123"
-
-
 def test_as_arguments():
-    from nemo_gym.trajectory_capture import _as_arguments
+    from nemo_gym.model_call_capture import _as_arguments
 
     assert _as_arguments({"x": 1}) == {"x": 1}
     assert _as_arguments('{"y": 2}') == {"y": 2}
@@ -441,7 +414,7 @@ def test_as_arguments():
 
 
 def test_cache_signal():
-    from nemo_gym.trajectory_capture import _cache_signal
+    from nemo_gym.model_call_capture import _cache_signal
 
     assert _cache_signal(None) == (None, None)
     assert _cache_signal({"prompt_tokens_details": {"cached_tokens": 4}}) == (True, 4)
@@ -451,7 +424,7 @@ def test_cache_signal():
 
 
 def test_extract_token_stats_chat_fallback():
-    from nemo_gym.trajectory_capture import extract_token_stats
+    from nemo_gym.model_call_capture import extract_token_stats
 
     assert extract_token_stats(None)["tokens_total"] is None
     stats = extract_token_stats(
@@ -461,7 +434,7 @@ def test_extract_token_stats_chat_fallback():
 
 
 def test_tool_calls_and_reasoning_chat_and_anthropic():
-    from nemo_gym.trajectory_capture import _tool_calls_and_reasoning
+    from nemo_gym.model_call_capture import _tool_calls_and_reasoning
 
     chat = {
         "choices": [
@@ -486,7 +459,7 @@ def test_tool_calls_and_reasoning_chat_and_anthropic():
 
 
 def test_tool_calls_and_reasoning_accepts_reasoning_alias():
-    from nemo_gym.trajectory_capture import _tool_calls_and_reasoning
+    from nemo_gym.model_call_capture import _tool_calls_and_reasoning
 
     # vLLM / newer servers emit `reasoning` (no `reasoning_content`).
     assert _tool_calls_and_reasoning({"choices": [{"message": {"content": "hi", "reasoning": "because"}}]}) == (
@@ -499,7 +472,7 @@ def test_tool_calls_and_reasoning_accepts_reasoning_alias():
 
 
 def test_tool_calls_and_reasoning_skips_non_dict_output_items():
-    from nemo_gym.trajectory_capture import _tool_calls_and_reasoning
+    from nemo_gym.model_call_capture import _tool_calls_and_reasoning
 
     # A Responses `output` list may contain non-dict junk; it must be skipped, not crash.
     resp = {"output": [None, "junk", {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]}
@@ -507,49 +480,6 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
     # Same guard on the Anthropic content blocks.
     anth = {"content": [None, "junk", {"type": "tool_use", "id": "t", "name": "g", "input": {"b": 2}}]}
     assert _tool_calls_and_reasoning(anth) == ([{"call_id": "t", "name": "g", "arguments": {"b": 2}}], None)
-
-
-def test_assemble_chat_wire_trajectory(tmp_path):
-    """The chat-wire assembler: tool results arrive in the next request as role:tool messages."""
-    store = CaptureStore(tmp_path)
-    store.record(
-        "rc",
-        {
-            "dialect": "chat",
-            "request": {"messages": [{"role": "user", "content": "hi"}]},
-            "response": {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "let me check",
-                            "tool_calls": [{"id": "c1", "function": {"name": "calc", "arguments": "{}"}}],
-                        }
-                    }
-                ]
-            },
-        },
-    )
-    store.record(
-        "rc",
-        {
-            "dialect": "chat",
-            "request": {
-                "messages": [
-                    {"role": "user", "content": "hi"},
-                    {"role": "tool", "tool_call_id": "c1", "content": "42"},
-                ]
-            },
-            "response": {"choices": [{"message": {"content": "answer is 42"}}]},
-        },
-    )
-
-    items = assemble_rollout(store, "rc")
-    assert [type(i).__name__ for i in items] == [
-        "NeMoGymResponseOutputMessage",  # turn 0 assistant
-        "NeMoGymResponseFunctionToolCall",  # turn 0 tool call
-        "NeMoGymFunctionCallOutput",  # turn 1 tool result (from the role:tool request message)
-        "NeMoGymResponseOutputMessage",  # turn 1 assistant
-    ]
 
 
 # --- base-agent correlation helpers ---
@@ -655,8 +585,8 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
-    install_trajectory_capture(app, config)
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
     client = TestClient(app)
 
     r = client.post("/ng-rollout/3-0/v1/messages", json={"stream": True})
@@ -667,15 +597,15 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     records = CaptureStore(tmp_path).read("3-0")
     assert len(records) == 1 and records[0]["response"] is not None  # reassembled, not dropped
 
-    steps = assemble_step_records(CaptureStore(tmp_path), "3-0")
-    assert len(steps) == 1
-    step = steps[0]
-    assert step.dialect == "messages"
-    assert step.tokens_in == 17 and step.tokens_out == 7  # 10 + cache_read 5 + cache_creation 2; output from delta
-    assert step.cached_tokens == 5 and step.cache_creation_tokens == 2
-    assert step.reasoning_content == "let me think"
-    assert step.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
-    assert step.latency_ttft_ms is not None
+    calls = read_model_call_records(CaptureStore(tmp_path), "3-0")
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.dialect == "messages"
+    assert call.tokens_in == 17 and call.tokens_out == 7  # 10 + cache_read 5 + cache_creation 2; output from delta
+    assert call.cached_tokens == 5 and call.cache_creation_tokens == 2
+    assert call.reasoning_content == "let me think"
+    assert call.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
+    assert call.latency_ttft_ms is not None
 
 
 def test_reconstruct_chat_sse():
@@ -762,8 +692,8 @@ def test_rollout_id_from_run_body_attempt_suffix():
     assert rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
 
 
-def test_capture_dirs_from_config_resolves_env_and_config(tmp_path):
-    from nemo_gym.observability import capture_dirs_from_config
+def test_model_call_capture_dirs_from_config_resolves_env_and_config(tmp_path):
+    from nemo_gym.observability import model_call_capture_dirs_from_config
 
     shared = tmp_path / "shared"
     shared.mkdir()
@@ -774,17 +704,18 @@ def test_capture_dirs_from_config_resolves_env_and_config(tmp_path):
             "responses_api_models": {
                 "openai_model": {
                     "observability_enabled": True,
-                    "trajectory_capture_dir": str(server_dir),
+                    "model_call_capture_dir": str(server_dir),
                     "name": "srv",
                 }
             }
         }
     }
-    dirs = capture_dirs_from_config(config, env={"NEMO_GYM_TRAJECTORY_DIR": str(shared)})
+    dirs = model_call_capture_dirs_from_config(config, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)})
     assert shared in dirs and server_dir in dirs
-    # capture-off servers contribute nothing; non-existent dirs are dropped
-    off = {"a": {"b": {"observability_enabled": False, "trajectory_capture_dir": str(tmp_path / "nope")}}}
-    assert capture_dirs_from_config(off, env={}) == []
+    # Capture-off servers contribute nothing, including from an existing shared directory.
+    off = {"a": {"b": {"observability_enabled": False, "model_call_capture_dir": str(tmp_path / "nope")}}}
+    assert model_call_capture_dirs_from_config(off, env={}) == []
+    assert model_call_capture_dirs_from_config(off, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)}) == []
 
 
 def _capture_exchange(dialect, model_server, usage, response):
@@ -800,11 +731,11 @@ def _capture_exchange(dialect, model_server, usage, response):
 
 
 def test_merge_capture_uniform_shape_across_agents(tmp_path):
-    from nemo_gym.observability import merge_capture_into_record
-    from nemo_gym.trajectory_capture import CaptureStore
+    from nemo_gym.model_call_capture import CaptureStore
+    from nemo_gym.observability import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
-    # Two different harnesses/dialects -> the attached trajectory must have the identical shape.
+    # Two different harnesses and dialects produce the same attachment shape.
     store.record(
         "0-0",
         _capture_exchange(
@@ -826,32 +757,32 @@ def test_merge_capture_uniform_shape_across_agents(tmp_path):
 
     rec_a = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
     rec_b = {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {"harness": "B"}}
-    merge_capture_into_record(rec_a, [tmp_path])
-    merge_capture_into_record(rec_b, [tmp_path])
+    merge_model_call_capture_into_record(rec_a, [tmp_path])
+    merge_model_call_capture_into_record(rec_b, [tmp_path])
 
-    cap_a, cap_b = rec_a["ng_trajectory_capture"], rec_b["ng_trajectory_capture"]
-    assert set(cap_a) == set(cap_b) == {"rollout_id", "metrics", "steps"}  # identical top-level
+    cap_a, cap_b = rec_a["ng_model_call_capture"], rec_b["ng_model_call_capture"]
+    assert set(cap_a) == set(cap_b) == {"rollout_id", "metrics", "calls"}
     assert set(cap_a["metrics"]) == set(cap_b["metrics"])  # identical metrics shape
-    assert set(cap_a["steps"][0]) == set(cap_b["steps"][0])  # identical per-step shape
-    assert "request" not in cap_a["steps"][0] and "response" not in cap_a["steps"][0]  # payloads stay in the store
+    assert set(cap_a["calls"][0]) == set(cap_b["calls"][0])
+    assert "request" not in cap_a["calls"][0] and "response" not in cap_a["calls"][0]
     # harness output + reward are untouched; capture carries the wire-level token stats
     assert rec_a["response"] == {"harness": "A"} and rec_a["reward"] == 1.0
-    assert cap_a["rollout_id"] == "0-0" and cap_a["steps"][0]["tokens_in"] == 3
+    assert cap_a["rollout_id"] == "0-0" and cap_a["calls"][0]["tokens_in"] == 3
 
 
 def test_merge_capture_noop_without_capture(tmp_path):
-    from nemo_gym.observability import merge_capture_into_record
+    from nemo_gym.observability import merge_model_call_capture_into_record
 
     rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
-    merge_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
-    assert "ng_trajectory_capture" not in rec
-    merge_capture_into_record(rec, [])  # no dirs
-    assert "ng_trajectory_capture" not in rec
+    merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
+    assert "ng_model_call_capture" not in rec
+    merge_model_call_capture_into_record(rec, [])  # no dirs
+    assert "ng_model_call_capture" not in rec
 
 
-def test_clear_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
+def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
     import nemo_gym.observability as obs
-    from nemo_gym.observability import clear_captures_for_rollouts
+    from nemo_gym.observability import clear_model_call_captures_for_rollouts
 
     store = CaptureStore(tmp_path)
     store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
@@ -859,9 +790,9 @@ def test_clear_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
     assert store.read("0-0") and store.read("1-0")
 
     # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
-    clear_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
     assert store.read("0-0") == [] and store.read("1-0")
-    clear_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
     assert store.read("1-0")
 
     # Best-effort: a dir whose store can't be opened is skipped, not raised.
@@ -869,88 +800,27 @@ def test_clear_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
         raise OSError("cannot open")
 
     monkeypatch.setattr(obs, "CaptureStore", _boom)
-    clear_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
 
 
-def test_assign_turn_indices_user_message_boundary():
-    from nemo_gym.trajectory_capture import StepRecord, _assign_turn_indices
+def test_aggregate_model_call_records_sums_and_counts():
+    from nemo_gym.model_call_capture import ModelCallRecord, aggregate_model_call_records
 
-    # Cumulative chat: a new user message starts a new turn; tool-result calls stay in the turn.
-    steps = [
-        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "user", "content": "q1"}]}),
-        StepRecord(
-            step_index=1,
-            dialect="chat",
-            request={"messages": [{"role": "user", "content": "q1"}, {"role": "tool", "content": "obs"}]},
-        ),
-        StepRecord(
-            step_index=2,
-            dialect="chat",
-            request={"messages": [{"role": "user", "content": "q1"}, {"role": "user", "content": "q2"}]},
-        ),
+    calls = [
+        ModelCallRecord(call_index=0, tokens_in=10, tokens_out=5, tokens_total=15, latency_total_ms=2.0),
+        ModelCallRecord(call_index=1, tokens_in=20, tokens_out=3, tokens_total=23, latency_total_ms=1.0),
     ]
-    _assign_turn_indices(steps)
-    assert [s.turn_index for s in steps] == [0, 0, 1]
-
-    # Unparseable request -> all None (deferred to the trajectory builder).
-    bad = [StepRecord(step_index=0, dialect="chat", request=None)]
-    _assign_turn_indices(bad)
-    assert bad[0].turn_index is None
-
-    # Responses input that is neither str nor list -> unparseable -> None.
-    no_input = [StepRecord(step_index=0, dialect="responses", request={"input": None})]
-    _assign_turn_indices(no_input)
-    assert no_input[0].turn_index is None
-
-    # Parseable but no user message anywhere -> not derivable -> None.
-    only_system = [
-        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "system", "content": "x"}]})
-    ]
-    _assign_turn_indices(only_system)
-    assert only_system[0].turn_index is None
-
-    # Interleaved threads (e.g. a sub-agent's fresh conversation) are not a single linear thread -> None.
-    interleaved = [
-        StepRecord(step_index=0, dialect="messages", request={"messages": [{"role": "user", "content": "main task"}]}),
-        StepRecord(
-            step_index=1, dialect="messages", request={"messages": [{"role": "user", "content": "sub prompt"}]}
-        ),
-    ]
-    _assign_turn_indices(interleaved)
-    assert all(s.turn_index is None for s in interleaved)
-
-    # Repeated user content across turns is counted by position, not deduped (no undercount).
-    repeated = [
-        StepRecord(step_index=0, dialect="chat", request={"messages": [{"role": "user", "content": "go"}]}),
-        StepRecord(
-            step_index=1,
-            dialect="chat",
-            request={"messages": [{"role": "user", "content": "go"}, {"role": "user", "content": "go"}]},
-        ),
-    ]
-    _assign_turn_indices(repeated)
-    assert [s.turn_index for s in repeated] == [0, 1]
-
-
-def test_aggregate_step_records_sums_and_counts():
-    from nemo_gym.trajectory_capture import StepRecord, aggregate_step_records
-
-    steps = [
-        StepRecord(step_index=0, turn_index=0, tokens_in=10, tokens_out=5, tokens_total=15, latency_total_ms=2.0),
-        StepRecord(step_index=1, turn_index=1, tokens_in=20, tokens_out=3, tokens_total=23, latency_total_ms=1.0),
-    ]
-    agg = aggregate_step_records(steps)
+    agg = aggregate_model_call_records(calls)
     assert (agg["tokens_in"], agg["tokens_out"], agg["tokens_total"]) == (30, 8, 38)
-    assert agg["latency_total_ms"] == 3.0 and agg["num_steps"] == 2 and agg["num_turns"] == 2
-    # empty -> all-None totals but a well-formed shape (num_steps 0)
-    assert aggregate_step_records([]) == {
+    assert agg["latency_total_ms"] == 3.0 and agg["num_calls"] == 2
+    # empty -> all-None totals but a well-formed shape (num_calls 0)
+    assert aggregate_model_call_records([]) == {
         "tokens_in": None,
         "tokens_out": None,
         "tokens_reasoning": None,
         "tokens_total": None,
         "latency_total_ms": None,
-        "num_turns": None,
-        "num_steps": 0,
+        "num_calls": 0,
     }
 
 
@@ -964,25 +834,25 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     async def _cc() -> dict:
         return {"ok": True}
 
-    install_trajectory_capture(app, SimpleNamespace(observability_enabled=False))
+    install_model_call_capture(app, SimpleNamespace(observability_enabled=False))
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
 
 
 def test_capture_dirs_resolves_default_by_config_key(tmp_path, monkeypatch):
-    # Bare opt-in (no trajectory_capture_dir / NEMO_GYM_TRAJECTORY_DIR): the consumer must resolve the
+    # Bare opt-in (no model_call_capture_dir / NEMO_GYM_MODEL_CALL_CAPTURE_DIR): the consumer must resolve the
     # SAME default dir the producer writes to. The producer keys it off config.name (the top-level
     # server-instance key, == server_name), not the leaf impl key -- so exercise BOTH sides and assert
     # they agree (the prior version only checked the consumer against a hand-built dir).
     import nemo_gym.observability as obs
 
-    monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
+    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
     monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))
 
     class _ProducerCfg:
         observability_enabled = True
-        trajectory_capture_dir = None
+        model_call_capture_dir = None
         name = "policy_model"  # top-level instance key, not the leaf impl key
 
     store = obs.make_capture_store(_ProducerCfg())
@@ -992,11 +862,11 @@ def test_capture_dirs_resolves_default_by_config_key(tmp_path, monkeypatch):
     # The observability node sits under the leaf impl key (openai_model), but the consumer must
     # resolve the producer's dir (keyed off policy_model), not the leaf or the "model_server" fallback.
     gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
-    dirs = obs.capture_dirs_from_config(gc, env={})
-    assert producer_dir == tmp_path / "nemo_gym_trajectories" / "policy_model"
+    dirs = obs.model_call_capture_dirs_from_config(gc, env={})
+    assert producer_dir == tmp_path / "nemo_gym_model_calls" / "policy_model"
     assert producer_dir in dirs
-    assert (tmp_path / "nemo_gym_trajectories" / "openai_model") not in dirs
-    assert (tmp_path / "nemo_gym_trajectories" / "model_server") not in dirs
+    assert (tmp_path / "nemo_gym_model_calls" / "openai_model") not in dirs
+    assert (tmp_path / "nemo_gym_model_calls" / "model_server") not in dirs
 
 
 def test_capture_dirs_warns_once_when_unresolved(tmp_path, monkeypatch, caplog):
@@ -1004,23 +874,23 @@ def test_capture_dirs_warns_once_when_unresolved(tmp_path, monkeypatch, caplog):
 
     import nemo_gym.observability as obs
 
-    monkeypatch.delenv("NEMO_GYM_TRAJECTORY_DIR", raising=False)
+    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
     monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))  # nothing created -> unresolved
-    obs._capture_dirs_warned = False
+    obs._model_call_capture_dirs_warned = False
     gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
     try:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.observability"):
-            assert obs.capture_dirs_from_config(gc, env={}) == []
-            assert obs.capture_dirs_from_config(gc, env={}) == []  # second call: no new warning
+            assert obs.model_call_capture_dirs_from_config(gc, env={}) == []
+            assert obs.model_call_capture_dirs_from_config(gc, env={}) == []  # second call: no new warning
         warns = [r for r in caplog.records if r.levelno == logging.WARNING and "capture directory" in r.message]
         assert len(warns) == 1
     finally:
-        obs._capture_dirs_warned = False
+        obs._model_call_capture_dirs_warned = False
 
 
 # --- P1 review regressions: Anthropic cache tokens + concurrent-append integrity ---
 def test_extract_token_stats_anthropic_cache_fold():
-    from nemo_gym.trajectory_capture import extract_token_stats
+    from nemo_gym.model_call_capture import extract_token_stats
 
     # Anthropic native: input_tokens is the uncached remainder; cache-read + cache-creation fold in.
     stats = extract_token_stats(
@@ -1038,7 +908,7 @@ def test_extract_token_stats_anthropic_cache_fold():
 
 
 def test_extract_token_stats_anthropic_fully_cached_zero_base():
-    from nemo_gym.trajectory_capture import extract_token_stats
+    from nemo_gym.model_call_capture import extract_token_stats
 
     # A fully-cached Anthropic response omits input_tokens; a 0 base preserves the folded prompt
     # size instead of leaving tokens_in null.
@@ -1055,7 +925,7 @@ def test_extract_token_stats_anthropic_fully_cached_zero_base():
 
 
 def test_extract_token_stats_openai_cached_not_double_counted():
-    from nemo_gym.trajectory_capture import extract_token_stats
+    from nemo_gym.model_call_capture import extract_token_stats
 
     # OpenAI: input_tokens already includes cached tokens (cached_tokens is a subset) -> no fold.
     stats = extract_token_stats(
@@ -1066,8 +936,8 @@ def test_extract_token_stats_openai_cached_not_double_counted():
     assert stats["cache_creation_tokens"] is None
 
 
-def test_build_step_record_surfaces_anthropic_cache_creation():
-    rec = build_step_record(
+def test_build_model_call_record_surfaces_anthropic_cache_creation():
+    rec = build_model_call_record(
         {
             "dialect": "messages",
             "response": {
@@ -1079,7 +949,7 @@ def test_build_step_record_surfaces_anthropic_cache_creation():
                 }
             },
         },
-        step_index=0,
+        call_index=0,
     )
     assert rec.tokens_in == 20  # 10 + 7 + 3
     assert rec.cached_tokens == 7  # cache-read
