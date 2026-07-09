@@ -24,7 +24,6 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 - [Configuration reference](#configuration-reference)
 - [Quick Start](#quick-start)
 - [Batch evaluation / data collection](#batch-evaluation--data-collection)
-- [Golden-patch validation](#golden-patch-validation)
 - [Output format](#output-format)
 - [GRPO masking and failure modes](#grpo-masking-and-failure-modes)
 - [Memory watchdog (OOM handling)](#memory-watchdog-oom-handling)
@@ -459,19 +458,12 @@ policy_model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct
 ### Step 2 — start the SWE-agents server
 
 ```bash
-# OpenHands single-prompt
-config_paths="responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-# Or full prompt × agent-class × tool-name diversity
-config_paths="responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-# Or opencode harness (real opencode processor.ts loop, NeMo-Gym LLM transport)
-config_paths="responses_api_agents/swe_agents/configs/swebench_opencode.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-
-ng_run "+config_paths=[$config_paths]" \
+# OpenHands single-prompt (swap to
+# responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml for full
+# prompt × agent-class × tool-name diversity)
+gym env start \
+    --config responses_api_agents/swe_agents/configs/swebench_openhands.yaml \
+    --model-type vllm_model \
     +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \
     +swe_agents.responses_api_agents.swe_agents.model_server.name=vllm_model
 ```
@@ -496,14 +488,16 @@ python responses_api_agents/swe_agents/client.py
 ## Batch evaluation / data collection
 
 ```bash
-ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=swebench-verified-converted.jsonl \
-    +output_jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl \
-    +model=Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    +temperature=0.7 +top_p=0.8
+gym eval run --no-serve \
+    --agent swe_agents \
+    --input swebench-verified-converted.jsonl \
+    --output swebench-verified.openhands.qwen3-30b-coder.jsonl \
+    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    --temperature 0.7 \
+    --top-p 0.8
 ```
 
-`ng_collect_rollouts` defaults to a concurrency of 100; tune to your hardware. View the results with:
+`gym eval run` defaults to a concurrency of 100; tune to your hardware. View the results with:
 
 ```bash
 ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
@@ -578,6 +572,7 @@ ng_reward_profile +input_jsonl_fpath=<dataset.jsonl> \
     +output_jsonl_fpath=results/<dataset>.golden.profiled.jsonl \
     +pass_threshold=1.0
 python scripts/print_aggregate_results.py +jsonl_fpath=results/<dataset>.golden.profiled.jsonl
+jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 ```
 
 ---

@@ -76,6 +76,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # The last match is used. If capture groups exist, the first non-empty group is
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
+    msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
@@ -140,13 +141,15 @@ class LLMJudgeVerifyResponse(BaseVerifyResponse):
     judge_evaluations: list[JudgeEvaluation]
 
 
-def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optional[str]) -> str:
+def _extract_last_assistant_text(
+    body: BaseVerifyRequest, extract_regex: Optional[str], extraction_failure_message: str = ""
+) -> str:
     """Extract the last assistant message text from the response.
 
     - If the assistant message has multiple text blocks, they are joined with newlines.
     - If ``extract_regex`` is provided, the last regex match is used; if capture
       groups exist, the first non-empty group is returned, otherwise the full match.
-    - Returns an empty string when no assistant text is available.
+    - Returns ``extraction_failure_message`` when no assistant text is available.
     """
     # Return only the last assistant message's text content.
     for o in reversed(body.response.output):
@@ -162,7 +165,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         texts.append(t)
                 text = "\n".join(texts).strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -181,7 +184,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
             elif isinstance(content, str):
                 text = content.strip()
                 if not text:
-                    return text
+                    return extraction_failure_message
                 if extract_regex:
                     try:
                         matches = list(re.finditer(extract_regex, text, flags=re.MULTILINE | re.DOTALL))
@@ -198,7 +201,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest, extract_regex: Optiona
                         return m.group(0).strip()
                 return text
             break
-    return ""
+    return extraction_failure_message
 
 
 def _extract_expected_answer(req: LLMJudgeRunRequest) -> Optional[str]:
@@ -353,7 +356,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             and body.template_metadata.get("output_regex")
         ):
             # Retry with full generation (no regex) - rescue from regex extraction failure
-            generated_full = _extract_last_assistant_text(body, extract_regex=None)
+            generated_full = _extract_last_assistant_text(
+                body, extract_regex=None, extraction_failure_message=self.config.msg_extraction_failure
+            )
             second_equal, second_eval = await self._generate_judge_evaluation(
                 question=question, expected_answer=expected, generated_answer=generated_full
             )
@@ -415,7 +420,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Step 3: Extract answer to judge
         # - If extract_regex is not None → regex-extracted answer
         # - If extract_regex is None (long answer) → full generation
-        generated = _extract_last_assistant_text(body, extract_regex)
+        generated = _extract_last_assistant_text(
+            body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
+        )
 
         # Step 4: Run first judge evaluation
         first_equal, first_eval = await self._generate_judge_evaluation(

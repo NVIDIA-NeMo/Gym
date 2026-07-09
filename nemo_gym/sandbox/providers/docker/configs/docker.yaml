@@ -1,0 +1,47 @@
+# Docker sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `docker` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/docker/configs/docker.yaml, $MODEL]"
+#
+# Requires a local Docker daemon (the `docker` CLI on PATH). See ../README.md -- especially
+# the Isolation & security section -- before running untrusted code.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      # Keep the container alive across exec calls, independent of the image's CMD/ENTRYPOINT.
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      # Isolation knobs -- opt in when running untrusted code (see README):
+      # network: none          # cut all networking (also breaks pip/git installs)
+      # read_only: true        # read-only root filesystem
+      # cap_drop: ["ALL"]      # drop Linux capabilities
+      # security_opt: ["no-new-privileges"]   # block setuid privilege escalation
+      # pids_limit: 512        # cap process count (fork-bomb guard)
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+      # exec_shell auto-detects bash (conda/SWE-bench commands use `source`, which sh/dash lacks)
+      # and falls back to sh. Pin it (e.g. /bin/sh or /bin/bash) to skip the per-create probe.
+      # exec_shell: /bin/bash
+    probe:
+      command: printf docker-sandbox-ready
+      expected_stdout: docker-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1

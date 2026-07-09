@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -154,37 +153,32 @@ class GDPValTask(TaskStrategy):
             return _render_template(config.user_prompt_template, task=task_info)
         return task_info["prompt"]
 
-    def prepare_input_files(self, task_info: Dict[str, Any]) -> Optional[str]:
-        ref_files = task_info.get("reference_files")
-        ref_urls = task_info.get("reference_file_urls")
-        if not ref_files or not ref_urls:
-            return None
-
-        # Default ``tempfile.mkdtemp`` lands in the agent host's local /tmp,
-        # which Ray actors on other nodes can't read. Honor a shared-FS
-        # override so multi-node Ray works.
-        ref_root = os.environ.get("GDPVAL_REF_FILES_DIR")
-        if ref_root:
-            Path(ref_root).mkdir(parents=True, exist_ok=True)
-        input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_", dir=ref_root)
-        downloaded = _download_reference_files(ref_files, ref_urls, Path(input_files_dir))
-        if downloaded:
-            print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
-            return input_files_dir
-
-        return None
-
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         container_path = getattr(config, "gdpval_container_path", None)
+
+        # GDPval MUST run inside the Apptainer sandbox built from
+        # containers/gdpval.def. The sandbox carries the heavy dependency set
+        # the task prompt advertises (TeX Live, the full data/ML/document/audio
+        # stack, CPU torch, ...). We deliberately do NOT install these into the
+        # evaluation/agent container — that would bloat the eval image by many
+        # GB. Consequently the local (non-sandbox) backend cannot provide the
+        # advertised environment, and silently falling back to it would run
+        # every task in a crippled sandbox and yield invalid results. Throw
+        # early instead of degrading silently.
         if not container_path:
-            return None
+            raise RuntimeError(
+                "GDPval requires the Apptainer sandbox: set `gdpval_container_path` to the "
+                ".sif built from responses_api_agents/stirrup_agent/containers/gdpval.def. "
+                "The local (non-sandbox) backend is rejected because the heavy sandbox "
+                "dependencies are not — and must not be — installed in the evaluation container."
+            )
 
         if not os.path.exists(container_path):
-            print(
-                f"[gdpval] WARNING: container not found at {container_path}, falling back to local sandbox",
-                flush=True,
+            raise RuntimeError(
+                f"GDPval Apptainer container not found at {container_path}. Build the .sif from "
+                "responses_api_agents/stirrup_agent/containers/gdpval.def. Refusing to fall back "
+                "to the local backend, which lacks the sandbox dependencies."
             )
-            return None
 
         from responses_api_agents.stirrup_agent.apptainer_provider import ApptainerCodeExecToolProvider
 

@@ -23,10 +23,15 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from stirrup.core.models import SystemMessage, UserMessage
+from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, ToolCall, ToolMessage, UserMessage
 
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
     DynamicMaxTokensChatCompletionsClient,
+)
+from responses_api_agents.stirrup_agent.stirrup_utils import (
+    restore_tool_messages_for_model,
+    to_provider_openai_messages,
 )
 
 
@@ -39,6 +44,7 @@ def _make_response(content: str = "ok"):
     choice.message.content = content
     choice.message.tool_calls = []
     choice.message.reasoning_content = None
+    choice.message.reasoning = None
     response.choices = [choice]
     response.usage = MagicMock()
     response.usage.prompt_tokens = 10
@@ -75,6 +81,60 @@ async def test_generate_forwards_configured_sampling_kwargs() -> None:
     assert sent["top_p"] == pytest.approx(0.7)
     assert sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
     assert sent["max_completion_tokens"] <= 2048
+
+
+@pytest.mark.asyncio
+async def test_generate_restores_tool_result_messages_for_openai_payload() -> None:
+    """Normal model calls must use provider-valid tool-call history."""
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+    )
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    messages = [
+        AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+        ),
+        NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+    ]
+
+    await client.generate(messages, tools={})
+
+    sent_messages = fake_create.await_args.kwargs["messages"]
+    assert sent_messages[0]["role"] == "assistant"
+    assert sent_messages[0]["tool_calls"][0]["id"] == "call_1"
+    assert sent_messages[1]["role"] == "tool"
+    assert sent_messages[1]["tool_call_id"] == "call_1"
+
+
+def test_provider_openai_messages_convert_nemo_user_messages() -> None:
+    """Stirrup serialization helper owns provider-compatible history conversion."""
+    messages = [
+        AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+        ),
+        NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+    ]
+
+    restored = restore_tool_messages_for_model(messages)
+    serialized = to_provider_openai_messages(messages)
+
+    assert restored[0] is messages[0]
+    assert isinstance(restored[1], ToolMessage)
+    assert restored[1].tool_call_id == "call_1"
+    assert restored[1].content == "ok"
+    assert serialized[0]["role"] == "assistant"
+    assert serialized[1]["role"] == "tool"
+    assert serialized[1]["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio

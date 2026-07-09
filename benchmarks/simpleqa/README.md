@@ -34,26 +34,26 @@ and derives `f1` + `accuracy_given_attempted` at every aggregation level.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/simpleqa/config.yaml]"
+gym eval prepare --benchmark simpleqa
 ```
 
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/simpleqa/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark simpleqa
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=simpleqa_simpleqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/simpleqa/data/simpleqa_benchmark.jsonl \
-    +output_jsonl_fpath=results/simpleqa_rollouts.jsonl \
-    +prompt_config=benchmarks/simpleqa/prompts/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent simpleqa_simpleqa_simple_agent \
+    --input benchmarks/simpleqa/data/simpleqa_benchmark.jsonl \
+    --output results/simpleqa_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/simpleqa/prompts/default.yaml
 ```
 
 For reasoning models, start the policy vLLM server with

@@ -58,16 +58,16 @@ the reward; pass@k / majority@k are computed by the metrics layer.
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/code_fim/configs/code_fim.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server code_fim
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=code_fim_simple_agent \
-    +input_jsonl_fpath=resources_servers/code_fim/data/example.jsonl \
-    +output_jsonl_fpath=results/code_fim_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent code_fim_simple_agent \
+    --input resources_servers/code_fim/data/example.jsonl \
+    --output results/code_fim_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for

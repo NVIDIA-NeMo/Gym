@@ -1,8 +1,10 @@
 ---
-title: "LLM-as-a-judge in verification"
+title: "LLM-as-Judge Verification"
 description: ""
 position: 8
 ---
+import { NavButton } from "../../../../components/NavButton";
+
 Use a **second language model** inside your resources server's `verify()` when rewards depend on semantic equivalence, rubrics, or other judgments that are expensive or awkward to encode in deterministic code.
 
 This tutorial is a beginner-first walkthrough. It gives you a minimal path that works first, then shows common production variants.
@@ -14,7 +16,7 @@ The walkthrough uses [`over_refusal_detection`](https://github.com/NVIDIA-NeMo/G
 - Call the judge from `verify()` and parse strict verdict labels.
 - Handle failures without crashing verification.
 
-[< Back to Building Environments](/v0.2/environment-tutorials)
+<NavButton href="/v0.2/environment-tutorials" label="Back to Building Environments" direction="back" />
 
 ---
 

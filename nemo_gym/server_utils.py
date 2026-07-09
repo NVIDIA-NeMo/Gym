@@ -110,6 +110,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
+            keepalive_timeout=15.0,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -377,6 +378,11 @@ class BaseServer(BaseModel):
 
         return server_config
 
+    def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
 
 class ProfilingMiddlewareInputConfig(BaseModel):
     # Relative to the Gym root dir.
@@ -626,6 +632,7 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
@@ -666,6 +673,8 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
             timeout_worker_healthcheck=30,
+            # Ensure server keepalive > client keepalive
+            timeout_keep_alive=30,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
@@ -698,6 +707,7 @@ class HeadServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        self.setup_liveness(app)
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 

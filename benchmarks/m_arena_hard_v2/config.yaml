@@ -24,7 +24,7 @@ m_arena_hard_v2_arena_judge_simple_agent:
       - name: m_arena_hard_v2
         type: benchmark
         jsonl_fpath: benchmarks/m_arena_hard_v2/data/m_arena_hard_v2_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/m_arena_hard_v2/prepare.py
         # NOTE: num_repeats here is NOT honored for type=benchmark. Pass
         # it on the CLI as `+num_repeats=N` — see run_m_arena_hard_v2_gym.py

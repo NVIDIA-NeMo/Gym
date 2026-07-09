@@ -221,7 +221,9 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
         (``"TRUE"`` / ``"FALSE"`` / ``None``) used as the answer_key for
         majority@k.
         """
-        library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
+        library_reward, extracted_answer = await self._verify_answer_with_library_async(
+            expected_answer, generated_answer
+        )
         if library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None, self.JUDGE_TRUE_LABEL
         if not self.config.should_use_judge:

@@ -20,6 +20,6 @@ config_paths:
       - name: gpqa-x
         type: benchmark
         jsonl_fpath: benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/gpqa-x/prepare.py
         num_repeats: 8

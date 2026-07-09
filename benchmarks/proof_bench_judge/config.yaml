@@ -17,6 +17,6 @@ proof_bench_judge_math_proof_judgement_simple_agent:
         - name: proof_bench_judge
           type: benchmark
           jsonl_fpath: benchmarks/proof_bench_judge/data/proof_bench_judge_benchmark.jsonl
-          prompt_config: benchmarks/proof_bench_judge/prompts/default.yaml
+          prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
           prepare_script: benchmarks/proof_bench_judge/prepare.py
           license: Apache 2.0
