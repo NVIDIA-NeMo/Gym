@@ -1,0 +1,69 @@
+# Gym-native external-harness stack running the Claude Code CLI in a Docker
+# sandbox. vllm_model (proxy to a local vLLM at :8000) with the ingress gate,
+# the blackbox_tool_toy env, and the external_harness agent. Run with `gym env start`
+# or `gym eval run`.
+#
+# The vLLM backend must be launched with tool-calling enabled and a large enough
+# context, because Claude Code sends its full tool suite with tool_choice=auto:
+#   vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 \
+#     --enable-auto-tool-choice --tool-call-parser hermes --max-model-len 32768
+
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      uses_reasoning_parser: false
+      return_token_id_information: false
+      observability:
+        enabled: true
+        capture_dir: ng_captures
+        run_id: workstation
+        return_token_ids: false
+
+blackbox_tool_toy:
+  resources_servers:
+    blackbox_tool_toy:
+      entrypoint: app.py
+      domain: coding
+
+external_harness_agent:
+  responses_api_agents:
+    external_harness:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: blackbox_tool_toy
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      policy_model_name: ${policy_model_name}
+      settings:
+        harness: claude_code
+        builder: prefix_merging
+        training_mode: false
+        # Inline single-key provider. To use a cluster sandbox, drop this in
+        # favor of a name ref (e.g. `sandbox_provider: sandbox`) and compose the
+        # provider config file via +config_paths.
+        sandbox_provider:
+          docker: {}
+        sandbox_spec:
+          image: node:20-bookworm-slim
+          workdir: /tmp/nemo-gym-harness
+          provider_options:
+            run_args: ["--network", "host"]
+        harness_spec:
+          pinned_version: null
+          max_output_tokens: 4096
+          # The local validation model is a small 7B; --bare under-scaffolds it. The
+          # spec default is bare=true (parity with the in-process claude_code_agent,
+          # tuned for strong models).
+          bare: false
+      datasets:
+        - name: example
+          type: validation
+          license: MIT
+          jsonl_fpath: resources_servers/blackbox_tool_toy/data/example.jsonl

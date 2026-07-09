@@ -1,0 +1,52 @@
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 1.0
+      observability:
+        enabled: true
+        capture_dir: /tmp/ng_captures
+        run_id: training
+        return_token_ids: true
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+external_harness_agent:
+  responses_api_agents:
+    external_harness:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      policy_model_name: ${policy_model_name}
+      settings:
+        harness: claude_code
+        builder: prefix_merging
+        training_mode: true
+        sandbox_provider:
+          docker: {}
+        sandbox_spec:
+          image: node:20-bookworm-slim
+          workdir: /tmp/nemo-gym-harness
+          provider_options:
+            run_args: ["--network", "host"]
+        harness_spec:
+          pinned_version: null
+          max_output_tokens: 2048
+          bare: false
+          system_prompt_append: 'You are a precise reasoning assistant. You have access
+            to Bash to run Python for calculations.
+
+            For every problem: think step by step, use code to verify when helpful,
+            and put your final
+
+            answer inside \boxed{...}.
+
+            '

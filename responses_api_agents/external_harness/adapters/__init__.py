@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from . import claude_code
 from .base import (
     HarnessAdapter,
     HarnessSpec,
@@ -26,6 +27,8 @@ from .base import (
 )
 from .registry import get_adapter, register_adapter
 
+
+register_adapter(claude_code.ADAPTER)
 
 __all__ = [
     "HarnessAdapter",
