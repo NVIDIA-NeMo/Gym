@@ -34,6 +34,10 @@ versions:
   - display-name: Main
     path: versions/main.yml
     slug: main
+  - display-name: "0.4.0"
+    path: versions/v0.4.0.yml
+    slug: v0.4.0
+    availability: stable
   - display-name: "0.3.0"
     path: versions/v0.3.0.yml
     slug: v0.3.0
@@ -81,23 +85,23 @@ redirects:
   - source: "/nemo/gym/tutorials/creating-resource-server.html"
     destination: "/nemo/gym/environment-tutorials/single-step-environment"
   - source: "/nemo/gym/tutorials/index.html"
-    destination: "/nemo/gym/training-tutorials"
+    destination: "/nemo/gym/tutorials/training-tutorials"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/about-workplace-assistant.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/about-workplace-assistant"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/about-workplace-assistant"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/gym-configuration.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/gym-configuration"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/gym-configuration"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/index.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/multi-node-training.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/multi-node-training"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/multi-node-training"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/nemo-rl-configuration.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/nemo-rl-configuration"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/nemo-rl-configuration"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/setup.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/setup"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/setup"
   - source: "/nemo/gym/tutorials/nemo-rl-grpo/single-node-training.html"
-    destination: "/nemo/gym/training-tutorials/nemo-rl-grpo/single-node-training"
+    destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/single-node-training"
   - source: "/nemo/gym/tutorials/offline-training-w-rollouts.html"
-    destination: "/nemo/gym/training-tutorials/offline-training-w-rollouts"
+    destination: "/nemo/gym/tutorials/training-tutorials/offline-training-w-rollouts"
   # Renamed/moved pages within the Fern site
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
@@ -171,7 +175,7 @@ redirects:
     destination: "/nemo/gym/v0.2.1/:path*"
   # README/blog links that pointed to Sphinx pages whose canonical was renamed in Fern
   - source: "/nemo/gym/latest/training-tutorials/unsloth-training"
-    destination: "/nemo/gym/main/training-tutorials/unsloth"
+    destination: "/nemo/gym/tutorials/training-tutorials/unsloth"
   - source: "/nemo/gym/latest/apidocs"
     destination: "/nemo/gym/api/reference/api-reference"
   - source: "/nemo/gym/latest/environment-tutorials/creating-training-environment"
