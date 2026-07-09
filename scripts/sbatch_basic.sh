@@ -30,6 +30,7 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
     ray symmetric-run \
       --address "'"$RAY_HEAD_NODE_IP"'" \
       --min-nodes "'"$SLURM_JOB_NUM_NODES"'" \
+      --grace-period 60 \
       --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
       --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
       -- "$@"
