@@ -19,8 +19,6 @@ echo "Running from $SLURM_SUBMIT_DIR"
 # The '--' separator is used to separate Ray arguments and the entrypoint command.
 # The --min-nodes argument ensures all nodes join before running the script.
 ENTRYPOINT_WITH_RAY_WRAPPER=$(cat <<EOF
-cd $SLURM_SUBMIT_DIR
-
 source .venv/bin/activate
 uv sync
 
