@@ -3,7 +3,7 @@
 LangGraph reflection agent compatible with resource servers that do not use tools; provides iterative reflection for diverse agent training data and test time scaling, extensible to use tools or other agent architectures.
 
 Source benchmark: https://github.com/open-thought/reasoning-gym
-
+The instructions below assume you have a vLLM server running and `policy_base_url`, `policy_model_name`, and `policy_api_key` configured in your `env.yaml` file. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ## Quick start
 
 ```bash
