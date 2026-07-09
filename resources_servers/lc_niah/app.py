@@ -13,20 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Resources server that grades responses on two signals at once:
-#   1. The final answer should match `expected_answer` (answer_score).
-#   2. The model's reasoning should NOT just copy the input message — we want
-#      *small* overlap between the reasoning and the prompt (reasoning_overlap).
+# Resources server that grades a response on two signals:
+#   1. The final answer should match `expected_answer` (answer_score, F1 over a node list).
+#   2. The model's reasoning should NOT just copy the input message — we measure the
+#      overlap between the reasoning and the prompt (reasoning_overlap).
 #
 # Three independent overlap signals between the reasoning and the input are
 # computed (each in [0, 1], higher = more copying):
 #   - seq_match : difflib SequenceMatcher ratio (global similarity)
 #   - ngram16   : fraction of the reasoning's 16-grams that appear in the input
 #   - lcs       : longest common substring length / reasoning length
-# They are combined into a single penalty in verify() (default: max), then:
-#       reward = answer_score * (1 - reasoning_overlap)
-# so the overlap term only matters once the answer is correct, and copying the
-# input verbatim into the reasoning is penalized even for a correct answer.
+#
+# Two config knobs decide the reward:
+#   - overlap_metric_rule  : which signal becomes `reasoning_overlap`
+#                            (seq_match | ngram16 | lcs; default lcs)
+#   - overlap_grading_rule : how answer_score and reasoning_overlap combine
+#       base     -> reward = answer_score
+#       multiply -> reward = answer_score * (1 - reasoning_overlap)  (default)
+#       minus    -> reward = answer_score - reasoning_overlap
 
 import json
 import re
@@ -44,15 +48,23 @@ from nemo_gym.base_resources_server import (
 )
 
 
-class AnswerGradingRule(str, Enum):
+class OverlapMetricRule(str, Enum):
     SEQ_MATCH = "seq_match"  # plain SequenceMatcher ratio
-    EXACT = "exact"  # 1.0 if normalized strings match exactly, else 0.0 (default)
+    NGRAM16 = "ngram16"  # fraction of the reasoning's 16-grams that appear in the input
+    LCS = "lcs"  # longest common substring length / reasoning length
+
+
+class OverlapGradingRule(str, Enum):
+    BASE = "base"  # reward = answer_score
+    MULTIPLY = "multiply"  # reward = answer_score * (1.0 - reasoning_overlap)
+    MINUS = "minus"  # reward = answer_score - reasoning_overlap
 
 
 class LCNIAHResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "lc_niah"
-    # Rule used to grade the final answer against `expected_answer`.
-    answer_grading_rule: AnswerGradingRule = AnswerGradingRule.EXACT
+    # Rule used to grade the final answer against expected_answer and reasoning_content against the input.
+    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.LCS
+    overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY
 
 
 class LCNIAHRunRequest(BaseRunRequest):
@@ -141,23 +153,34 @@ class LCNIAHResourcesServer(SimpleResourcesServer):
         overlap_ngram16 = self._overlap_ngram(reasoning_text, input_text, n=16)
         overlap_lcs = self._overlap_lcs(reasoning_text, input_text)
 
-        # --- Combine the signals however you like; default is the strongest (most conservative). ---
-        # e.g. mean: (overlap_seq_match + overlap_ngram16 + overlap_lcs) / 3
-        #      weighted: 0.5 * overlap_lcs + 0.3 * overlap_ngram16 + 0.2 * overlap_seq_match
-        # reasoning_overlap = max(overlap_ngram16, overlap_lcs)
-        reasoning_overlap = overlap_lcs
+        # --- Overlap function: which signal feeds the penalty (config.overlap_metric_rule) ---
+        if self.config.overlap_metric_rule == OverlapMetricRule.SEQ_MATCH:
+            reasoning_overlap = overlap_seq_match
+        elif self.config.overlap_metric_rule == OverlapMetricRule.NGRAM16:
+            reasoning_overlap = overlap_ngram16
+        elif self.config.overlap_metric_rule == OverlapMetricRule.LCS:
+            reasoning_overlap = overlap_lcs
+        else:
+            raise ValueError(f"Invalid overlap metric rule: {self.config.overlap_metric_rule}")
 
-        # Answer-gated reward: low reasoning/input overlap is rewarded only when the answer is correct.
-        reward = answer_score * (1.0 - reasoning_overlap)
+        # --- Reward function: how answer_score and the overlap combine (config.overlap_grading_rule) ---
+        if self.config.overlap_grading_rule == OverlapGradingRule.BASE:
+            reward = answer_score
+        elif self.config.overlap_grading_rule == OverlapGradingRule.MULTIPLY:
+            reward = answer_score * (1.0 - reasoning_overlap)
+        elif self.config.overlap_grading_rule == OverlapGradingRule.MINUS:
+            reward = answer_score - reasoning_overlap
+        else:
+            raise ValueError(f"Invalid overlap grading rule: {self.config.overlap_grading_rule}")
 
         return LCNIAHVerifyResponse(
             **body.model_dump(),
             reward=reward,
             answer_score=answer_score,
+            reasoning_overlap=reasoning_overlap,
             overlap_seq_match=overlap_seq_match,
             overlap_ngram16=overlap_ngram16,
             overlap_lcs=overlap_lcs,
-            reasoning_overlap=reasoning_overlap,
         )
 
     @classmethod

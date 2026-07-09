@@ -1,6 +1,7 @@
 # lc_niah
 
-Long-context needle-in-a-haystack (NIAH) rule-based resources server that grades a
+Long-context needle-in-a-haystack (NIAH) rule-based resources server for
+graphwalks-style tasks (BFS / parent-finding over a large directed graph). It grades a
 response on two signals at once:
 
 1. **Answer correctness** (`answer_score`) — the final answer (the assistant's
@@ -14,21 +15,27 @@ response on two signals at once:
    - `overlap_ngram16` — fraction of the reasoning's 16-grams that appear in the input
    - `overlap_lcs` — longest common substring length / reasoning length
 
-These signals are combined into a single `reasoning_overlap` penalty in `verify()`
-(default: `max(...)` — the most conservative; tweak the combination there), then
-gated by the answer:
+## Reward
 
-```
-reasoning_overlap = max(overlap_seq_match, overlap_ngram16, overlap_lcs)
-reward            = answer_score * (1 - reasoning_overlap)
-```
+Two config knobs decide the reward:
 
-- A wrong answer scores `0` regardless of reasoning.
-- A correct answer scores `1 - reasoning_overlap`, so verbatim copying of the prompt
-  into the reasoning is penalized even when the answer is right.
+- **`overlap_metric_rule`** — which overlap signal becomes the single `reasoning_overlap`
+  penalty: `seq_match`, `ngram16`, or `lcs` (default `lcs`).
+- **`overlap_grading_rule`** — how `answer_score` and `reasoning_overlap` combine:
 
-The verify response exposes `answer_score`, the three `overlap_*` signals, and the
-combined `reasoning_overlap` for inspection.
+  | rule | reward |
+  |------|--------|
+  | `base` | `answer_score` |
+  | `multiply` (default) | `answer_score * (1 - reasoning_overlap)` |
+  | `minus` | `answer_score - reasoning_overlap` |
+
+Under the default `multiply`, the overlap only matters once the answer is correct (a
+wrong answer scores `0`), so verbatim copying of the prompt into the reasoning is
+penalized even when the answer is right. `base` ignores the overlap entirely and
+rewards answer correctness alone.
+
+The verify response always exposes `answer_score`, the three `overlap_*` signals, and
+the combined `reasoning_overlap` for inspection, regardless of which rules are active.
 
 ## Config
 
@@ -36,8 +43,13 @@ See `configs/lc_niah.yaml`.
 
 ## Dataset
 
-Each JSONL row needs `responses_create_params.input` (the prompt) and an
-`expected_answer` (passed to the verifier). See `data/example.jsonl`.
+Each JSONL row needs `responses_create_params.input` (the graphwalks prompt — graph
+edges plus the BFS/parents operation, ending with a `Final Answer: [..]` instruction)
+and an `expected_answer` (a JSON list of node ids, passed to the verifier). See
+`data/example.jsonl` for small synthetic smoke-test rows.
+
+Train / validation datasets are not committed to git — they are fetched from the
+GitLab dataset registry via a `gitlab_identifier` in the config.
 
 # Licensing information
 Code: Apache-2.0

@@ -15,6 +15,7 @@
 from typing import List, Optional
 from unittest.mock import MagicMock
 
+import pytest
 from pytest import approx
 
 from nemo_gym.openai_utils import (
@@ -30,6 +31,8 @@ from resources_servers.lc_niah.app import (
     LCNIAHResourcesServer,
     LCNIAHResourcesServerConfig,
     LCNIAHVerifyRequest,
+    OverlapGradingRule,
+    OverlapMetricRule,
     _extract_answer_text,
     _extract_input_text,
     _extract_reasoning_text,
@@ -85,8 +88,18 @@ def _make_request(
     )
 
 
-def _make_server() -> LCNIAHResourcesServer:
-    config = LCNIAHResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+def _make_server(
+    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.LCS,
+    overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY,
+) -> LCNIAHResourcesServer:
+    config = LCNIAHResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        overlap_metric_rule=overlap_metric_rule,
+        overlap_grading_rule=overlap_grading_rule,
+    )
     return LCNIAHResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -153,6 +166,14 @@ class TestGradeAnswer:
     def test_both_empty_is_one(self) -> None:
         assert LCNIAHResourcesServer._grade_answer("Final Answer: []", "[]") == approx(1.0)
 
+    def test_non_json_expected_is_zero(self) -> None:
+        # Unparseable expected_answer -> empty expected set; a non-empty prediction scores 0.
+        assert LCNIAHResourcesServer._grade_answer("Final Answer: [a]", "not-json") == approx(0.0)
+
+    def test_empty_response_is_zero(self) -> None:
+        # No lines at all -> parse failure -> 0.
+        assert LCNIAHResourcesServer._grade_answer("", '["a"]') == approx(0.0)
+
 
 class TestOverlapSeqMatch:
     def test_no_reasoning_is_zero(self) -> None:
@@ -210,21 +231,23 @@ class TestOverlapLcs:
 
 
 class TestVerify:
-    async def test_correct_answer_low_overlap_high_reward(self) -> None:
-        server = _make_server()
+    async def test_base_rule_ignores_overlap(self) -> None:
+        # base grading: reward == answer_score, overlap reported but ignored.
+        server = _make_server(overlap_grading_rule=OverlapGradingRule.BASE)
+        prompt = "The graph has edges from node a to node b and several other distinct nodes scattered around."
         request = _make_request(
             expected_answer='["a", "b"]',
             answer="Final Answer: [a, b]",
-            reasoning="I traced the graph briefly and picked the endpoints.",
-            input_text="Some long haystack prompt describing a graph with many distinct edges.",
+            reasoning=prompt,  # reasoning copies the prompt verbatim
+            input_text=prompt,
         )
         result = await server.verify(request)
         assert result.answer_score == approx(1.0)
-        assert result.reasoning_overlap < 0.5
-        assert result.reward == approx(1.0 - result.reasoning_overlap)
-        assert result.reward > 0.5
+        assert result.reasoning_overlap == approx(1.0)  # still reported for inspection
+        assert result.reward == approx(1.0)  # base rule ignores the overlap
 
     async def test_wrong_answer_gives_zero_reward(self) -> None:
+        # Default grading (multiply): a wrong answer scores 0 regardless of overlap.
         server = _make_server()
         request = _make_request(
             expected_answer='["a", "b"]',
@@ -236,13 +259,13 @@ class TestVerify:
         assert result.answer_score == approx(0.0)
         assert result.reward == approx(0.0)
 
-    async def test_correct_answer_high_overlap_penalized(self) -> None:
-        server = _make_server()
+    async def test_multiply_rule_gates_reward_by_overlap(self) -> None:
+        server = _make_server(overlap_grading_rule=OverlapGradingRule.MULTIPLY)
         prompt = "The graph has edges from node a to node b and several other distinct nodes scattered around."
         request = _make_request(
             expected_answer='["a", "b"]',
             answer="Final Answer: [a, b]",
-            reasoning=prompt,  # reasoning copies the prompt verbatim
+            reasoning=prompt,  # verbatim copy -> overlap 1.0 -> reward 0.0
             input_text=prompt,
         )
         result = await server.verify(request)
@@ -250,8 +273,31 @@ class TestVerify:
         assert result.reasoning_overlap == approx(1.0)
         assert result.reward == approx(0.0)
 
+    async def test_multiply_rule_correct_answer_low_overlap(self) -> None:
+        server = _make_server(overlap_grading_rule=OverlapGradingRule.MULTIPLY)
+        request = _make_request(
+            expected_answer='["a", "b"]',
+            answer="Final Answer: [a, b]",
+            reasoning="I traced the graph briefly and picked the endpoints.",
+            input_text="Some long haystack prompt describing a graph with many distinct edges.",
+        )
+        result = await server.verify(request)
+        assert result.answer_score == approx(1.0)
+        assert result.reward == approx(1.0 - result.reasoning_overlap)
+
+    async def test_minus_rule_subtracts_overlap(self) -> None:
+        server = _make_server(overlap_grading_rule=OverlapGradingRule.MINUS)
+        request = _make_request(
+            expected_answer='["a"]',
+            answer="Final Answer: [a]",
+            reasoning="a partially overlapping reasoning trace",
+            input_text="a partially overlapping prompt with extra words",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(result.answer_score - result.reasoning_overlap)
+
     async def test_no_reasoning_no_penalty(self) -> None:
-        server = _make_server()
+        server = _make_server(overlap_grading_rule=OverlapGradingRule.MULTIPLY)
         request = _make_request(
             expected_answer='["a"]',
             answer="Final Answer: [a]",
@@ -265,18 +311,38 @@ class TestVerify:
         assert result.reasoning_overlap == approx(0.0)
         assert result.reward == approx(1.0)
 
-    async def test_combined_is_max_of_signals(self) -> None:
-        server = _make_server()
+    @pytest.mark.parametrize(
+        "metric_rule, signal_field",
+        [
+            (OverlapMetricRule.SEQ_MATCH, "overlap_seq_match"),
+            (OverlapMetricRule.NGRAM16, "overlap_ngram16"),
+            (OverlapMetricRule.LCS, "overlap_lcs"),
+        ],
+    )
+    async def test_metric_rule_selects_signal(self, metric_rule: OverlapMetricRule, signal_field: str) -> None:
+        server = _make_server(metric_rule)
         request = _make_request(
             expected_answer='["a"]',
             answer="Final Answer: [a]",
-            reasoning="a partially overlapping reasoning trace",
-            input_text="a partially overlapping prompt with extra words",
+            reasoning="a partially overlapping reasoning trace with several words",
+            input_text="a partially overlapping prompt with several extra words",
         )
         result = await server.verify(request)
-        assert result.reasoning_overlap == approx(
-            max(result.overlap_seq_match, result.overlap_ngram16, result.overlap_lcs)
-        )
+        assert result.reasoning_overlap == approx(getattr(result, signal_field))
+
+    async def test_invalid_metric_rule_raises(self) -> None:
+        server = _make_server()
+        server.config.overlap_metric_rule = "bogus"
+        request = _make_request(expected_answer='["a"]', answer="Final Answer: [a]", reasoning="r", input_text="i")
+        with pytest.raises(ValueError, match="Invalid overlap metric rule"):
+            await server.verify(request)
+
+    async def test_invalid_grading_rule_raises(self) -> None:
+        server = _make_server()
+        server.config.overlap_grading_rule = "bogus"
+        request = _make_request(expected_answer='["a"]', answer="Final Answer: [a]", reasoning="r", input_text="i")
+        with pytest.raises(ValueError, match="Invalid overlap grading rule"):
+            await server.verify(request)
 
     async def test_response_fields_present(self) -> None:
         server = _make_server()

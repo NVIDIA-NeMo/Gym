@@ -1,12 +1,18 @@
-# answer_grading_rule options: seq_match, exact (default)
-# reward = answer_score * (1 - reasoning_overlap)
-#   answer_score      : match of final answer vs expected_answer
-#   reasoning_overlap : SequenceMatcher ratio between reasoning and the input message
+# overlap_metric_rule options: seq_match, ngram16, lcs (default)
+#   -> which overlap signal becomes reasoning_overlap
+# overlap_grading_rule options: base, multiply (default), minus
+#   -> how answer_score and reasoning_overlap combine into the reward:
+#      base     : reward = answer_score
+#      multiply : reward = answer_score * (1 - reasoning_overlap)
+#      minus    : reward = answer_score - reasoning_overlap
+#   answer_score      : F1 of the final answer's node list vs expected_answer
+#   reasoning_overlap : overlap between the reasoning and the input message (per overlap_metric_rule)
 lc_niah:
   resources_servers:
     lc_niah:
       entrypoint: app.py
-      answer_grading_rule: exact
+      overlap_metric_rule: lcs
+      overlap_grading_rule: multiply
       domain: knowledge
       verified: false
       description: Answer-correctness reward gated by low reasoning/input overlap
