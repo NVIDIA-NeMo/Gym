@@ -367,6 +367,122 @@ class TestGenRMCompareResourcesServer:
         assert expected_rewards == actual_rewards
 
 
+class TestCompareHttpWireContract:
+    """/compare is a HARNESS-called judge endpoint, not a model-facing gym tool.
+
+    Evidence: every dataset row in data/example.jsonl carries ``"tools": []`` (the model is never
+    advertised a compare tool), and the only caller is harness code — ``GenRMStrategy.compare`` in
+    comparison_strategies.py posts to ``url_path="/compare"`` via the server client (the README's
+    "batch API" for rollout collection). It therefore stays a plain ``app.post("/compare")`` route
+    and the server stays tool-less: no /mcp mount, no gym_tool catch-all, plain /seed_session.
+    These tests lock in that classification and the exact HTTP wire format.
+    """
+
+    def _make_server(self) -> GenRMCompareResourcesServer:
+        from nemo_gym.server_utils import ServerClient
+
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+        )
+        server = GenRMCompareResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        judge_response = AsyncMock()
+        judge_response.json = AsyncMock(
+            return_value={
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score_1": 4, "score_2": 2, "ranking": 2}'}],
+                    }
+                ]
+            }
+        )
+        server.server_client.post = AsyncMock(return_value=judge_response)
+        return server
+
+    def _make_response_obj(self, text: str) -> dict:
+        return {"output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
+
+    def test_compare_single_response_bytes_are_stable(self) -> None:
+        """A <2-response request short-circuits to defaults; the exact bytes are the contract."""
+        from fastapi.testclient import TestClient
+
+        server = self._make_server()
+        with TestClient(server.setup_webserver()) as client:
+            resp = client.post(
+                "/compare",
+                json={
+                    "conversation_history": [{"role": "user", "content": "Hello"}],
+                    "response_objs": [self._make_response_obj("Hi")],
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.content == b'{"rewards":[3.0],"comparison_results":null,"metrics":null}'
+
+    def test_compare_http_replay_matches_direct_handler(self) -> None:
+        """The route must serve byte-for-byte what the handler returns (no serialization drift)."""
+        import json
+
+        from fastapi.testclient import TestClient
+
+        payload = {
+            "conversation_history": [{"role": "user", "content": "What is 2+2?"}],
+            "response_objs": [self._make_response_obj("4"), self._make_response_obj("Four")],
+            "principle": "Be concise",
+        }
+
+        direct = asyncio.run(self._make_server().compare(GenRMCompareRequest.model_validate(payload)))
+
+        server = self._make_server()
+        with TestClient(server.setup_webserver()) as client:
+            resp = client.post("/compare", json=payload)
+        assert resp.status_code == 200
+        assert resp.json() == json.loads(direct.model_dump_json())
+        # Circular strategy over 2 responses -> exactly the pairs (0,1) and (1,0), judged once each.
+        assert [(r["response_i"], r["response_j"]) for r in resp.json()["comparison_results"]] == [(0, 1), (1, 0)]
+        assert len(resp.json()["rewards"]) == 2
+
+    def test_compare_error_path_is_fastapi_422(self) -> None:
+        """A missing required field keeps FastAPI's stock 422 shape (no custom error contract)."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self._make_server().setup_webserver()) as client:
+            resp = client.post("/compare", json={"response_objs": []})
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail[0]["loc"] == ["body", "conversation_history"]
+        assert detail[0]["type"] == "missing"
+
+    def test_server_is_tool_less_no_mcp_surface(self) -> None:
+        """Harness classification lock-in: no gym tools -> the pre-MCP app is byte-identical.
+
+        Transport parity holds vacuously: the MCP tool set and the HTTP tool-route set are both
+        empty (every POST route is a base/harness endpoint).
+        """
+        from fastapi.routing import APIRoute
+        from fastapi.testclient import TestClient
+
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        post_paths = {route.path for route in app.routes if isinstance(route, APIRoute) and "POST" in route.methods}
+        assert post_paths == {"/seed_session", "/verify", "/aggregate_metrics", "/compare"}
+
+        with TestClient(app) as client:
+            # No /mcp mount and no unknown-tool catch-all on a tool-less server.
+            assert client.post("/mcp", json={}).status_code == 404
+            assert client.post("/definitely_not_a_tool", json={}).status_code == 404
+            # seed_session is the plain base endpoint: no MCP metadata augmentation.
+            seed = client.post("/seed_session", json={})
+            assert seed.status_code == 200
+            assert seed.json() == {}
+
+
 class TestRunSingleComparison:
     """Tests for GenRMCompareResourcesServer._run_single_comparison."""
 
