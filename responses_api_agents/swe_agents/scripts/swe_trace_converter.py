@@ -173,7 +173,7 @@ def reconstruct_rollout_events(nm):
     token_by_rid = {usage["response_id"]: usage for usage in ptm["token_usages"]}
 
     llm_starts = []
-    for response in responses:
+    for turn, response in enumerate(responses, start=1):
         timestamp = response["timestamp"]
         end = parse_iso_timestamp(timestamp)
         latency = response["latency"]
@@ -183,6 +183,7 @@ def reconstruct_rollout_events(nm):
         metadata = {
             "response_id": response_id,
             "recorded_latency": latency,
+            "turn": turn,
         }
         metadata["prompt_tokens"] = token_usage["prompt_tokens"]
         metadata["completion_tokens"] = token_usage["completion_tokens"]
@@ -334,12 +335,12 @@ def build_chrome_trace(log_dir):
                 data = json.load(f)
             validate_precise_metrics(data, name)
             start_time = parse_iso_timestamp(data["generation_start_timestamp"])
-            reconstruct_rollout_events(data)
+            events = reconstruct_rollout_events(data)
         except (OSError, KeyError, TypeError, ValueError):
             skipped_entries += 1
             continue
         entries.append((name, data))
-        entry_start_times[name] = start_time
+        entry_start_times[name] = min((event[1] for event in events), default=start_time)
 
     print(f"Processing {len(entries)} rollout entries...")
     if skipped_entries:
@@ -350,6 +351,8 @@ def build_chrome_trace(log_dir):
     for name, _ in entries:
         iid = extract_instance_id(name)
         instance_groups[iid].append(name)
+    for group in instance_groups.values():
+        group.sort(key=entry_start_times.__getitem__)
 
     # Assign pid per instance, sorted by earliest start time
     instance_to_pid = {}
