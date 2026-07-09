@@ -23,8 +23,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import (
@@ -82,6 +85,27 @@ def _make_model_response(outputs: list, response_id: str = "resp_001") -> dict:
     ).model_dump()
 
 
+def _make_model_response_with_usage(outputs: list, input_tokens: int, response_id: str = "resp_001") -> dict:
+    """Like _make_model_response but carries usage.input_tokens (drives the post-call context reset)."""
+    return NeMoGymResponse(
+        id=response_id,
+        created_at=0.0,
+        model="test_model",
+        object="response",
+        output=outputs,
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        usage=NeMoGymResponseUsage(
+            input_tokens=input_tokens,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=input_tokens,
+        ),
+    ).model_dump()
+
+
 class TestApp:
     @fixture
     def agent(self) -> BrowsecompAgent:
@@ -99,8 +123,25 @@ class TestApp:
         assert config.nudge_steps is True
         assert config.max_context_tokens == 196608
         assert config.context_reset_pct == 0.3
+        assert config.context_reset_tokens == 0
         assert config.context_reset_keep_rounds == 3
         assert config.max_run_retries == 1
+
+    # ---- _reset_threshold ----
+
+    def test_reset_threshold_pct_fallback(self) -> None:
+        # context_reset_tokens == 0 (default) -> max_context_tokens * context_reset_pct
+        config = _make_config()
+        assert BrowsecompAgent._reset_threshold(config) == int(196608 * 0.3)  # 58982
+
+    def test_reset_threshold_absolute_overrides_pct(self) -> None:
+        # context_reset_tokens > 0 takes precedence over the pct calc (50k standard)
+        config = _make_config(context_reset_tokens=50000)
+        assert BrowsecompAgent._reset_threshold(config) == 50000
+
+    def test_reset_threshold_disabled(self) -> None:
+        config = _make_config(context_reset_tokens=0, max_context_tokens=0)
+        assert BrowsecompAgent._reset_threshold(config) == 0
 
     # ---- _compact_old_tool_messages ----
 
@@ -211,6 +252,7 @@ class TestApp:
 
         tool_http = MagicMock()
         tool_http.ok = True
+        tool_http.status = 200
         tool_http.read = AsyncMock(
             side_effect=[
                 json.dumps(tool_response_data).encode(),  # model call 1
@@ -245,6 +287,7 @@ class TestApp:
 
         mock_http = MagicMock()
         mock_http.ok = True
+        mock_http.status = 200
         mock_http.read = AsyncMock(return_value=json.dumps(tool_response_data).encode())
         mock_http.content.read = AsyncMock(return_value=b"{}")
         mock_http.cookies = {}
@@ -260,3 +303,81 @@ class TestApp:
 
         # max_steps=2: 2 model calls + 2 tool calls = 4 total posts
         assert agent.server_client.post.call_count == 4
+
+    # ---- full trajectory (Part B) ----
+
+    def test_save_trajectory_writes_header_and_all_items(self, tmp_path) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(snap_dir=str(tmp_path)),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        input_messages = [NeMoGymResponseOutputMessage.model_construct(type="message", role="user", content=[])]
+        full_trajectory = [_make_fn_call("search"), _make_tool_output(), _make_msg("Exact Answer: RIGHT")]
+        agent._save_trajectory(
+            input_messages=input_messages,
+            full_trajectory=full_trajectory,
+            task_index="9",
+            attempt="0",
+            reset_steps=[2, 5],
+            reset_count=2,
+            num_tool_calls=1,
+        )
+        path = tmp_path / "sample_9" / "attempt_0_trajectory.jsonl"
+        assert path.exists()
+        lines = path.read_text().strip().split("\n")
+        header = json.loads(lines[0])
+        assert header["type"] == "metadata"
+        assert header["reset_count"] == 2 and header["reset_steps"] == [2, 5] and header["num_tool_calls"] == 1
+        # line 1 header + input prefix + every trajectory item
+        assert len(lines) == 1 + len(input_messages) + len(full_trajectory)
+
+    async def test_full_trajectory_survives_reset(self, tmp_path) -> None:
+        """A context reset trims new_outputs, but response.output (= full_trajectory) keeps the
+        pre-reset tool round, and the last item is still the final answer (grading invariant)."""
+        agent = BrowsecompAgent(
+            config=_make_config(
+                snap_dir=str(tmp_path),
+                save_model_call_using_vllm_tokenize_endpoint=False,
+                context_reset_tokens=1,  # threshold 1 -> any usage>1 resets
+                context_reset_keep_rounds=0,  # reset drops everything from new_outputs
+                nudge_steps=False,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        model1 = _make_model_response_with_usage([_make_fn_call("search", call_id="c1")], input_tokens=0)  # turn 1
+        model2 = _make_model_response_with_usage([_make_msg("partial")], input_tokens=999)  # turn 2 -> reset
+        model3 = _make_model_response_with_usage([_make_msg("Exact Answer: RIGHT")], input_tokens=0)  # turn 3
+
+        http = MagicMock()
+        http.ok = True
+        http.status = 200
+        http.cookies = {}
+        http.read = AsyncMock(
+            side_effect=[json.dumps(model1).encode(), json.dumps(model2).encode(), json.dumps(model3).encode()]
+        )
+        http.content.read = AsyncMock(return_value=b'{"results_string": "tool result"}')
+        agent.server_client.post = AsyncMock(return_value=http)
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        response_mock = MagicMock()
+        response_mock.set_cookie = MagicMock()
+
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "q"}],
+            metadata={"task_index": "7", "attempt": "0"},
+        )
+        result = await agent.responses(request_mock, response_mock, body)
+
+        types = [getattr(o, "type", None) for o in result.output]
+        # full trajectory retains the pre-reset round (would be gone from the trimmed new_outputs window)
+        assert "function_call" in types and "function_call_output" in types
+        assert len(result.output) == 3
+        # grading invariant: last item is the final assistant answer (what Part A grades)
+        assert result.output[-1].type == "message" and result.output[-1].content[0].text == "Exact Answer: RIGHT"
+        # trajectory.jsonl written with the reset recorded
+        traj = tmp_path / "sample_7" / "attempt_0_trajectory.jsonl"
+        assert traj.exists()
+        lines = traj.read_text().strip().split("\n")
+        assert json.loads(lines[0])["reset_steps"] == [2]
+        assert len(lines) == 1 + len(body.input) + len(result.output)
