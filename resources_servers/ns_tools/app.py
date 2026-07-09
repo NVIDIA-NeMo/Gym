@@ -28,15 +28,12 @@ import logging
 import subprocess
 import sys
 import time
-import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from nemo_skills.mcp.tool_manager import ToolManager
-from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -45,7 +42,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
+
+
+try:
+    from nemo_skills.mcp.tool_manager import ToolManager
+    from nemo_skills.mcp.utils import locate
+except ImportError:  # pragma: no cover - nemo_skills is a per-server dependency; keep module import safe
+    ToolManager = None
+    locate = None
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -133,6 +139,26 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
 
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+
+        # Discover nemo_skills tools at construction so each one can be declared as a gym_tool
+        # (served over both HTTP POST /<name> and MCP) before setup_webserver() collects them.
+        if not self.config.nemo_skills_tools:
+            return
+        if ToolManager is None:
+            raise RuntimeError(
+                "nemo_skills is required to load nemo_skills_tools; install this server's requirements.txt."
+            )
+        self._uses_python_tool_sidecar = any(
+            self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools
+        )
+        if self._uses_python_tool_sidecar:
+            # Legacy HTTP PythonTool variants require a local sidecar process, and tool
+            # discovery below connects to it — so it must start first.
+            self._start_python_tool_server()
+        self._initialize_nemo_skills_tools()
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
@@ -151,20 +177,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 await self.shutdown()
 
         app.router.lifespan_context = lifespan_wrapper
-
-        # Initialize nemo_skills ToolManager if tools are configured
-        if self.config.nemo_skills_tools:
-            self._uses_python_tool_sidecar = any(
-                self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools
-            )
-            if self._uses_python_tool_sidecar:
-                # Legacy HTTP PythonTool variants require a local sidecar process.
-                self._start_python_tool_server()
-            self._initialize_nemo_skills_tools()
-
-            # Register a catch-all endpoint for tool execution
-            # This handles any tool name dynamically
-            app.post("/{tool_name}")(self.execute_tool)
 
         return app
 
@@ -292,32 +304,49 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             for tool in tools:
                 self._tool_name_map[tool["name"]] = tool["name"]
             logger.info(f"Loaded {len(tools)} nemo_skills tools: {list(self._tool_name_map.keys())}")
+            return tools
 
-        asyncio.get_event_loop().run_until_complete(_load_tools())
+        tools = asyncio.get_event_loop().run_until_complete(_load_tools())
+        for tool in tools:
+            self._register_nemo_skills_gym_tool(tool)
         logger.info("NeMo Skills ToolManager initialized successfully")
 
-    async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
+    def _register_nemo_skills_gym_tool(self, tool: Dict[str, Any]) -> None:
+        """Declare one discovered nemo_skills tool as a gym_tool (HTTP POST /<name> + MCP).
+
+        The tool's JSON schema from nemo_skills is advertised verbatim over MCP and call
+        arguments pass through raw on both transports — exactly the payload the old
+        catch-all route forwarded to ToolManager.
+        """
+        tool_name = tool["name"]
+
+        async def execute_nemo_skills_tool(session_id: str, **args: Any) -> str:
+            return await self._execute_nemo_skills_tool(tool_name, session_id, args)
+
+        gym_tool(
+            execute_nemo_skills_tool,
+            name=tool_name,
+            description=tool.get("description"),
+            input_schema=tool.get("input_schema") or {"type": "object", "properties": {}},
+            owner=self,
+        )
+
+    async def handle_unknown_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
+        """Preserve the historical soft-error bytes for unknown tool names (200, not 404)."""
+        if not self.tool_manager:
+            return PlainTextResponse(json.dumps({"error": "No tools configured"}))
+        logger.error(f"Unknown tool requested: {tool_name}")
+        return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
+
+    async def _execute_nemo_skills_tool(self, tool_name: str, session_id: str, args: Dict[str, Any]) -> str:
         """
         Execute a nemo_skills tool by name.
 
         Uses the nemo-gym session ID as the request_id for stateful tools.
-        Returns the result as plain text for simple_agent compatibility.
+        Always returns a string (the base serves it as text/plain over HTTP, preserving
+        the old PlainTextResponse bytes for simple_agent compatibility).
         Tracks execution timing and timeout detection per session.
         """
-        if not self.tool_manager:
-            return PlainTextResponse(json.dumps({"error": "No tools configured"}))
-
-        # Check if tool is in our known tools
-        if tool_name not in self._tool_name_map:
-            logger.error(f"Unknown tool requested: {tool_name}")
-            return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
-
-        # Get session ID for stateful execution
-        session_id = request.session.get(SESSION_ID_KEY)
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            logger.warning(f"No session ID found, using fallback: {session_id}")
-
         if session_id not in self._timing_by_session:
             self._timing_by_session[session_id] = []
 
@@ -327,12 +356,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         result = None
 
         try:
-            body = await request.json()
-
             # Execute the tool
             result = await self.tool_manager.execute_tool(
                 raw_name=tool_name,
-                args=body,
+                args=args,
                 extra_args={"request_id": session_id},
             )
 
@@ -374,10 +401,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 timeout_info = " [REQUEST_TIMEOUT]"
             logger.info(f"Tool '{tool_name}' executed in {elapsed:.3f}s{timeout_info} (session={session_id[:8]}...)")
 
-        # Return result as plain text to avoid double JSON serialization
+        # Return the result as a string to avoid double JSON serialization: the base serves
+        # str returns as text/plain over HTTP (byte-identical to the old PlainTextResponse).
         if isinstance(result, str):
-            return PlainTextResponse(result)
-        return PlainTextResponse(json.dumps(result))
+            return result
+        return json.dumps(result)
 
     # --------------------------------------------------------
     # Verification

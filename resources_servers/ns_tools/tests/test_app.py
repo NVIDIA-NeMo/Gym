@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import json
 import subprocess
 from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,12 +26,19 @@ from app import (
     NSToolsVerifyRequest,
 )
 from fastapi import FastAPI
-from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+
+
+try:
+    from nemo_skills.mcp.tool_manager import ToolManager
+except ImportError:  # nemo_skills is a per-server dependency; most tests here stub it out
+    ToolManager = None
+
+requires_nemo_skills = pytest.mark.skipif(ToolManager is None, reason="nemo_skills is not installed in this venv")
 
 
 class TestApp:
@@ -85,6 +95,7 @@ class TestApp:
                 server._tool_uses_python_tool_sidecar("nemo_skills.mcp.servers.python_tool::DirectPythonTool") is False
             )
 
+    @requires_nemo_skills
     async def test_verify_delegates_to_math_with_judge(self) -> None:
         """Test that verification is delegated to math_with_judge verifier."""
         verifiers = {
@@ -159,6 +170,7 @@ class TestApp:
         assert call_args.kwargs["url_path"] == "/verify"
         server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
 
+    @requires_nemo_skills
     async def test_verify_cleans_up_when_verifier_fails(self) -> None:
         verifiers = {
             "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
@@ -451,3 +463,268 @@ class TestSidecarTeardownWiredToLifespan:
 
         proc.terminate.assert_called_once()
         assert server._python_tool_process is None
+
+
+# ============================================================
+# Dual-transport migration: HTTP wire-format replay + MCP round-trip
+# ============================================================
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+PYTHON_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {"code": {"type": "string", "description": "Python code to execute"}},
+    "required": ["code"],
+}
+
+DICT_RESULT = {"process_status": "completed", "stdout": "4\n", "stderr": ""}
+STR_RESULT = '{"process_status": "completed", "stdout": "raw string result"}'
+
+
+class _StubToolManager:
+    """Stands in for the nemo_skills ToolManager: fixed discovery + scripted execute results."""
+
+    def __init__(self, module_specs: List[str], overrides: Any = None, context: Any = None):
+        self.calls: List[Any] = []
+
+    async def list_all_tools(self, use_cache: bool = True) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": "execute_python",
+                "description": "Execute python code.",
+                "input_schema": dict(PYTHON_TOOL_SCHEMA),
+                "server": "DirectPythonTool",
+            }
+        ]
+
+    async def execute_tool(self, raw_name: str, args: Dict[str, Any], extra_args: Any = None) -> Any:
+        self.calls.append((raw_name, dict(args), dict(extra_args or {})))
+        code = args.get("code")
+        if code == "boom":
+            raise RuntimeError("sandbox exploded")
+        if code == "request-timeout":
+            raise TimeoutError("request timed out")
+        if code == "internal-timeout":
+            return {"process_status": "timeout", "stdout": ""}
+        if code == "str-result":
+            return STR_RESULT
+        return dict(DICT_RESULT)
+
+    async def cleanup_request(self, request_id: str) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+
+class _FakeDirectPythonTool:
+    """Sidecar detection double: not named PythonTool, so no sidecar subprocess is spawned."""
+
+    def default_config(self) -> Dict[str, Any]:
+        return {"sandbox": {}}
+
+
+def _make_tools_server() -> NSToolsResourcesServer:
+    pytest.importorskip("mcp")
+    config = NSToolsConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="ns_tools",
+        nemo_skills_tools=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+    )
+    # model_post_init discovers tools with run_until_complete: give it a scratch loop.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        with (
+            patch("app.ToolManager", _StubToolManager),
+            patch("app.locate", return_value=_FakeDirectPythonTool),
+        ):
+            return NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if method.startswith("notifications/"):
+        payload["params"] = params or {}
+    else:
+        payload["id"] = rpc_id
+        payload["params"] = params or {}
+    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
+
+
+def _list_tools(client, token: Optional[str] = None) -> Dict[str, dict]:
+    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+    assert resp.status_code == 200, resp.text
+    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+
+
+def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
+    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+def _seed(client) -> str:
+    resp = client.post("/seed_session", json={})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
+
+
+class TestHTTPWireContractReplay:
+    """The migrated gym_tool routes must serve byte-identical bodies to the old catch-all route."""
+
+    def test_dict_result_is_json_dumped_text_plain(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/execute_python", json={"code": "print(2+2)"})
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/plain")
+            # Python's default json.dumps separators, exactly as the old PlainTextResponse body.
+            assert resp.text == json.dumps(DICT_RESULT)
+            assert resp.text == '{"process_status": "completed", "stdout": "4\\n", "stderr": ""}'
+
+            # The rollout session id is wired through as the nemo_skills request_id...
+            raw_name, args, extra = server.tool_manager.calls[0]
+            assert raw_name == "execute_python"
+            assert args == {"code": "print(2+2)"}
+            session_id = extra["request_id"]
+            assert session_id
+            # ...and the timing bookkeeping is recorded under that session.
+            records = server._timing_by_session[session_id]
+            assert len(records) == 1
+            assert records[0]["tool_name"] == "execute_python"
+            assert records[0]["is_internal_timeout"] is False
+            assert records[0]["is_request_timeout"] is False
+
+    def test_str_result_passes_through_verbatim(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/execute_python", json={"code": "str-result"})
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/plain")
+            assert resp.text == STR_RESULT  # no double JSON serialization
+
+    def test_unknown_tool_keeps_the_200_soft_error_bytes(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/nonexistent_tool", json={"code": "x"})
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/plain")
+            assert resp.text == '{"error": "Unknown tool: nonexistent_tool"}'
+
+    def test_tool_exception_becomes_200_error_string(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/execute_python", json={"code": "boom"})
+            assert resp.status_code == 200
+            assert resp.text == '{"error": "sandbox exploded"}'
+
+    def test_request_timeout_becomes_200_timeout_body_and_is_counted(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/execute_python", json={"code": "request-timeout"})
+            assert resp.status_code == 200
+            assert resp.text == '{"error": "Request timeout", "process_status": "timeout"}'
+
+            (records,) = server._timing_by_session.values()
+            assert records[0]["is_request_timeout"] is True
+            assert records[0]["is_internal_timeout"] is False
+
+    def test_internal_sandbox_timeout_is_flagged_and_body_preserved(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/execute_python", json={"code": "internal-timeout"})
+            assert resp.status_code == 200
+            assert resp.text == '{"process_status": "timeout", "stdout": ""}'
+
+            (records,) = server._timing_by_session.values()
+            assert records[0]["is_internal_timeout"] is True
+            assert records[0]["is_request_timeout"] is False
+
+    def test_tool_less_server_keeps_the_stock_404(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/anything", json={})
+            assert resp.status_code == 404
+            assert resp.json() == {"detail": "Not Found"}  # no catch-all when no tools configured
+
+
+class TestMCPRoundTrip:
+    """tools/list advertises the nemo_skills schema verbatim; tools/call shares the HTTP session."""
+
+    def test_list_and_call_over_mcp(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            token = _seed(client)
+
+            tools = _list_tools(client, token=token)
+            assert set(tools) == {"execute_python"}
+            assert tools["execute_python"]["inputSchema"] == PYTHON_TOOL_SCHEMA
+            assert tools["execute_python"]["description"] == "Execute python code."
+
+            result = _call(client, "execute_python", {"code": "print(2+2)"}, token=token)
+            assert result.get("isError") is not True
+            assert result["content"][0]["text"] == json.dumps(DICT_RESULT)
+
+            # The MCP call resolved the same session id the HTTP cookie transport would use.
+            _, _, extra = server.tool_manager.calls[0]
+            assert extra["request_id"]
+            assert extra["request_id"] in server._timing_by_session
+
+    def test_call_without_session_token_is_a_tool_error(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            result = _call(client, "execute_python", {"code": "print(2+2)"}, token=None)
+            assert result["isError"] is True
+            assert TOKEN_HEADER in result["content"][0]["text"]
+
+
+class TestTransportParity:
+    """MCP tools/list names == HTTP POST tool routes == the discovered nemo_skills inventory."""
+
+    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+    def test_tool_sets_identical_across_transports(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = _make_tools_server()
+        app = server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            mcp_names = set(_list_tools(client))
+
+            http_names = set()
+            for route in app.router.routes:
+                path = getattr(route, "path", None)
+                methods = getattr(route, "methods", None) or set()
+                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
+                    http_names.add(path.lstrip("/"))
+
+            assert mcp_names == http_names == {"execute_python"}
