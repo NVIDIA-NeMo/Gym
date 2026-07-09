@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import math
 from unittest.mock import MagicMock
 
-from pytest import approx, fixture
+import pytest
+from pytest import fixture
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -23,12 +25,33 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.math_advanced_calculations.app import (
-    MultiVerseMathHardRequest,
     MultiVerseMathHardResourcesServer,
     MultiVerseMathHardResourcesServerConfig,
-    MultiVerseMathHardResponse,
     MultiVerseMathHardVerifyRequest,
 )
+
+
+pytest.importorskip("mcp")
+
+EXPECTED_TOOLS = {
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "sin",
+    "cos",
+    "power",
+    "log",
+    "pi",
+    "negate",
+    "return_constant",
+}
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+def _solution_bytes(value: float) -> bytes:
+    """The exact wire bytes of the historical response envelope."""
+    return json.dumps({"solution": float(value)}, separators=(",", ":")).encode()
 
 
 class TestApp:
@@ -38,7 +61,7 @@ class TestApp:
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            name="",
+            name="math_advanced_calculations",
         )
 
     def init_server(self, config: MultiVerseMathHardResourcesServerConfig):
@@ -46,147 +69,146 @@ class TestApp:
         resources_server = MultiVerseMathHardResourcesServer(config=config, server_client=server_mock)
         return resources_server
 
-    async def test_multiply(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+    # ----------------------------------------------------------------------------------------
+    # HTTP wire-contract replay: byte-equal response bodies for every tool
+    # ----------------------------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "path, body, expected_solution",
+        [
+            ("/multiply", {"a": 5.0, "b": 2.0}, 1.1 * 5.0 * 2.0),
+            ("/divide", {"a": 10.0, "b": 2.0}, 0.5 * 10.0 / 2.0),
+            ("/add", {"a": 3.0, "b": 7.0}, 3.0 + 7.0 + 1.2),
+            ("/return_constant", {"a": 42.0}, 42.0),
+            ("/sin", {"radians": math.pi / 2}, math.cos(math.pi / 2)),
+            ("/cos", {"radians": math.pi}, math.sin(math.pi)),
+            ("/subtract", {"a": 15.0, "b": 5.0}, 15.0 - 5.0 - 3),
+            ("/power", {"a": 2.0, "b": 3.0}, 2.0 ** (3.0 + 2)),
+            ("/log", {"a": 100.0, "base": 8.5}, math.log(100.0, abs(8.5 + 1.5))),
+            ("/pi", {}, math.e),
+            ("/negate", {"a": 7.0}, 7.0),
+        ],
+    )
+    def test_tool_replay_byte_equal(
+        self,
+        config: MultiVerseMathHardResourcesServerConfig,
+        path: str,
+        body: dict,
+        expected_solution: float,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
         resources_server = self.init_server(config)
-        a = 5.0
-        b = 2.0
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post(path, json=body)
+            assert response.status_code == 200
+            assert response.content == _solution_bytes(expected_solution)
 
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
+    def test_null_arguments_are_silently_filtered(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+        """The old dispatcher dropped explicit-null args before calling the function; that stays."""
+        from fastapi.testclient import TestClient
 
-        response = await resources_server.route_to_python_function("multiply", mock_body)
-
-        expected_solution = 1.1 * a * b
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_divide(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post("/add", json={"a": 1.0, "b": 3.0, "radians": None, "base": None})
+            assert response.status_code == 200
+            assert response.content == b'{"solution":5.2}'
 
-        a = 10.0
-        b = 2.0
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
+    def test_unknown_tool_preserves_historical_404_bytes(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        from fastapi.testclient import TestClient
 
-        response = await resources_server.route_to_python_function("divide", mock_body)
-        expected_solution = 0.5 * a / b
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_add(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post("/no_such_function", json={})
+            assert response.status_code == 404
+            assert response.content == b'{"detail":"Function not found"}'
 
-        a = 3.0
-        b = 7.0
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
+    def test_missing_argument_preserves_historical_500_bytes(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        from fastapi.testclient import TestClient
 
-        response = await resources_server.route_to_python_function("add", mock_body)
-        expected_solution = a + b + 1.2
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_return_constant(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
-        a = 42.0
-        mock_body = MultiVerseMathHardRequest(**{"a": a})
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post("/add", json={"a": 1.0})
+            assert response.status_code == 500
+            assert response.content == b'{"detail":"add() missing 1 required positional argument: \'b\'"}'
 
-        response = await resources_server.route_to_python_function("return_constant", mock_body)
-        expected_solution = a
+    def test_math_error_preserves_historical_500_bytes(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+        from fastapi.testclient import TestClient
 
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_sin(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
-        radians = math.pi / 2
-        mock_body = MultiVerseMathHardRequest(**{"radians": radians})
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post("/divide", json={"a": 1.0, "b": 0.0})
+            assert response.status_code == 500
+            assert response.content == b'{"detail":"float division by zero"}'
 
-        response = await resources_server.route_to_python_function("sin", mock_body)
-        expected_solution = math.cos(radians)
+    def test_bad_argument_type_is_422(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+        from fastapi.testclient import TestClient
 
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_cos(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
-        radians = math.pi
-        mock_body = MultiVerseMathHardRequest(**{"radians": radians})
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            response = client.post("/add", json={"a": "x", "b": 1.0})
+            assert response.status_code == 422
+            (error,) = response.json()["detail"]
+            assert error["type"] == "float_parsing"
+            assert error["loc"] == ["body", "a"]
 
-        response = await resources_server.route_to_python_function("cos", mock_body)
-        expected_solution = math.sin(radians)
+    # ----------------------------------------------------------------------------------------
+    # MCP round-trip and transport parity
+    # ----------------------------------------------------------------------------------------
 
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
+    def _rpc(self, client, method: str, params: dict, rpc_id: int = 1):
+        return client.post(
+            "/mcp",
+            headers=RPC_HEADERS,
+            json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
+            follow_redirects=False,
+        )
 
-    async def test_subtract(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+    def test_mcp_lists_and_calls_the_same_tools(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+        from fastapi.testclient import TestClient
+
         resources_server = self.init_server(config)
-        a = 15.0
-        b = 5.0
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
+        with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            listing = self._rpc(client, "tools/list", {})
+            assert listing.status_code == 200, listing.text
+            tools = {tool["name"]: tool for tool in listing.json()["result"]["tools"]}
+            assert set(tools) == EXPECTED_TOOLS
+            assert set(tools["add"]["inputSchema"]["properties"]) == {"a", "b"}
+            assert "session_id" not in tools["add"]["inputSchema"]["properties"]
 
-        response = await resources_server.route_to_python_function("subtract", mock_body)
-        expected_solution = a - b - 3
+            called = self._rpc(client, "tools/call", {"name": "add", "arguments": {"a": 1.0, "b": 3.0}}, rpc_id=2)
+            assert called.status_code == 200, called.text
+            result = called.json()["result"]
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"solution": 5.2}
 
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
+    def test_transport_parity(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
+        from fastapi.testclient import TestClient
 
-    async def test_power(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
-        a = 2.0
-        b = 3.0
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "b": b})
+        app = resources_server.setup_webserver()
+        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+        http_tools = {
+            route.path.lstrip("/")
+            for route in app.router.routes
+            if getattr(route, "path", None)
+            and "POST" in (getattr(route, "methods", None) or set())
+            and route.path not in non_tool_paths
+        }
 
-        response = await resources_server.route_to_python_function("power", mock_body)
-        expected_solution = a ** (b + 2)
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            listing = self._rpc(client, "tools/list", {})
+            mcp_tools = {tool["name"] for tool in listing.json()["result"]["tools"]}
 
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
+        assert mcp_tools == http_tools == EXPECTED_TOOLS
 
-    async def test_log(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        resources_server = self.init_server(config)
-        a = 100.0
-        base = 8.5
-        mock_body = MultiVerseMathHardRequest(**{"a": a, "base": base})
-
-        response = await resources_server.route_to_python_function("log", mock_body)
-        expected_solution = math.log(a, abs(base + 1.5))
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_pi_method_logic_with_magicmock(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        resources_server = self.init_server(config)
-        mock_body = MultiVerseMathHardRequest()  # Use an empty request body
-
-        response = await resources_server.route_to_python_function("pi", mock_body)
-        expected_solution = math.e
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
-
-    async def test_negate(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        resources_server = self.init_server(config)
-        a = 7.0
-
-        mock_body = MultiVerseMathHardRequest(**{"a": a})
-
-        response = await resources_server.route_to_python_function("negate", mock_body)
-        expected_solution = a
-
-        assert response.solution == approx(expected_solution)
-        assert isinstance(response, MultiVerseMathHardResponse)
-        assert isinstance(response.solution, float)
+    # ----------------------------------------------------------------------------------------
+    # Verification
+    # ----------------------------------------------------------------------------------------
 
     async def test_verify(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         resources_server = self.init_server(config)
