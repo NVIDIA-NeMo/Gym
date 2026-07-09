@@ -23,7 +23,7 @@ from tool_sandbox.common.message_conversion import (
 from tool_sandbox.common.tool_conversion import convert_to_openai_tool
 from tool_sandbox.common.utils import all_logging_disabled
 from tool_sandbox.roles.base_role import BaseRole
-from tool_sandbox.roles.openai_api_agent import (
+from tool_sandbox.roles.openai_api import (
     OpenAIRoleConfig,
     _sampling_kwargs,
     openai_retry,
