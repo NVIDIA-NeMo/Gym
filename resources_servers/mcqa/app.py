@@ -87,7 +87,7 @@ ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
-    """Pull the answer letter out of the first \\boxed{...}.
+    """Pull the answer letter out of the last \\boxed{...}.
 
     Handles a bare letter, a \\text{...} wrapper (\\boxed{\\text{E}}), and a
     leading letter with option text after it (\\boxed{E: ...}). Plain option
@@ -160,7 +160,7 @@ def _normalize_for_match(s: str) -> str:
 def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters: set[str]) -> Optional[str]:
     """Match boxed content against option texts and return the option letter.
 
-    - Looks ONLY inside the first \boxed{...} region; returns None if absent.
+    - Looks ONLY inside the last \boxed{...} region; returns None if absent.
     - Normalizes (lowercase, collapse whitespace) both boxed content and option texts.
     - Treats a match as substring containment of an option's text in the boxed content.
     - Returns the option letter only if EXACTLY ONE option matches; otherwise returns None.
