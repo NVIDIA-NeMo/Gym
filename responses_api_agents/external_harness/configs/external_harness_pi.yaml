@@ -1,0 +1,57 @@
+# Same stack as external_harness_claude_code.yaml but running the Pi CLI
+# (@earendil-works/pi-coding-agent) as the harness. Pi speaks the OpenAI
+# chat-completions dialect, so vllm_model is used exactly as-is; only the agent's
+# `harness` (and its spec) differ — the proof that the adapter boundary holds.
+
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      uses_reasoning_parser: false
+      return_token_id_information: false
+      observability:
+        enabled: true
+        capture_dir: ng_captures
+        run_id: workstation
+        return_token_ids: false
+
+blackbox_tool_toy:
+  resources_servers:
+    blackbox_tool_toy:
+      entrypoint: app.py
+      domain: coding
+
+external_harness_agent:
+  responses_api_agents:
+    external_harness:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: blackbox_tool_toy
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      policy_model_name: ${policy_model_name}
+      settings:
+        harness: pi
+        builder: prefix_merging
+        training_mode: false
+        sandbox_provider:
+          docker: {}
+        sandbox_spec:
+          # Pi 0.80.2 requires Node >= 22 (pi_agent's installer pins 22.15.0).
+          image: node:22-bookworm-slim
+          workdir: /tmp/nemo-gym-harness
+          provider_options:
+            run_args: ["--network", "host"]
+        harness_spec:
+          pinned_version: "0.80.2"
+      datasets:
+        - name: example
+          type: validation
+          license: MIT
+          jsonl_fpath: resources_servers/blackbox_tool_toy/data/example.jsonl
