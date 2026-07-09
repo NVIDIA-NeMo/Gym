@@ -275,6 +275,13 @@ class TestReplayMainAsync:
         assert aa_responses[1]["submission_ids"] == [2, 3]
         assert aa_responses[1]["response"] == aa_result
 
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 4
+        assert partial["total_submissions_seen"] == 4
+        assert partial["pending_submissions"] == 0
+        assert partial["scored_batches"] == 2
+        assert partial["mean_accuracy_over_scored"] == 0.25
+
     @pytest.mark.asyncio
     async def test_nothing_pending_returns_zero(self, tmp_path):
         _write_jsonl(
@@ -310,3 +317,47 @@ class TestReplayMainAsync:
 
         assert exit_code == 3
         assert not (tmp_path / "aa_responses.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_quota_exhausted_refreshes_partial_metrics_after_partial_replay(self, tmp_path):
+        """Batches scored before quota exhaustion still update partial_metrics.json."""
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [
+                _submission_row(0, "p1", "a=1"),
+                _submission_row(1, "p2", "b=2"),
+                _submission_row(2, "p1", "c=3"),
+                _submission_row(3, "p2", "d=4"),
+            ],
+        )
+        (tmp_path / "partial_metrics.json").write_text(
+            json.dumps(
+                {
+                    "scored_submissions": 0,
+                    "total_submissions_seen": 4,
+                    "pending_submissions": 4,
+                    "scored_batches": 0,
+                    "mean_accuracy_over_scored": None,
+                    "mean_timeout_rate_over_scored": None,
+                    "ts": 1.0,
+                }
+            )
+        )
+        first_batch = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 0}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.side_effect = [
+                (first_batch, 0),
+                CritPtRateLimitExceeded(retry_after_seconds=60, reset_unix=999, body="rl"),
+            ]
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 3
+        assert call_api.await_count == 2
+
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["total_submissions_seen"] == 4
+        assert partial["pending_submissions"] == 2
+        assert partial["scored_batches"] == 1
+        assert partial["mean_accuracy_over_scored"] == 0.5

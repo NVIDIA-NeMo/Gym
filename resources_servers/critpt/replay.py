@@ -59,6 +59,7 @@ from resources_servers.critpt.app import (
     _ALL_PROBLEM_IDS,
     CritPtRateLimitExceeded,
     _call_api,
+    refresh_partial_metrics,
 )
 
 
@@ -297,6 +298,8 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 f"tool after the quota resets.",
                 file=sys.stderr,
             )
+            if rejudged > 0:
+                refresh_partial_metrics(args.cache_dir)
             return 3
 
         with aa_responses_path.open("a") as fh:
@@ -330,6 +333,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 else " (pass --fire-after N to pad and ship short batches, matching a smoke run)."
             )
         )
+    refresh_partial_metrics(args.cache_dir)
     return 0
 
 

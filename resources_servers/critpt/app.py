@@ -63,6 +63,53 @@ def _run_subdir_name() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
+def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
+    """Recompute partial_metrics.json from the on-disk caches.
+
+    Called after every successful AA call (live verify() or replay) so the file
+    always reflects current state.
+    """
+    if cache_dir is None:
+        return
+    responses_path = cache_dir / "aa_responses.jsonl"
+    submissions_path = cache_dir / "submissions.jsonl"
+    scored = 0
+    accuracy_sum = 0.0
+    timeout_rate_sum = 0.0
+    n_batches = 0
+    if responses_path.exists():
+        with responses_path.open("r") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                n = len(rec["submission_ids"])
+                response = rec["response"]
+                scored += n
+                accuracy_sum += float(response.get("accuracy", 0.0)) * n
+                timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n
+                n_batches += 1
+    n_submissions = 0
+    if submissions_path.exists():
+        with submissions_path.open("r") as fh:
+            for raw in fh:
+                if raw.strip():
+                    n_submissions += 1
+    partial = {
+        "scored_submissions": scored,
+        "total_submissions_seen": n_submissions,
+        "pending_submissions": max(0, n_submissions - scored),
+        "scored_batches": n_batches,
+        "mean_accuracy_over_scored": (accuracy_sum / scored) if scored else None,
+        "mean_timeout_rate_over_scored": (timeout_rate_sum / scored) if scored else None,
+        "ts": time.time(),
+    }
+    out_path = cache_dir / "partial_metrics.json"
+    with out_path.open("w") as fh:
+        json.dump(partial, fh, indent=2)
+
+
 LOG = logging.getLogger(__name__)
 
 # Canonical PUBLIC problem set; used to pad sub-batch fires in smoke-test mode.
@@ -467,50 +514,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
         return bid
 
     def _refresh_partial_metrics(self) -> None:
-        """Recompute partial_metrics.json from the on-disk caches.
-
-        Called after every successful AA call so the file always reflects
-        current state.
-        """
-        if self.config.cache_dir is None:
-            return
-        responses_path = self.config.cache_dir / "aa_responses.jsonl"
-        submissions_path = self.config.cache_dir / "submissions.jsonl"
-        scored = 0
-        accuracy_sum = 0.0
-        timeout_rate_sum = 0.0
-        n_batches = 0
-        if responses_path.exists():
-            with responses_path.open("r") as fh:
-                for raw in fh:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    n = len(rec["submission_ids"])
-                    response = rec["response"]
-                    scored += n
-                    accuracy_sum += float(response.get("accuracy", 0.0)) * n
-                    timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n
-                    n_batches += 1
-        n_submissions = 0
-        if submissions_path.exists():
-            with submissions_path.open("r") as fh:
-                for raw in fh:
-                    if raw.strip():
-                        n_submissions += 1
-        partial = {
-            "scored_submissions": scored,
-            "total_submissions_seen": n_submissions,
-            "pending_submissions": max(0, n_submissions - scored),
-            "scored_batches": n_batches,
-            "mean_accuracy_over_scored": (accuracy_sum / scored) if scored else None,
-            "mean_timeout_rate_over_scored": (timeout_rate_sum / scored) if scored else None,
-            "ts": time.time(),
-        }
-        out_path = self.config.cache_dir / "partial_metrics.json"
-        with out_path.open("w") as fh:
-            json.dump(partial, fh, indent=2)
+        refresh_partial_metrics(self.config.cache_dir)
 
 
 def _extract_output_text(body: CritPtVerifyRequest) -> str:
