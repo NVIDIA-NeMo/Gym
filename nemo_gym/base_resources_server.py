@@ -14,17 +14,21 @@
 # limitations under the License.
 import functools
 import inspect
+import json
+import logging
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Optional, get_type_hints
+from typing import Any, Callable, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from itsdangerous import BadSignature, URLSafeSerializer
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError, create_model
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
@@ -35,6 +39,8 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
+
+LOG = logging.getLogger(__name__)
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
@@ -47,29 +53,94 @@ _MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
 class MCPSessionError(Exception):
     """A Gym MCP tool call lacked a valid per-rollout session token.
 
-    Deliberately not an HTTP error: MCP runs over JSON-RPC, so FastMCP returns HTTP 200 and surfaces
-    this to the client as a tool error (``isError: true``). An HTTP status code raised here would
-    never reach the caller, so we raise a plain error with a clear message instead.
+    Deliberately not an HTTP error: MCP runs over JSON-RPC, so the transport returns HTTP 200 and
+    surfaces this to the client as a tool error (``isError: true``). An HTTP status code raised here
+    would never reach the caller, so we raise a plain error with a clear message instead.
     """
 
 
-# Names a @gym_tool method may not use, because they collide with the resources server's own
+# Names a gym_tool may not use, because they collide with the resources server's own
 # endpoints (and would silently shadow them on HTTP while still registering as MCP tools).
 RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
 
 
-def gym_tool(fn):
-    """Mark a resources-server method as a tool to auto-expose over MCP.
+class GymToolSpec(BaseModel):
+    """Declaration attached to a callable by ``gym_tool``; drives both transports.
 
-    The method is registered as an MCP tool named after the method, and its MCP input schema is
-    derived from the method's typed parameters. Declare a ``session_id: str`` parameter to receive
-    the per-rollout Gym session id; it is injected automatically (from the hidden session token) and
-    hidden from the tool's input schema. The method must NOT take a ``request`` parameter — there is
-    no FastAPI ``Request`` on the MCP path; use ``session_id`` instead. Both sync and async methods
-    are supported.
+    ``input_schema`` decides where the tool's advertised schema comes from:
+    ``None`` — introspect the callable's typed parameters (signature = schema);
+    a JSON-schema ``dict`` — advertise it verbatim over MCP and pass call arguments through raw;
+    a Pydantic model class — the model's fields are the schema, arguments validate into an instance.
     """
-    fn.__gym_tool__ = True
-    return fn
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    name: str
+    description: Optional[str] = None
+    input_schema: Optional[Any] = None
+    validate_input: bool = False
+
+
+def gym_tool(
+    fn: Optional[Callable] = None,
+    /,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    input_schema: Optional[Any] = None,
+    validate: bool = False,
+    owner: Optional["SimpleResourcesServer"] = None,
+):
+    """Declare a callable as a Gym tool, served over BOTH transports: MCP and HTTP ``POST /<name>``.
+
+    This is the single tool-registration entry point. Two binding times, one API:
+
+    - Decorator on a typed method (bare or with kwargs)::
+
+        @gym_tool
+        async def get_weather(self, session_id: str, city: str) -> GetWeatherResponse: ...
+
+    - Runtime call for tools that only exist after startup (registries, discovered tool sets),
+      typically from ``model_post_init``::
+
+        gym_tool(closure, name=tool.name, description=tool.description,
+                 input_schema=tool.input_schema, owner=self)
+
+    Contract (both transports):
+    - Declare ``session_id: str`` to receive the per-rollout Gym session id. It is injected by the
+      base — from the session cookie on HTTP, from the signed session token on MCP — and is never
+      visible in, nor injectable from, the model-facing payload.
+    - Never take a ``request`` parameter; there is no FastAPI ``Request`` on the MCP path.
+    - With ``input_schema=None`` use flat typed params (NOT one wrapping Pydantic ``body`` arg —
+      the parameter name would leak into the MCP argument shape); the HTTP body is validated by a
+      synthesized model (422 on bad input) and the MCP schema is derived from the same params.
+    - With a JSON-schema ``dict``, the schema is advertised verbatim and call arguments are passed
+      through RAW on both transports (set ``validate=True`` for shallow 422-gating over HTTP).
+    - With a Pydantic model class, the callable receives the validated instance as its single
+      non-session parameter; HTTP body validation is byte-identical to a hand-written route.
+    - ``str`` return values are served as ``text/plain`` over HTTP; models/dicts as JSON.
+    - Sync callables are offloaded to a threadpool on both transports (never block the event loop).
+    - Error shapes differ per transport by design: an exception surfaces over MCP as a tool error
+      (``isError: true`` on HTTP 200) and over HTTP as a 500 with ``repr(e)``. Session presence also
+      differs: MCP without a token raises a clean tool error, while HTTP without a cookie mints a
+      fresh (unseeded) session id per request — stateful tools should keep a seeded-session guard.
+    """
+
+    def apply(func: Callable) -> Callable:
+        tool_name = name or getattr(func, "__name__", None)
+        if not tool_name:
+            raise ValueError("gym_tool requires name= for callables without a __name__.")
+        func.__gym_tool__ = GymToolSpec(
+            name=tool_name,
+            description=description if description is not None else ((func.__doc__ or "").strip() or None),
+            input_schema=input_schema,
+            validate_input=validate,
+        )
+        if owner is not None:
+            owner._dynamic_gym_tools.append(func)
+        return func
+
+    return apply if fn is None else apply(fn)
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
@@ -127,16 +198,45 @@ class _MCPHeaderSessionMiddleware:
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
+    """Resources server base: /seed_session, /verify, /aggregate_metrics — and, lazily, Gym tools.
+
+    Declare tools with ``gym_tool`` (see its docstring for the full contract). Each declared tool is
+    served over BOTH transports: an HTTP ``POST /<name>`` route and an MCP tool on ``mcp_url_path``.
+    The MCP endpoint (and the ``mcp`` package import) only exists when the server declares at least
+    one tool or overrides ``register_mcp_tools``; a tool-less server's app is unchanged.
+
+    Per-rollout sessions thread through both transports to the same session id: ``/seed_session``
+    responses are auto-augmented with :class:`MCPServerMetadata` (a signed session token the agent
+    sends back as the ``X-NeMo-Gym-Session-Token`` header), and HTTP calls carry the session cookie.
+    Pass ``allowed_tools`` to :meth:`build_mcp_session_metadata` to restrict which tools an MCP
+    session can list and call.
+    """
+
     config: BaseResourcesServerConfig
+
+    mcp_url_path: str = "/mcp"
+
+    _dynamic_gym_tools: list = PrivateAttr(default_factory=list)
+    _raw_dispatch: dict = PrivateAttr(default_factory=dict)
+    _gym_tool_names: tuple = PrivateAttr(default=())
+    _mcp_mounted: bool = PrivateAttr(default=False)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
 
-        app.post("/seed_session")(self.seed_session)
+        gym_tools = self._collect_gym_tools()
+        mcp_overridden = type(self).register_mcp_tools is not SimpleResourcesServer.register_mcp_tools
+        mcp_enabled = bool(gym_tools) or mcp_overridden
+
+        # Tool-less servers keep the exact pre-MCP app: plain seed_session, no /mcp, no mcp import.
+        app.post("/seed_session")(self._build_seed_session_endpoint() if mcp_enabled else self.seed_session)
         app.post("/verify")(self.verify)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+
+        if mcp_enabled:
+            self._setup_mcp(app, gym_tools)
 
         return app
 
@@ -159,29 +259,40 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             get_key_metrics_fn=self.get_key_metrics,
         )
 
+    # --------------------------------------------------------------------------------------------
+    # Gym tool collection and MCP setup
+    # --------------------------------------------------------------------------------------------
 
-class MCPResourcesServer(SimpleResourcesServer):
-    """SimpleResourcesServer variant that also exposes Gym-owned MCP tools.
+    def _collect_gym_tools(self) -> list[tuple[GymToolSpec, Callable]]:
+        """Gather every gym_tool declaration: decorated class methods + runtime-registered callables."""
+        tools: list[tuple[GymToolSpec, Callable]] = []
+        for attr_name, func in inspect.getmembers(type(self), predicate=inspect.isfunction):
+            spec = getattr(func, "__gym_tool__", None)
+            if spec is not None:
+                tools.append((spec, getattr(self, attr_name)))
+        for func in self._dynamic_gym_tools:
+            spec = getattr(func, "__gym_tool__", None)
+            if spec is not None:
+                tools.append((spec, func))
 
-    Subclasses decorate tool methods with ``@gym_tool`` (the default ``register_mcp_tools``
-    auto-registers them; override only for manual control) and call ``build_mcp_session_metadata``
-    from ``seed_session`` to hand the agent a per-rollout token. A ``@gym_tool`` method receives the
-    Gym session by declaring a ``session_id`` parameter, which the base resolves from that token (a
-    stateless signed value) so tool calls share the session id used by /seed_session and /verify.
-    """
+        seen: set[str] = set()
+        for spec, _ in tools:
+            if spec.name in RESERVED_MCP_TOOL_NAMES:
+                raise ValueError(
+                    f"@gym_tool method {spec.name!r} collides with a reserved endpoint name "
+                    f"{sorted(RESERVED_MCP_TOOL_NAMES)}; rename the tool."
+                )
+            if spec.name in seen:
+                raise ValueError(f"Duplicate gym_tool name {spec.name!r}; tool names must be unique per server.")
+            seen.add(spec.name)
+        return tools
 
-    mcp_url_path: str = "/mcp"
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
+    def _setup_mcp(self, app: FastAPI, gym_tools: list[tuple[GymToolSpec, Callable]]) -> None:
         try:
             from mcp.server.fastmcp import FastMCP
             from mcp.server.transport_security import TransportSecuritySettings
         except ImportError as exc:  # pragma: no cover - exercised only without the optional runtime dependency
-            raise RuntimeError(
-                "MCPResourcesServer requires the official MCP Python SDK. Install the 'mcp' package."
-            ) from exc
+            raise RuntimeError("Gym tools require the official MCP Python SDK. Install the 'mcp' package.") from exc
 
         mcp = FastMCP(
             self.config.name or self.__class__.__name__,
@@ -196,12 +307,30 @@ class MCPResourcesServer(SimpleResourcesServer):
             # Host/Origin validation to keep MCP tool calls working off-loopback.
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
+
+        self._raw_dispatch = {}
+        for spec, fn in gym_tools:
+            if spec.input_schema is not None:
+                self._check_no_request_param(spec.name, fn)
+                self._raw_dispatch[spec.name] = (spec, fn)
+
         self.register_mcp_tools(mcp)
+        self._install_mcp_list_handler(mcp)
+        self._install_mcp_call_handler(mcp)
+
+        for spec, fn in gym_tools:
+            self._register_http_gym_tool(app, spec, fn)
+
+        self._gym_tool_names = tuple(sorted(spec.name for spec, _ in gym_tools))
+        self._warn_on_transport_parity_gap(mcp)
 
         main_app_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
         async def lifespan_wrapper(app: FastAPI):
+            # The catch-all must land AFTER every subclass-added route, and exactly once across
+            # repeated lifespan cycles (TestClient re-entry) — hence registered here, guarded.
+            self._ensure_unknown_tool_catchall(app)
             async with mcp.session_manager.run():
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
@@ -219,21 +348,24 @@ class MCPResourcesServer(SimpleResourcesServer):
             )
         )
         app.mount(self.mcp_url_path, _MCPHeaderSessionMiddleware(mcp_app))
-        return app
+        self._mcp_mounted = True
 
     def register_mcp_tools(self, mcp: Any) -> None:
-        """Auto-register methods decorated with ``@gym_tool`` as MCP tools.
+        """Register this server's typed gym_tool declarations as MCP tools.
 
-        Subclasses can either rely on this default (just decorate tool methods with ``@gym_tool``) or
-        override it for full manual control. To add manual ``@mcp.tool()`` functions on top of the
-        auto-registered ones, call ``super().register_mcp_tools(mcp)`` first.
+        Override for manual control of the MCP surface; to add manual ``@mcp.tool()`` functions on
+        top of the auto-registered ones, call ``super().register_mcp_tools(mcp)`` first. Note that
+        manual registrations are MCP-only: HTTP routes are driven solely by gym_tool declarations,
+        so hand-registered MCP tools get no HTTP twin (the base logs a warning). Tools declared with
+        an explicit ``input_schema`` (dict or model) are dispatched by the base directly and do not
+        pass through FastMCP registration.
         """
-        for name, func in inspect.getmembers(type(self), predicate=inspect.isfunction):
-            if getattr(func, "__gym_tool__", False):
-                self._register_gym_tool(mcp, name, getattr(self, name))
+        for spec, method in self._collect_gym_tools():
+            if spec.input_schema is None:
+                self._register_gym_tool(mcp, spec.name, method, description=spec.description)
 
-    def _register_gym_tool(self, mcp: Any, name: str, method: Any) -> None:
-        """Register one bound ``@gym_tool`` method as an MCP tool.
+    def _register_gym_tool(self, mcp: Any, name: str, method: Any, description: Optional[str] = None) -> None:
+        """Register one typed gym_tool callable as a FastMCP tool.
 
         Builds a wrapper whose signature mirrors the method's parameters minus ``session_id`` (so the
         session id stays out of the model-visible input schema) and injects the resolved Gym session id
@@ -244,16 +376,10 @@ class MCPResourcesServer(SimpleResourcesServer):
                 f"@gym_tool method {name!r} collides with a reserved endpoint name "
                 f"{sorted(RESERVED_MCP_TOOL_NAMES)}; rename the tool."
             )
+        self._check_no_request_param(name, method)
 
         signature = inspect.signature(method)
-        hints = get_type_hints(method)
-        for param_name, param in signature.parameters.items():
-            if param_name == "request" or hints.get(param_name, param.annotation) is Request:
-                raise ValueError(
-                    f"@gym_tool method {name!r} must not take a 'request' parameter; there is no FastAPI "
-                    "Request on the MCP path. Declare a 'session_id: str' parameter to access the Gym session."
-                )
-
+        hints = get_type_hints(method, include_extras=True)
         inject_session = "session_id" in signature.parameters
 
         if inspect.iscoroutinefunction(method):
@@ -285,18 +411,352 @@ class MCPResourcesServer(SimpleResourcesServer):
             return_annotation=hints.get("return", signature.return_annotation),
         )
         wrapper.__annotations__ = {k: v for k, v in hints.items() if k != "session_id"}
-        mcp.add_tool(wrapper, name=name, description=(method.__doc__ or "").strip() or None)
+        mcp.add_tool(wrapper, name=name, description=description or (method.__doc__ or "").strip() or None)
 
-    def build_mcp_session_metadata(self, request: Request) -> MCPServerMetadata:
+    def _check_no_request_param(self, name: str, method: Callable) -> None:
+        signature = inspect.signature(method)
+        try:
+            hints = get_type_hints(method)
+        except Exception:
+            hints = {}
+        for param_name, param in signature.parameters.items():
+            if param_name == "request" or hints.get(param_name, param.annotation) is Request:
+                raise ValueError(
+                    f"@gym_tool method {name!r} must not take a 'request' parameter; there is no FastAPI "
+                    "Request on the MCP path. Declare a 'session_id: str' parameter to access the Gym session."
+                )
+
+    # --------------------------------------------------------------------------------------------
+    # MCP low-level handlers: session-aware tools/list, raw-argument tools/call
+    # --------------------------------------------------------------------------------------------
+
+    def _install_mcp_list_handler(self, mcp: Any) -> None:
+        """Re-register the low-level tools/list handler: raw-schema tools + per-session filtering.
+
+        FastMCP's own listing only knows FastMCP-registered (typed/manual) tools and has no
+        per-request filter; this handler appends dict/model-schema gym tools (schemas advertised
+        verbatim) and applies the session token's ``allowed_tools`` claim when present.
+        """
+        import mcp.types as types
+
+        @mcp._mcp_server.list_tools()
+        async def _gym_list_tools() -> list:
+            tools = list(await mcp.list_tools())
+            for spec, _ in self._raw_dispatch.values():
+                schema = spec.input_schema
+                if isinstance(schema, type) and issubclass(schema, BaseModel):
+                    schema = schema.model_json_schema()
+                tools.append(types.Tool(name=spec.name, description=spec.description, inputSchema=schema))
+            _, allowed = self._mcp_session_claims(required=False)
+            if allowed is not None:
+                tools = [tool for tool in tools if tool.name in allowed]
+            return tools
+
+    def _install_mcp_call_handler(self, mcp: Any) -> None:
+        """Re-register the low-level tools/call handler: claim gate + raw-argument dispatch.
+
+        Dict/model-schema tools must NOT pass through FastMCP's argument validation — it silently
+        drops every argument name not present in its synthesized signature. This handler enforces
+        the ``allowed_tools`` claim for ALL tools (hiding alone does not block), dispatches
+        raw-schema tools with the caller's arguments verbatim, and delegates typed tools to FastMCP.
+        """
+
+        @mcp._mcp_server.call_tool(validate_input=False)
+        async def _gym_call_tool(name: str, arguments: Optional[dict]) -> Any:
+            _, allowed = self._mcp_session_claims(required=False)
+            if allowed is not None and name not in allowed:
+                raise MCPSessionError(f"Tool {name!r} is not available for this session.")
+            entry = self._raw_dispatch.get(name)
+            if entry is None:
+                return await mcp.call_tool(name, arguments or {})
+            result = await self._call_raw_gym_tool(entry, arguments or {}, self.require_mcp_session_id)
+            return self._to_call_tool_return(result)
+
+    async def _call_raw_gym_tool(
+        self,
+        entry: tuple[GymToolSpec, Callable],
+        arguments: dict,
+        resolve_session_id: Callable[[], str],
+    ) -> Any:
+        """Invoke a dict/model-schema gym tool with raw arguments; shared by both transports."""
+        spec, fn = entry
+        signature = inspect.signature(fn)
+
+        schema = spec.input_schema
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            instance = schema.model_validate(arguments)
+            body_params = [p for p in signature.parameters if p != "session_id"]
+            if len(body_params) != 1:
+                raise ValueError(
+                    f"gym_tool {spec.name!r} with a model input_schema must take exactly one "
+                    f"non-session parameter (the validated instance); got {body_params}."
+                )
+            kwargs: dict[str, Any] = {body_params[0]: instance}
+        else:
+            if spec.validate_input:
+                self._model_from_json_schema(spec.name, schema).model_validate(arguments)
+            kwargs = dict(arguments)
+            # The session id is never injectable from the model-facing payload.
+            kwargs.pop("session_id", None)
+
+        if "session_id" in signature.parameters:
+            kwargs["session_id"] = resolve_session_id()
+
+        if inspect.iscoroutinefunction(fn):
+            return await fn(**kwargs)
+        return await run_in_threadpool(fn, **kwargs)
+
+    @staticmethod
+    def _to_call_tool_return(result: Any) -> Any:
+        """Convert a raw tool's return value for the low-level SDK result normalizer.
+
+        The SDK renders a dict as structuredContent (+ a JSON text block) and a ContentBlock list as
+        plain content — but both ``str`` and ``BaseModel`` define ``__iter__``, so returning them
+        bare corrupts the result (char-exploded text / a spurious validation error). Convert first.
+        """
+        import mcp.types as types
+
+        if isinstance(result, BaseModel):
+            return result.model_dump(mode="json")
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            return [types.TextContent(type="text", text=result)]
+        return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+    def _warn_on_transport_parity_gap(self, mcp: Any) -> None:
+        registry = getattr(getattr(mcp, "_tool_manager", None), "_tools", None)
+        if registry is None:  # pragma: no cover - internal SDK layout changed; warning is best-effort
+            return
+        mcp_only = set(registry) - set(self._gym_tool_names)
+        if mcp_only:
+            LOG.warning(
+                "MCP-only tools with no HTTP route (manual @mcp.tool() registrations?): %s. "
+                "gym_tool declarations are served over both transports; manual MCP registrations are not.",
+                sorted(mcp_only),
+            )
+
+    # --------------------------------------------------------------------------------------------
+    # HTTP twin registration
+    # --------------------------------------------------------------------------------------------
+
+    def _register_http_gym_tool(self, app: FastAPI, spec: GymToolSpec, fn: Callable) -> None:
+        """Register the HTTP ``POST /<name>`` twin of a gym tool (session id from the cookie)."""
+        name = spec.name
+        signature = inspect.signature(fn)
+        inject_session = "session_id" in signature.parameters
+        is_coro = inspect.iscoroutinefunction(fn)
+
+        async def invoke(kwargs: dict, request: Request) -> Any:
+            if inject_session:
+                kwargs["session_id"] = request.session[SESSION_ID_KEY]
+            if is_coro:
+                return await fn(**kwargs)
+            return await run_in_threadpool(fn, **kwargs)
+
+        schema = spec.input_schema
+        if schema is None:
+            hints = get_type_hints(fn, include_extras=True)
+            body_model = self._synth_body_model(name, signature, hints)
+
+            async def http_handler(body: Any, request: Request) -> Any:
+                # Shallow one-level unpack: nested models must stay model instances (a deep
+                # body.model_dump() would hand the tool dicts where MCP hands it models).
+                kwargs = {field: getattr(body, field) for field in type(body).model_fields}
+                result = await invoke(kwargs, request)
+                return PlainTextResponse(result) if isinstance(result, str) else result
+
+            # Pin annotations so FastAPI introspects `body` as the request body even if a future
+            # maintainer adds `from __future__ import annotations` to this module. The return
+            # annotation is pinned only for model returns, so response filtering matches a
+            # hand-written route; str returns are served as text/plain instead.
+            annotations: dict[str, Any] = {"body": body_model, "request": Request}
+            return_hint = hints.get("return")
+            if isinstance(return_hint, type) and issubclass(return_hint, BaseModel):
+                annotations["return"] = return_hint
+            http_handler.__annotations__ = annotations
+            app.post(f"/{name}")(http_handler)
+        elif isinstance(schema, type) and issubclass(schema, BaseModel):
+            body_params = [p for p in signature.parameters if p != "session_id"]
+            if len(body_params) != 1:
+                raise ValueError(
+                    f"gym_tool {name!r} with a model input_schema must take exactly one "
+                    f"non-session parameter (the validated instance); got {body_params}."
+                )
+            body_param = body_params[0]
+
+            async def http_handler(body: Any, request: Request) -> Any:
+                result = await invoke({body_param: body}, request)
+                return PlainTextResponse(result) if isinstance(result, str) else result
+
+            http_handler.__annotations__ = {"body": schema, "request": Request}
+            app.post(f"/{name}")(http_handler)
+        else:
+            validator = self._model_from_json_schema(name, schema) if spec.validate_input else None
+
+            async def http_handler(request: Request) -> Any:
+                try:
+                    raw = await request.json()
+                except Exception:
+                    raw = {}
+                if not isinstance(raw, dict):
+                    return JSONResponse(
+                        status_code=422, content={"error": f"Tool {name!r} expects a JSON object body."}
+                    )
+                if validator is not None:
+                    try:
+                        validator.model_validate(raw)
+                    except ValidationError as exc:
+                        return JSONResponse(status_code=422, content={"error": str(exc)})
+                kwargs = dict(raw)
+                # The session id is never injectable from the model-facing payload.
+                kwargs.pop("session_id", None)
+                result = await invoke(kwargs, request)
+                if isinstance(result, str):
+                    return PlainTextResponse(result)
+                return result
+
+            app.post(f"/{name}")(http_handler)
+
+    def _synth_body_model(self, name: str, signature: inspect.Signature, hints: dict) -> type[BaseModel]:
+        """Synthesize the HTTP body model from a typed tool's visible (non-session) parameters."""
+        fields: dict[str, Any] = {}
+        for param_name, param in signature.parameters.items():
+            if param_name in ("self", "session_id"):
+                continue
+            if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD, param.POSITIONAL_ONLY):
+                raise ValueError(
+                    f"@gym_tool {name!r}: parameter {param_name!r} ({param.kind.description}) is unsupported "
+                    "for typed tools; use keyword-compatible typed params or declare input_schema explicitly."
+                )
+            annotation = hints.get(param_name, param.annotation)
+            if annotation is inspect.Parameter.empty:
+                annotation = Any
+            default = ... if param.default is inspect.Parameter.empty else param.default
+            fields[param_name] = (annotation, default)
+        # Namespaced model name: FastAPI de-duplicates identical OpenAPI schema names by mangling.
+        return create_model(f"{name}__GymToolBody", **fields)
+
+    def _model_from_json_schema(self, name: str, schema: dict) -> type[BaseModel]:
+        """Shallow Pydantic model from a JSON-schema dict (top-level property types only)."""
+        type_map = {"string": str, "integer": int, "number": float, "boolean": bool, "object": dict, "array": list}
+        fields: dict[str, Any] = {}
+        required = set(schema.get("required", []))
+        for prop_name, prop in schema.get("properties", {}).items():
+            python_type = type_map.get(prop.get("type", "string"), str)
+            fields[prop_name] = (python_type, ...) if prop_name in required else (Optional[python_type], None)
+        return create_model(f"{name}__GymToolSchema", **fields)
+
+    # --------------------------------------------------------------------------------------------
+    # Unknown-tool catch-all and seed_session auto-augmentation
+    # --------------------------------------------------------------------------------------------
+
+    async def handle_unknown_tool(self, tool_name: str, request: Request) -> Any:
+        """Answer a POST to an unregistered tool path (only mounted on tool-bearing servers).
+
+        The default is a 404 whose body lists the available tools — agents feed response bodies back
+        to the model as tool output, so the model can recover with a valid name. Override to preserve
+        a server's historical error bytes (e.g. the 200-with-error-string contracts).
+        """
+        available = ", ".join(self._gym_tool_names)
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Unknown tool {tool_name!r}. Available tools: {available}"},
+        )
+
+    def _ensure_unknown_tool_catchall(self, app: FastAPI) -> None:
+        if any(getattr(route, "name", None) == "_gym_unknown_tool_catchall" for route in app.router.routes):
+            return
+
+        async def _gym_unknown_tool_catchall(tool_name: str, request: Request) -> Any:
+            return await self.handle_unknown_tool(tool_name, request)
+
+        app.add_api_route(
+            "/{tool_name}",
+            _gym_unknown_tool_catchall,
+            methods=["POST"],
+            include_in_schema=False,
+            name="_gym_unknown_tool_catchall",
+        )
+
+    def _build_seed_session_endpoint(self) -> Callable:
+        """Wrap seed_session so its response always carries the MCP metadata block.
+
+        The wrapper adopts the subclass's signature (synthesizing a ``request`` parameter when
+        absent) so FastAPI body binding is unchanged, then injects :data:`NEMO_GYM_MCP_METADATA_KEY`
+        with setdefault semantics. It returns a plain JSONResponse: adopting the method's
+        ``-> BaseSeedSessionResponse`` annotation would make FastAPI's response filtering silently
+        strip the injected key, so the return annotation is deliberately NOT pinned here — the exact
+        opposite of the tool routes above.
+        """
+        method = self.seed_session
+        signature = inspect.signature(method)
+        try:
+            hints = get_type_hints(method)
+        except Exception:
+            hints = {}
+
+        request_param_name = next(
+            (
+                param_name
+                for param_name, param in signature.parameters.items()
+                if param_name == "request" or hints.get(param_name, param.annotation) is Request
+            ),
+            None,
+        )
+
+        params = [
+            param.replace(annotation=hints.get(param_name, param.annotation))
+            for param_name, param in signature.parameters.items()
+        ]
+        if request_param_name is None:
+            request_param_name = "request"
+            params = [
+                inspect.Parameter("request", kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
+                *params,
+            ]
+            passthrough = tuple(signature.parameters)
+        else:
+            passthrough = tuple(signature.parameters)
+
+        async def seed_session_endpoint(**kwargs: Any) -> JSONResponse:
+            request: Request = kwargs[request_param_name]
+            result = method(**{k: kwargs[k] for k in passthrough})
+            if inspect.isawaitable(result):
+                result = await result
+            payload = jsonable_encoder(result)
+            if isinstance(payload, dict) and NEMO_GYM_MCP_METADATA_KEY not in payload:
+                payload[NEMO_GYM_MCP_METADATA_KEY] = jsonable_encoder(self.build_mcp_session_metadata(request))
+            return JSONResponse(payload)
+
+        seed_session_endpoint.__name__ = "seed_session"
+        seed_session_endpoint.__signature__ = inspect.Signature(parameters=params)
+        seed_session_endpoint.__annotations__ = {param.name: param.annotation for param in params}
+        return seed_session_endpoint
+
+    # --------------------------------------------------------------------------------------------
+    # Stateless signed session token (shared secret across workers; no server-side token storage)
+    # --------------------------------------------------------------------------------------------
+
+    def build_mcp_session_metadata(
+        self, request: Request, allowed_tools: Optional[list[str]] = None
+    ) -> MCPServerMetadata:
+        """Mint the per-rollout MCP metadata (signed session token) from the HTTP session.
+
+        ``allowed_tools`` restricts which tools this session can list and call over MCP; the claim
+        rides inside the signed token, so it needs no server-side state and is consistent across
+        workers. HTTP routes are not restricted by this claim (status-quo HTTP behavior).
+        """
         session_id = request.session.get(SESSION_ID_KEY)
         if not session_id:
             session_id = str(uuid4())
             request.session[SESSION_ID_KEY] = session_id
 
+        payload: Any = session_id if allowed_tools is None else {"sid": session_id, "tools": list(allowed_tools)}
         return MCPServerMetadata(
             server_name=self.config.name or self.__class__.__name__,
             url_path=self.mcp_url_path,
-            headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: self._mcp_token_serializer().dumps(session_id)},
+            headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: self._mcp_token_serializer().dumps(payload)},
         )
 
     def _mcp_token_serializer(self) -> URLSafeSerializer:
@@ -306,10 +766,27 @@ class MCPResourcesServer(SimpleResourcesServer):
         return URLSafeSerializer(self.get_session_middleware_key(), salt=_MCP_TOKEN_SALT)
 
     def require_mcp_session_id(self) -> str:
+        session_id, _ = self._mcp_session_claims(required=True)
+        return session_id
+
+    def _mcp_session_claims(self, required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
+        """Resolve (session_id, allowed_tools) from the signed token header.
+
+        Accepts both token payload shapes: the legacy bare session-id string and the dict form
+        ``{"sid": ..., "tools": [...]}`` minted when ``allowed_tools`` was passed.
+        """
         token = _MCP_SESSION_TOKEN.get()
         if not token:
-            raise MCPSessionError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
+            if required:
+                raise MCPSessionError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
+            return None, None
         try:
-            return self._mcp_token_serializer().loads(token)
+            payload = self._mcp_token_serializer().loads(token)
         except BadSignature as exc:
-            raise MCPSessionError("Invalid Gym MCP session token.") from exc
+            if required:
+                raise MCPSessionError("Invalid Gym MCP session token.") from exc
+            return None, None
+        if isinstance(payload, dict):
+            allowed = payload.get("tools")
+            return payload.get("sid"), None if allowed is None else frozenset(allowed)
+        return payload, None

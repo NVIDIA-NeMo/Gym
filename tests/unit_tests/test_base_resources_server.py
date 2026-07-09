@@ -21,7 +21,6 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
-    MCPResourcesServer,
     MCPServerMetadata,
     MCPSessionError,
     SimpleResourcesServer,
@@ -42,12 +41,13 @@ class TestBaseResourcesServer:
         agent.setup_webserver()
 
 
-class TestMCPResourcesServer:
+class TestMCPSupport:
     def test_mounts_mcp_endpoint_with_normal_gym_endpoints(self) -> None:
+        """A manual register_mcp_tools override (zero @gym_tool methods) must still mount /mcp."""
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
-        class TestMCPServer(MCPResourcesServer):
+        class TestMCPServer(SimpleResourcesServer):
             def register_mcp_tools(self, mcp):
                 @mcp.tool()
                 def ping() -> str:
@@ -69,7 +69,7 @@ class TestMCPResourcesServer:
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
-        class TestMCPServer(MCPResourcesServer):
+        class TestMCPServer(SimpleResourcesServer):
             def register_mcp_tools(self, mcp):
                 pass
 
@@ -98,7 +98,7 @@ class TestMCPResourcesServer:
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
-        class TestMCPServer(MCPResourcesServer):
+        class TestMCPServer(SimpleResourcesServer):
             def register_mcp_tools(self, mcp):
                 pass
 
@@ -114,7 +114,7 @@ class TestMCPResourcesServer:
         pytest.importorskip("mcp")
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
-        class TestMCPServer(MCPResourcesServer):
+        class TestMCPServer(SimpleResourcesServer):
             def register_mcp_tools(self, mcp):
                 pass
 
@@ -134,14 +134,14 @@ class TestMCPResourcesServer:
 
     def test_mcp_endpoint_accepts_non_loopback_host(self) -> None:
         """Regression: the MCP SDK's default DNS-rebinding protection returns HTTP 421 for any
-        non-loopback Host header, which breaks multi-node/absolute-IP deployments. MCPResourcesServer
+        non-loopback Host header, which breaks multi-node/absolute-IP deployments. The Gym MCP mount
         must disable it so server-to-server MCP calls keep working off-loopback."""
         pytest.importorskip("mcp")
         from fastapi.testclient import TestClient
 
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="test_mcp_resources_server")
 
-        class TestMCPServer(MCPResourcesServer):
+        class TestMCPServer(SimpleResourcesServer):
             def register_mcp_tools(self, mcp):
                 @mcp.tool()
                 def ping() -> str:
@@ -180,7 +180,7 @@ class _GymToolSeedResponse(BaseSeedSessionResponse):
     mcp: MCPServerMetadata
 
 
-class _GymToolServer(MCPResourcesServer):
+class _GymToolServer(SimpleResourcesServer):
     """Exercises the @gym_tool auto-registration: a session-bound tool and a stateless one."""
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> _GymToolSeedResponse:

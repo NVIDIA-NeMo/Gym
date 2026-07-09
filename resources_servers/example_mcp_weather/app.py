@@ -24,8 +24,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    MCPResourcesServer,
     MCPServerMetadata,
+    SimpleResourcesServer,
     gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -81,7 +81,7 @@ class ExampleMCPWeatherVerifyResponse(BaseVerifyResponse):
     final_response_mentions_weather: bool
 
 
-class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
+class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
     config: ExampleMCPWeatherResourcesServerConfig
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
