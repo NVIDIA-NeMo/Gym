@@ -22,7 +22,7 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
   bash -lc '
     echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
-    cd "$SLURM_SUBMIT_DIR"
+    cd $SLURM_SUBMIT_DIR
     source .venv/bin/activate
 
     ray symmetric-run \
