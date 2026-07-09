@@ -15,16 +15,19 @@
 """Generic NeMo-Gym resource server adapter for OpenEnv environments.
 
 Wraps any OpenEnv Environment class and exposes it through NeMo-Gym's
-three-server architecture. MCP environments get per-tool POST endpoints
-discovered at startup. Non-MCP environments get a single POST /step endpoint.
-The YAML config selects which environment to load — no Python code needed
-to add a new environment.
+three-server architecture. Every tool is declared via ``gym_tool`` and served
+over BOTH transports (HTTP ``POST /<tool_name>`` and MCP). MCP environments
+discover their tools at construction time (``model_post_init``) and register
+one gym tool per discovered tool, advertising the environment's original JSON
+schema verbatim over MCP. Non-MCP environments register a single lax "step"
+tool that accepts any JSON object body. The YAML config selects which
+environment to load — no Python code needed to add a new environment.
 """
 
 import importlib
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import Request
 from pydantic import BaseModel, create_model
 
 from nemo_gym.base_resources_server import (
@@ -34,6 +37,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -79,32 +83,31 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     _env_class: Any = None
     _action_class: Any = None
     _is_mcp: bool = False
+    _mcp_tools: Dict[str, Any] = {}
 
     def model_post_init(self, context: Any) -> None:
-        """Initialize private attributes: session store and dynamically imported classes."""
+        """Initialize private attributes, import the env classes, and register the gym tools.
+
+        MCP environments discover their tool inventory here (it requires the env class import
+        that already happens here); non-MCP environments register the single lax "step" tool.
+        """
+        super().model_post_init(context)
         self._sessions = {}
         self._env_class = _import_class(self.config.env_class)
         self._action_class = _import_class(self.config.action_class)
-
-    def setup_webserver(self) -> FastAPI:
-        """Set up FastAPI app with tool endpoints based on environment type.
-
-        MCP environments get per-tool POST endpoints discovered at startup.
-        Non-MCP environments get a single POST /step endpoint.
-        """
-        app = super().setup_webserver()
-
         self._is_mcp = self.config.is_mcp
 
         if self._is_mcp:
-            self._register_mcp_endpoints(app)
+            self._register_mcp_env_tools()
         else:
-            app.post("/step")(self._handle_step)
+            self._register_step_tool()
 
-        return app
+    def _register_mcp_env_tools(self) -> None:
+        """Discover the environment's MCP tools and declare each one as a gym tool.
 
-    def _register_mcp_endpoints(self, app: FastAPI) -> None:
-        """Discover MCP tools and register each as a POST endpoint."""
+        The environment's ORIGINAL JSON schema is advertised verbatim over MCP; ``validate=True``
+        keeps a shallow 422 gate over HTTP like the previously synthesized per-tool body models.
+        """
         from openenv.core.env_server.mcp_types import ListToolsAction
 
         temp_env = self._env_class()
@@ -118,8 +121,89 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
         for tool in tools:
             request_model = self._schema_to_pydantic(tool.name, tool.input_schema)
-            handler = self._make_mcp_handler(tool.name, request_model)
-            app.post(f"/{tool.name}")(handler)
+            gym_tool(
+                self._make_mcp_tool_closure(tool.name, request_model),
+                name=tool.name,
+                description=getattr(tool, "description", None),
+                input_schema=tool.input_schema,
+                validate=True,
+                owner=self,
+            )
+
+    def _make_mcp_tool_closure(self, tool_name: str, request_model: type):
+        """Build the tool callable for one discovered MCP tool (served over HTTP and MCP).
+
+        Reproduces the previous per-tool POST handler: session guard, done-check, and
+        try/except-to-error-string conversion all return 200 soft errors. Arguments are
+        round-tripped through the synthesized request model so type coercion, optional-field
+        None-filling, and extra-key dropping match the old FastAPI body validation exactly.
+        """
+
+        async def tool_closure(session_id: str, **arguments: Any) -> dict:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return {"error": "No active session. Call /seed_session first.", "result": None}
+
+            if session.done:
+                return {"error": "Episode has ended.", "result": None}
+
+            try:
+                body = request_model(**arguments)
+                action = self._action_class(tool_name=tool_name, arguments=body.model_dump())
+                obs = session.env.step(action)
+            except Exception as e:
+                return {"error": str(e), "result": None}
+
+            if obs.reward is not None:
+                session.accumulated_reward += float(obs.reward)
+            session.step_count += 1
+            session.done = obs.done
+
+            result = obs.result if hasattr(obs, "result") else None
+            error = str(obs.error) if hasattr(obs, "error") and obs.error else None
+            return {"result": result, "error": error}
+
+        tool_closure.__name__ = f"handle_{tool_name}"
+        return tool_closure
+
+    def _register_step_tool(self) -> None:
+        """Register the single non-MCP "step" tool with a permissive schema and no validation.
+
+        ``validate=False`` with the lax ``{"type": "object"}`` schema preserves the previous
+        bare-dict body contract: any JSON object is accepted and every failure surfaces as an
+        HTTP 200 ``{"error": ..., "result": None}`` soft error.
+        """
+
+        async def step(session_id: str, **body: Any) -> dict:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return {"error": "No active session. Call /seed_session first.", "result": None}
+
+            if session.done:
+                return {"error": "Episode has ended.", "result": None}
+
+            try:
+                action = self._action_class(**body)
+                obs = session.env.step(action)
+            except Exception as e:
+                return {"error": str(e), "result": None}
+
+            if obs.reward is not None:
+                session.accumulated_reward += float(obs.reward)
+            session.step_count += 1
+            session.done = obs.done
+            session.last_observation = obs.model_dump() if hasattr(obs, "model_dump") else {}
+
+            return obs.model_dump() if hasattr(obs, "model_dump") else {"result": str(obs)}
+
+        gym_tool(
+            step,
+            name="step",
+            description="Step the environment by constructing the Action from the given arguments.",
+            input_schema={"type": "object"},
+            validate=False,
+            owner=self,
+        )
 
     def _schema_to_pydantic(self, tool_name: str, schema: dict) -> type:
         """Convert a JSON schema dict to a Pydantic model class."""
@@ -147,60 +231,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             "array": list,
         }
         return mapping.get(json_type, str)
-
-    def _make_mcp_handler(self, tool_name: str, request_model: type):
-        """Create a POST handler for an MCP tool."""
-
-        async def handler(request: Request, body: request_model) -> dict:
-            session_id = request.session[SESSION_ID_KEY]
-            session = self._sessions.get(session_id)
-            if session is None:
-                return {"error": "No active session. Call /seed_session first.", "result": None}
-
-            if session.done:
-                return {"error": "Episode has ended.", "result": None}
-
-            try:
-                action = self._action_class(tool_name=tool_name, arguments=body.model_dump())
-                obs = session.env.step(action)
-            except Exception as e:
-                return {"error": str(e), "result": None}
-
-            if obs.reward is not None:
-                session.accumulated_reward += float(obs.reward)
-            session.step_count += 1
-            session.done = obs.done
-
-            result = obs.result if hasattr(obs, "result") else None
-            error = str(obs.error) if hasattr(obs, "error") and obs.error else None
-            return {"result": result, "error": error}
-
-        handler.__name__ = f"handle_{tool_name}"
-        return handler
-
-    async def _handle_step(self, request: Request, body: dict) -> dict:
-        """Handle non-MCP step calls by constructing the Action and calling env.step()."""
-        session_id = request.session[SESSION_ID_KEY]
-        session = self._sessions.get(session_id)
-        if session is None:
-            return {"error": "No active session. Call /seed_session first.", "result": None}
-
-        if session.done:
-            return {"error": "Episode has ended.", "result": None}
-
-        try:
-            action = self._action_class(**body)
-            obs = session.env.step(action)
-        except Exception as e:
-            return {"error": str(e), "result": None}
-
-        if obs.reward is not None:
-            session.accumulated_reward += float(obs.reward)
-        session.step_count += 1
-        session.done = obs.done
-        session.last_observation = obs.model_dump() if hasattr(obs, "model_dump") else {}
-
-        return obs.model_dump() if hasattr(obs, "model_dump") else {"result": str(obs)}
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         """Create a new environment instance, call reset(), and store session state.

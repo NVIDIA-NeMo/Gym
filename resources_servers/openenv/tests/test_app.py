@@ -14,6 +14,9 @@
 # limitations under the License.
 import sys
 import types
+from contextlib import contextmanager
+from typing import Any, Optional
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,17 +31,35 @@ from resources_servers.openenv.app import (
 )
 
 
+# Every OpenEnv server declares at least one gym tool, so setup_webserver requires the MCP SDK.
+pytest.importorskip("mcp")
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+
+class StatelessCookies(Cookies):
+    """Cookies jar that never stores responses' cookies, so tests control sessions explicitly."""
+
+    def extract_cookies(self, response):
+        pass
+
+
 def _make_test_client(server):
-    """Create a TestClient with stateless cookies for session testing."""
+    """Create a TestClient with stateless cookies for session testing (no lifespan)."""
     app = server.setup_webserver()
     client = TestClient(app)
-
-    class StatelessCookies(Cookies):
-        def extract_cookies(self, response):
-            pass
-
     client._cookies = StatelessCookies(client._cookies)
     return client
+
+
+@contextmanager
+def _make_lifespan_client(server):
+    """TestClient inside the app lifespan (required for /mcp and the unknown-tool catch-all)."""
+    with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+        client._cookies = StatelessCookies(client._cookies)
+        yield client
 
 
 def _make_mock_env(reset_obs=None, step_obs=None, step_side_effect=None):
@@ -59,17 +80,106 @@ def _make_mock_env(reset_obs=None, step_obs=None, step_side_effect=None):
     return env
 
 
-def _make_server(env_class="pydantic.BaseModel", action_class="pydantic.BaseModel", is_mcp=False):
+def _make_server(is_mcp=False, env_class_obj=None, action_class_obj=None, reset_kwargs=None):
+    """Build a server; mock classes must be injected at construction (tools register in model_post_init)."""
     config = OpenEnvResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
-        name="",
-        env_class=env_class,
-        action_class=action_class,
+        name="openenv",
+        env_class="pydantic.BaseModel",
+        action_class="pydantic.BaseModel",
         is_mcp=is_mcp,
+        reset_kwargs=reset_kwargs or {},
     )
-    return OpenEnvResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    if env_class_obj is None and action_class_obj is None:
+        return OpenEnvResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    with mock.patch(
+        "resources_servers.openenv.app._import_class",
+        side_effect=[
+            env_class_obj if env_class_obj is not None else MagicMock(),
+            action_class_obj if action_class_obj is not None else MagicMock(),
+        ],
+    ):
+        return OpenEnvResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _make_mock_tool(name, properties, required=None):
+    """Create a mock MCP tool with the given schema."""
+    tool = MagicMock()
+    tool.name = name
+    tool.description = f"The {name} tool."
+    tool.input_schema = {
+        "type": "object",
+        "properties": properties,
+        "required": required or list(properties.keys()),
+    }
+    return tool
+
+
+def _patch_openenv_mcp_types():
+    """Patch openenv MCP types module for tests when openenv is not installed."""
+    mock_mcp_types = types.ModuleType("openenv.core.env_server.mcp_types")
+    mock_mcp_types.ListToolsAction = MagicMock
+    mock_mcp_types.CallToolAction = MagicMock
+
+    # Ensure parent modules exist
+    for mod_name in ["openenv", "openenv.core", "openenv.core.env_server"]:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = types.ModuleType(mod_name)
+    sys.modules["openenv.core.env_server.mcp_types"] = mock_mcp_types
+    return mock_mcp_types
+
+
+def _make_discovery_env(tools):
+    """A mock env whose step(ListToolsAction()) returns the given tool inventory."""
+    env = MagicMock()
+    env.reset.return_value = MagicMock(reward=0.0, done=False)
+    list_obs = MagicMock()
+    list_obs.tools = tools
+    env.step.return_value = list_obs
+    env.close = MagicMock()
+    return env
+
+
+def _make_mcp_server(tools, session_envs=()):
+    """Build an is_mcp server: discovery env consumed at construction, then per-session envs."""
+    _patch_openenv_mcp_types()
+    env_class = MagicMock(side_effect=[_make_discovery_env(tools), *session_envs])
+    server = _make_server(is_mcp=True, env_class_obj=env_class)
+    server._action_class = MagicMock()
+    return server
+
+
+# ------------------------------------------------------------------------------------------------
+# MCP JSON-RPC helpers (in-memory, via TestClient; stateless_http mode needs no initialize)
+# ------------------------------------------------------------------------------------------------
+
+
+def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}}
+    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
+
+
+def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
+    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+    assert resp.status_code == 200, resp.text
+    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+
+
+def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
+    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+def _seed(client) -> str:
+    resp = client.post("/seed_session", json={})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
 
 
 class TestApp:
@@ -148,16 +258,7 @@ class TestSessionManagement:
         mock_env_instance = _make_mock_env()
         mock_env_class = MagicMock(return_value=mock_env_instance)
 
-        config = OpenEnvResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            env_class="pydantic.BaseModel",
-            action_class="pydantic.BaseModel",
-            reset_kwargs={"seed": 42, "difficulty": "hard"},
-        )
-        server = OpenEnvResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server = _make_server(reset_kwargs={"seed": 42, "difficulty": "hard"})
         server._env_class = mock_env_class
         client = _make_test_client(server)
 
@@ -269,54 +370,32 @@ class TestNonMCPStepEndpoint:
         assert session.accumulated_reward == 0.0
         assert session.step_count == 1
 
+    def test_step_forwards_body_kwargs_to_action_class(self) -> None:
+        """The raw JSON object body must reach the Action class as kwargs, verbatim."""
+        mock_obs = MagicMock(reward=None, done=False)
+        mock_obs.model_dump.return_value = {"done": False}
+        mock_env_instance = _make_mock_env(step_obs=mock_obs)
 
-def _make_mock_tool(name, properties, required=None):
-    """Create a mock MCP tool with the given schema."""
-    tool = MagicMock()
-    tool.name = name
-    tool.input_schema = {
-        "type": "object",
-        "properties": properties,
-        "required": required or list(properties.keys()),
-    }
-    return tool
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=mock_env_instance)
+        action_class = MagicMock()
+        server._action_class = action_class
+        client = _make_test_client(server)
 
-
-def _patch_openenv_mcp_types():
-    """Patch openenv MCP types module for tests when openenv is not installed."""
-    mock_mcp_types = types.ModuleType("openenv.core.env_server.mcp_types")
-    mock_mcp_types.ListToolsAction = MagicMock
-    mock_mcp_types.CallToolAction = MagicMock
-
-    # Ensure parent modules exist
-    for mod_name in ["openenv", "openenv.core", "openenv.core.env_server"]:
-        if mod_name not in sys.modules:
-            sys.modules[mod_name] = types.ModuleType(mod_name)
-    sys.modules["openenv.core.env_server.mcp_types"] = mock_mcp_types
-    return mock_mcp_types
+        cookies = client.post("/seed_session", json={}).cookies
+        client.post("/step", json={"move": "e2e4", "extra": 1}, cookies=cookies)
+        action_class.assert_called_once_with(move="e2e4", extra=1)
 
 
 class TestMCPAdapter:
     def test_mcp_tool_discovery_registers_endpoints(self) -> None:
         """MCP environments should have per-tool POST endpoints."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [
             _make_mock_tool("echo_message", {"message": {"type": "string"}}),
             _make_mock_tool("echo_with_length", {"message": {"type": "string"}}),
         ]
 
-        mock_env_class = MagicMock()
-        mock_env_instance = MagicMock()
-        mock_env_instance.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_env_instance.step.return_value = mock_list_obs
-        mock_env_instance.close = MagicMock()
-        mock_env_class.return_value = mock_env_instance
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
+        server = _make_mcp_server(mock_tools)
         app = server.setup_webserver()
 
         routes = [r.path for r in app.routes if hasattr(r, "path")]
@@ -325,27 +404,12 @@ class TestMCPAdapter:
 
     def test_mcp_tool_call_returns_result(self) -> None:
         """Calling an MCP tool endpoint should return the tool result."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
 
-        # Discovery env uses sync methods (called during setup_webserver)
-        mock_discovery_env = MagicMock()
-        mock_discovery_env.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_discovery_env.step.return_value = mock_list_obs
-        mock_discovery_env.close = MagicMock()
-
-        # Session env uses async methods (called in endpoint handlers)
         mock_tool_obs = MagicMock(reward=0.5, done=False, result="echoed: hello", error=None)
         mock_session_env = _make_mock_env(step_obs=mock_tool_obs)
 
-        mock_env_class = MagicMock(side_effect=[mock_discovery_env, mock_session_env])
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
-        server._action_class = MagicMock()
+        server = _make_mcp_server(mock_tools, session_envs=[mock_session_env])
         client = _make_test_client(server)
 
         response = client.post("/seed_session", json={})
@@ -359,20 +423,9 @@ class TestMCPAdapter:
 
     def test_mcp_tool_call_no_session_returns_error(self) -> None:
         """MCP tool call without seed_session should return an error."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
 
-        mock_discovery_env = MagicMock()
-        mock_discovery_env.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_discovery_env.step.return_value = mock_list_obs
-        mock_discovery_env.close = MagicMock()
-        mock_env_class = MagicMock(return_value=mock_discovery_env)
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
+        server = _make_mcp_server(mock_tools)
         client = _make_test_client(server)
 
         response = client.post("/echo_message", json={"message": "hello"})
@@ -382,25 +435,12 @@ class TestMCPAdapter:
 
     def test_mcp_tool_call_after_done_returns_error(self) -> None:
         """MCP tool call after done=True should return an error."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
-
-        mock_discovery_env = MagicMock()
-        mock_discovery_env.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_discovery_env.step.return_value = mock_list_obs
-        mock_discovery_env.close = MagicMock()
 
         done_obs = MagicMock(reward=1.0, done=True, result="done", error=None)
         mock_session_env = _make_mock_env(step_obs=done_obs)
 
-        mock_env_class = MagicMock(side_effect=[mock_discovery_env, mock_session_env])
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
-        server._action_class = MagicMock()
+        server = _make_mcp_server(mock_tools, session_envs=[mock_session_env])
         client = _make_test_client(server)
 
         response = client.post("/seed_session", json={})
@@ -415,24 +455,11 @@ class TestMCPAdapter:
 
     def test_mcp_tool_call_exception_returns_error(self) -> None:
         """MCP tool call that raises should return a structured error."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
-
-        mock_discovery_env = MagicMock()
-        mock_discovery_env.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_discovery_env.step.return_value = mock_list_obs
-        mock_discovery_env.close = MagicMock()
 
         mock_session_env = _make_mock_env(step_side_effect=RuntimeError("MCP tool failed"))
 
-        mock_env_class = MagicMock(side_effect=[mock_discovery_env, mock_session_env])
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
-        server._action_class = MagicMock()
+        server = _make_mcp_server(mock_tools, session_envs=[mock_session_env])
         client = _make_test_client(server)
 
         response = client.post("/seed_session", json={})
@@ -442,6 +469,38 @@ class TestMCPAdapter:
         data = response.json()
         assert data["error"] is not None
         assert "MCP tool failed" in data["error"]
+
+    def test_mcp_tool_bad_argument_type_is_422(self) -> None:
+        """validate=True keeps a shallow HTTP validation gate like the old synthesized models."""
+        mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
+
+        server = _make_mcp_server(mock_tools)
+        client = _make_test_client(server)
+
+        response = client.post("/echo_message", json={"message": [1, 2]})
+        assert response.status_code == 422
+        assert "error" in response.json()
+
+    def test_mcp_tool_optional_field_none_filling_matches_old_body_model(self) -> None:
+        """Missing optional properties must reach the Action as None, like body.model_dump() did."""
+        mock_tools = [
+            _make_mock_tool(
+                "echo_message",
+                {"message": {"type": "string"}, "label": {"type": "string"}},
+                required=["message"],
+            )
+        ]
+
+        mock_tool_obs = MagicMock(reward=None, done=False, result="ok", error=None)
+        mock_session_env = _make_mock_env(step_obs=mock_tool_obs)
+
+        server = _make_mcp_server(mock_tools, session_envs=[mock_session_env])
+        action_class = server._action_class
+        client = _make_test_client(server)
+
+        cookies = client.post("/seed_session", json={}).cookies
+        client.post("/echo_message", json={"message": "hi"}, cookies=cookies)
+        action_class.assert_called_once_with(tool_name="echo_message", arguments={"message": "hi", "label": None})
 
 
 class TestVerify:
@@ -646,27 +705,174 @@ class TestErrorHandling:
         assert "No active session" in data["error"]
 
 
+class TestReplayByteEquality:
+    """Replay tests: representative requests must produce the exact pre-migration response bytes."""
+
+    NO_SESSION_BYTES = b'{"error":"No active session. Call /seed_session first.","result":null}'
+    DONE_BYTES = b'{"error":"Episode has ended.","result":null}'
+
+    def test_step_success_bytes(self) -> None:
+        mock_obs = MagicMock(reward=0.5, done=False)
+        mock_obs.model_dump.return_value = {"reward": 0.5, "done": False, "message": "ok"}
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=_make_mock_env(step_obs=mock_obs))
+        server._action_class = MagicMock()
+
+        with _make_lifespan_client(server) as client:
+            cookies = client.post("/seed_session", json={}).cookies
+            resp = client.post("/step", json={"move": "e2e4"}, cookies=cookies)
+            assert resp.status_code == 200
+            assert resp.content == b'{"reward":0.5,"done":false,"message":"ok"}'
+
+    def test_step_soft_error_bytes(self) -> None:
+        """The 200-with-error-string soft contract: no session, done episode, and env exception."""
+        obs_done = MagicMock(reward=1.0, done=True)
+        obs_done.model_dump.return_value = {"reward": 1.0, "done": True}
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=_make_mock_env(step_obs=obs_done))
+        server._action_class = MagicMock()
+
+        with _make_lifespan_client(server) as client:
+            # No session yet.
+            resp = client.post("/step", json={"move": "e2e4"})
+            assert resp.status_code == 200
+            assert resp.content == self.NO_SESSION_BYTES
+
+            cookies = client.post("/seed_session", json={}).cookies
+            client.post("/step", json={}, cookies=cookies)  # sets done=True
+            resp = client.post("/step", json={}, cookies=cookies)
+            assert resp.status_code == 200
+            assert resp.content == self.DONE_BYTES
+
+    def test_step_exception_bytes(self) -> None:
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=_make_mock_env(step_side_effect=ValueError("Invalid move: xyz")))
+        server._action_class = MagicMock()
+
+        with _make_lifespan_client(server) as client:
+            cookies = client.post("/seed_session", json={}).cookies
+            resp = client.post("/step", json={"move": "xyz"}, cookies=cookies)
+            assert resp.status_code == 200
+            assert resp.content == b'{"error":"Invalid move: xyz","result":null}'
+
+    def test_mcp_env_tool_success_and_error_bytes(self) -> None:
+        mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
+        mock_tool_obs = MagicMock(reward=0.5, done=False, result="echoed: hello", error=None)
+        server = _make_mcp_server(mock_tools, session_envs=[_make_mock_env(step_obs=mock_tool_obs)])
+
+        with _make_lifespan_client(server) as client:
+            # Error path first: no active session (the 200 soft-error contract).
+            resp = client.post("/echo_message", json={"message": "hello"})
+            assert resp.status_code == 200
+            assert resp.content == self.NO_SESSION_BYTES
+
+            cookies = client.post("/seed_session", json={}).cookies
+            resp = client.post("/echo_message", json={"message": "hello"}, cookies=cookies)
+            assert resp.status_code == 200
+            assert resp.content == b'{"result":"echoed: hello","error":null}'
+
+    def test_unknown_tool_error_path(self) -> None:
+        """Unknown tool names get the base catch-all 404 listing the available tools."""
+        server = _make_server(is_mcp=False)
+        with _make_lifespan_client(server) as client:
+            resp = client.post("/definitely_not_a_tool", json={})
+            assert resp.status_code == 404
+            assert resp.json() == {"error": "Unknown tool 'definitely_not_a_tool'. Available tools: step"}
+
+
+class TestMCPRoundTrip:
+    """MCP transport round-trips (raw JSON-RPC POSTs to /mcp, in-memory)."""
+
+    def test_non_mcp_env_step_tool_over_mcp(self) -> None:
+        mock_obs = MagicMock(reward=0.5, done=False)
+        mock_obs.model_dump.return_value = {"reward": 0.5, "done": False}
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=_make_mock_env(step_obs=mock_obs))
+        server._action_class = MagicMock()
+
+        with _make_lifespan_client(server) as client:
+            token = _seed(client)
+
+            tools = _list_tools(client, token=token)
+            assert set(tools) == {"step"}
+            # The permissive schema is advertised verbatim.
+            assert tools["step"]["inputSchema"] == {"type": "object"}
+
+            result = _call(client, "step", {"move": "e2e4"}, token=token)
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"reward": 0.5, "done": False}
+
+    def test_mcp_env_tools_over_mcp_advertise_original_schema(self) -> None:
+        mock_tools = [
+            _make_mock_tool("echo_message", {"message": {"type": "string"}}),
+            _make_mock_tool("echo_with_length", {"message": {"type": "string"}}),
+        ]
+        mock_tool_obs = MagicMock(reward=0.5, done=False, result="echoed: hello", error=None)
+        server = _make_mcp_server(mock_tools, session_envs=[_make_mock_env(step_obs=mock_tool_obs)])
+
+        with _make_lifespan_client(server) as client:
+            token = _seed(client)
+
+            tools = _list_tools(client, token=token)
+            assert set(tools) == {"echo_message", "echo_with_length"}
+            # Fidelity win over the old lossy _json_type_to_python round trip: verbatim schema.
+            assert tools["echo_message"]["inputSchema"] == mock_tools[0].input_schema
+
+            result = _call(client, "echo_message", {"message": "hello"}, token=token)
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"result": "echoed: hello", "error": None}
+
+    def test_mcp_call_without_token_is_tool_error(self) -> None:
+        server = _make_server(is_mcp=False)
+        server._action_class = MagicMock()
+
+        with _make_lifespan_client(server) as client:
+            result = _call(client, "step", {"move": "e2e4"}, token=None)
+            assert result["isError"] is True
+            assert TOKEN_HEADER in result["content"][0]["text"]
+
+
+class TestTransportParity:
+    """MCP tools/list names == HTTP tool routes (minus fixed endpoints) == expected inventory."""
+
+    def _http_tool_names(self, app) -> set:
+        names = set()
+        for route in app.router.routes:
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None) or set()
+            if path and "POST" in methods and path not in NON_TOOL_PATHS:
+                names.add(path.lstrip("/"))
+        return names
+
+    def test_non_mcp_env_parity(self) -> None:
+        server = _make_server(is_mcp=False)
+        app = server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            assert set(_list_tools(client)) == self._http_tool_names(app) == {"step"}
+
+    def test_mcp_env_parity(self) -> None:
+        mock_tools = [
+            _make_mock_tool("echo_message", {"message": {"type": "string"}}),
+            _make_mock_tool("echo_with_length", {"message": {"type": "string"}}),
+        ]
+        server = _make_mcp_server(mock_tools)
+        app = server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            expected = {"echo_message", "echo_with_length"}
+            assert set(_list_tools(client)) == self._http_tool_names(app) == expected
+
+
 class TestIntegrationMCPLifecycle:
     """Full lifecycle test: seed_session -> MCP tool calls -> verify."""
 
     def test_full_lifecycle_mcp(self) -> None:
         """seed_session -> tool call -> tool call -> verify with mocked MCP env."""
-        _patch_openenv_mcp_types()
-
         mock_tools = [
             _make_mock_tool("echo_message", {"message": {"type": "string"}}),
             _make_mock_tool("echo_with_length", {"message": {"type": "string"}}),
         ]
 
-        # Discovery env uses sync methods (called during setup_webserver)
-        mock_discovery_env = MagicMock()
-        mock_discovery_env.reset.return_value = MagicMock(reward=0.0, done=False)
-        mock_list_obs = MagicMock()
-        mock_list_obs.tools = mock_tools
-        mock_discovery_env.step.return_value = mock_list_obs
-        mock_discovery_env.close = MagicMock()
-
-        # Session env uses async methods (called in endpoint handlers)
+        # Session env used by the per-tool handlers after seed_session.
         call_count = [0]
 
         def mock_step(action):
@@ -679,12 +885,7 @@ class TestIntegrationMCPLifecycle:
             return obs
 
         mock_session_env = _make_mock_env(step_side_effect=mock_step)
-
-        mock_env_class = MagicMock(side_effect=[mock_discovery_env, mock_session_env])
-
-        server = _make_server(is_mcp=True)
-        server._env_class = mock_env_class
-        server._action_class = MagicMock()
+        server = _make_mcp_server(mock_tools, session_envs=[mock_session_env])
         client = _make_test_client(server)
 
         # 1. seed_session
