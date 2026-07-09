@@ -316,7 +316,7 @@ class TestRunMiniSweQna:
             problem_statement="the question",
             output=str(tmp_path / "out"),
             model="hosted_vllm/m",
-            api_key="dummy_key",
+            api_key="dummy_key",  # pragma: allowlist secret
             base_url="http://x/v1",
             config=str(config_path),
             image="docker://img",

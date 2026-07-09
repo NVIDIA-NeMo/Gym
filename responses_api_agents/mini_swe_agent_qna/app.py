@@ -428,7 +428,7 @@ class MiniSWEAgentQna(SimpleResponsesAPIAgent):
                     problem_statement=problem_statement,
                     output=output_file_dir,
                     model=f"hosted_vllm/{policy_model_name}",
-                    api_key="dummy_key",
+                    api_key="dummy_key",  # pragma: allowlist secret
                     base_url=base_url,
                     config=str(Path(self.config.mini_swe_config_path).resolve()),
                     image=_resolve_image(self.config.image_template, metadata),
