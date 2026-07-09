@@ -12,7 +12,8 @@ tales:
       task_no: 0
       seed: 0
       split: train
-      max_episode_steps: 25
+      # 100 matches the TALES paper protocol (arXiv:2504.14128 §4); rows may override per task.
+      max_episode_steps: 100
 tales_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -23,7 +24,8 @@ tales_gymnasium_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      max_steps: 25
+      # Agent loop cap binds before the server's max_episode_steps — keep >= the row cap (paper: 100).
+      max_steps: 100
       datasets:
       - name: example
         type: example

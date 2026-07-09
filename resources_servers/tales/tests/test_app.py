@@ -225,3 +225,64 @@ class TestApp:
         assert a["info"]["total_score"] == 5.0
         assert b["info"]["total_score"] == 2.0
         assert len(server.session_id_to_state) == 2
+
+    def test_step_info_preserves_upstream_score_and_tracks_highscore(self) -> None:
+        # Non-monotonic game: cumulative score peaks at 30 then drops to 20.
+        # info["score"] must stay the upstream cumulative (not the per-step value),
+        # and highscore/normalized_highscore must track the running max (paper metric).
+        server = _make_server()
+        steps = [
+            ("o", 30.0, False, {"score": 30, "max_score": 100, "won": False}),
+            ("o", -10.0, True, {"score": 20, "max_score": 100, "won": False}),
+        ]
+        with _patch_env(FakeEnv(steps=steps)):
+            client = TestClient(server.setup_webserver())
+            r = client.post("/reset", json=_reset_payload(framework="scienceworld"))
+            assert r.json()["info"]["framework"] == "scienceworld"
+            cookies = r.cookies
+            s1 = client.post("/step", json=_step_payload("mix"), cookies=cookies).json()
+            s2 = client.post("/step", json=_step_payload("pour"), cookies=cookies).json()
+        assert s1["info"]["score"] == 30  # upstream cumulative, not clobbered
+        assert s1["info"]["step_score"] == 30.0
+        assert s1["info"]["game_score"] == 30.0
+        assert s1["info"]["highscore"] == 30.0
+        assert s1["info"]["normalized_highscore"] == 0.3
+        assert s2["info"]["score"] == 20
+        assert s2["info"]["highscore"] == 30.0  # running max survives the drop
+        assert s2["info"]["normalized_highscore"] == 0.3
+        assert s2["info"]["framework"] == "scienceworld"
+
+    def test_step_info_falls_back_to_positional_score(self) -> None:
+        # Upstream info without "score"/"max_score": game_score falls back to the
+        # positional value and normalized_highscore is None (cannot normalize).
+        server = _make_server()
+        with _patch_env(FakeEnv(steps=[("o", 1.0, True, {})])):
+            client = TestClient(server.setup_webserver())
+            cookies = client.post("/reset", json=_reset_payload(framework="alfworld")).cookies
+            s = client.post("/step", json=_step_payload("x"), cookies=cookies).json()
+        assert s["info"]["game_score"] == 1.0
+        assert s["info"]["highscore"] == 1.0
+        assert s["info"]["normalized_highscore"] is None
+
+    def test_compute_metrics_per_family_macro_average(self) -> None:
+        server = _make_server()
+
+        def rollout(framework, normalized, won):
+            return {"info": {"framework": framework, "normalized_highscore": normalized, "won": won}}
+
+        tasks = [
+            [rollout("jericho", 0.10, False), rollout("jericho", 0.20, False)],  # task mean 15.0
+            [rollout("jericho", 0.30, False)],  # task mean 30.0 -> jericho family mean 22.5
+            [rollout("alfworld", 1.0, True), rollout("alfworld", 0.0, False)],  # family mean 50.0
+            [{"info": {}}],  # missing fields -> skipped
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["tales/jericho/normalized_highscore"] == 22.5
+        assert metrics["tales/alfworld/normalized_highscore"] == 50.0
+        assert metrics["tales/alfworld/success_rate"] == 0.5
+        assert metrics["tales/macro_avg/normalized_highscore"] == 36.25
+        assert metrics["tales/num_families"] == 2
+        assert metrics["tales/rollouts_missing_score_fields"] == 1
+
+        key = server.get_key_metrics({"tales/macro_avg/normalized_highscore": 36.25, "mean/reward": -19.8})
+        assert key == {"tales/macro_avg/normalized_highscore": 36.25}

@@ -119,10 +119,13 @@ If missing, list `resources_servers/` and ask the user which to onboard.
 Determine `$MODE`:
 - **full** — a usable model endpoint exists (`$TARGET_ENDPOINT` given, or
   `env.yaml`/config points at a reachable endpoint, or `gym env status` shows a
-  live model server). Baseline runs happen in this engagement.
-- **design-only** — no endpoint. The team produces datasets + experiment plans
-  with exact commands; runs happen later. All performance-dependent selections
-  are marked provisional.
+  live model server). PROBE it (a minimal chat completion, never printing
+  secrets) — "configured" is not "working" (keys expire, interpolations dangle).
+  Baseline runs happen in this engagement.
+- **design-only** — no endpoint, **explicitly chosen by the user** (in
+  `$ARGUMENTS` or via the gate below). The team produces datasets + experiment
+  plans with exact commands; runs happen later. All performance-dependent
+  selections are marked provisional.
 
 Also record `$GPU_AVAILABLE` (`nvidia-smi` check) — some model servers need it.
 
@@ -131,9 +134,29 @@ top-level `wandb_project`, `wandb_name`, and `wandb_api_key` are set (env.yaml o
 `++wandb_*=` overrides), every `gym eval run` invocation inits a W&B run
 automatically (`nemo_gym/global_config.py`, `WANDBConfig`) and logs aggregate/key
 metrics, rollout tables, and profiling histograms. Check whether `wandb_api_key`
-is configured (do NOT print it). In full mode with no key, ask the user whether
-to proceed untracked or provide one — **onboarding runs should be W&B-tracked**:
-the run links are the durable, shareable evidence attached to the environment.
+is configured (do NOT print it) — **onboarding runs should be W&B-tracked**: the
+run links are the durable, shareable evidence attached to the environment.
+
+### ⛔ ENTRY-GATE RULE (hard stop — never silently degrade)
+
+If ANY run-blocking gap is found — at Phase 0 or discovered mid-engagement —
+**STOP and ask the user to fix it** (`AskUserQuestion`) before spawning or
+continuing waves. Do NOT silently fall back to design-only mode. Blockers
+include, at minimum:
+
+1. **No working policy endpoint** (missing/expired/unresolvable key, probe
+   fails) — offer: renew the key / provide another endpoint (e.g.
+   build.nvidia.com `nvapi-` key) / self-host vLLM on local GPUs / explicitly
+   proceed design-only.
+2. **W&B not configured** (`wandb_project`/`wandb_name`/`wandb_api_key`) when
+   runs are planned — offer: provide the key / explicitly proceed untracked.
+3. **A required server fix** surfaced by the audit that gates the sweep (e.g. a
+   metric-correctness fix) — offer: pause while the user (or this session, on
+   request) lands the fix / explicitly defer the affected runs.
+
+The user may answer "proceed design-only" / "proceed untracked" / "defer" — that
+explicit choice is what unlocks continuing. Waiting on a fix is fine: re-probe
+after the user says it's done. Record every gate decision in the final report.
 
 ---
 
@@ -196,7 +219,10 @@ the run links are the durable, shareable evidence attached to the environment.
 | `profile-rewards` | `reward-profiler` | (blocked by `run-baselines`) Reward profiling across a multi-model panel ($MODEL_PANEL); validates the reward signal itself. |
 | `analyze-discriminativeness` | `discriminativeness-analyst` | (blocked by `run-baselines` AND `profile-rewards`) Classify tasks saturated/discriminative/floored; finalize eval_v0 membership; compare repro results to paper numbers. |
 
-In design-only mode, skip Wave 3; `dataset-designer` marks eval_v0 membership
+Skipping Wave 3 is only valid if design-only mode was the user's explicit
+choice at the entry gate (Phase 0) — a blocker discovered here (dead endpoint,
+missing W&B, sweep-gating server fix) re-triggers the ⛔ ENTRY-GATE RULE: stop
+and ask before proceeding. In design-only mode, skip Wave 3; `dataset-designer` marks eval_v0 membership
 `PROVISIONAL` and the deliverables include the exact commands for the deferred
 sweep AND the deferred multi-model reward-profiling panel (model list, per-model
 override cycle, wandb naming).

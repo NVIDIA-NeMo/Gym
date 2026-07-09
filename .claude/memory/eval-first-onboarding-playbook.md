@@ -40,11 +40,30 @@ denied with upstream evidence).
      for self-hosted vLLM.
   4. alfworld success-path test; expert sign-off on the review package.
 
-## Next steps
+## Wave-3 attempt (2026-07-09 PM) — ABORTED by user; state for resume
 
-1. Renew inference-hub key (or nvapi/build.nvidia.com key) + set wandb_* in env.yaml.
-2. Land the tales server metric fix + pins (small PR; fix spec in the report).
-3. Re-run `/env-onboarding-team tales <endpoint>` in full mode → Wave 3 (smoke → eval_full
-   k=5 sweep → paper-parity repro → ≥3-model reward profiling) → re-select eval_v0 →
-   expert sign-off.
-4. Second onboarding target: pick next unverified environment; skill is proven.
+Key renewed, full mode entered, metric server fix IMPLEMENTED in working tree
+(app.py: game_score/highscore/normalized_highscore/won/framework in info, no clobber;
+compute_metrics/get_key_metrics per-family macro; 13 tests pass; tales.yaml caps 25→100).
+Zero successful episodes — blockers hit:
+- Hub qwen backend (eccn-qwen3.6-35b) FLAPPING: conc-3 = 100% failures, conc-1 could not
+  complete episodes. Endpoint-only policy (user): NO self-hosting, NO HF mirrors.
+- Hub catalog DOES serve paper-exact models (verified /models): eccn-llama-3.1-8b-instruct
+  (parity target, probed healthy), llama-3.2-1b, llama-3.3-70b, gpt-4o-mini(azure),
+  mixtral-8x22b, phi-4-mini → parity + panel can be fully endpoint-only.
+- W&B: env.yaml wandb_api_key line holds a REVOKED key (rotated after argv leak; see
+  [[wandb-tracking-gate-and-secret-safety]]). Needs a FRESH key value before tracked runs.
+- Two contaminated wandb runs (nvidia/nemo-gym-onboarding: nlj0q4vq, h65exb3i) hold the
+  old revoked key in metadata; deletion optional now that the key is dead.
+- Gym core bug documented (global_config.py:715 clobbers valid WANDB_API_KEY env var with
+  unresolved ${...} literal) — recommended fix, not applied.
+- Game assets fully cached (~/.cache/tales ~950M). Server venv at resources_servers/tales/.venv.
+
+## Next steps (resume checklist)
+
+1. User: fresh wandb key into env.yaml wandb_api_key line; confirm hub backend stability.
+2. Runs (endpoint-only): smoke → eval_full ×5 (user approved grind) with the qwen target
+   when its backend recovers; paper-parity via eccn-llama-3.1-8b-instruct ×5 on
+   paper_parity.jsonl; panel = llama-3.2-1b / 3.1-8b / 3.3-70b or gpt-4o-mini.
+3. Then discriminativeness → eval_v0 finalization → fold MEASURED results into the fern
+   environment-reports pages → expert sign-off.
