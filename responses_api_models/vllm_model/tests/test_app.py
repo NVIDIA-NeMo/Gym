@@ -1660,6 +1660,89 @@ class TestApp:
         )
         mock_client.create_streaming_tool_call.assert_not_awaited()
 
+    def test_streaming_tool_call_uses_exact_incremental_tokenizer(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            side_effect=[
+                {
+                    "sequence_no": 0,
+                    "token_count": 3,
+                    "encoded_chars": 0,
+                    "incremental_valid": True,
+                },
+                {
+                    "sequence_no": 1,
+                    "token_count": 4,
+                    "encoded_chars": 8,
+                    "incremental_valid": True,
+                    "tokens": [1, 2, 3, 4],
+                },
+            ]
+        )
+        mock_client.create_tokenize = AsyncMock()
+        mock_client.abort_incremental_tokenize = AsyncMock(return_value={"aborted": True})
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        chat_completion = {
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        first_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": chat_completion,
+                "exact_incremental_tokenizer": True,
+            },
+        )
+        final_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 1,
+                "chat_completion": chat_completion,
+                "exact_incremental_tokenizer": True,
+                "final": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+        abort_response = client.post(
+            "/v1/streaming_tool_call/abort",
+            json={
+                "session_id": "session",
+                "exact_incremental_tokenizer": True,
+            },
+        )
+
+        assert first_response.status_code == 200
+        assert first_response.json() == {
+            "sequence_no": 0,
+            "token_count": 3,
+            "encoded_chars": 0,
+            "incremental_valid": True,
+        }
+        assert final_response.status_code == 200
+        assert final_response.json() == {
+            "sequence_no": 1,
+            "token_count": 4,
+            "encoded_chars": 8,
+            "incremental_valid": True,
+            "reuse_id": "session",
+        }
+        assert abort_response.json() == {"aborted": True}
+        assert mock_client.create_incremental_tokenize.await_args_list[0].kwargs == {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "session_id": "session",
+            "sequence_no": 0,
+            "final": False,
+        }
+        mock_client.create_tokenize.assert_not_awaited()
+        mock_client.abort_incremental_tokenize.assert_awaited_once_with(session_id="session")
+
     def test_streaming_tool_call_final_tokens_are_reused_once(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)

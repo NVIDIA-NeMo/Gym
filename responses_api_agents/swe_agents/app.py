@@ -281,6 +281,14 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prompt_reuse_missing: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_requests: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_tokens: Optional[int] = None
+    streaming_tool_call_exact_incremental_tokenizer_actions: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_encoded_chars: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_encoded_tokens: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_reused_tokens: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_rollback_tokens: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_checkpoints: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_checkpoint_tokens: Optional[int] = None
+    streaming_tool_call_incremental_tokenizer_checkpoint_mismatches: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_seconds: Optional[float] = None
     streaming_tool_call_command_request_seconds: Optional[float] = None
     streaming_tool_call_post_command_tail_seconds: Optional[float] = None
@@ -1011,6 +1019,10 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         )
         runtime_breakdown_patch_path = self.parent_dir / "patches" / "openhands_runtime_breakdown.patch"
         prompt_reuse_patch_path = self.parent_dir / "patches" / "streaming_tool_call_prompt_reuse.patch"
+        exact_incremental_tokenizer_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_exact_incremental_tokenizer.patch"
+        )
+        action_timeout_patch_path = self.parent_dir / "patches" / "streaming_tool_call_action_timeout.patch"
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1038,8 +1050,10 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
-        if is_applied(prompt_reuse_patch_path):
+        if is_applied(action_timeout_patch_path):
             return
+        exact_incremental_tokenizer_applied = is_applied(exact_incremental_tokenizer_patch_path)
+        prompt_reuse_applied = is_applied(prompt_reuse_patch_path)
         runtime_breakdown_applied = is_applied(runtime_breakdown_patch_path)
         valid_action_metrics_applied = is_applied(valid_action_metrics_patch_path)
         tokenizer_only_applied = is_applied(tokenizer_only_patch_path)
@@ -1055,7 +1069,11 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             apply_patch(valid_action_metrics_patch_path)
         if not runtime_breakdown_applied:
             apply_patch(runtime_breakdown_patch_path)
-        apply_patch(prompt_reuse_patch_path)
+        if not prompt_reuse_applied:
+            apply_patch(prompt_reuse_patch_path)
+        if not exact_incremental_tokenizer_applied:
+            apply_patch(exact_incremental_tokenizer_patch_path)
+        apply_patch(action_timeout_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -2005,6 +2023,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_prompt_reuse_missing": 0,
                     "streaming_tool_call_incremental_tokenizer_requests": 0,
                     "streaming_tool_call_incremental_tokenizer_tokens": 0,
+                    "streaming_tool_call_exact_incremental_tokenizer_actions": 0,
+                    "streaming_tool_call_incremental_tokenizer_encoded_chars": 0,
+                    "streaming_tool_call_incremental_tokenizer_encoded_tokens": 0,
+                    "streaming_tool_call_incremental_tokenizer_reused_tokens": 0,
+                    "streaming_tool_call_incremental_tokenizer_rollback_tokens": 0,
+                    "streaming_tool_call_incremental_tokenizer_checkpoints": 0,
+                    "streaming_tool_call_incremental_tokenizer_checkpoint_tokens": 0,
+                    "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches": 0,
                     "streaming_tool_call_incremental_tokenizer_seconds": 0.0,
                     "streaming_tool_call_command_request_seconds": 0.0,
                     "streaming_tool_call_post_command_tail_seconds": 0.0,

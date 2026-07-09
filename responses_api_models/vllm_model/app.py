@@ -97,6 +97,7 @@ class StreamingToolCallPromptRequest(BaseModel):
     sequence_no: int
     chat_completion: Dict[str, Any]
     final: bool = False
+    exact_incremental_tokenizer: bool = False
     max_candidates: Optional[int] = Field(default=None, gt=0)
     candidate_ttl_seconds: Optional[float] = Field(default=None, gt=0)
 
@@ -114,6 +115,7 @@ class StreamingToolCallCloseRequest(BaseModel):
 
 class StreamingToolCallAbortRequest(BaseModel):
     session_id: str
+    exact_incremental_tokenizer: bool = False
 
 
 @dataclass(frozen=True)
@@ -333,16 +335,31 @@ class VLLMModel(SimpleResponsesAPIModel):
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
         """Tokenize a partial tool result without starting a prefill session."""
-        client, prompt_token_ids, tokenize_body = await self._tokenize_streaming_tool_call_prompt(
-            request, body.chat_completion
-        )
-        result = {
-            "sequence_no": body.sequence_no,
-            "token_count": len(prompt_token_ids),
-        }
+        tokenization_body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body.chat_completion)
+        tokenization_body_dict = tokenization_body.model_dump(exclude_unset=True)
+        tokenization_body_dict = self._preprocess_chat_completion_create_params(request, tokenization_body_dict)
+        tokenize_body = self._streaming_prompt_tokenize_body(tokenization_body_dict)
+        client = self._resolve_client(request)
+        if body.exact_incremental_tokenizer:
+            tokenization_result = await client.create_incremental_tokenize(
+                **tokenize_body,
+                session_id=body.session_id,
+                sequence_no=body.sequence_no,
+                final=body.final,
+            )
+            prompt_token_ids = tokenization_result.pop("tokens", None)
+            result = dict(tokenization_result)
+        else:
+            tokenization_result = await client.create_tokenize(**tokenize_body)
+            prompt_token_ids = tokenization_result["tokens"]
+            result = {
+                "sequence_no": body.sequence_no,
+                "token_count": len(prompt_token_ids),
+            }
         if body.final:
             assert body.max_candidates is not None
             assert body.candidate_ttl_seconds is not None
+            assert prompt_token_ids is not None
             self._store_streaming_prompt_token_candidate(
                 reuse_id=body.session_id,
                 client=client,
@@ -385,6 +402,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         body: StreamingToolCallAbortRequest = Body(),
     ) -> Dict[str, Any]:
         client = self._resolve_client(request)
+        if body.exact_incremental_tokenizer:
+            return await client.abort_incremental_tokenize(session_id=body.session_id)
         return await client.create_streaming_tool_call("abort", session_id=body.session_id)
 
     async def responses(

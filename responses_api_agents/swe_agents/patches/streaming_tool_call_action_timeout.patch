@@ -1,0 +1,53 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 1a9fc080c..6cd0dca8a 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -482,10 +482,12 @@ class LocalRuntime(ActionExecutionClient):
+ 
+         action = event_from_dict(serialized_action)
+         assert isinstance(action, Action)
++        request_timeout = kwargs.get("timeout")
+         return call_async_from_sync(
+             self._execute_action_request,
+-            kwargs.get("timeout"),
++            request_timeout,
+             action,
++            request_timeout=request_timeout,
+         )
+ 
+     async def execute_action(self, action: Action) -> Observation:
+@@ -530,12 +532,21 @@ class LocalRuntime(ActionExecutionClient):
+             except httpx.NetworkError:
+                 raise AgentRuntimeDisconnectedError("Server connection lost")
+ 
+-    async def _execute_action_request(self, action: Action) -> httpx.Response:
++    async def _execute_action_request(
++        self,
++        action: Action,
++        *,
++        request_timeout: float | None = None,
++    ) -> httpx.Response:
++        if request_timeout is None and action.timeout is not None:
++            request_timeout = action.timeout + 5
++
+         async def post_action() -> httpx.Response:
+             return await call_sync_from_async(
+                 lambda: self.session.post(
+                     f"{self.api_url}/execute_action",
+                     json={"action": event_to_dict(action)},
++                    timeout=request_timeout,
+                 )
+             )
+ 
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index 2e70dd4fd..4207996ce 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -373,6 +373,7 @@ class TestLocalRuntime:
+         post_response.json.return_value = event_to_dict(final_observation)
+ 
+         def post(*args, **kwargs):
++            assert kwargs["timeout"] == 5
+             assert release_post.wait(timeout=1)
+             return post_response
+ 

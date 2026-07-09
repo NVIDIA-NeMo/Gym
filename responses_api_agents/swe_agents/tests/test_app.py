@@ -987,6 +987,8 @@ class TestOpenHandsHarnessProcessor:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # action-timeout reverse check
+                MagicMock(returncode=1),  # exact incremental tokenizer reverse check
                 MagicMock(returncode=1),  # prompt-reuse reverse check
                 MagicMock(returncode=1),  # runtime-breakdown reverse check
                 MagicMock(returncode=1),  # valid-action-metrics reverse check
@@ -1002,13 +1004,17 @@ class TestOpenHandsHarnessProcessor:
                 MagicMock(returncode=0),  # runtime-breakdown apply
                 MagicMock(returncode=0),  # prompt-reuse apply check
                 MagicMock(returncode=0),  # prompt-reuse apply
+                MagicMock(returncode=0),  # exact incremental tokenizer apply check
+                MagicMock(returncode=0),  # exact incremental tokenizer apply
+                MagicMock(returncode=0),  # action-timeout apply check
+                MagicMock(returncode=0),  # action-timeout apply
             ]
 
             with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 15
+            assert len(commands) == 21
             assert commands[0][2:4] == ["--reverse", "--check"]
             assert commands[1][2:4] == ["--reverse", "--check"]
             assert commands[2][2:4] == ["--reverse", "--check"]
@@ -1016,14 +1022,20 @@ class TestOpenHandsHarnessProcessor:
             assert commands[4][2:4] == ["--reverse", "--check"]
             assert commands[5][2:4] == ["--reverse", "--check"]
             assert commands[6][2:4] == ["--reverse", "--check"]
-            assert commands[7][2] == "--check"
-            assert commands[8][2].endswith("streaming_tool_call_tokenizer_only.patch")
+            assert commands[7][2:4] == ["--reverse", "--check"]
+            assert commands[8][2:4] == ["--reverse", "--check"]
             assert commands[9][2] == "--check"
-            assert commands[10][2].endswith("streaming_tool_call_valid_action_metrics.patch")
+            assert commands[10][2].endswith("streaming_tool_call_tokenizer_only.patch")
             assert commands[11][2] == "--check"
-            assert commands[12][2].endswith("openhands_runtime_breakdown.patch")
+            assert commands[12][2].endswith("streaming_tool_call_valid_action_metrics.patch")
             assert commands[13][2] == "--check"
-            assert commands[14][2].endswith("streaming_tool_call_prompt_reuse.patch")
+            assert commands[14][2].endswith("openhands_runtime_breakdown.patch")
+            assert commands[15][2] == "--check"
+            assert commands[16][2].endswith("streaming_tool_call_prompt_reuse.patch")
+            assert commands[17][2] == "--check"
+            assert commands[18][2].endswith("streaming_tool_call_exact_incremental_tokenizer.patch")
+            assert commands[19][2] == "--check"
+            assert commands[20][2].endswith("streaming_tool_call_action_timeout.patch")
 
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
