@@ -1,11 +1,4 @@
 #!/bin/bash
-# shellcheck disable=SC2206
-#SBATCH --job-name=test
-#SBATCH --cpus-per-task=5
-#SBATCH --mem-per-cpu=1GB
-#SBATCH --nodes=4
-#SBATCH --tasks-per-node=1
-#SBATCH --time=00:30:00
 # @bxyu-nvidia: Copied from https://docs.ray.io/en/latest/cluster/vms/user-guides/community/slurm-basic.html#slurm-basic
 
 set -x
