@@ -12,7 +12,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 ## Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/mobench/config.yaml]"
+gym eval prepare --benchmark mobench
 ```
 
 Downloads the source JSONL, splits the prelude from the theorem block via regex,
@@ -29,21 +29,22 @@ and set `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` before starting
 the server.
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/mobench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark mobench
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=mobench_math_formal_lean_simple_agent \
-    +input_jsonl_fpath=benchmarks/mobench/data/mobench_benchmark.jsonl \
-    +output_jsonl_fpath=results/mobench_rollouts.jsonl \
-    +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+    --agent mobench_math_formal_lean_simple_agent \
+    --input benchmarks/mobench/data/mobench_benchmark.jsonl \
+    --output results/mobench_rollouts.jsonl \
+    --num-repeats 32 \
+    --prompt-config benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
+    --temperature 1.0 \
+    --max-output-tokens 16384
 ```
 
 Reproduce published MOBench numbers on a DeepSeek-Prover / Goedel-Prover class

@@ -12,17 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import subprocess
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from app import (
     NSToolsConfig,
     NSToolsResourcesServer,
     NSToolsVerifyRequest,
 )
+from fastapi import FastAPI
+from nemo_skills.mcp.tool_manager import ToolManager
 
+from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 class TestApp:
@@ -93,6 +99,9 @@ class TestApp:
             default_verifier="math_with_judge",
         )
         server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
 
         # Mock the server_client.post to return a successful verification
         mock_response = AsyncMock()
@@ -137,7 +146,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        result = await server.verify(None, verify_request)
+        result = await server.verify(request, verify_request)
 
         assert result.reward == 1.0
         assert result.delegated_response is not None
@@ -148,6 +157,32 @@ class TestApp:
         call_args = server.server_client.post.call_args
         assert call_args.kwargs["server_name"] == "math_with_judge"
         assert call_args.kwargs["url_path"] == "/verify"
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
+
+    async def test_verify_cleans_up_when_verifier_fails(self) -> None:
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("verifier failed"))
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
+        verify_request = MagicMock(spec=NSToolsVerifyRequest)
+        verify_request.verifier_type = None
+
+        with pytest.raises(RuntimeError, match="verifier failed"):
+            await server.verify(request, verify_request)
+
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
 
     async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""
@@ -266,3 +301,153 @@ class TestApp:
         assert "expected_answer" in json_data
         assert "responses_create_params" in json_data
         assert "response" in json_data
+
+
+class TestPythonToolShutdownReap:
+    """Shutdown must reap the python_tool subprocess on every exit path."""
+
+    def _make_server(self) -> NSToolsResourcesServer:
+        config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
+        return NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_kill_is_followed_by_reap_wait(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="python_tool", timeout=5), 0]
+        server._python_tool_process = proc
+
+        await server.shutdown()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        assert server._python_tool_process is None
+
+    async def test_unreaped_child_after_sigkill_is_logged(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="python_tool", timeout=5)
+        server._python_tool_process = proc
+
+        with patch("app.logger") as mock_logger:
+            await server.shutdown()
+
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        mock_logger.error.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_graceful_termination_does_not_kill(self) -> None:
+        server = self._make_server()
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        await server.shutdown()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
+        proc.wait.assert_called_once_with(timeout=5)
+        assert server._python_tool_process is None
+
+
+class TestSidecarTeardownWiredToLifespan:
+    """shutdown() must be connected to the server lifetime, not just defined.
+
+    The base runner only starts Uvicorn; nothing calls shutdown() on its own.
+    setup_webserver() must register it so a normal server stop reaps the
+    python_tool sidecar instead of leaving it bound to its fixed port.
+    """
+
+    def _make_server(self) -> NSToolsResourcesServer:
+        config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
+        return NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_lifespan_context_invokes_shutdown(self) -> None:
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        # Exiting the app lifespan context must reap the sidecar.
+        async with app.router.lifespan_context(app):
+            pass
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    def test_lifespan_shutdown_reaps_sidecar_via_testclient(self) -> None:
+        from fastapi.testclient import TestClient
+
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        # Entering/exiting TestClient drives the app startup/shutdown lifespan.
+        with TestClient(app):
+            pass
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_shutdown_runs_when_lifespan_body_raises(self) -> None:
+        """The try/finally must reap the sidecar even if the running app errors/cancels.
+
+        An exception raised inside the lifespan body is thrown into the wrapper at
+        the `yield`. Without the finally, shutdown() is skipped and the sidecar leaks.
+        """
+        server = self._make_server()
+        app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        with pytest.raises(RuntimeError, match="boom"):
+            async with app.router.lifespan_context(app):
+                raise RuntimeError("boom")
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None
+
+    async def test_shutdown_runs_when_inner_lifespan_teardown_raises(self) -> None:
+        """The try/finally must reap the sidecar even if the inner lifespan teardown raises.
+
+        The wrapper wraps the base app's lifespan; if that inner teardown raises on a
+        clean exit, the finally still runs shutdown() before the error propagates.
+        """
+
+        @asynccontextmanager
+        async def raising_inner_lifespan(app):
+            yield None
+            raise RuntimeError("inner lifespan teardown failed")
+
+        base_app = FastAPI()
+        base_app.router.lifespan_context = raising_inner_lifespan
+
+        server = self._make_server()
+        with patch.object(SimpleResourcesServer, "setup_webserver", return_value=base_app):
+            app = server.setup_webserver()
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        server._python_tool_process = proc
+
+        with pytest.raises(RuntimeError, match="inner lifespan teardown failed"):
+            async with app.router.lifespan_context(app):
+                pass
+
+        proc.terminate.assert_called_once()
+        assert server._python_tool_process is None

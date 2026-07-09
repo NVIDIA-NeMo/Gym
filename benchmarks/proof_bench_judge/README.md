@@ -34,19 +34,19 @@ details.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/proof_bench_judge/config.yaml]"
+gym eval prepare --benchmark proof_bench_judge
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/proof_bench_judge/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark proof_bench_judge
 
 # Collecting rollouts (4 rollouts per task)
-ng_collect_rollouts \
-    +agent_name=proof_bench_judge_math_proof_judgement_simple_agent \
-    +input_jsonl_fpath=benchmarks/proof_bench_judge/data/proof_bench_judge_benchmark.jsonl \
-    +output_jsonl_fpath=results/proof_bench_judge_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent proof_bench_judge_math_proof_judgement_simple_agent \
+    --input benchmarks/proof_bench_judge/data/proof_bench_judge_benchmark.jsonl \
+    --output results/proof_bench_judge_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Metrics

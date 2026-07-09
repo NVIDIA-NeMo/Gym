@@ -5,41 +5,30 @@
 # published pipeline; these targets just mirror the local-developer entry
 # points.
 #
-# Sphinx (legacy) docs are still built via docs/Makefile; the `sphinx-*`
-# targets here are thin wrappers around that.
-#
 # First time on this machine? Run `make docs-login` before `make docs`.
 # Without dashboard provisioning, `fern docs md generate` fails with
 # `HTTP 403: User does not belong to organization`.
 
 FERN_DIR := fern
-DOCS_DIR := docs
 PUBLISH_WORKFLOW := Publish Fern Docs
 
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-        docs docs-check docs-preview docs-publish docs-login docs-generate-library \
-        sphinx sphinx-html sphinx-live sphinx-publish sphinx-clean
+        docs docs-check docs-preview docs-publish docs-login docs-login-remote docs-generate-library
 
 help:
 	@echo ""
 	@echo "NeMo Gym top-level Make targets"
 	@echo "==============================="
 	@echo ""
-	@echo "Fern docs (canonical):"
+	@echo "Fern docs:"
 	@echo "  make docs-login             FIRST-TIME SETUP — provision Fern account + CLI auth"
 	@echo "  make docs                   Generate library reference and start Fern dev server"
 	@echo "  make docs-check             Validate Fern docs config ('fern check' via npm run check)"
 	@echo "  make docs-preview           Build a shared preview URL on *.docs.buildwithfern.com (needs DOCS_FERN_TOKEN)"
 	@echo "  make docs-publish           Trigger the 'Publish Fern Docs' workflow on origin/main"
 	@echo "  make docs-generate-library  Regenerate the autodoc library reference under fern/product-docs/"
-	@echo ""
-	@echo "Sphinx docs (legacy — wrappers around docs/Makefile):"
-	@echo "  make sphinx                 Start Sphinx live-reload server"
-	@echo "  make sphinx-html            Build Sphinx HTML output"
-	@echo "  make sphinx-publish         Build Sphinx for publication (fail on warnings)"
-	@echo "  make sphinx-clean           Clean Sphinx build output"
 	@echo ""
 	@echo "First time? Run 'make docs-login' before 'make docs' or your"
 	@echo "autodoc step will fail with HTTP 403."
@@ -91,7 +80,14 @@ docs-login:
 		*) echo ""; echo "Bailing. Open the dashboard URL above, sign in, then re-run 'make docs-login'."; exit 1 ;; \
 	esac
 	@echo ""
-	npx -y fern-api@latest login
+	npx -y fern-api@latest login $(LOGIN_FLAGS)
+
+# Same as docs-login, but uses Fern's device-code flow instead of opening a
+# browser locally — needed on headless remote machines (SSH dev boxes, etc.)
+# where the OAuth callback can't reach a browser. Prints a URL + short code
+# you complete on your laptop.
+docs-login-remote: LOGIN_FLAGS := --device-code
+docs-login-remote: docs-login
 
 # Local-only preview. `fern docs md generate` populates fern/product-docs/ from
 # the nemo_gym package source (declared under `libraries:` in fern/docs.yml);
@@ -136,21 +132,3 @@ docs-preview:
 # — the workflow also fires on `docs/v*` tag pushes.
 docs-publish:
 	gh workflow run "$(PUBLISH_WORKFLOW)" --ref main
-
-# ---------------------------------------------------------------------------
-# Sphinx wrappers — delegate to docs/Makefile (the legacy Sphinx pipeline).
-# ---------------------------------------------------------------------------
-
-sphinx: sphinx-live
-
-sphinx-html:
-	$(MAKE) -C $(DOCS_DIR) docs-html
-
-sphinx-live:
-	$(MAKE) -C $(DOCS_DIR) docs-live
-
-sphinx-publish:
-	$(MAKE) -C $(DOCS_DIR) docs-publish
-
-sphinx-clean:
-	$(MAKE) -C $(DOCS_DIR) docs-clean

@@ -47,7 +47,7 @@ imo_proofbench_judge_simple_agent:
 # Default-null judge config keys so OmegaConf can resolve the
 # `${judge_base_url}` / `${judge_api_key}` / `${judge_model_name}`
 # interpolations on the `judge_model` server even when the consumer
-# doesn't supply them. `ng_prepare_benchmark` reads the merged config
+# doesn't supply them. `gym eval prepare` reads the merged config
 # but doesn't instantiate the judge — without these defaults, prepare
 # crashes with `InterpolationKeyError` before prepare.py runs. CLI
 # overrides (`+judge_base_url=…`) supersede the null at server launch.

@@ -61,18 +61,21 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 
 The following allows users to launch the environment followed by the request for generating and collecting rollouts.
 ```bash
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+  --config "$config_paths" \
   +simple_agent.responses_api_agents.simple_agent.resources_server.name=competitive_coding_challenges_resources_server
 
-ng_collect_rollouts +agent_name=simple_agent \
-  +input_jsonl_fpath=$input_jsonl_fpath \
-  +output_jsonl_fpath=$output_jsonl_fpath \
-  +limit=null \
-  +num_repeats=1 \
-  +num_samples_in_parallel=null
+gym eval run --no-serve \
+  --agent simple_agent \
+  --input $input_jsonl_fpath \
+  --output $output_jsonl_fpath \
+  --limit null \
+  --num-repeats 1 \
+  --concurrency null
 ```
 
 ## Additional Information
 
+- The data necessary for this environment is currently not available and a future release of it is TBD.
 - Example reward profiling done with Qwen3-32B can be found at ![Reward Profile](data/pass_rate_histogram.png)
 - The default settings for `test_batch_size`, `num_parallel_requests` and `time_scale` should work well but if you notice many `"run_stderr": "Time limit exceeded` in your `ccc_verify.jsonl` file then its worth increasing this to remove false negatives. Conversely, lowering `time_scale` will speed up training.
