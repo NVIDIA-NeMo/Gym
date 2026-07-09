@@ -14,7 +14,7 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 # The --min-nodes argument ensures all nodes join before running the script.
 
 # All nodes (including head and workers) will execute this block.
-# The entrypoint (simple-trainer.py) will only run on the head node.
+# The command after '--' will only run on the head node
 srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_JOB_NUM_NODES" \
     ray symmetric-run \
     --address $RAY_HEAD_NODE_IP \
