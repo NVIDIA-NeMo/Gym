@@ -9,11 +9,11 @@ anyterminal_hermes:
       agent_server_module: responses_api_agents.hermes_agent.app
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
-      agent_kwargs:
+      agent_kwargs: # Harbor default params for parity
         max_turns: 90
         terminal_backend: local
         terminal_timeout: 180
-        compression_enabled: true
+        compression_enabled: true # should disable for training
         compression_threshold: 0.85
 
       # Path to pre-built Apptainer SIF files produced by prepare.py --sif-dir.

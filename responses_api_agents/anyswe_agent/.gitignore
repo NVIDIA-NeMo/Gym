@@ -1,4 +1,7 @@
+results/
+deps/
 anyswe_results_*
+results/
 anyswe_*_deps
 swe_swebench_setup
 swe_swebench_multilingual_setup

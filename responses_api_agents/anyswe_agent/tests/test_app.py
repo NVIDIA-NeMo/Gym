@@ -21,6 +21,7 @@ from a task row, and config plumbing.
 import json
 from pathlib import Path
 
+from nemo_gym import PARENT_DIR
 from responses_api_agents.anyswe_agent.app import (
     _RUNNER_TEMPLATE,
     AnySweAgent,
@@ -166,10 +167,10 @@ class TestBuildSweTask:
 
 class TestSetupScriptsExist:
     def test_supported_agents_have_deps_scripts(self) -> None:
-        scripts = Path(__file__).parent.parent / "setup_scripts"
-        assert (scripts / "hermes_agent_deps.sh").exists()
-        assert (scripts / "claude_code_agent_deps.sh").exists()
-        assert (scripts / "_portable_python.sh").exists()
+        agents_dir = PARENT_DIR / "responses_api_agents"
+        assert (agents_dir / "hermes_agent" / "scripts" / "hermes_agent_deps.sh").exists()
+        assert (agents_dir / "claude_code_agent" / "scripts" / "claude_code_agent_deps.sh").exists()
+        assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
 
 
 class TestExampleData:
