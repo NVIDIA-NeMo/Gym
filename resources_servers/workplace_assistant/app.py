@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -24,9 +24,19 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
+
+
+TOOLKITS = [
+    "email",
+    "calendar",
+    "analytics",
+    "project_management",
+    "customer_relationship_manager",
+]
 
 
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -56,28 +66,54 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/{path}")(self.route_to_python_function)
-        return app
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        # Register every workbench tool over both transports (HTTP POST /<name> and MCP). The
+        # hand-authored schema dicts are advertised verbatim and call arguments pass through raw.
+        for schema in get_tools(TOOLKITS)["schemas"]:
+            gym_tool(
+                self._make_tool_closure(schema["name"]),
+                name=schema["name"],
+                description=schema["description"],
+                input_schema=schema["parameters"],
+                owner=self,
+            )
+
+    def _make_tool_closure(self, name: str) -> Callable:
+        def call_workbench_tool(session_id: str, **args: Any) -> WorkbenchResponse:
+            # Check if session exists
+            if session_id not in self.session_id_to_tool_env:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session not initialized. Please call seed_session first.",
+                )
+
+            tool_env = self.session_id_to_tool_env[session_id]
+            args = {key: value for key, value in args.items() if value is not None}
+
+            try:
+                function = tool_env["functions"][name]
+                result = function(**args)
+                return WorkbenchResponse(output=result)
+            except Exception as e:
+                return WorkbenchResponse(
+                    output=f"Error executing tool '{name}': {str(e)}"
+                )  # return error to model so that it can correct itself
+
+        return call_workbench_tool
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
-        toolkits = [
-            "email",
-            "calendar",
-            "analytics",
-            "project_management",
-            "customer_relationship_manager",
-        ]
-        self.session_id_to_tool_env[session_id] = get_tools(toolkits)
+        self.session_id_to_tool_env[session_id] = get_tools(TOOLKITS)
         return BaseSeedSessionResponse()
 
-    async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
+    async def handle_unknown_tool(self, tool_name: str, request: Request) -> WorkbenchResponse:
+        # Preserve the historical catch-all dispatcher contract: unseeded sessions get the 400,
+        # seeded sessions get the 200 soft error produced by the KeyError on the function lookup
+        # ("Error executing tool '<name>': '<name>'").
         session_id = request.session[SESSION_ID_KEY]
 
-        # Check if session exists
         if session_id not in self.session_id_to_tool_env:
             raise HTTPException(
                 status_code=400,
@@ -85,15 +121,20 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             )
 
         tool_env = self.session_id_to_tool_env[session_id]
+        try:
+            raw = await request.json()
+        except Exception:
+            raw = {}
+        body = WorkbenchRequest.model_validate(raw) if isinstance(raw, dict) else WorkbenchRequest()
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
         try:
-            function = tool_env["functions"][path]
+            function = tool_env["functions"][tool_name]
             result = function(**args)
             return WorkbenchResponse(output=result)
         except Exception as e:
             return WorkbenchResponse(
-                output=f"Error executing tool '{path}': {str(e)}"
+                output=f"Error executing tool '{tool_name}': {str(e)}"
             )  # return error to model so that it can correct itself
 
     async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
