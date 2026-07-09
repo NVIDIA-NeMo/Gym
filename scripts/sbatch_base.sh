@@ -1,6 +1,6 @@
 #!/bin/bash
 # One log file for both stdout and stderr
-#SBATCH --output=slurm-%j-%x.log
+#SBATCH --output=nemo-gym-slurm-logs/%j-%x.log
 ### Give all resources to a single Ray task, ray can manage the resources internally
 #SBATCH --ntasks-per-node=1
 
