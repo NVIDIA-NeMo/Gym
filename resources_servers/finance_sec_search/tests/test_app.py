@@ -41,12 +41,6 @@ from resources_servers.finance_sec_search.app import (
 _TEST_SESSION_ID = "test-session"
 
 
-def _mock_request(session_id: str = _TEST_SESSION_ID) -> MagicMock:
-    req = MagicMock()
-    req.session = {"session_id": session_id}
-    return req
-
-
 # ============================================================================
 # Mock Data
 # ============================================================================
@@ -300,7 +294,7 @@ class TestSECFilingSearch:
         _write_filings_cache(server, "0000320193", test_filings)
 
         body = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
 
         results = json.loads(response.results)
         assert len(results) == 1
@@ -313,7 +307,7 @@ class TestSECFilingSearch:
         server._initialized = True
 
         body = FinanceAgentSearchRequest(ticker="NOTEXIST")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
 
         results = json.loads(response.results)
         assert "error" in results
@@ -370,7 +364,7 @@ class TestSECFilingSearch:
         _write_filings_cache(server, "0000320193", test_filings)
 
         body = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
 
         results = json.loads(response.results)
         assert len(results) == 5
@@ -412,7 +406,7 @@ class TestSECFilingSearch:
         _write_filings_cache(server, "0000320193", test_filings)
 
         body = FinanceAgentSearchRequest(ticker="AAPL", form_types=["10-K"])
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
 
         results = json.loads(response.results)
         assert len(results) == 1
@@ -438,7 +432,7 @@ class TestSECFilingSearch:
         _write_filings_cache(server, "0000320193", test_filings)
 
         body = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
 
         results = json.loads(response.results)
         assert len(results) == 200
@@ -495,7 +489,7 @@ class TestDateFiltering:
     async def test_start_date_only(self, server) -> None:
         """start_date filters out filings before the given date."""
         body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
         results = json.loads(response.results)
         assert len(results) == 3
         assert all(r["filing_date"] >= "2024-01-01" for r in results)
@@ -504,7 +498,7 @@ class TestDateFiltering:
     async def test_end_date_only(self, server) -> None:
         """end_date filters out filings after the given date."""
         body = FinanceAgentSearchRequest(ticker="AAPL", end_date="2024-07-15")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
         results = json.loads(response.results)
         assert len(results) == 3
         assert all(r["filing_date"] <= "2024-07-15" for r in results)
@@ -513,7 +507,7 @@ class TestDateFiltering:
     async def test_start_and_end_date(self, server) -> None:
         """Combined date range narrows results."""
         body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2024-01-01", end_date="2024-12-31")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
         results = json.loads(response.results)
         assert len(results) == 2
         for r in results:
@@ -523,7 +517,7 @@ class TestDateFiltering:
     async def test_date_filter_no_results(self, server) -> None:
         """Date range with no matching filings returns error with filter info."""
         body = FinanceAgentSearchRequest(ticker="AAPL", start_date="2030-01-01", end_date="2030-12-31")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
         results = json.loads(response.results)
         assert "error" in results
         assert "start_date=" in results["error"]
@@ -533,7 +527,7 @@ class TestDateFiltering:
     async def test_results_sorted_newest_first(self, server) -> None:
         """Results are sorted by filing_date descending."""
         body = FinanceAgentSearchRequest(ticker="AAPL")
-        response = await server.sec_filing_search(_mock_request(), body)
+        response = await server.sec_filing_search(_TEST_SESSION_ID, body)
         results = json.loads(response.results)
         dates = [r["filing_date"] for r in results]
         assert dates == sorted(dates, reverse=True)
@@ -712,14 +706,14 @@ class TestRetrieveInformation:
         server.server_client.post = AsyncMock(return_value=mock_response)
 
         body = RetrieveInformationRequest(prompt="What is COGS in {{doc}}?")
-        response = await server.retrieve_information(_mock_request(), body)
+        response = await server.retrieve_information(_TEST_SESSION_ID, body)
         assert "COGS is 500" in response.results
 
     @pytest.mark.asyncio
     async def test_missing_key_error(self, server) -> None:
         """Referencing a key not in data storage returns an error."""
         body = RetrieveInformationRequest(prompt="Tell me about {{nonexistent}}")
-        response = await server.retrieve_information(_mock_request(), body)
+        response = await server.retrieve_information(_TEST_SESSION_ID, body)
         assert "ERROR" in response.results
         assert "nonexistent" in response.results
         assert "not found in the data storage" in response.results
@@ -728,7 +722,7 @@ class TestRetrieveInformation:
     async def test_no_placeholder_error(self, server) -> None:
         """Prompt without {{key}} placeholders returns an error."""
         body = RetrieveInformationRequest(prompt="What is the revenue?")
-        response = await server.retrieve_information(_mock_request(), body)
+        response = await server.retrieve_information(_TEST_SESSION_ID, body)
         assert "ERROR" in response.results
         assert "key" in response.results.lower()
         assert "{{key_name}}" in response.results
@@ -766,7 +760,7 @@ class TestRetrieveInformation:
         server.server_client.post = AsyncMock(return_value=mock_response)
 
         body = RetrieveInformationRequest(prompt="Summarize {{huge}}")
-        response = await server.retrieve_information(_mock_request(), body)
+        response = await server.retrieve_information(_TEST_SESSION_ID, body)
         assert "Summary of huge doc" in response.results
 
 
@@ -1033,3 +1027,261 @@ class TestVerify:
         req = self._make_verify_request(response, '{"net": 1000}')
         res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
+
+
+# ============================================================================
+# Test: Dual-transport wire contract (HTTP replay + MCP round-trip + parity)
+# ============================================================================
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+EXPECTED_TOOLS = {
+    "sec_filing_search",
+    "parse_html_page",
+    "retrieve_information",
+    "submit_final_result",
+    "web_search",
+}
+NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+WIRE_FILINGS = {
+    "000032019325000001": {
+        "ticker": "AAPL",
+        "cik": "0000320193",
+        "form": "10-K",
+        "filing_date": "2025-01-15",
+        "report_date": "2024-12-31",
+        "accession_number": "0000320193-25-000001",
+        "primary_document": "aapl-20241228.htm",
+        "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/aapl-20241228.htm",
+    },
+}
+
+# The exact `results` string the pre-migration handler produced for {"ticker": "AAPL"}.
+EXPECTED_AAPL_RESULTS = json.dumps(
+    [
+        {
+            "ticker": "AAPL",
+            "company_name": "APPLE INC.",
+            "form": "10-K",
+            "filing_date": "2025-01-15",
+            "report_date": "2024-12-31",
+            "accession_number": "0000320193-25-000001",
+            "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/aapl-20241228.htm",
+        }
+    ],
+    indent=2,
+)
+
+
+def _rpc(client, method: str, params: dict | None = None, token: str | None = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    return client.post(
+        "/mcp",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}},
+        follow_redirects=False,
+    )
+
+
+def _mcp_list_tools(client, token: str | None = None) -> dict:
+    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+    assert resp.status_code == 200, resp.text
+    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+
+
+def _mcp_call(client, name: str, arguments: dict, token: str | None = None) -> dict:
+    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+@pytest.fixture
+def wire_server(server_config, temp_cache_dir):
+    """A server whose tickers + filings load from disk cache (no network) with tools registered."""
+    pytest.importorskip("mcp")
+    tickers_file = Path(temp_cache_dir) / "tickers.json"
+    tickers_file.write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
+    server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+    _write_filings_cache(server, "0000320193", WIRE_FILINGS)
+    return server
+
+
+class TestHTTPWireContract:
+    """Replay tests: byte-identical request/response shapes vs. the pre-@gym_tool routes."""
+
+    def test_sec_filing_search_replay(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/sec_filing_search", json={"ticker": "AAPL"})
+            assert resp.status_code == 200
+            assert resp.json() == {"results": EXPECTED_AAPL_RESULTS}
+
+    def test_sec_filing_search_unknown_ticker_soft_error_bytes(self, wire_server) -> None:
+        """Unknown ticker keeps the 200-with-error-string soft contract, byte-identical."""
+        from fastapi.testclient import TestClient
+
+        expected = {
+            "results": json.dumps(
+                {
+                    "error": "No company found for ticker 'NOTEXIST'",
+                    "suggestion": "Use the exact stock ticker symbol (e.g., 'AAPL' for Apple, 'MSFT' for Microsoft). "
+                    "Note: only companies listed at https://www.sec.gov/files/company_tickers.json are supported.",
+                }
+            )
+        }
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/sec_filing_search", json={"ticker": "NOTEXIST"})
+            assert resp.status_code == 200
+            assert resp.json() == expected
+
+    def test_sec_filing_search_bad_args_is_422(self, wire_server) -> None:
+        """Missing required field still rejected by body-model validation, loc unchanged."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/sec_filing_search", json={})
+            assert resp.status_code == 422
+            assert resp.json()["detail"][0]["loc"] == ["body", "ticker"]
+
+    def test_form_types_stringified_coercion_survives_http(self, wire_server) -> None:
+        """The _coerce_stringified_collection field validator still runs on the HTTP body."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/sec_filing_search", json={"ticker": "AAPL", "form_types": '["10-K"]'})
+            assert resp.status_code == 200
+            assert resp.json() == {"results": EXPECTED_AAPL_RESULTS}
+
+            miss = client.post("/sec_filing_search", json={"ticker": "AAPL", "form_types": '["8-K"]'})
+            assert miss.status_code == 200
+            assert "No filings found" in json.loads(miss.json()["results"])["error"]
+
+    def test_submit_final_result_replay_and_empty_soft_error(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/submit_final_result", json={"final_result": "42"})
+            assert resp.status_code == 200
+            assert resp.json() == {"results": json.dumps({"success": True, "result": "42"})}
+
+            empty = client.post("/submit_final_result", json={"final_result": ""})
+            assert empty.status_code == 200
+            assert empty.json() == {"results": "ERROR: final_result is required. Please provide your answer."}
+
+    def test_web_search_unavailable_soft_error_bytes(self, wire_server) -> None:
+        """No Tavily key configured: same 200-with-error-string body as before."""
+        from fastapi.testclient import TestClient
+
+        expected = {
+            "results": json.dumps(
+                {
+                    "error": "web_search is not available. Use sec_filing_search, parse_html_page, and retrieve_information instead.",
+                }
+            )
+        }
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/web_search", json={"search_query": "apple revenue"})
+            assert resp.status_code == 200
+            assert resp.json() == expected
+
+    def test_retrieve_information_missing_key_soft_error(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        wire_server.config.retrieval_model_server = ModelServerRef(type="responses_api_models", name="test-model")
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            client.post("/seed_session", json={})
+            resp = client.post("/retrieve_information", json={"prompt": "Tell me about {{nope}}"})
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "results": "ERROR: The key 'nope' was not found in the data storage. "
+                "Available keys are: . "
+                "Use the parse_html_page tool to add keys to the data storage."
+            }
+
+    def test_unknown_tool_catchall_replay(self, wire_server) -> None:
+        """Unknown tool POST keeps today's exact 200 body (error string inside `results`)."""
+        from fastapi.testclient import TestClient
+
+        expected_inner = json.dumps(
+            {
+                "error": "Tool 'does_not_exist' does not exist. Available tools: "
+                "sec_filing_search, parse_html_page, "
+                "retrieve_information, submit_final_result, web_search"
+            }
+        )
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/does_not_exist", json={"anything": 1})
+            assert resp.status_code == 200
+            assert resp.json() == {"results": expected_inner}
+            assert resp.content == json.dumps({"results": expected_inner}, separators=(",", ":")).encode()
+
+
+class TestMCPRoundTrip:
+    """MCP surface: tools/list names + tools/call through raw JSON-RPC on /mcp."""
+
+    def test_seed_session_advertises_mcp_metadata(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            body = client.post("/seed_session", json={}).json()
+            assert body["mcp"]["url_path"] == "/mcp"
+            assert TOKEN_HEADER in body["mcp"]["headers"]
+
+    def test_tools_list_and_call(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            tools = _mcp_list_tools(client)
+            assert set(tools) == EXPECTED_TOOLS
+            # Model-schema tools advertise their body model's fields; session_id is never visible.
+            assert set(tools["sec_filing_search"]["inputSchema"]["properties"]) == {
+                "ticker",
+                "form_types",
+                "start_date",
+                "end_date",
+            }
+
+            result = _mcp_call(client, "submit_final_result", {"final_result": "42"})
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"results": json.dumps({"success": True, "result": "42"})}
+
+    def test_sec_filing_search_via_mcp_matches_http(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+            result = _mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=token)
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"results": EXPECTED_AAPL_RESULTS}
+
+    def test_session_tool_without_token_is_tool_error(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            result = _mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=None)
+            assert result["isError"] is True
+            assert TOKEN_HEADER in result["content"][0]["text"]
+
+
+class TestTransportParity:
+    """MCP tools/list names == HTTP tool routes (minus infra paths) == expected inventory."""
+
+    def test_tool_sets_identical_across_transports(self, wire_server) -> None:
+        from fastapi.testclient import TestClient
+
+        app = wire_server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            mcp_names = set(_mcp_list_tools(client))
+
+        http_names = {
+            route.path.lstrip("/")
+            for route in app.router.routes
+            if getattr(route, "path", None)
+            and "POST" in (getattr(route, "methods", None) or set())
+            and route.path not in NON_TOOL_PATHS
+        }
+        assert mcp_names == http_names == EXPECTED_TOOLS

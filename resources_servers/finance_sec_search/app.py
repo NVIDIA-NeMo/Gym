@@ -48,6 +48,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -442,30 +443,24 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return await super().seed_session(body)
 
     def setup_webserver(self) -> FastAPI:
-        """Register API routes."""
+        """Register API routes (tool routes come from the @gym_tool declarations)."""
         app = super().setup_webserver()
 
         self._load_tickers_or_fail()
 
-        app.post("/sec_filing_search")(self.sec_filing_search)
-        app.post("/parse_html_page")(self.parse_html_page)
-        app.post("/retrieve_information")(self.retrieve_information)
-        app.post("/submit_final_result")(self.submit_final_result)
-        app.post("/web_search")(self.web_search)
-
-        @app.post("/{tool_name}")
-        async def handle_unknown_tool(tool_name: str):
-            return {
-                "results": json.dumps(
-                    {
-                        "error": f"Tool '{tool_name}' does not exist. Available tools: "
-                        "sec_filing_search, parse_html_page, "
-                        "retrieve_information, submit_final_result, web_search"
-                    }
-                )
-            }
-
         return app
+
+    async def handle_unknown_tool(self, tool_name: str, request: Request) -> Dict[str, str]:
+        """Preserve the historical 200-with-error-string catch-all body."""
+        return {
+            "results": json.dumps(
+                {
+                    "error": f"Tool '{tool_name}' does not exist. Available tools: "
+                    "sec_filing_search, parse_html_page, "
+                    "retrieve_information, submit_final_result, web_search"
+                }
+            )
+        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the shared HTTP session."""
@@ -774,14 +769,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # sec_filing_search Endpoint
     # ========================================================================
 
-    async def sec_filing_search(self, request: Request, body: FinanceAgentSearchRequest) -> FinanceAgentSearchResponse:
+    @gym_tool(input_schema=FinanceAgentSearchRequest)
+    async def sec_filing_search(self, session_id: str, body: FinanceAgentSearchRequest) -> FinanceAgentSearchResponse:
         """Search for SEC filings by ticker symbol.
 
         Returns filing metadata entries (sorted by date, newest first),
         capped at max_filing_results. Supports optional form_types,
         start_date, and end_date filters.
         """
-        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+        if timeout_msg := self._check_time_budget(session_id):
             return FinanceAgentSearchResponse(results=timeout_msg)
 
         company = await self._resolve_ticker(body.ticker)
@@ -925,14 +921,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         return tool_result
 
-    async def parse_html_page(self, request: Request, body: ParseHtmlPageRequest) -> ParseHtmlPageResponse:
+    @gym_tool(input_schema=ParseHtmlPageRequest)
+    async def parse_html_page(self, session_id: str, body: ParseHtmlPageRequest) -> ParseHtmlPageResponse:
         """Parse an HTML page from any URL and store in session data storage.
 
         SEC URLs are detected automatically and routed through the
         disk-cache / dump / live-download pipeline (with caching).
         All URLs use the same generic BeautifulSoup parser.
         """
-        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+        if timeout_msg := self._check_time_budget(session_id):
             return ParseHtmlPageResponse(results=timeout_msg)
 
         url, key = body.url, body.key
@@ -941,7 +938,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if not key:
             return ParseHtmlPageResponse(results="ERROR: key is required.")
 
-        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
+        storage = self._get_session_storage(session_id)
 
         try:
             if self._parse_sec_url(url):
@@ -960,11 +957,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # retrieve_information Endpoint (LLM-based document querying)
     # ========================================================================
 
+    @gym_tool(input_schema=RetrieveInformationRequest)
     async def retrieve_information(
-        self, request: Request, body: RetrieveInformationRequest
+        self, session_id: str, body: RetrieveInformationRequest
     ) -> RetrieveInformationResponse:
         """Query stored documents using LLM-based prompting."""
-        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+        if timeout_msg := self._check_time_budget(session_id):
             return RetrieveInformationResponse(results=timeout_msg)
 
         if not self.config.retrieval_model_server:
@@ -972,7 +970,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 results="ERROR: Retrieval model not configured. Set retrieval_model_server in config."
             )
 
-        storage = self._get_session_storage(request.session[SESSION_ID_KEY])
+        storage = self._get_session_storage(session_id)
         prompt = body.prompt
 
         # Extract {{key}} placeholders from prompt
@@ -1077,6 +1075,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         return start_date, end_date
 
+    @gym_tool(input_schema=SubmitFinalResultRequest)
     async def submit_final_result(self, body: SubmitFinalResultRequest) -> SubmitFinalResultResponse:
         """Accept the agent's final answer submission."""
         final_result = body.final_result
@@ -1084,9 +1083,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             return SubmitFinalResultResponse(results="ERROR: final_result is required. Please provide your answer.")
         return SubmitFinalResultResponse(results=json.dumps({"success": True, "result": final_result}))
 
-    async def web_search(self, request: Request, body: WebSearchRequest) -> WebSearchResponse:
+    @gym_tool(input_schema=WebSearchRequest)
+    async def web_search(self, session_id: str, body: WebSearchRequest) -> WebSearchResponse:
         """Search the web using Tavily."""
-        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+        if timeout_msg := self._check_time_budget(session_id):
             return WebSearchResponse(results=timeout_msg)
 
         if self._tavily is None:
