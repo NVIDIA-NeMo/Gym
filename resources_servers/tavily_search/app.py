@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -221,10 +222,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        app.post("/web_search")(self.web_search)
-        app.post("/find_in_page")(self.find_in_page)
-        app.post("/scroll_page")(self.scroll_page)
-
         main_app_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -249,8 +246,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
-    async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+    @gym_tool(
+        description=(
+            "Search the web for a query and return up to 10 search results with <link, summary> for each result."
+        ),
+        input_schema=TavilySearchRequest,
+    )
+    async def web_search(self, session_id: str, body: TavilySearchRequest) -> TavilySearchResponse:
+        metrics = self._session_id_to_metrics[session_id]
 
         if self.config.debug:
             print("\n\n body.query: ", body.query)
@@ -277,8 +280,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = self._postprocess_search_results(results)
         return TavilySearchResponse(results_string="".join(postprocessed_results))
 
-    async def find_in_page(self, request: Request, body: FindInPageRequest) -> FindInPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+    @gym_tool(
+        description=(
+            "Extract and search content from a specific URL. "
+            "Uses the query to find and return the most relevant content chunks from the page."
+        ),
+        input_schema=FindInPageRequest,
+    )
+    async def find_in_page(self, session_id: str, body: FindInPageRequest) -> FindInPageResponse:
+        metrics = self._session_id_to_metrics[session_id]
 
         if self.config.debug:
             print("\n\n find_in_page ")
@@ -331,8 +341,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return FindInPageResponse(results_string=header + numbered + footer)
 
-    async def scroll_page(self, request: Request, body: ScrollPageRequest) -> ScrollPageResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+    @gym_tool(
+        description=(
+            "Retrieve the content of a web page and return a specific section of it as words. "
+            "Use start_index and n to paginate through the page content."
+        ),
+        input_schema=ScrollPageRequest,
+    )
+    async def scroll_page(self, session_id: str, body: ScrollPageRequest) -> ScrollPageResponse:
+        metrics = self._session_id_to_metrics[session_id]
 
         if self.config.debug:
             print("\n\n scroll_page ")
