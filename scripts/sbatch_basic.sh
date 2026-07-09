@@ -22,7 +22,7 @@ echo "Running from $SLURM_SUBMIT_DIR"
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
-    source .venv/bin/activate && uv sync \
+    pwd && ls && ls .venv && source .venv/bin/activate && uv sync \
     && ray symmetric-run \
     --address $RAY_HEAD_NODE_IP \
     --min-nodes $SLURM_JOB_NUM_NODES \
