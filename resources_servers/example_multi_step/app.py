@@ -15,7 +15,6 @@
 import json
 from typing import List
 
-from fastapi import FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -24,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 
 
@@ -31,16 +31,8 @@ class ExampleMultiStepResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class GetSynonymValueRequest(BaseModel):
-    synonym: str
-
-
 class GetSynonymValueResponse(BaseModel):
     synonym_value: int
-
-
-class ExtractSynonymValuesRequest(BaseModel):
-    synonym_values: List[int]
 
 
 class ExtractSynonymValuesResponse(BaseModel):
@@ -70,18 +62,14 @@ class ExampleMultiStepVerifyResponse(BaseVerifyResponse):
 class ExampleMultiStepResourcesServer(SimpleResourcesServer):
     config: ExampleMultiStepResourcesServerConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
+    @gym_tool
+    async def get_synonym_value(self, synonym: str) -> GetSynonymValueResponse:
+        """Get the synonym value for a synonym."""
+        return GetSynonymValueResponse(synonym_value=sum(map(ord, synonym)))
 
-        app.post("/get_synonym_value")(self.get_synonym_value)
-        app.post("/extract_synonym_values")(self.extract_synonym_values)
-
-        return app
-
-    async def get_synonym_value(self, body: GetSynonymValueRequest) -> GetSynonymValueResponse:
-        return GetSynonymValueResponse(synonym_value=sum(map(ord, body.synonym)))
-
-    async def extract_synonym_values(self, body: ExtractSynonymValuesRequest) -> ExtractSynonymValuesResponse:
+    @gym_tool
+    async def extract_synonym_values(self, synonym_values: List[int]) -> ExtractSynonymValuesResponse:
+        """Extract the synonym values you retrieved for the term that is relevant to the user query."""
         return ExtractSynonymValuesResponse(success=True)
 
     async def verify(self, body: ExampleMultiStepVerifyRequest) -> ExampleMultiStepVerifyResponse:
