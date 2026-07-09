@@ -566,3 +566,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
+
+    async def create_embeddings(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/embeddings",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)

@@ -16,6 +16,7 @@ import asyncio
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
+from openai.types import CreateEmbeddingResponse
 from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
@@ -82,6 +83,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         async with self._semaphore:
             openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
+
+    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+        body_dict = self.config.extra_body | body
+        body_dict["model"] = self.config.openai_model
+        # Force float output: this endpoint's response schema is CreateEmbeddingResponse
+        # (embedding: List[float]) and cannot represent base64. OpenAI SDK clients default to
+        # encoding_format="base64" on the wire, which would otherwise fail response validation.
+        body_dict["encoding_format"] = "float"
+        async with self._semaphore:
+            openai_response_dict = await self._client.create_embeddings(**body_dict)
+        return CreateEmbeddingResponse.model_validate(openai_response_dict)
 
 
 if __name__ == "__main__":
