@@ -113,6 +113,7 @@ claude_code_agent:
       bare: true
       mcp_config: null
       settings: null
+      capture_trajectory: true
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -130,6 +131,7 @@ claude_code_agent:
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
+- `capture_trajectory`: when `true` (default), each `run()` result carries a standardized `trajectory` built from the session transcript Claude Code writes on disk (see [Trajectory capture](#trajectory-capture))
 
 For the full set of Claude Code CLI flags see the [CLI reference](https://code.claude.com/docs/en/cli-reference).
 
@@ -192,6 +194,52 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 `hash` is a content digest of the skill directory, so optimizer loops (e.g. ACE, GEPA, EvoSkill) that mutate a skill **in place** at the same path still produce distinguishable variants. For concurrent candidate evaluation, give each candidate its own directory (`skills/cand-0/`, `skills/cand-1/`, …) to avoid a path-reuse read/write race.
 
 The skills path is resolved like `input_jsonl_fpath` (relative paths check the working directory, then the Gym root). For distributed runs the directory must be on storage accessible to the agent process.
+
+## Trajectory capture
+
+Claude Code persists a complete session transcript — one JSON record per event, with timestamps, request ids, per-model-call token usage, and tool execution metadata — under `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl`. Since each rollout runs with an ephemeral `CLAUDE_CONFIG_DIR`, the agent harvests those artifacts just before cleanup and attaches a standardized, versioned trajectory to every `run()` result (and therefore to every rollout JSONL row). This addresses the standardized trajectory-telemetry requirements of [NVIDIA-NeMo/Gym#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867). When no transcript is available, the trajectory is built from the stream-json stdout events instead (`source: "stream_json"`), which carry the same message structure and token usage but no timestamps or request ids — missing telemetry is `null`, never fabricated.
+
+The schema lives in `trajectory.py` (`ClaudeCodeTrajectory`, `schema_version: "1.0"`, validated via `validate_trajectory()`):
+
+```json
+{
+  "schema_version": "1.0",
+  "agent": "claude_code_agent",
+  "source": "transcript",
+  "session_id": "…",
+  "model": "claude-sonnet-4-6",
+  "num_turns": 4,
+  "duration_ms": 8123.0,
+  "total_cost_usd": 0.021,
+  "result_usage": {"input_tokens": 63, "cache_read_input_tokens": 18478, "output_tokens": 912},
+  "stats": {"prompt_tokens": 63, "completion_tokens": 912, "total_tokens": 975, "cached_tokens": 18478, "cache_creation_tokens": 8289, "reasoning_tokens": null},
+  "steps": [
+    {"step_id": 0, "type": "user_message", "timestamp": "…", "content": "fix the bug"},
+    {
+      "step_id": 1, "type": "agent_turn", "turn_no": 1, "timestamp": "…",
+      "model": "claude-sonnet-4-6", "request_id": "req_…", "message_id": "msg_…", "stop_reason": "tool_use",
+      "content": "…", "reasoning_content": "…",
+      "stats": {"prompt_tokens": 12, "completion_tokens": 300, "cached_tokens": 9000, "cache_creation_tokens": 512, "total_tokens": 312, "reasoning_tokens": null},
+      "tool_calls": [{"call_id": "toolu_…", "name": "Bash", "arguments": "{\"command\": \"ls\"}"}],
+      "observations": [
+        {"source_call_id": "toolu_…", "content": "…model-visible output…", "status": "completed",
+         "started_at": "…", "completed_at": "…", "duration_ms": 532.3, "extra": {"interrupted": false}}
+      ]
+    }
+  ]
+}
+```
+
+Semantics:
+
+- **Delta / append-only steps**: each step holds only the new content it introduced — a user message, or one complete agent turn (one model call) with its tool calls and observations. The model-visible input of turn *N* is the concatenation of all steps before it, starting from the most recent `context_boundary` step. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
+- **Compaction**: when Claude Code compacts its context, a `context_boundary` step is emitted whose `content` is the summary that replaced the prior history; post-compaction context = boundary content + later steps.
+- **Per-model-call stats**: `stats` on each `agent_turn` carries prompt/completion/total tokens plus `cached_tokens` (cache reads) and `cache_creation_tokens`, deduplicated per API message (the transcript writes one record per content block, repeating the usage). `reasoning_tokens` is `null` — the Anthropic Messages API doesn't report it separately.
+- **Tool observations and timing**: each observation records the model-visible output, `completed`/`error` status, and independent `started_at`/`completed_at`/`duration_ms` from the actual execution boundary (issuing assistant record → its tool-result record), so parallel tool calls keep independent timing. Short scalar execution metadata from Claude Code's `toolUseResult` (flags, exit info) is kept in `extra`; oversized payloads are dropped.
+- **Failures**: tool errors surface as `status: "error"` observations; on a rollout timeout the partial transcript written before the kill is still harvested.
+- **Subagents**: sidechain (subagent) records are out of scope for the schema and skipped, but counted in `sidechain_records_skipped` so consumers can tell "no subagents ran" from "subagent events were dropped".
+
+Identity: `session_id` identifies the Claude Code session; task and rollout identity are recorded by Gym's rollout collection layer on the surrounding rollout row (the trajectory rides on the verify response), and each model call is identified by `request_id`/`message_id`, each tool call by `call_id`.
 
 ## Limitations
 

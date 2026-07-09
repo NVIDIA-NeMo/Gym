@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
+from responses_api_agents.claude_code_agent.trajectory import build_trajectory, decode_jsonl
 
 
 LOG = logging.getLogger(__name__)
@@ -70,30 +71,22 @@ def _extract_thinking(content: list[Any]) -> str:
 
 def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage)."""
-    raw_events: list[dict] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            raw_events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    raw_events = decode_jsonl(stdout)
 
     output_items: list[Any] = []
     pending_calls: dict[str, dict] = {}
     buffered_think: str | None = None
-    total_input = 0
-    total_output = 0
+    # The CLI emits one assistant event per content block of the same API message, each
+    # repeating that message's usage — key by message id so each model call counts once.
+    usage_by_message: dict[str, dict] = {}
+    result_usage: Optional[dict] = None
     num_turns: Optional[int] = None
 
     for event in raw_events:
         etype = event.get("type")
 
         if etype == "result":
-            usage = event.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            result_usage = event.get("usage") or {}
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -102,8 +95,8 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             message = event.get("message", {})
             content = message.get("content") or []
             usage = message.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            if usage:
+                usage_by_message.setdefault(message.get("id") or f"_event_{len(usage_by_message)}", usage)
 
             if not isinstance(content, list):
                 content = []
@@ -171,7 +164,14 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
-    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+    # The result event's usage is the run total, so it wins over the per-message sum
+    # (summing both would double count).
+    usages = [result_usage] if result_usage else list(usage_by_message.values())
+    metadata: dict = {
+        "input_tokens": sum(int(u.get("input_tokens") or 0) for u in usages),
+        "output_tokens": sum(int(u.get("output_tokens") or 0) for u in usages),
+        "cached_tokens": sum(int(u.get("cache_read_input_tokens") or 0) for u in usages),
+    }
     if num_turns is not None:
         metadata["num_turns"] = num_turns
     return output_items, metadata
@@ -233,6 +233,10 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     bare: bool = True
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
+    # When True, the session transcript Claude Code writes under the per-run CLAUDE_CONFIG_DIR
+    # is harvested before cleanup and attached to run() results as a standardized `trajectory`
+    # (see trajectory.py for the schema and reconstruction semantics).
+    capture_trajectory: bool = True
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -243,6 +247,9 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    # Standardized trajectory (trajectory.ClaudeCodeTrajectory, serialized); None when
+    # capture is disabled or no artifacts were produced (e.g. hard timeout before startup).
+    trajectory: Optional[dict[str, Any]] = None
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
@@ -364,14 +371,31 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         cmd += ["--", instruction]
         return cmd
 
+    def _collect_transcript_records(self, claude_config_dir: Path) -> list[dict]:
+        """Harvest the session transcript(s) Claude Code wrote under the per-run config dir.
+
+        Claude Code persists every session event (with timestamps, request ids, per-call
+        usage, and tool execution metadata) to ``<config_dir>/projects/<cwd-slug>/*.jsonl``.
+        The per-run dir is removed after each request, so this runs just before cleanup.
+        """
+        records: list[dict] = []
+        try:
+            projects_dir = claude_config_dir / "projects"
+            if projects_dir.is_dir():
+                for transcript in sorted(projects_dir.glob("*/*.jsonl")):
+                    records.extend(decode_jsonl(transcript.read_text(errors="replace")))
+        except OSError as exc:
+            LOG.warning("failed to read Claude Code transcript from %s: %s", claude_config_dir, exc)
+        return records
+
     async def _run_claude_code(
         self,
         instruction: str,
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
+    ) -> tuple[str, str, list[dict]]:
+        """Run claude -p --output-format=stream-json; return (stdout, model_name, transcript_records)."""
         base_url = self._resolve_base_url()
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
@@ -417,16 +441,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 proc.kill()
                 await proc.communicate()
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                return "", model
+                # The partial transcript is still on disk and is the only record of what
+                # happened before the kill — harvest it for debugging.
+                return "", model, self._maybe_collect_transcript(claude_config_dir)
 
             if proc.returncode not in (0, None):
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+            return stdout.decode(errors="replace"), model, self._maybe_collect_transcript(claude_config_dir)
         finally:
             if claude_config_dir is not None:
                 shutil.rmtree(claude_config_dir, ignore_errors=True)
+
+    def _maybe_collect_transcript(self, claude_config_dir: Path) -> list[dict]:
+        return self._collect_transcript_records(claude_config_dir) if self.config.capture_trajectory else []
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(
@@ -493,7 +522,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
-    ) -> NeMoGymResponse:
+    ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]]]:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -502,13 +531,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_claude_code(
+        stdout, model_name, transcript_records = await self._run_claude_code(
             user_message,
             system_prompt=system_prompt,
             mcp_config=mcp_config,
             skills_path=skills_path,
         )
         output_items, usage = parse_stream_json(stdout)
+
+        trajectory: Optional[dict[str, Any]] = None
+        if self.config.capture_trajectory:
+            try:
+                trajectory = build_trajectory(decode_jsonl(stdout), transcript_records).model_dump(mode="json")
+            except Exception as exc:
+                LOG.warning("failed to build trajectory: %s", exc)
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -528,7 +564,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -539,19 +575,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens", 0)),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        return response, trajectory
 
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body)
+        response, _ = await self._create_response(body)
+        return response
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -575,7 +613,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                agent_resp = await self._create_response(
+                agent_resp, trajectory = await self._create_response(
                     body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
                 )
                 agent_resp_json = agent_resp.model_dump(mode="json")
@@ -599,7 +637,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
+                verify_json | {"turns_used": turns, "finished_naturally": naturally, "trajectory": trajectory}
             )
 
 

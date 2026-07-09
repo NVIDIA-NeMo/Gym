@@ -19,3 +19,4 @@ claude_code_agent:
       bare: true  # set false to auto-discover skills, hooks, plugins, MCP, memory, CLAUDE.md
       mcp_config: null  # path to an MCP server config file (--mcp-config); works even with bare: true
       settings: null  # path to a settings JSON layered into the per-run CLAUDE_CONFIG_DIR
+      capture_trajectory: true  # attach a standardized trajectory (from Claude Code's transcript) to run() results

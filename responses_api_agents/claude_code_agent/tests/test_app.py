@@ -288,7 +288,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6"))
+        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6", []))
         body = ClaudeCodeAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -302,7 +302,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6"))
+        run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6", []))
         body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_claude_code)
@@ -335,7 +335,7 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
+            stdout, model, transcript_records = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
 
         assert "claude" in captured["cmd"][0]
         assert "--mcp-config" in captured["cmd"]
@@ -415,11 +415,12 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_claude_code("hello"))
+            stdout, model, transcript_records = asyncio.run(agent._run_claude_code("hello"))
 
         assert stdout == ""
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
+        assert transcript_records == []
 
 
 class TestRolloutMCPConfig:
@@ -530,10 +531,14 @@ class TestRolloutMCPConfig:
             captured["mcp_config"] = mcp_config
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
             captured["config"] = json.loads(Path(mcp_config).read_text())
-            return _event(
-                "assistant",
-                message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
-            ), "claude-sonnet-4-6"
+            return (
+                _event(
+                    "assistant",
+                    message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
+                ),
+                "claude-sonnet-4-6",
+                [],
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
@@ -585,7 +590,7 @@ class TestRolloutMCPConfig:
             captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
                 "headers"
             ]["X-NeMo-Gym-Session-Token"]
-            return _event("assistant", message={"content": [{"type": "text", "text": "ok"}]}), "claude-sonnet-4-6"
+            return _event("assistant", message={"content": [{"type": "text", "text": "ok"}]}), "claude-sonnet-4-6", []
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
@@ -638,7 +643,7 @@ class TestParseStreamJson:
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
     def test_text_message(self) -> None:
         line = self._assistant([{"type": "text", "text": "hello"}])
@@ -714,6 +719,33 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
 
+    def test_result_usage_wins_over_assistant_sums(self) -> None:
+        # The result event's usage is the run total — adding per-message usage on top
+        # of it would double count.
+        assistant = self._assistant([{"type": "text", "text": "hi"}])
+        result = _event("result", usage={"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 7})
+        _, usage = parse_stream_json(f"{assistant}\n{result}")
+        assert usage["input_tokens"] == 10
+        assert usage["output_tokens"] == 5
+        assert usage["cached_tokens"] == 7
+
+    def test_usage_deduped_by_message_id(self) -> None:
+        # One API message can arrive as multiple events (one per content block), each
+        # repeating the same message id and usage — it must count once.
+        shared = {"input_tokens": 10, "output_tokens": 5}
+        e1 = _event("assistant", message={"id": "msg_1", "content": [{"type": "text", "text": "a"}], "usage": shared})
+        e2 = _event(
+            "assistant",
+            message={
+                "id": "msg_1",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                "usage": shared,
+            },
+        )
+        _, usage = parse_stream_json(f"{e1}\n{e2}")
+        assert usage["input_tokens"] == 10
+        assert usage["output_tokens"] == 5
+
     def test_result_event_exposes_num_turns(self) -> None:
         result = _event("result", num_turns=9, usage={"input_tokens": 1, "output_tokens": 1})
         _, usage = parse_stream_json(result)
@@ -723,6 +755,165 @@ class TestParseStreamJson:
         assistant = self._assistant([{"type": "text", "text": "hi"}])
         _, usage = parse_stream_json(assistant)
         assert "num_turns" not in usage
+
+
+class TestTrajectoryCapture:
+    def _seed_and_verify_post(self):
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            if url_path == "/verify":
+                return _FakeHttpResp(
+                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
+                )
+            return _FakeHttpResp({})
+
+        return AsyncMock(side_effect=_post)
+
+    def _run(self, agent: ClaudeCodeAgent, run_claude_code: AsyncMock):
+        agent.server_client.post = self._seed_and_verify_post()
+        req = MagicMock()
+        req.cookies = {}
+        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+        with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
+            return asyncio.run(agent.run(req, body))
+
+    def _stream_stdout(self) -> str:
+        return "\n".join(
+            [
+                _event("system", subtype="init", session_id="sess-1"),
+                _event(
+                    "assistant",
+                    message={
+                        "id": "msg_1",
+                        "model": "claude-sonnet-4-6",
+                        "content": [{"type": "text", "text": "done"}],
+                        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3},
+                    },
+                ),
+                _event(
+                    "result",
+                    num_turns=1,
+                    duration_ms=1234.0,
+                    total_cost_usd=0.01,
+                    usage={"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3},
+                ),
+            ]
+        )
+
+    def test_run_attaches_trajectory(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", []))
+
+        result = self._run(agent, run_claude_code)
+
+        trajectory = result.trajectory
+        assert trajectory["schema_version"] == "1.0"
+        assert trajectory["source"] == "stream_json"
+        assert trajectory["session_id"] == "sess-1"
+        assert trajectory["num_turns"] == 1
+        assert trajectory["duration_ms"] == 1234.0
+        assert trajectory["total_cost_usd"] == 0.01
+        (step,) = trajectory["steps"]
+        assert step["type"] == "agent_turn"
+        assert step["turn_no"] == 1
+        assert step["content"] == "done"
+        assert step["stats"]["cached_tokens"] == 3
+
+    def test_transcript_preferred_over_stream(self) -> None:
+        agent = _make_agent()
+        transcript = [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "timestamp": "2026-07-09T00:00:00.000Z",
+                "sessionId": "sess-t",
+                "message": {"role": "user", "content": "solve it"},
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "requestId": "req-1",
+                "timestamp": "2026-07-09T00:00:01.000Z",
+                "sessionId": "sess-t",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            },
+        ]
+        run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", transcript))
+
+        result = self._run(agent, run_claude_code)
+
+        trajectory = result.trajectory
+        assert trajectory["source"] == "transcript"
+        assert trajectory["session_id"] == "sess-t"
+        # run-level totals still come from the stream-json result event
+        assert trajectory["num_turns"] == 1
+        assert trajectory["total_cost_usd"] == 0.01
+        assert [s["type"] for s in trajectory["steps"]] == ["user_message", "agent_turn"]
+        assert trajectory["steps"][1]["request_id"] == "req-1"
+        assert trajectory["steps"][1]["timestamp"] == "2026-07-09T00:00:01.000Z"
+
+    def test_capture_disabled_yields_none(self) -> None:
+        agent = _make_agent(capture_trajectory=False)
+        run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", []))
+
+        result = self._run(agent, run_claude_code)
+
+        assert result.trajectory is None
+
+    def test_run_claude_code_harvests_transcript_from_config_dir(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            # Simulate Claude Code persisting the session transcript under the per-run config dir.
+            project_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"]) / "projects" / "-tmp-cwd"
+            project_dir.mkdir(parents=True)
+            (project_dir / "sess-1.jsonl").write_text(
+                json.dumps({"type": "user", "sessionId": "sess-1", "message": {"role": "user", "content": "hi"}})
+                + "\nnot-json\n"
+            )
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            _, _, records = asyncio.run(agent._run_claude_code("hello"))
+
+        assert len(records) == 1
+        assert records[0]["sessionId"] == "sess-1"
+
+    def test_capture_disabled_skips_harvest(self, tmp_path: Path) -> None:
+        agent = _make_agent(capture_trajectory=False)
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        async def fake_exec(*cmd, **kwargs):
+            project_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"]) / "projects" / "-tmp-cwd"
+            project_dir.mkdir(parents=True)
+            (project_dir / "sess-1.jsonl").write_text('{"type":"user"}\n')
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            _, _, records = asyncio.run(agent._run_claude_code("hello"))
+
+        assert records == []
 
 
 class TestConfigYaml:
