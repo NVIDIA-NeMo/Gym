@@ -374,6 +374,20 @@ class TestVerify:
         assert "real answer" in sent
         assert result.reward == approx(1.0)
 
+    async def test_user_supplied_braces_do_not_break_judge_prompt_formatting(self) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        _mock_constant(server_mock, _rating("YES", "1"))
+        server = _make_server(server_mock)
+        problem_statement = "What does `{x: value` mean in this code sample?"
+        answer = "It is probably an object literal like `{foo: bar}` or an f-string fragment `{baz`."
+
+        result = await server.verify(_verify_request(answer, [_rubric("r1", "criterion")], problem_statement))
+
+        sent = server_mock.post.await_args.kwargs["json"].messages[1]["content"]
+        assert problem_statement in sent
+        assert answer in sent
+        assert result.reward == approx(1.0)
+
 
 class TestMetrics:
     def test_score_fn(self) -> None:
