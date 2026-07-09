@@ -24,7 +24,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import scipy
-from fastapi import FastAPI, Request
+from fastapi import Request
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.base_resources_server import (
@@ -33,6 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -51,6 +52,10 @@ class ExecutePythonResponse(BaseModel):
     stderr: str
     error_message: Optional[str] = None
     result: Optional[str] = None
+
+
+class EndSessionRequest(BaseModel):
+    pass
 
 
 def _session_worker(child_conn, max_execution_time: int):
@@ -168,20 +173,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     _sessions: Dict[str, _SessionHandle] = PrivateAttr(default_factory=dict)
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/execute_python")(self.execute_python)
-        app.post("/end_session")(self.end_session)
-        return app
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # _sessions dict already initialised by default_factory
-
-    async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
+    @gym_tool(input_schema=ExecutePythonRequest)
+    async def execute_python(self, session_id: str, body: ExecutePythonRequest) -> ExecutePythonResponse:
+        """Execute Python code to perform calculations. You have access to numpy, scipy, pandas and basic math
+        operations."""
         loop = asyncio.get_running_loop()
         try:
-            sid = request.session[SESSION_ID_KEY]
+            sid = session_id
             if sid not in self._sessions:
                 self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
             handle = self._sessions[sid]
@@ -205,8 +203,9 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 error_message=str(e),
             )
 
-    async def end_session(self, request: Request) -> ExecutePythonResponse:
-        session_id = request.session[SESSION_ID_KEY]
+    @gym_tool(input_schema=EndSessionRequest)
+    async def end_session(self, session_id: str, body: EndSessionRequest) -> ExecutePythonResponse:
+        """Clean up the Python execution session."""
         self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
