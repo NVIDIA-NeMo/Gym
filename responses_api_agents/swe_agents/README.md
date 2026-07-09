@@ -300,7 +300,7 @@ jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 
 ## Output format
 
-Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`.
+Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. The same metrics are written incrementally to `<persistent_dir>/nemo_gym_metrics.json` for profiling and post-run inspection.
 
 `run` wraps that in `SWEBenchVerifyResponse`:
 
@@ -317,7 +317,45 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "eval_timed_out": false,
   "ray_queue_time": 0.12,
   "openhands_run_time": 412.3,
+  "generation_start_timestamp": "2026-07-01T12:00:00.000000+00:00",
+  "evaluation_start_timestamp": "2026-07-01T12:07:00.000000+00:00",
+  "per_turn_metrics": {
+    "response_latencies": [
+      {
+        "model": "model-name",
+        "latency": 12.34,
+        "response_id": "chatcmpl-123",
+        "timestamp": "2026-07-01T12:01:00.000000+00:00"
+      }
+    ],
+    "action_execution_latencies": [
+      {
+        "observation_type": "CmdOutputObservation",
+        "observation_id": "42",
+        "latency": 0.31,
+        "message": "Command finished successfully.",
+        "timestamp": "2026-07-01T12:01:01.000000+00:00"
+      }
+    ],
+    "token_usages": [
+      {
+        "model": "model-name",
+        "prompt_tokens": 4096,
+        "completion_tokens": 512,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "context_window": 0,
+        "per_turn_token": 4608,
+        "response_id": "chatcmpl-123"
+      }
+    ]
+  },
   "generation_apptainer_spinup_time": 11.4,
+  "create_runtime_time": 2.1,
+  "connect_to_runtime_time": 0.8,
+  "initialize_runtime_time": 3.2,
+  "total_command_exec_time": 48.6,
+  "total_model_call_time": 301.7,
   "final_eval_apptainer_spinup_time":  9.7,
   "final_eval_time": 87.2,
   "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ }
@@ -352,3 +390,14 @@ Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then 
 Set `openhands_should_log=true` to flip OpenHands to `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, and write per-event logs. Otherwise the wrapper aggressively quiets OpenHands (`LOG_LEVEL=CRITICAL`, all `DEBUG_*` flags off).
 
 Per-instance Apptainer stdout/stderr is always streamed to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log` regardless of these flags.
+
+To inspect a completed run as a timeline, convert the precise per-rollout metrics to Chrome Trace Event Format:
+
+```bash
+python responses_api_agents/swe_agents/scripts/swe_trace_converter.py \
+    --log-dir /path/to/swebench_results_<run_session_id>
+```
+
+`--log-dir` must directly contain the completed `<instance_id>_<timestamp>_<uuid>/` rollout directories and their `nemo_gym_metrics.json` files.
+
+Open the generated `.json` file in [Perfetto](https://ui.perfetto.dev/) to explore rollout concurrency and per-turn timing.

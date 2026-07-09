@@ -14,6 +14,8 @@ anyterminal_claude_code:
         anthropic_api_key: ${anthropic_api_key}
         anthropic_base_url: https://inference-api.nvidia.com
         timeout: 12500 # Max task timeout in Terminal Bench is 12000 seconds
+        max_turns: null # Unlimited turns
+
       # Path to pre-built Apptainer SIF files produced by prepare.py --sif-dir.
       # If omitted, Apptainer will pull docker:// images at runtime (requires internet).
       tb_sif_dir: null
