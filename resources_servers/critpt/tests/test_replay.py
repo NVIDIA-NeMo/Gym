@@ -6,14 +6,11 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-"""Unit tests for the CritPt replay tool's env-parsing + rotation helpers.
+"""Unit tests for the CritPt replay tool."""
 
-The integration of replay vs. a real cache_dir is covered by the live
-server's test suite (see test_app.py::TestKeyRotation); this file pins the
-pure parsing/rotation logic so a regression in the env-shape contract is
-caught fast without spinning up an httpx mock.
-"""
-
+import argparse
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,7 +22,36 @@ from resources_servers.critpt.replay import (
     _pack_into_batches,
     _pad_to_batch_size,
     _parse_api_keys_env,
+    main_async,
 )
+
+
+def _submission_row(submission_id: int, problem_id: str, code: str = "x=1") -> dict:
+    return {
+        "submission_id": submission_id,
+        "submission": {
+            "problem_id": problem_id,
+            "generated_code": f"```python\n{code}\n```",
+            "model": "m",
+            "generation_config": {},
+        },
+        "ts": 1.0,
+    }
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def _make_replay_args(cache_dir: Path, batch_size: int = 2, fire_after: int | None = None) -> argparse.Namespace:
+    return argparse.Namespace(
+        cache_dir=cache_dir,
+        api_url="https://example/api",
+        batch_size=batch_size,
+        fire_after=fire_after,
+        max_retries=1,
+        backoff_seconds=0.0,
+    )
 
 
 class TestParseApiKeysEnv:
@@ -210,3 +236,77 @@ class TestCallApiWithRotation:
             assert next_idx == 2
             assert call_api.await_args.kwargs["api_key"] == "k2"  # pragma: allowlist secret
             assert response["accuracy"] == 0.4
+
+
+class TestReplayMainAsync:
+    @pytest.mark.asyncio
+    async def test_replays_only_pending_batch(self, tmp_path):
+        """Already-scored submission_ids are skipped; only pending full batches ship."""
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [
+                _submission_row(0, "p1", "a=1"),
+                _submission_row(1, "p2", "b=2"),
+                _submission_row(2, "p3", "c=3"),
+                _submission_row(3, "p4", "d=4"),
+            ],
+        )
+        _write_jsonl(
+            tmp_path / "aa_responses.jsonl",
+            [{"batch_id": 0, "submission_ids": [0, 1], "response": {"accuracy": 0.0}, "ts": 1.0}],
+        )
+        aa_result = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 0}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.return_value = (aa_result, 0)
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 0
+        assert call_api.await_count == 1
+        shipped = call_api.await_args.kwargs["submissions"]
+        assert [s["problem_id"] for s in shipped] == ["p3", "p4"]
+        assert "c=3" in shipped[0]["generated_code"]
+        assert "d=4" in shipped[1]["generated_code"]
+
+        aa_responses = [
+            json.loads(line) for line in (tmp_path / "aa_responses.jsonl").read_text().splitlines() if line.strip()
+        ]
+        assert len(aa_responses) == 2
+        assert aa_responses[1]["submission_ids"] == [2, 3]
+        assert aa_responses[1]["response"] == aa_result
+
+    @pytest.mark.asyncio
+    async def test_nothing_pending_returns_zero(self, tmp_path):
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [_submission_row(0, "p1"), _submission_row(1, "p2")],
+        )
+        _write_jsonl(
+            tmp_path / "aa_responses.jsonl",
+            [{"batch_id": 0, "submission_ids": [0, 1], "response": {"accuracy": 0.0}, "ts": 1.0}],
+        )
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 0
+        call_api.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_submissions_cache_returns_two(self, tmp_path):
+        exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+        assert exit_code == 2
+
+    @pytest.mark.asyncio
+    async def test_quota_exhausted_returns_three_without_appending_response(self, tmp_path):
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [_submission_row(0, "p1"), _submission_row(1, "p2")],
+        )
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.side_effect = CritPtRateLimitExceeded(retry_after_seconds=60, reset_unix=999, body="rl")
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 3
+        assert not (tmp_path / "aa_responses.jsonl").exists()

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -174,6 +175,12 @@ def _mock_api_sequence(response_specs: list):
 def _stop_patches(patches):
     for p in patches:
         p.stop()
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 class TestExtractCode:
@@ -398,6 +405,47 @@ class TestApp:
                 assert r.reward == 0.0
         finally:
             _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_verify_writes_cache_files_on_successful_batch(self, tmp_path):
+        """With cache_dir set, a fired batch persists submissions, AA response, and partial metrics."""
+        aa_result = {"accuracy": 0.75, "timeout_rate": 0.1, "judge_error_count": 0}
+        server = _make_server(_make_config(batch_size=2, cache_dir=tmp_path, unique_cache_per_run=False))
+
+        with patch.object(server, "_call_aa_with_rotation", new_callable=AsyncMock) as mock_aa:
+            mock_aa.return_value = aa_result
+            results = await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+            )
+
+        assert mock_aa.await_count == 1
+        for r in results:
+            assert r.reward == 0.75
+            assert r.accuracy == 0.75
+            assert r.timeout_rate == 0.1
+
+        submissions = _read_jsonl(tmp_path / "submissions.jsonl")
+        assert len(submissions) == 2
+        assert [row["submission_id"] for row in submissions] == [0, 1]
+        by_pid = {row["submission"]["problem_id"]: row for row in submissions}
+        assert set(by_pid) == {"p1", "p2"}
+        assert "a=1" in by_pid["p1"]["submission"]["generated_code"]
+        assert "b=2" in by_pid["p2"]["submission"]["generated_code"]
+
+        aa_responses = _read_jsonl(tmp_path / "aa_responses.jsonl")
+        assert len(aa_responses) == 1
+        assert aa_responses[0]["batch_id"] == 0
+        assert set(aa_responses[0]["submission_ids"]) == {0, 1}
+        assert aa_responses[0]["response"] == aa_result
+
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["total_submissions_seen"] == 2
+        assert partial["pending_submissions"] == 0
+        assert partial["scored_batches"] == 1
+        assert partial["mean_accuracy_over_scored"] == 0.75
+        assert partial["mean_timeout_rate_over_scored"] == 0.1
 
 
 class TestKeyRotation:
