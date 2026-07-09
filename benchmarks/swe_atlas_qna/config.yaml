@@ -1,27 +1,27 @@
 # SWE-Atlas Codebase QnA benchmark.
 #
-# Chains to the swe_atlas_qna rubric-judge resources server + agent config, then
-# isolates this benchmark's agent wiring via ``_inherit_from`` so dataset
-# overrides here don't leak back to the resources server's own smoke config.
+# Chains to the mini-swe-agent QnA harness config (which itself chains to the
+# swe_atlas_qna rubric-judge resources server), then attaches the benchmark
+# dataset to an inherited copy of that agent. The harness explores each
+# repository in a sandbox (Apptainer .sif images) before answering; supply your
+# cluster image path via ``image_template`` at launch, e.g.
+#   +swe_atlas_qna_benchmark_mini_swe_agent.responses_api_agents.mini_swe_agent_qna.image_template=/lustre/sifs/{sif_basename}
 config_paths:
-  - resources_servers/swe_atlas_qna/configs/swe_atlas_qna.yaml
+  - responses_api_agents/mini_swe_agent_qna/configs/mini_swe_agent_qna.yaml
 
-swe_atlas_qna_benchmark_resources_server:
-  _inherit_from: swe_atlas_qna_resources_server
-
-# NOTE: paired with simple_agent (single-turn, no repo access) as a placeholder
-# so the benchmark is preparable and listable today. The real SWE-Atlas QnA eval
-# runs through the mini-swe-agent QnA harness (which explores the repository in an
-# Apptainer sandbox); swap the agent here once that harness lands.
-swe_atlas_qna_benchmark_simple_agent:
-  _inherit_from: swe_atlas_qna_simple_agent
+# ``_inherit_from`` moves the harness agent into this benchmark-scoped instance so
+# the benchmark dataset override doesn't leak back to the harness's own config.
+# The inherited agent keeps its resources_server reference (swe_atlas_qna), which
+# owns the reward.
+swe_atlas_qna_benchmark_mini_swe_agent:
+  _inherit_from: swe_atlas_qna_mini_swe_agent
   responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: swe_atlas_qna_benchmark_resources_server
+    mini_swe_agent_qna:
       datasets:
       - name: swe_atlas_qna
         type: benchmark
         jsonl_fpath: benchmarks/swe_atlas_qna/data/swe_atlas_qna_benchmark.jsonl
+        # mini-swe builds its own prompt from verifier_metadata.problem_statement;
+        # prompt_config still renders the row's ``question`` into a valid input.
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/swe_atlas_qna/prepare.py

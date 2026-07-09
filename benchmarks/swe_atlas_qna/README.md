@@ -37,21 +37,22 @@ SWE_ATLAS_DIR=/path/to/SWE-Atlas gym eval prepare --benchmark swe_atlas_qna
 # Configure the judge endpoint (any OpenAI-compatible endpoint)
 export SWE_ATLAS_QNA_JUDGE_BASE_URL=... SWE_ATLAS_QNA_JUDGE_API_KEY=... SWE_ATLAS_QNA_JUDGE_MODEL=...
 
-# Run servers + collect rollouts
-gym env start --model-type vllm_model --benchmark swe_atlas_qna
+# Run servers + collect rollouts (Apptainer must be on PATH; point image_template
+# at your cluster .sif directory)
+gym env start --model-type vllm_model --benchmark swe_atlas_qna \
+    '+swe_atlas_qna_benchmark_mini_swe_agent.responses_api_agents.mini_swe_agent_qna.image_template=/lustre/sifs/{sif_basename}'
 
 gym eval run --no-serve \
-    --agent swe_atlas_qna_benchmark_simple_agent \
+    --agent swe_atlas_qna_benchmark_mini_swe_agent \
     --input benchmarks/swe_atlas_qna/data/swe_atlas_qna_benchmark.jsonl \
     --output results/swe_atlas_qna_rollouts.jsonl \
     --num-repeats 3
 ```
 
-> **Note:** this entry is paired with `simple_agent` (single-turn, no repository
-> access) as a placeholder so the benchmark is preparable and listable today.
-> The real SWE-Atlas QnA eval runs through the mini-swe-agent QnA harness, which
-> explores the repository in an Apptainer sandbox before answering; the config's
-> agent will be swapped once that harness lands.
+The benchmark is driven by the
+[mini-swe-agent QnA harness](../../responses_api_agents/mini_swe_agent_qna/README.md),
+which explores each repository in a sandbox (Apptainer `.sif` images) before
+answering; the answer is graded by the `swe_atlas_qna` rubric judge.
 
 ## Metrics
 
