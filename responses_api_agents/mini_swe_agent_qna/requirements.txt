@@ -1,0 +1,2 @@
+-e nemo-gym[dev,sandbox] @ ../../
+mini-swe-agent==2.1.0
