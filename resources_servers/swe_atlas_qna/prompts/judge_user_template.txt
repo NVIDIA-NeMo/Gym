@@ -1,0 +1,10 @@
+# Prompt
+{problem_statement}
+
+# Response
+{model_answer}
+
+#Rubric Criteria
+{{
+  "rubric_statement": {title}
+}}
