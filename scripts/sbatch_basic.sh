@@ -15,9 +15,9 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 ENTRYPOINT_WITH_RAY_WRAPPER=$(cat <<EOF
 ray symmetric-run \
     --address $RAY_HEAD_NODE_IP \
-    --min-nodes $SLURM_JOB_NUM_NODES \
-    --num-cpus=$SLURM_CPUS_PER_TASK \
-    --num-gpus=$SLURM_GPUS_PER_TASK \
+    --min-nodes \$SLURM_JOB_NUM_NODES \
+    --num-cpus=\$SLURM_CPUS_PER_TASK \
+    --num-gpus=\$SLURM_GPUS_PER_TASK \
     -- \
     bash $@
 EOF
