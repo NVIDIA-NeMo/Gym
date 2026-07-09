@@ -37,13 +37,13 @@ gym policy model, driven by an external agent harness; the user simulator and
 Python execution environment run inside the gym resources server; scoring is a
 pure `/verify`). The following files were modified from upstream:
 
-| File | Change |
-|------|--------|
-| `roles/openai_api_agent.py` | Agent role talks to any OpenAI-compatible endpoint; sampling / reasoning-toggle handling. |
-| `roles/openai_api_user.py` | User-simulator role talks to any OpenAI-compatible endpoint. |
-| `cli/__init__.py` | CLI reworked for per-scenario runs, `--list-scenarios`, and OpenAI-compatible agent/user endpoints (retained for offline scoring-parity checks). |
-| `cli/utils.py` | Scenario resolution / result-summary helpers for the reworked CLI. |
-| `common/execution_context.py` | Added `new_context` / context-manager helpers for safe ambient-context binding. |
+| File | Change                                                                                                                                                                                                                    |
+|------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `roles/openai_api.py` | config, sampling / reasoning-toggle handling.                                                                                                                                                                             |
+| `roles/openai_api_user.py` | User-simulator role talks to any OpenAI-compatible endpoint.                                                                                                                                                              |
+| `cli/__init__.py` | CLI reworked for per-scenario runs, `--list-scenarios`, and OpenAI-compatible agent/user endpoints (retained for offline scoring-parity checks).                                                                          |
+| `cli/utils.py` | Scenario resolution / result-summary helpers for the reworked CLI.                                                                                                                                                        |
+| `common/execution_context.py` | Added `new_context` / context-manager helpers for safe ambient-context binding.                                                                                                                                           |
 | `common/evaluation.py` | Replaced the `scipy.optimize.linear_sum_assignment` import with the vendored dependency-free solver below (scipy is excluded from the base install and cannot be installed under the gym tree via uv). No scoring change. |
 
 NVIDIA-authored additions in this tree:

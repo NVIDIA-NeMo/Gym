@@ -104,7 +104,7 @@ from tool_sandbox.common.tool_conversion import convert_to_openai_tools  # noqa:
 from tool_sandbox.common.tool_discovery import ToolBackend  # noqa: E402
 from tool_sandbox.roles.base_role import BaseRole  # noqa: E402
 from tool_sandbox.roles.execution_environment import ExecutionEnvironment  # noqa: E402
-from tool_sandbox.roles.openai_api_agent import OpenAIRoleConfig, _sampling_kwargs  # noqa: E402
+from tool_sandbox.roles.openai_api import OpenAIRoleConfig, _sampling_kwargs  # noqa: E402
 from tool_sandbox.roles.openai_api_user import OpenAIAPIUser  # noqa: E402
 from tool_sandbox.scenarios import named_scenarios  # noqa: E402
 
