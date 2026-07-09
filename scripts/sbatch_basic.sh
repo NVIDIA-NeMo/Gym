@@ -1,5 +1,6 @@
 #!/bin/bash
-#SBATCH --output=${SLURM_JOB_ID}-${JOB_NAME}.log
+# One log file for both stdout and stderr
+#SBATCH --output=%j-%x.log
 ### Give all resources to a single Ray task, ray can manage the resources internally
 #SBATCH --ntasks-per-node=1
 
