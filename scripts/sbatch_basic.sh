@@ -3,21 +3,12 @@
 
 set -x
 
-# __doc_head_address_start__
-
-# Getting the node names
+# Get the Ray head node IP
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
+RAY_HEAD_NODE_IP=${nodes_array[0]}:6379
+echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 
-head_node=${nodes_array[0]}
-
-port=6379
-ip_head=$head_node:$port
-export ip_head
-echo "IP Head: $ip_head"
-# __doc_head_address_end__
-
-# __doc_symmetric_run_start__
 # Start Ray cluster using symmetric_run.py on all nodes.
 # Symmetric run will automatically start Ray on all nodes and run the script ONLY the head node.
 # Use the '--' separator to separate Ray arguments and the entrypoint command.
@@ -33,7 +24,3 @@ srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_JOB_NUM_NODES" \
     --num-gpus="${SLURM_GPUS_PER_TASK}" \
     -- \
     echo "hello"
-# __doc_symmetric_run_end__
-
-# __doc_script_start__
-# The entrypoint script (simple-trainer.py) will be run on the head node by symmetric_run.
