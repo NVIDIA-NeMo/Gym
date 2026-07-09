@@ -15,9 +15,9 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
@@ -76,10 +77,9 @@ class InjectionSpec(BaseModel):
 
 class IPISeedSessionRequest(BaseSeedSessionRequest):
     environment: Dict[str, Any]
-    model_config = ConfigDict(extra="allow")
-
-
-class ToolCallRequest(BaseModel):
+    # Agents POST the full run body to /seed_session, so the dataset row's responses_create_params
+    # (including its per-task tools[]) rides along; used to scope the MCP allowed_tools claim.
+    responses_create_params: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(extra="allow")
 
 
@@ -111,38 +111,71 @@ class IPIResourcesServer(SimpleResourcesServer):
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/{tool_name}")(self.route_tool_call)
-        return app
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        # Register every registry tool over both transports. The registry has names -> handlers but
+        # no schemas (per-task schemas live in the dataset rows, which stay the model-facing truth
+        # for HTTP agents), so the MCP-advertised schema is a permissive object and call arguments
+        # pass through raw. Per-task visibility over MCP comes from the allowed_tools claim minted
+        # in seed_session, which filters tools/list AND gates tools/call for that session.
+        for tool_name, handler in TOOL_HANDLERS.items():
+            gym_tool(
+                self._make_tool_closure(tool_name, handler),
+                name=tool_name,
+                input_schema={"type": "object", "additionalProperties": True},
+                owner=self,
+            )
 
-    async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
+    def _make_tool_closure(self, tool_name: str, handler: Callable) -> Callable:
+        def call_ipi_tool(session_id: str, **args: Any) -> ToolCallResponse:
+            if session_id not in self.session_id_to_env:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session not initialized. Please call seed_session first.",
+                )
+
+            env = self.session_id_to_env[session_id]
+            args = {key: value for key, value in args.items() if value is not None}
+
+            try:
+                result = handler(env, **args)
+                return ToolCallResponse(output=json.dumps(result) if not isinstance(result, str) else result)
+            except Exception as e:
+                logger.exception("Tool '%s' raised %s", tool_name, type(e).__name__)
+                return ToolCallResponse(output=f"Error executing tool '{tool_name}' ({type(e).__name__}): {e}")
+
+        return call_ipi_tool
+
+    async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> Any:
         session_id = request.session[SESSION_ID_KEY]
         self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
         logger.debug("seed_session: sid=%s", session_id)
+
+        # Scope this session's MCP surface to the task's tools when the row provides them: the
+        # claim rides inside the signed token, so tools/list shows (and tools/call permits) only
+        # this domain's tools for this rollout. HTTP routes are unrestricted (status quo).
+        allowed_tools = self._allowed_tools_from_seed(body)
+        if allowed_tools:
+            return {"mcp": self.build_mcp_session_metadata(request, allowed_tools=allowed_tools)}
         return BaseSeedSessionResponse()
 
-    async def route_tool_call(self, tool_name: str, body: ToolCallRequest, request: Request) -> ToolCallResponse:
+    @staticmethod
+    def _allowed_tools_from_seed(body: IPISeedSessionRequest) -> Optional[List[str]]:
+        params = body.responses_create_params or {}
+        tools = params.get("tools") or []
+        names = [tool.get("name") for tool in tools if isinstance(tool, dict) and tool.get("name")]
+        return names or None
+
+    async def handle_unknown_tool(self, tool_name: str, request: Request) -> ToolCallResponse:
+        # Preserve the historical catch-all contract: unseeded sessions get the 400; seeded
+        # sessions get the 200 soft error so the model can self-correct.
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self.session_id_to_env:
             raise HTTPException(
                 status_code=400,
                 detail="Session not initialized. Please call seed_session first.",
             )
-
-        env = self.session_id_to_env[session_id]
-        args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
-
-        handler = TOOL_HANDLERS.get(tool_name)
-        if handler is None:
-            return ToolCallResponse(output=f"Unknown tool: {tool_name}")
-
-        try:
-            result = handler(env, **args)
-            return ToolCallResponse(output=json.dumps(result) if not isinstance(result, str) else result)
-        except Exception as e:
-            logger.exception("Tool '%s' raised %s", tool_name, type(e).__name__)
-            return ToolCallResponse(output=f"Error executing tool '{tool_name}' ({type(e).__name__}): {e}")
+        return ToolCallResponse(output=f"Unknown tool: {tool_name}")
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
