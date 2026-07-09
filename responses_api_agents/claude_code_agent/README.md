@@ -199,7 +199,11 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 Claude Code persists a complete session transcript — one JSON record per event, with timestamps, request ids, per-model-call token usage, and tool execution metadata — under `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl`. Since each rollout runs with an ephemeral `CLAUDE_CONFIG_DIR`, the agent harvests those artifacts just before cleanup and attaches a standardized, versioned trajectory to every `run()` result (and therefore to every rollout JSONL row). This addresses the standardized trajectory-telemetry requirements of [NVIDIA-NeMo/Gym#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867). When no transcript is available, the trajectory is built from the stream-json stdout events instead (`source: "stream_json"`), which carry the same message structure and token usage but no timestamps or request ids — missing telemetry is `null`, never fabricated.
 
-The schema lives in `trajectory.py` (`ClaudeCodeTrajectory`, `schema_version: "1.0"`, validated via `validate_trajectory()`):
+The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajectory`, `schema_version: "1.0"`, validated via `validate_trajectory()`); this server's `trajectory.py` is just the Claude Code adapter that parses the transcript and drives the shared `TrajectoryBuilder`. Content and token stats reuse Gym's native contracts; telemetry the Responses API doesn't standardize lives in spans modeled after the OpenAI Agents SDK tracing spans:
+
+- **`steps[*].items`** — native `NeMoGymResponseInputItem`s (`message`, `reasoning`, `function_call`, `function_call_output`), exactly the types Gym responses already use.
+- **`steps[*].usage`** — native `NeMoGymResponseUsage` per model call (`input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`), deduplicated per API message (the transcript writes one record per content block, repeating the usage).
+- **`steps[*].spans`** — one `generation` span per model call (`response_id`, `request_id`, raw provider usage verbatim in `extra.provider_usage`, so fields with no native slot like `cache_creation_input_tokens` are never lost) and one `function` span per tool call (`call_id`, `started_at`/`ended_at`/`duration_ms`, `error`, curated `toolUseResult` scalars in `extra`).
 
 ```json
 {
@@ -211,19 +215,27 @@ The schema lives in `trajectory.py` (`ClaudeCodeTrajectory`, `schema_version: "1
   "num_turns": 4,
   "duration_ms": 8123.0,
   "total_cost_usd": 0.021,
-  "result_usage": {"input_tokens": 63, "cache_read_input_tokens": 18478, "output_tokens": 912},
-  "stats": {"prompt_tokens": 63, "completion_tokens": 912, "total_tokens": 975, "cached_tokens": 18478, "cache_creation_tokens": 8289, "reasoning_tokens": null},
+  "provider_usage": {"input_tokens": 63, "cache_read_input_tokens": 18478, "output_tokens": 912},
+  "usage": {"input_tokens": 63, "input_tokens_details": {"cached_tokens": 18478}, "output_tokens": 912, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 975},
+  "dropped_records": {},
   "steps": [
-    {"step_id": 0, "type": "user_message", "timestamp": "…", "content": "fix the bug"},
+    {"step_id": 0, "type": "user_message", "timestamp": "…",
+     "items": [{"type": "message", "role": "user", "content": "fix the bug"}]},
     {
       "step_id": 1, "type": "agent_turn", "turn_no": 1, "timestamp": "…",
-      "model": "claude-sonnet-4-6", "request_id": "req_…", "message_id": "msg_…", "stop_reason": "tool_use",
-      "content": "…", "reasoning_content": "…",
-      "stats": {"prompt_tokens": 12, "completion_tokens": 300, "cached_tokens": 9000, "cache_creation_tokens": 512, "total_tokens": 312, "reasoning_tokens": null},
-      "tool_calls": [{"call_id": "toolu_…", "name": "Bash", "arguments": "{\"command\": \"ls\"}"}],
-      "observations": [
-        {"source_call_id": "toolu_…", "content": "…model-visible output…", "status": "completed",
-         "started_at": "…", "completed_at": "…", "duration_ms": 532.3, "extra": {"interrupted": false}}
+      "model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+      "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 9000}, "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 312},
+      "items": [
+        {"type": "reasoning", "id": "rs-1-0", "summary": [{"type": "summary_text", "text": "…"}]},
+        {"type": "message", "id": "msg-1-1", "role": "assistant", "content": [{"type": "output_text", "text": "…", "annotations": []}]},
+        {"type": "function_call", "call_id": "toolu_…", "name": "Bash", "arguments": "{\"command\": \"ls\"}"},
+        {"type": "function_call_output", "call_id": "toolu_…", "output": "…model-visible output…", "status": "completed"}
+      ],
+      "spans": [
+        {"type": "generation", "response_id": "msg_01…", "request_id": "req_…", "ended_at": "…",
+         "extra": {"provider_usage": {"input_tokens": 12, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 512, "output_tokens": 300}}},
+        {"type": "function", "call_id": "toolu_…", "started_at": "…", "ended_at": "…", "duration_ms": 532.3,
+         "error": null, "extra": {"interrupted": false}}
       ]
     }
   ]
@@ -232,14 +244,15 @@ The schema lives in `trajectory.py` (`ClaudeCodeTrajectory`, `schema_version: "1
 
 Semantics:
 
-- **Delta / append-only steps**: each step holds only the new content it introduced — a user message, or one complete agent turn (one model call) with its tool calls and observations. The model-visible input of turn *N* is the concatenation of all steps before it, starting from the most recent `context_boundary` step. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
-- **Compaction**: when Claude Code compacts its context, a `context_boundary` step is emitted whose `content` is the summary that replaced the prior history; post-compaction context = boundary content + later steps.
-- **Per-model-call stats**: `stats` on each `agent_turn` carries prompt/completion/total tokens plus `cached_tokens` (cache reads) and `cache_creation_tokens`, deduplicated per API message (the transcript writes one record per content block, repeating the usage). `reasoning_tokens` is `null` — the Anthropic Messages API doesn't report it separately.
-- **Tool observations and timing**: each observation records the model-visible output, `completed`/`error` status, and independent `started_at`/`completed_at`/`duration_ms` from the actual execution boundary (issuing assistant record → its tool-result record), so parallel tool calls keep independent timing. Short scalar execution metadata from Claude Code's `toolUseResult` (flags, exit info) is kept in `extra`; oversized payloads are dropped.
-- **Failures**: tool errors surface as `status: "error"` observations; on a rollout timeout the partial transcript written before the kill is still harvested.
-- **Subagents**: sidechain (subagent) records are out of scope for the schema and skipped, but counted in `sidechain_records_skipped` so consumers can tell "no subagents ran" from "subagent events were dropped".
+- **Delta / append-only steps**: each step holds only the new items it introduced — a user message, or one complete agent turn (one model call) with its output items and resulting `function_call_output`s. The model-visible input of a step is every item of every earlier step, starting from the most recent `context_boundary` step; `nemo_gym.trajectory.reconstruct_model_input()` resolves this, and `to_response_create_params()` packages it as a native `NeMoGymResponseCreateParamsNonStreaming`. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
+- **Compaction**: when Claude Code compacts its context, a `context_boundary` step is emitted whose items are the summary that replaced the prior history; post-compaction context = boundary items + later steps (reconstruction handles this automatically).
+- **Tool timing**: each `function` span records independent `started_at`/`completed_at`/`duration_ms` from the actual execution boundary (issuing assistant record → its tool-result record), so parallel tool calls keep independent timing.
+- **Failures**: tool errors surface as `error` on the `function` span (the model-visible output stays on the native item); on a rollout timeout the partial transcript written before the kill is still harvested.
+- **Subagents**: sidechain (subagent) records are out of scope for the schema and skipped, but counted in `dropped_records["sidechain"]` so consumers can tell "no subagents ran" from "subagent events were dropped".
 
-Identity: `session_id` identifies the Claude Code session; task and rollout identity are recorded by Gym's rollout collection layer on the surrounding rollout row (the trajectory rides on the verify response), and each model call is identified by `request_id`/`message_id`, each tool call by `call_id`.
+Identity: `session_id` identifies the Claude Code session; task and rollout identity are recorded by Gym's rollout collection layer on the surrounding rollout row (the trajectory rides on the verify response); each model call is identified by the generation span's `request_id`/`response_id`, each tool call by `call_id`.
+
+To adapt another agent harness, parse its artifacts and drive `nemo_gym.trajectory.TrajectoryBuilder` (`add_user_message` / `start_agent_turn` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_context_boundary` / `set_run_totals`); the builder owns turn numbering, model-call deduplication, call/observation correlation, orphan handling, and usage totals.
 
 ## Limitations
 

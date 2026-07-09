@@ -815,8 +815,11 @@ class TestTrajectoryCapture:
         (step,) = trajectory["steps"]
         assert step["type"] == "agent_turn"
         assert step["turn_no"] == 1
-        assert step["content"] == "done"
-        assert step["stats"]["cached_tokens"] == 3
+        # content is a native Responses output message item
+        assert step["items"][0]["type"] == "message"
+        assert step["items"][0]["content"][0]["text"] == "done"
+        # per-call token stats are a native NeMoGymResponseUsage
+        assert step["usage"]["input_tokens_details"]["cached_tokens"] == 3
 
     def test_transcript_preferred_over_stream(self) -> None:
         agent = _make_agent()
@@ -853,7 +856,8 @@ class TestTrajectoryCapture:
         assert trajectory["num_turns"] == 1
         assert trajectory["total_cost_usd"] == 0.01
         assert [s["type"] for s in trajectory["steps"]] == ["user_message", "agent_turn"]
-        assert trajectory["steps"][1]["request_id"] == "req-1"
+        # provider identity lives on the generation span
+        assert trajectory["steps"][1]["spans"][0]["request_id"] == "req-1"
         assert trajectory["steps"][1]["timestamp"] == "2026-07-09T00:00:01.000Z"
 
     def test_capture_disabled_yields_none(self) -> None:
