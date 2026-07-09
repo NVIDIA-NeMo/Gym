@@ -34,3 +34,5 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
       --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
       -- "$@"
   ' bash "$@"
+
+# TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
