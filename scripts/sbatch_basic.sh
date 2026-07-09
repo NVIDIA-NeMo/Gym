@@ -11,6 +11,8 @@ nodes_array=($nodes)
 RAY_HEAD_NODE_IP=${nodes_array[0]}:6379
 echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 
+echo "Running from $SLURM_SUBMIT_DIR"
+
 # Start Ray cluster using symmetric_run.py on all nodes.
 # Symmetric run will automatically start Ray on all nodes and run the script ONLY the head node.
 # The '--' separator is used to separate Ray arguments and the entrypoint command.
