@@ -12,16 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare RULER at 1M context for NVIDIA-Nemotron-Nano-3-30B-A3B-BF16 (with answer prefix)."""
+"""Prepare RULER at 1M context for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (with answer prefix)."""
 
 from benchmarks.ruler.prepare_utils import prepare_helper
 
 
 def prepare():
     return prepare_helper(
-        model="/lustre/fsw/portfolios/llmservice/users/igitman/hf_models/NVIDIA-Nemotron-Nano-3-30B-A3B-BF16",
+        model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",  # pragma: allowlist secret
         length=1048576,
-        output_name="ruler.jsonl",
+        output_name="ruler_nemotron_3_1m_benchmark.jsonl",
         add_answer_prefix=True,
     )
 
