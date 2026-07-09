@@ -18,7 +18,6 @@ from typing import Optional
 
 import requests
 import trafilatura
-from fastapi import FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -27,20 +26,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 
 
 class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
     google_api_key: str
     google_cx: str
-
-
-class BaseSearchQueryRequest(BaseModel):
-    query: str
-
-
-class BaseGetPageContentRequest(BaseModel):
-    url: str
 
 
 class BaseGetPageContentResponse(BaseModel):
@@ -90,20 +82,13 @@ def _extract_last_assistant_text(body: GoogleSearchVerifyRequest) -> str:
 class GoogleSearchResourcesServer(SimpleResourcesServer):
     config: GoogleSearchResourcesServerConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        # Additional server routes go here! e.g.:
-        # app.post("/get_weather")(self.get_weather)
-        app.post("/search")(self.search)
-        app.post("/browse")(self.browse)
-        return app
-
-    async def search(self, body: BaseSearchQueryRequest) -> BaseGetSearchQueryResponse:
+    @gym_tool
+    async def search(self, query: str) -> BaseGetSearchQueryResponse:
+        """Search Google for a query and return up to 10 search results."""
         request_params = {
             "key": self.config.google_api_key,
             "cx": self.config.google_cx,
-            "q": body.query,
+            "q": query,
         }
         try:
             response = requests.get(
@@ -117,9 +102,11 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
         except Exception as e:
             return BaseGetSearchQueryResponse(search_results=f"Error: Unexpected error - {str(e)}")
 
-    async def browse(self, body: BaseGetPageContentRequest) -> BaseGetPageContentResponse:
+    @gym_tool
+    async def browse(self, url: str) -> BaseGetPageContentResponse:
+        """Returns the cleaned content of a webpage. If the page is too long, it will be truncated to 10,000 words."""
         try:
-            html = trafilatura.fetch_url(body.url)
+            html = trafilatura.fetch_url(url)
             if html:
                 text = trafilatura.extract(html)
                 if len(text.split()) > 10000:
