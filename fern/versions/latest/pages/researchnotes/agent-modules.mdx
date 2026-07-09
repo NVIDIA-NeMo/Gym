@@ -6,13 +6,13 @@ description: ""
 
 ## The question
 
-NeMo Gym already has behavior-shaping knobs — `prompt_config` on `gym eval run`, `skills.path` with `skills_ref` provenance ([#1256](https://github.com/NVIDIA-NeMo/Gym/issues/1256)), per-agent harness logic in `app.py`, and optimizer drivers (GEPA/DSPy, ACE/TALES) that treat `/run` as a black box. These pieces work, but they do not share one boundary:
+NeMo Gym already has behavior-shaping knobs — `prompt_config` on `gym eval run`, `skills.path` with `skills_ref` provenance ([#1256](https://github.com/NVIDIA-NeMo/Gym/issues/1256)), per-agent harness logic in `app.py`, and optimizer drivers (GEPA/DSPy, ACE/TALES) that treat `/run` as a black box. These concrete mechanisms implement broader cognitive capabilities such as working memory, skill libraries, long-term memory, planning, reasoning, and control, but they do not share one boundary:
 
 - **Where** does prompt injection happen — run-level preprocessing or Agent `activate`?
 - **How** do optimizers know which module version was active?
 - **What** is trainable policy vs optimizable module vs Environment reward?
 
-This note proposes **`AgentModule`s**: typed pieces on the **Agent boundary** with a `activate` / `adapt` / `module_refs` lifecycle. Each module has a cognitive capability **`type`** discriminator (`working_memory`, `skill_library`, `planning`, …). More types may be added over time.
+This note proposes **`AgentModule`s**: typed pieces on the **Agent boundary** with an `activate` / `adapt` / `module_refs` lifecycle. Each module has a cognitive capability **`type`** discriminator (`working_memory`, `skill_library`, `planning`, …). More types may be added over time.
 
 ## Module types (first cut)
 
@@ -193,7 +193,7 @@ Existing run-level prompt preprocessing remains supported during migration. Agen
 ## What this does not solve yet
 
 - Standardized per-step **trajectory** objects ([#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867))
-- `playbook`, `memory`, `guardrails`, `model_roles` module types
+- `long_term_memory`, `guardrails`, `planning`, and `reasoning` module types
 - Moving seed/verify or `/run` responsibilities out of Agent servers
 - GEPA/ACE drivers consuming `adapt` events in-process
 
