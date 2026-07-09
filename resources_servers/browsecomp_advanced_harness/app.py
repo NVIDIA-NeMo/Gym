@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     SimpleResourcesServer,
+    gym_tool,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -261,9 +262,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        app.post("/search")(self.search)
-        app.post("/browse")(self.browse)
-
         main_app_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -323,8 +321,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
-    async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+    @gym_tool(input_schema=TavilySearchRequest)
+    async def search(self, session_id: str, body: TavilySearchRequest) -> TavilySearchResponse:
+        """Web Search API, works like Google Search. All queries will be searched in parallel.
+
+        If you want to search with multiple keywords, put them in a single query.
+        """
+        metrics = self._session_id_to_metrics[session_id]
 
         if self.config.debug:
             print("\n\n body.queries: ", body.queries)
@@ -348,8 +351,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         postprocessed_results = "\n\n".join(results)
         return TavilySearchResponse(results_string=postprocessed_results)
 
-    async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+    @gym_tool(input_schema=BrowseRequest)
+    async def browse(self, session_id: str, body: BrowseRequest) -> BrowseResponse:
+        """Visit specific webpage(s) and return their full text content.
+
+        Use this to read the complete content of web pages found during search.
+        """
+        metrics = self._session_id_to_metrics[session_id]
 
         if self.config.debug:
             print("\n\n browse urls: ", body.urls)

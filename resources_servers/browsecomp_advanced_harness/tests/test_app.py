@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -195,26 +197,26 @@ class TestApp:
         server._async_tavily_clients = [mock_client]
 
         request = TavilySearchRequest(queries=["NVIDIA GPU"])
-        response = await server.search(self._create_dummy_request(), request)
+        response = await server.search("test_session_id", request)
 
         mock_client.search.assert_called_once()
         assert "NVIDIA" in response.results_string
 
     async def test_search_empty_queries(self, server: TavilySearchResourcesServer) -> None:
         request = TavilySearchRequest(queries=[])
-        response = await server.search(self._create_dummy_request(), request)
+        response = await server.search("test_session_id", request)
         assert response.results_string == "Query is none or empty"
 
     async def test_search_none_queries(self, server: TavilySearchResourcesServer) -> None:
         request = TavilySearchRequest(queries=None)
-        response = await server.search(self._create_dummy_request(), request)
+        response = await server.search("test_session_id", request)
         assert response.results_string == "Query is none or empty"
 
     # ---- browse ----
 
     async def test_browse_excluded_urls(self, server: TavilySearchResourcesServer) -> None:
         request = BrowseRequest(urls=["https://blacklisteddomain.com/page"])
-        response = await server.browse(self._create_dummy_request(), request)
+        response = await server.browse("test_session_id", request)
         assert "Error: no URLs provided." in response.results_string
 
     async def test_browse_extract_failure(self, server: TavilySearchResourcesServer) -> None:
@@ -223,7 +225,7 @@ class TestApp:
         server._async_tavily_clients = [mock_client]
 
         request = BrowseRequest(urls=["https://example.com"])
-        response = await server.browse(self._create_dummy_request(), request)
+        response = await server.browse("test_session_id", request)
         assert "Failed to extract content" in response.results_string
 
     # ---- verify ----
@@ -286,3 +288,226 @@ class TestApp:
         result = server._verify_answer_with_regex("Paris", "I don't know.")
         assert result.reward == approx(0.0)
         assert result.extracted_final_answer == ""
+
+
+# ============================================================================
+# Dual-transport wire contract (HTTP replay + MCP round-trip + parity)
+# ============================================================================
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+EXPECTED_TOOLS = {"search", "browse"}
+NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+# The exact results_string the pre-migration /search handler produced for {"queries": ["NVIDIA GPU"]}
+# against the mocked Tavily response below.
+EXPECTED_SEARCH_RESULTS_STRING = (
+    "[Search Query]: NVIDIA GPU\n[Title]: NVIDIA\n[URL]: https://nvidia.com\n[Content]:\nNVIDIA raw\n"
+)
+EXPECTED_BROWSE_RESULTS_STRING = "[URL]: https://example.com\n[Content]:\nExample page body\n"
+
+
+def _make_wire_server() -> TavilySearchResourcesServer:
+    from nemo_gym.server_utils import ServerClient as _ServerClient
+
+    config = TavilySearchResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        tavily_api_key="test_api_key",  # pragma: allowlist secret
+        exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=_ServerClient))
+    mock_client = MagicMock()
+    mock_client.search = AsyncMock(
+        return_value={
+            "results": [
+                {
+                    "url": "https://nvidia.com",
+                    "title": "NVIDIA",
+                    "content": "NVIDIA content",
+                    "raw_content": "NVIDIA raw",
+                    "score": 0.99,
+                },
+            ]
+        }
+    )
+    mock_client.extract = AsyncMock(
+        return_value={"results": [{"url": "https://example.com", "raw_content": "Example page body"}]}
+    )
+    server._async_tavily_clients = [mock_client]
+    return server
+
+
+@fixture
+def wire_server() -> TavilySearchResourcesServer:
+    pytest.importorskip("mcp")
+    return _make_wire_server()
+
+
+def _rpc(client, method: str, params: dict | None = None, token: str | None = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    return client.post(
+        "/mcp",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}},
+        follow_redirects=False,
+    )
+
+
+def _mcp_list_tools(client, token: str | None = None) -> dict:
+    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+    assert resp.status_code == 200, resp.text
+    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+
+
+def _mcp_call(client, name: str, arguments: dict, token: str | None = None) -> dict:
+    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+class TestHTTPWireContract:
+    """Replay tests: byte-identical request/response bodies vs. the pre-@gym_tool routes."""
+
+    def test_search_replay(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/search", json={"queries": ["NVIDIA GPU"]})
+            assert resp.status_code == 200
+            assert (
+                resp.content
+                == json.dumps({"results_string": EXPECTED_SEARCH_RESULTS_STRING}, separators=(",", ":")).encode()
+            )
+
+    def test_search_empty_queries_soft_error_bytes(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            for body in ({"queries": []}, {}):
+                resp = client.post("/search", json=body)
+                assert resp.status_code == 200
+                assert resp.content == b'{"results_string":"Query is none or empty"}'
+
+    def test_search_bad_args_is_422(self, wire_server: TavilySearchResourcesServer) -> None:
+        """Bad max_total_length is still rejected by body-model validation with an unchanged loc."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/search", json={"queries": ["x"], "max_total_length": "abc"})
+            assert resp.status_code == 422
+            assert resp.json()["detail"][0]["loc"] == ["body", "max_total_length"]
+            assert resp.json()["detail"][0]["type"] == "int_parsing"
+
+    def test_browse_replay(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/browse", json={"urls": ["https://example.com"], "goal": "info"})
+            assert resp.status_code == 200
+            assert (
+                resp.content
+                == json.dumps({"results_string": EXPECTED_BROWSE_RESULTS_STRING}, separators=(",", ":")).encode()
+            )
+
+    def test_browse_excluded_urls_soft_error_bytes(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/browse", json={"urls": ["https://blacklisteddomain.com/p"]})
+            assert resp.status_code == 200
+            assert resp.content == b'{"results_string":"Error: no URLs provided."}'
+
+    def test_browse_missing_urls_is_422(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/browse", json={})
+            assert resp.status_code == 422
+            assert resp.content == (
+                b'{"detail":[{"type":"missing","loc":["body","urls"],"msg":"Field required","input":{}}]}'
+            )
+
+    def test_http_search_records_session_metrics(self, wire_server: TavilySearchResourcesServer) -> None:
+        """The stateful per-session metrics keep flowing from the HTTP session cookie."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            client.post("/search", json={"queries": ["NVIDIA GPU"]})
+
+        assert len(wire_server._session_id_to_metrics) == 1
+        (metrics,) = wire_server._session_id_to_metrics.values()
+        assert [call.function for call in metrics.async_tavily_calls] == ["search"]
+
+
+class TestMCPRoundTrip:
+    """MCP surface: tools/list names + tools/call through raw JSON-RPC on /mcp."""
+
+    def test_seed_session_advertises_mcp_metadata(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            body = client.post("/seed_session", json={}).json()
+            assert body["mcp"]["url_path"] == "/mcp"
+            assert TOKEN_HEADER in body["mcp"]["headers"]
+
+    def test_tools_list_and_call(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            tools = _mcp_list_tools(client)
+            assert set(tools) == EXPECTED_TOOLS
+            # Model-schema tools advertise their body model's fields; session_id is never visible.
+            assert set(tools["search"]["inputSchema"]["properties"]) == {"queries", "max_total_length"}
+            assert set(tools["browse"]["inputSchema"]["properties"]) == {"urls", "goal", "max_total_length"}
+
+            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+            result = _mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=token)
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"results_string": EXPECTED_SEARCH_RESULTS_STRING}
+
+    def test_mcp_call_records_metrics_under_the_seeded_session(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+            result = _mcp_call(client, "browse", {"urls": ["https://example.com"]}, token=token)
+            assert result.get("isError") is not True
+
+        assert len(wire_server._session_id_to_metrics) == 1
+        (metrics,) = wire_server._session_id_to_metrics.values()
+        assert [call.function for call in metrics.async_tavily_calls] == ["extract"]
+
+    def test_session_tool_without_token_is_tool_error(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            result = _mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=None)
+            assert result["isError"] is True
+            assert TOKEN_HEADER in result["content"][0]["text"]
+
+
+class TestTransportParity:
+    """MCP tools/list names == HTTP tool routes (minus infra paths) == expected inventory."""
+
+    def test_tool_sets_identical_across_transports(self, wire_server: TavilySearchResourcesServer) -> None:
+        from fastapi.testclient import TestClient
+
+        app = wire_server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            mcp_names = set(_mcp_list_tools(client))
+
+        http_names = {
+            route.path.lstrip("/")
+            for route in app.router.routes
+            if getattr(route, "path", None)
+            and "POST" in (getattr(route, "methods", None) or set())
+            and route.path not in NON_TOOL_PATHS
+        }
+        assert mcp_names == http_names == EXPECTED_TOOLS
