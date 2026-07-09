@@ -17,9 +17,9 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 # The entrypoint (simple-trainer.py) will only run on the head node.
 srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_JOB_NUM_NODES" \
     ray symmetric-run \
-    --address "$ip_head" \
-    --min-nodes "$SLURM_JOB_NUM_NODES" \
-    --num-cpus="${SLURM_CPUS_PER_TASK}" \
-    --num-gpus="${SLURM_GPUS_PER_TASK}" \
+    --address $RAY_HEAD_NODE_IP \
+    --min-nodes $SLURM_JOB_NUM_NODES \
+    --num-cpus=$SLURM_CPUS_PER_TASK \
+    --num-gpus=$SLURM_GPUS_PER_TASK \
     -- \
     echo "hello"
