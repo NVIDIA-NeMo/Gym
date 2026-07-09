@@ -51,7 +51,12 @@ def prepare_helper(output_name: str, model: str, length: int, add_answer_prefix:
     if maybe_hf_token:
         env_vars["HF_TOKEN"] = maybe_hf_token
 
-    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model / str(length)
+    # `model` may be an HF repo id (e.g. "nvidia/Model") or a local absolute path
+    # (e.g. "/lustre/.../Model"). Sanitize it into a single path segment so the tmp
+    # dir always lands under BENCHMARK_DIR — otherwise `BENCHMARK_DIR / model` with an
+    # absolute path collapses to the model dir itself (which is typically read-only).
+    model_dirname = model.strip("/").replace("/", "__")
+    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model_dirname / str(length)
 
     run(
         f"""source .venv/bin/activate \
