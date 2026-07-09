@@ -36,10 +36,8 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
@@ -48,6 +46,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from nemo_gym.trajectory import Trajectory, to_response_output
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 from responses_api_agents.claude_code_agent.trajectory import build_trajectory, decode_jsonl
 
@@ -55,126 +54,37 @@ from responses_api_agents.claude_code_agent.trajectory import build_trajectory, 
 LOG = logging.getLogger(__name__)
 
 
-def _extract_text(content: list[Any]) -> str:
-    return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+def _usage_metadata(trajectory: Trajectory) -> dict:
+    """Derive the response usage metadata from a trajectory.
 
-
-def _extract_thinking(content: list[Any]) -> str:
-    parts = []
-    for b in content:
-        if not isinstance(b, dict):
-            continue
-        if b.get("type") in ("thinking", "reasoning"):
-            parts.append(b.get("thinking") or b.get("text") or "")
-    return "\n".join(p for p in parts if p)
+    The provider's end-of-run report is the authoritative total when present (summing it
+    with the per-turn usage would double count); otherwise the per-turn sums are used.
+    """
+    if trajectory.provider_usage:
+        metadata = {
+            "input_tokens": int(trajectory.provider_usage.get("input_tokens") or 0),
+            "output_tokens": int(trajectory.provider_usage.get("output_tokens") or 0),
+            "cached_tokens": int(trajectory.provider_usage.get("cache_read_input_tokens") or 0),
+        }
+    else:
+        metadata = {
+            "input_tokens": trajectory.usage.input_tokens,
+            "output_tokens": trajectory.usage.output_tokens,
+            "cached_tokens": trajectory.usage.input_tokens_details.cached_tokens,
+        }
+    if trajectory.num_turns is not None:
+        metadata["num_turns"] = trajectory.num_turns
+    return metadata
 
 
 def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
-    """Convert claude -p --output-format=stream-json stdout into (output_items, usage)."""
-    raw_events = decode_jsonl(stdout)
+    """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
 
-    output_items: list[Any] = []
-    pending_calls: dict[str, dict] = {}
-    buffered_think: str | None = None
-    # The CLI emits one assistant event per content block of the same API message, each
-    # repeating that message's usage — key by message id so each model call counts once.
-    usage_by_message: dict[str, dict] = {}
-    result_usage: Optional[dict] = None
-    num_turns: Optional[int] = None
-
-    for event in raw_events:
-        etype = event.get("type")
-
-        if etype == "result":
-            result_usage = event.get("usage") or {}
-            # Claude Code's authoritative turn counter (what --max-turns bounds).
-            if event.get("num_turns") is not None:
-                num_turns = int(event["num_turns"])
-
-        elif etype == "assistant":
-            message = event.get("message", {})
-            content = message.get("content") or []
-            usage = message.get("usage") or {}
-            if usage:
-                usage_by_message.setdefault(message.get("id") or f"_event_{len(usage_by_message)}", usage)
-
-            if not isinstance(content, list):
-                content = []
-
-            think = _extract_thinking(content)
-            if think:
-                buffered_think = (buffered_think + "\n" + think) if buffered_think else think
-
-            text = _extract_text(content)
-            if text:
-                if buffered_think:
-                    text = f"<think>\n{buffered_think}\n</think>\n\n{text}"
-                    buffered_think = None
-                output_items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{len(output_items)}",
-                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                        role="assistant",
-                        status="completed",
-                        type="message",
-                    )
-                )
-
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                call_id = block.get("id") or f"call-{uuid4().hex[:8]}"
-                input_data = block.get("input") or {}
-                arguments = json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)
-                pending_calls[call_id] = {"name": block.get("name", ""), "call_id": call_id, "arguments": arguments}
-
-        elif etype == "user":
-            message = event.get("message", {})
-            content = message.get("content") or []
-            if not isinstance(content, list):
-                continue
-
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                tool_id = block.get("tool_use_id", "")
-                call_info = pending_calls.pop(tool_id, None)
-                if call_info:
-                    output_items.append(
-                        NeMoGymResponseFunctionToolCall(
-                            arguments=call_info["arguments"],
-                            call_id=tool_id,
-                            name=call_info["name"],
-                            type="function_call",
-                            id=tool_id,
-                            status="completed",
-                        )
-                    )
-                result_content = block.get("content") or ""
-                if isinstance(result_content, list):
-                    result_text = _extract_text(result_content)
-                else:
-                    result_text = str(result_content)
-                output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=tool_id,
-                        output=result_text,
-                        status="completed",
-                    )
-                )
-
-    # The result event's usage is the run total, so it wins over the per-message sum
-    # (summing both would double count).
-    usages = [result_usage] if result_usage else list(usage_by_message.values())
-    metadata: dict = {
-        "input_tokens": sum(int(u.get("input_tokens") or 0) for u in usages),
-        "output_tokens": sum(int(u.get("output_tokens") or 0) for u in usages),
-        "cached_tokens": sum(int(u.get("cache_read_input_tokens") or 0) for u in usages),
-    }
-    if num_turns is not None:
-        metadata["num_turns"] = num_turns
-    return output_items, metadata
+    The stdout is parsed once into a trajectory and the response items are derived from
+    it, so the response and the trajectory telemetry can never drift apart.
+    """
+    trajectory = build_trajectory(decode_jsonl(stdout), [])
+    return to_response_output(trajectory), _usage_metadata(trajectory)
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -537,12 +447,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             mcp_config=mcp_config,
             skills_path=skills_path,
         )
-        output_items, usage = parse_stream_json(stdout)
+        # One parse for both artifacts: the response the verifier scores is derived from the
+        # stream-json trajectory; the attached telemetry prefers the richer transcript source.
+        stream_events = decode_jsonl(stdout)
+        stream_trajectory = build_trajectory(stream_events, [])
+        output_items = to_response_output(stream_trajectory)
+        usage = _usage_metadata(stream_trajectory)
 
         trajectory: Optional[dict[str, Any]] = None
         if self.config.capture_trajectory:
             try:
-                trajectory = build_trajectory(decode_jsonl(stdout), transcript_records).model_dump(mode="json")
+                telemetry = (
+                    build_trajectory(stream_events, transcript_records) if transcript_records else stream_trajectory
+                )
+                trajectory = telemetry.model_dump(mode="json")
             except Exception as exc:
                 LOG.warning("failed to build trajectory: %s", exc)
 

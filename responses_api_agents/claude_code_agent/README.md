@@ -252,6 +252,8 @@ Semantics:
 
 Identity: `session_id` identifies the Claude Code session; task and rollout identity are recorded by Gym's rollout collection layer on the surrounding rollout row (the trajectory rides on the verify response); each model call is identified by the generation span's `request_id`/`response_id`, each tool call by `call_id`.
 
+The trajectory is also the **single parse** of Claude Code's output: the `NeMoGymResponse.output` the verifier scores is derived from it via `nemo_gym.trajectory.to_response_output()` (which reproduces the flattened response conventions — `<think>`-tag inlining, calls paired with their outputs in arrival order), so the response and the telemetry can never drift apart. The scored response is derived from the stream-json stdout events; the attached telemetry prefers the transcript.
+
 To adapt another agent harness, parse its artifacts and drive `nemo_gym.trajectory.TrajectoryBuilder` (`add_user_message` / `start_agent_turn` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_context_boundary` / `set_run_totals`); the builder owns turn numbering, model-call deduplication, call/observation correlation, orphan handling, and usage totals.
 
 ## Limitations

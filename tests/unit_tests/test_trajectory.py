@@ -28,6 +28,7 @@ from nemo_gym.trajectory import (
     TrajectorySpanError,
     reconstruct_model_input,
     to_response_create_params,
+    to_response_output,
     usage_from_provider,
     validate_trajectory,
 )
@@ -278,6 +279,76 @@ class TestReconstruction:
         assert len(params.input) == 3
         # round-trips through the strict native model
         assert type(params).model_validate(params.model_dump(mode="json")).model == "test-model"
+
+
+class TestToResponseOutput:
+    def test_reasoning_inlined_into_next_message(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_reasoning("let me reason")
+        builder.add_output_text("answer")
+        items = to_response_output(builder.build())
+        assert len(items) == 1
+        assert items[0].content[0].text == "<think>\nlet me reason\n</think>\n\nanswer"
+
+    def test_reasoning_kept_native_when_tag_disabled(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_reasoning("let me reason")
+        builder.add_output_text("answer")
+        items = to_response_output(builder.build(), reasoning_tag=None)
+        assert isinstance(items[0], NeMoGymResponseReasoningItem)
+        assert items[1].content[0].text == "answer"
+
+    def test_reasoning_buffer_spans_turns_and_clears(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_reasoning("think")
+        builder.start_agent_turn(response_id="m2")
+        builder.add_output_text("msg1")
+        builder.start_agent_turn(response_id="m3")
+        builder.add_output_text("msg2")
+        items = to_response_output(builder.build())
+        assert "<think>" in items[0].content[0].text
+        assert "<think>" not in items[1].content[0].text
+
+    def test_call_emitted_before_its_output_in_arrival_order(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_output_text("running")
+        builder.add_tool_call("t1", "Bash", "{}")
+        builder.add_tool_call("t2", "Read", "{}")
+        builder.add_tool_result("t2", "second issued, first done")
+        builder.add_tool_result("t1", "ok")
+        items = to_response_output(builder.build())
+        assert [(type(i).__name__, getattr(i, "call_id", None)) for i in items] == [
+            ("NeMoGymResponseOutputMessage", None),
+            ("NeMoGymResponseFunctionToolCall", "t2"),
+            ("NeMoGymFunctionCallOutput", "t2"),
+            ("NeMoGymResponseFunctionToolCall", "t1"),
+            ("NeMoGymFunctionCallOutput", "t1"),
+        ]
+        # the call item's id mirrors call_id in the flattened response shape
+        assert items[1].id == "t2"
+
+    def test_unresolved_call_omitted_and_orphan_output_kept(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_tool_call("never-resolved", "Bash", "{}")
+        builder.add_tool_result("orphan", "out")  # attaches to the turn without a matching call
+        items = to_response_output(builder.build())
+        assert [type(i).__name__ for i in items] == ["NeMoGymFunctionCallOutput"]
+        assert items[0].call_id == "orphan"
+
+    def test_non_agent_steps_skipped(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.add_user_message("question")
+        builder.add_context_boundary(summary="summary")
+        builder.start_agent_turn(response_id="m1")
+        builder.add_output_text("answer")
+        items = to_response_output(builder.build())
+        assert len(items) == 1
+        assert items[0].content[0].text == "answer"
 
 
 class TestValidation:

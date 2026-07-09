@@ -198,6 +198,55 @@ def to_response_create_params(
     )
 
 
+def to_response_output(
+    trajectory: Trajectory, reasoning_tag: Optional[str] = "think"
+) -> list[NeMoGymResponseInputItem]:
+    """Flatten a trajectory's agent turns into a ``NeMoGymResponse.output``-shaped item list.
+
+    This lets a harness parse its provider artifacts once (into a trajectory) and derive
+    the response the verifier scores from it. The flattening matches the conventions Gym
+    agents already use for episode outputs:
+
+    - With ``reasoning_tag`` set, reasoning items are inlined as ``<tag>…</tag>`` prefixed
+      to the next output message (pass ``None`` to keep native ``reasoning`` items).
+    - A ``function_call`` is emitted immediately before its ``function_call_output``, in
+      result-arrival order; calls whose result never arrived are omitted (they remain in
+      the trajectory), and orphan outputs are kept without a call.
+    """
+    items: list[NeMoGymResponseInputItem] = []
+    reasoning_buffer: list[str] = []
+    for step in trajectory.steps:
+        if step.type != "agent_turn":
+            continue
+        calls = {i.call_id: i for i in step.items if isinstance(i, NeMoGymResponseFunctionToolCall)}
+        emitted_calls: set[str] = set()
+        for item in step.items:
+            if isinstance(item, NeMoGymResponseReasoningItem):
+                if reasoning_tag is None:
+                    items.append(item.model_copy(deep=True))
+                else:
+                    reasoning_buffer.extend(s.text for s in item.summary if s.text)
+            elif isinstance(item, NeMoGymResponseOutputMessage):
+                text = "".join(b.text for b in item.content if isinstance(b, NeMoGymResponseOutputText))
+                if reasoning_buffer:
+                    joined = "\n".join(reasoning_buffer)
+                    text = f"<{reasoning_tag}>\n{joined}\n</{reasoning_tag}>\n\n{text}"
+                    reasoning_buffer.clear()
+                items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg-{len(items)}",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=text)],
+                    )
+                )
+            elif isinstance(item, NeMoGymFunctionCallOutput):
+                call = calls.get(item.call_id)
+                if call is not None and item.call_id not in emitted_calls:
+                    emitted_calls.add(item.call_id)
+                    items.append(call.model_copy(update={"id": call.call_id}))
+                items.append(item.model_copy(deep=True))
+    return items
+
+
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if not isinstance(value, str):
         return None
