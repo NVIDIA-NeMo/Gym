@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from typing import Any, Optional
 from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -21,6 +25,8 @@ from resources_servers.circle_click.app import (
     CircleClickConfig,
     CircleClickResourcesServer,
     CircleClickVerifyRequest,
+    ClickRequest,
+    ClickResponse,
 )
 
 
@@ -182,3 +188,138 @@ class TestCircleClickServer:
         assert CircleClickResourcesServer._point_in_circle(250, 200, circle) is True
         assert CircleClickResourcesServer._point_in_circle(251, 200, circle) is False
         assert CircleClickResourcesServer._point_in_circle(0, 0, circle) is False
+
+
+def _reference_app() -> FastAPI:
+    """The pre-migration hand-written /click route: the byte-parity oracle."""
+    app = FastAPI()
+
+    async def click(body: ClickRequest) -> ClickResponse:
+        return ClickResponse(x=body.x, y=body.y)
+
+    app.post("/click")(click)
+    return app
+
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
+
+
+def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
+    headers = dict(RPC_HEADERS)
+    if token is not None:
+        headers[TOKEN_HEADER] = token
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if method.startswith("notifications/"):
+        payload["params"] = params or {}
+    else:
+        payload["id"] = rpc_id
+        payload["params"] = params or {}
+    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
+
+
+class TestClickHTTPReplay:
+    """Wire-format preservation: /click responses must match the hand-written route byte-for-byte."""
+
+    REPLAY_PAYLOADS = [
+        {"x": 100, "y": 200},  # nominal integer click
+        {"x": [1, 2], "y": "abc"},  # x/y are Any: echoed verbatim, no coercion
+        {"x": 100},  # error path: missing required field -> 422
+        {"x": None, "y": None},  # Any accepts null
+    ]
+
+    def test_click_bytes_match_handwritten_route(self) -> None:
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        server = _make_server()
+        with (
+            TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as migrated,
+            TestClient(_reference_app(), base_url="http://127.0.0.1:8000") as reference,
+        ):
+            for payload in self.REPLAY_PAYLOADS:
+                got = migrated.post("/click", json=payload)
+                want = reference.post("/click", json=payload)
+                assert got.status_code == want.status_code, payload
+                assert got.content == want.content, payload
+                assert got.headers["content-type"] == want.headers["content-type"], payload
+
+    def test_click_non_json_body_bytes_match(self) -> None:
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        server = _make_server()
+        with (
+            TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as migrated,
+            TestClient(_reference_app(), base_url="http://127.0.0.1:8000") as reference,
+        ):
+            got = migrated.post("/click", content=b"not json", headers={"Content-Type": "application/json"})
+            want = reference.post("/click", content=b"not json", headers={"Content-Type": "application/json"})
+            assert got.status_code == want.status_code == 422
+            assert got.content == want.content
+
+
+class TestClickMCP:
+    """MCP round-trip: tools/list advertises click, tools/call echoes the coordinates."""
+
+    def test_tools_list_and_call_round_trip(self) -> None:
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        server = _make_server()
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            seed = client.post("/seed_session", json={})
+            assert seed.status_code == 200
+            token = seed.json()["mcp"]["headers"][TOKEN_HEADER]
+
+            resp = _rpc(
+                client,
+                "initialize",
+                {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"},
+                },
+                token=token,
+            )
+            assert resp.status_code == 200, resp.text
+            resp = _rpc(client, "notifications/initialized", token=token)
+            assert resp.status_code in (200, 202)
+
+            resp = _rpc(client, "tools/list", token=token, rpc_id=2)
+            assert resp.status_code == 200, resp.text
+            tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+            assert set(tools) == {"click"}
+            assert set(tools["click"]["inputSchema"]["properties"]) == {"x", "y"}
+            assert set(tools["click"]["inputSchema"]["required"]) == {"x", "y"}
+
+            resp = _rpc(
+                client, "tools/call", {"name": "click", "arguments": {"x": 10, "y": 20}}, token=token, rpc_id=3
+            )
+            assert resp.status_code == 200, resp.text
+            result = resp.json()["result"]
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == {"x": 10, "y": 20}
+
+
+class TestTransportParity:
+    def test_mcp_names_match_http_tool_routes(self) -> None:
+        pytest.importorskip("mcp")
+        from fastapi.testclient import TestClient
+
+        server = _make_server()
+        app = server.setup_webserver()
+        with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+            resp = _rpc(client, "tools/list", rpc_id=2)
+            assert resp.status_code == 200, resp.text
+            mcp_names = {tool["name"] for tool in resp.json()["result"]["tools"]}
+
+        http_names = set()
+        for route in app.router.routes:
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None) or set()
+            if path and "POST" in methods and path not in NON_TOOL_PATHS:
+                http_names.add(path.lstrip("/"))
+
+        assert mcp_names == http_names == {"click"}

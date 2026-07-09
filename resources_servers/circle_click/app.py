@@ -16,7 +16,6 @@ import json
 import math
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
@@ -24,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    gym_tool,
 )
 
 
@@ -55,11 +55,10 @@ class CircleClickVerifyResponse(BaseVerifyResponse):
 class CircleClickResourcesServer(SimpleResourcesServer):
     config: CircleClickConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/click")(self.click)
-        return app
-
+    @gym_tool(
+        input_schema=ClickRequest,
+        description="Click at pixel coordinates (x, y) in the image.",
+    )
     async def click(self, body: ClickRequest) -> ClickResponse:
         return ClickResponse(x=body.x, y=body.y)
 
