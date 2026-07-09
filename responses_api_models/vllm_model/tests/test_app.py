@@ -3318,6 +3318,72 @@ class TestVLLMConverter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Assistant reasoning history preprocessing
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=True,
+        uses_interleaved_reasoning=True,
+        preserve_reasoning_in_assistant_content=preserve_content,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestAssistantReasoningHistoryPreprocess:
+    @staticmethod
+    def _body(content: Any) -> dict[str, Any]:
+        return {
+            "model": "caller-model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": "next"},
+            ],
+        }
+
+    def test_default_still_splits_think_history(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body("<think>reason</think>\n## Action:\nact")
+        )
+
+        assistant = result["messages"][1]
+        assert assistant["content"] == "\n## Action:\nact"
+        assert assistant["reasoning_content"] == "reason"
+        assert assistant["reasoning"] == "reason"
+
+    def test_preserve_mode_keeps_string_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = "<think>reason</think>\n## Action:\nact"
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body(original)
+        )
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
+
+    def test_preserve_mode_keeps_list_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = [{"type": "text", "text": "<think>reason</think>\n## Action:\nact"}]
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body(original)
+        )
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
 #
 # Lets audio benchmarks like librispeech_pc carry audio data-URIs through the

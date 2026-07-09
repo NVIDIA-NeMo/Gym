@@ -57,6 +57,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Keep reconstructed assistant history byte-for-byte in ``content`` for
+    # models whose validated direct-vLLM contract includes <think> tags.
+    # Response parsing remains controlled independently by
+    # ``uses_reasoning_parser``.
+    preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -317,7 +322,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # prompt_logprobs=0,
             )
 
-        if self.config.uses_reasoning_parser:
+        if (
+            self.config.uses_reasoning_parser
+            and not self.config.preserve_reasoning_in_assistant_content
+        ):
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") != "assistant" or "content" not in message_dict:
                     continue
