@@ -427,6 +427,14 @@ class TestRolloutMCPConfig:
         agent = _make_agent(mcp_config="/path/to/static.json")
         assert agent._write_rollout_mcp_config({}, tmp_path) is None
 
+    def test_malformed_metadata_returns_none_and_warns(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        agent = _make_agent()
+        with caplog.at_level(logging.WARNING):
+            assert agent._write_rollout_mcp_config({"mcp": "not-a-dict"}, tmp_path) is None
+        assert any("malformed" in record.getMessage() for record in caplog.records)
+
     def test_writes_rollout_mcp_config_with_session_header(self, tmp_path: Path) -> None:
         agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
         agent.server_client.global_config_dict = {

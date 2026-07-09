@@ -457,7 +457,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def _write_rollout_mcp_config(self, seed_response_json: dict[str, Any], output_dir: Path) -> Optional[str]:
         metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
+        if metadata is None:
+            # Normal for non-MCP resources servers (MCP-enabled ones auto-augment their seed
+            # responses), so this is not worth a per-rollout warning.
+            LOG.debug(
+                "Seed response has no %r metadata; the rollout runs without a Gym MCP server.",
+                NEMO_GYM_MCP_METADATA_KEY,
+            )
+            return None
         if not isinstance(metadata, dict):
+            LOG.warning(
+                "Seed response %r metadata is malformed (expected a dict, got %s); ignoring it. The rollout "
+                "will run without a Gym MCP server, so its Gym tools will be unavailable to the model.",
+                NEMO_GYM_MCP_METADATA_KEY,
+                type(metadata).__name__,
+            )
             return None
 
         server_name = metadata.get("server_name") or self.config.resources_server.name
