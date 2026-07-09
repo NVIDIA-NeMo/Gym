@@ -17,7 +17,7 @@ There are two distinct integration shapes, and they need different amounts of pl
 
 | Flow | When | What you build |
 |---|---|---|
-| **Gym-owned MCP server** | You want the tools *and* their verification to live in Gym, with per-rollout session isolation | Subclass `MCPResourcesServer` — Gym mounts a Streamable-HTTP MCP endpoint at `/mcp` on the same app as `/seed_session` and `/verify` |
+| **Gym-owned tools** | You want the tools *and* their verification to live in Gym, with per-rollout session isolation | Declare tools with `gym_tool` on your `SimpleResourcesServer` — each tool is served over **both** an HTTP `POST /<name>` route and a Streamable-HTTP MCP endpoint mounted at `/mcp` on the same app as `/seed_session` and `/verify` |
 | **Existing / external MCP server** | The MCP server already runs outside Gym (a third-party or shared service) | Point the agent at it directly with a static `mcp_config`; write a plain `SimpleResourcesServer.verify()` that scores the resulting trajectory |
 
 The rest of this page builds the **Gym-owned** flow (the one that needs new infrastructure) and then explains the **external** flow at the end.
@@ -55,7 +55,7 @@ Flow (the MCP endpoint and /verify share one session_id)
 
 ## Implementation
 
-The base class `MCPResourcesServer` (in `nemo_gym/base_resources_server.py`) mounts the MCP endpoint and manages the per-rollout token. You write a **`@gym_tool` method** (your tool), a `seed_session()` that returns the MCP metadata so the agent can connect, and a `verify()` that scores the rollout.
+There is no separate MCP base class: `SimpleResourcesServer` (in `nemo_gym/base_resources_server.py`) serves every **`gym_tool`** declaration over both transports, mounting `/mcp` and managing the per-rollout token **lazily** — only when the server actually declares a tool. You write the **`@gym_tool` method** (your tool), a `seed_session()` that seeds per-rollout state, and a `verify()` that scores the rollout. The MCP connection metadata is injected into every `seed_session` response automatically (returning it yourself is optional — do so only to pass `allowed_tools`, see below).
 
 **File ([`resources_servers/example_mcp_weather/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather/app.py)):**
 
@@ -72,8 +72,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    MCPResourcesServer,
     MCPServerMetadata,
+    SimpleResourcesServer,
     gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -93,7 +93,8 @@ class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
     verifier_metadata: Optional[dict[str, Any]] = None
 
 
-# seed_session returns the MCP metadata under the `mcp` key
+# Returning the MCP metadata yourself is optional (the base injects it when absent); this example
+# returns it explicitly so the response model documents the `mcp` key.
 class ExampleMCPWeatherSeedSessionResponse(BaseSeedSessionResponse):
     mcp: MCPServerMetadata
 
@@ -103,7 +104,7 @@ class ExampleMCPWeatherVerifyRequest(BaseVerifyRequest):
     verifier_metadata: Optional[dict[str, Any]] = None
 
 
-class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
+class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
     config: ExampleMCPWeatherResourcesServerConfig
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
@@ -149,15 +150,23 @@ if __name__ == "__main__":
 
 ### Key Pattern
 
-Writing a tool is just decorating a method:
+Writing a tool is just decorating a method — and one declaration serves **both transports**:
 
-1. **`@gym_tool`** — mark a method and the base class auto-registers it as an MCP tool (name = method name), mounted at `/mcp` (Streamable HTTP). The MCP input schema is derived from the method's typed parameters. To receive the Gym session, declare a **`session_id: str`** parameter — it is injected from the per-rollout token and **hidden** from the tool's input schema (the model only sees the real args). Omit it for a stateless tool. A missing/invalid token raises `MCPSessionError`, which — because MCP runs over JSON-RPC — FastMCP surfaces to the client as a tool error (`isError: true`) on an HTTP 200 response, not an HTTP status code. Both sync and async methods work. Tool names may not collide with reserved endpoints (`verify`, `seed_session`, `aggregate_metrics`, `mcp`), and a tool must **not** take a `request` parameter (there is no FastAPI `Request` on the MCP path — use `session_id`).
-2. **`build_mcp_session_metadata(request)`** — call this from `seed_session` and return it under the response's `mcp` key. It mints the one-time `X-NeMo-Gym-Session-Token` bound to the current `session_id`.
+1. **`@gym_tool`** — mark a method and the base registers it as an MCP tool (name = method name) at `/mcp` (Streamable HTTP) **and** as an HTTP `POST /get_weather` route on the same app, so HTTP-driven agents (e.g. `simple_agent`) and MCP-native agents (e.g. Claude Code) call the identical implementation. The schema is derived from the method's typed parameters (use flat typed params, not one wrapping Pydantic `body` arg — the parameter name would leak into the MCP argument shape). To receive the Gym session, declare a **`session_id: str`** parameter — it is injected on both paths (from the session cookie over HTTP, from the per-rollout token over MCP) and **hidden** from the tool's schema; the model only sees the real args, and a `session_id` key in the payload is ignored. Omit it for a stateless tool. Both sync and async methods work (sync tools run in a threadpool, never on the event loop). Tool names may not collide with reserved endpoints (`verify`, `seed_session`, `aggregate_metrics`, `mcp`), and a tool must **not** take a `request` parameter — use `session_id`.
+2. **Runtime tools** — for tool sets that only exist after startup (registries, discovered tools), call the same function on a generated closure, typically in `model_post_init`: `gym_tool(closure, name=..., description=..., input_schema=<json schema dict or Pydantic model>, owner=self)`. A dict `input_schema` is advertised verbatim over MCP and arguments pass through **raw** on both transports; a Pydantic model class validates arguments into an instance.
+3. **Session metadata is automatic** — every `seed_session` response is augmented with the `mcp` key (the per-rollout `X-NeMo-Gym-Session-Token` bound to the current `session_id`). Call `build_mcp_session_metadata(request, allowed_tools=[...])` and return it yourself only to restrict which tools this session can list and call over MCP (the claim rides inside the signed token).
+4. **Unknown tool names** — tool-bearing servers answer a `POST` to an unregistered tool path with a 404 that lists the available tools (agents feed the body back to the model, so it can recover). Override `handle_unknown_tool(tool_name, request)` to preserve a server's historical error bytes.
 
-> Need full control (e.g. a hand-written `@mcp.tool()` with custom schema)? Override `register_mcp_tools(self, mcp)` — call `super().register_mcp_tools(mcp)` first to keep the auto-registered `@gym_tool` ones.
+Error shapes differ per transport by design: a missing/invalid token raises `MCPSessionError`, which — because MCP runs over JSON-RPC — surfaces to the client as a tool error (`isError: true`) on an HTTP 200 response, not an HTTP status code. Over HTTP there is no token: a request without a session cookie mints a fresh (unseeded) session id, so stateful tools should keep a seeded-session guard in their body.
+
+> Need full manual control of the MCP surface? Override `register_mcp_tools(self, mcp)` — call `super().register_mcp_tools(mcp)` first to keep the auto-registered ones. Note that hand-written `@mcp.tool()` registrations are **MCP-only** (no HTTP twin; the base logs a warning), so prefer `gym_tool` declarations.
 
 <Note>
-`MCPResourcesServer` disables the MCP SDK's default DNS-rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`). That protection only accepts loopback `Host` headers and returns HTTP `421` otherwise — which would break multi-node / `use_absolute_ip=True` deployments where the agent reaches the server by a routable host. The endpoint is instead protected by the per-rollout session token. You don't need to set this yourself; the base class handles it.
+The Gym MCP mount disables the MCP SDK's default DNS-rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`). That protection only accepts loopback `Host` headers and returns HTTP `421` otherwise — which would break multi-node / `use_absolute_ip=True` deployments where the agent reaches the server by a routable host. The endpoint is instead protected by the per-rollout session token. You don't need to set this yourself; the base class handles it.
+</Note>
+
+<Note>
+**Dual transport ≠ one dataset.** HTTP-driven agents (`simple_agent`) learn the tools from the dataset row's hand-authored `tools[]` and record bare tool names with raw response bytes; MCP-native agents (Claude Code) ignore `tools[]`, discover tools from `tools/list`, and record `mcp__<server>__<tool>`-namespaced names. For environments meant to run under both, verify off server-side session state (as this example does) rather than off trajectory shape. Also note that in-memory session state is per-process: stateful servers require the default `num_workers=1`.
 </Note>
 
 ---
@@ -222,7 +231,7 @@ To watch the MCP round-trip without a full `gym env start`, start the Resources 
 
 ## Pointing at an existing / external MCP server
 
-If the MCP server already runs outside Gym, the agent talks to it **directly** — you do not need an `MCPResourcesServer`. Give the agent a static `mcp_config` pointing at the external server, and write a plain `SimpleResourcesServer.verify()` that scores the agent's trajectory:
+If the MCP server already runs outside Gym, the agent talks to it **directly** — you do not need any Gym-owned tools. Give the agent a static `mcp_config` pointing at the external server, and write a plain `SimpleResourcesServer.verify()` that scores the agent's trajectory:
 
 ```yaml
 my_external_mcp_agent:
