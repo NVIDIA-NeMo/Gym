@@ -1,5 +1,4 @@
 #!/bin/bash
-# @bxyu-nvidia: Copied from https://docs.ray.io/en/latest/cluster/vms/user-guides/community/slurm-basic.html#slurm-basic
 
 set -x
 
