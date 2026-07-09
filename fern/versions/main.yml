@@ -41,6 +41,9 @@ navigation:
       - folder: ./latest/pages/environment-tutorials
         title: "Build Environments"
         title-source: frontmatter
+      - folder: ./latest/pages/environment-reports
+        title: "Environment Reports"
+        title-source: frontmatter
       - folder: ./latest/pages/model-recipes
         title: "Model Recipes"
         title-source: frontmatter
