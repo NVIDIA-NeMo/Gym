@@ -43,7 +43,7 @@ swe_atlas_qna_mini_swe_agent:
       # used directly (Apptainer pulls docker://...).
       image_template: null
       mini_swe_config_path: responses_api_agents/mini_swe_agent_qna/configs/mswea_qa_config.yaml
-      answer_path: /logs/agent/answer.txt
+      answer_path: /sandbox/answer.txt
       step_timeout: 900
       step_limit: 250
       datasets:

@@ -20,7 +20,7 @@ rather than SWE-Bench patch/test tasks:
 - Drives the mini-swe-agent bash loop in a Gym sandbox (e.g. Apptainer ``.sif``
   images on a cluster) using a QnA-specific mini-swe config template.
 - The task ends when the agent writes its answer to ``answer_path``
-  (``/logs/agent/answer.txt`` by default, wrapped in ``<<FINAL_ANSWER>>`` tags)
+  (``/sandbox/answer.txt`` by default, wrapped in ``<<FINAL_ANSWER>>`` tags)
   and submits with ``COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT``. This harness reads
   that answer file out of the sandbox — there is no git patch.
 - Reward is delegated to the ``swe_atlas_qna`` rubric-judge resources server's
@@ -69,7 +69,9 @@ from nemo_gym.server_utils import (
 
 
 # Default filesystem path (inside the sandbox) the agent writes its final answer to.
-DEFAULT_ANSWER_PATH = "/logs/agent/answer.txt"
+# Under the sandbox mount point (/sandbox) so it is writable even when the container
+# image root is read-only (the Apptainer default).
+DEFAULT_ANSWER_PATH = "/sandbox/answer.txt"
 
 
 class MiniSWEAgentQnaConfig(BaseResponsesAPIAgentConfig):

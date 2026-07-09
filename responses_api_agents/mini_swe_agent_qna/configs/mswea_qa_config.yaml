@@ -27,16 +27,16 @@ agent:
     - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
     - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
     - When you are confident in your answer, you MUST first write your complete answer to a file, then submit:
-      1. First, write your answer wrapped in <<FINAL_ANSWER>> tags to /logs/agent/answer.txt:
+      1. First, write your answer wrapped in <<FINAL_ANSWER>> tags to /sandbox/answer.txt:
          ```bash
-         cat <<'ANSWER_EOF' > /logs/agent/answer.txt
+         cat <<'ANSWER_EOF' > /sandbox/answer.txt
          <<FINAL_ANSWER>>
          Your comprehensive answer here, including all relevant findings, code references, and explanations.
          <<FINAL_ANSWER>>
          ANSWER_EOF
          ```
       2. Then, in a SEPARATE follow-up command, submit: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
-      <important>You MUST write /logs/agent/answer.txt with <<FINAL_ANSWER>> tags BEFORE submitting. After the submit command, you cannot continue working on this task.</important>
+      <important>You MUST write /sandbox/answer.txt with <<FINAL_ANSWER>> tags BEFORE submitting. After the submit command, you cannot continue working on this task.</important>
 
     Example of a CORRECT response:
     <example_response>

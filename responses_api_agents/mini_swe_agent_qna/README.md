@@ -13,7 +13,7 @@ for QnA rather than SWE-Bench:
 | | mini_swe_agent_2 (SWE-Bench) | mini_swe_agent_qna |
 |---|---|---|
 | Config template | built-in `swebench.yaml` | QnA `configs/mswea_qa_config.yaml` |
-| Task output | git patch (`submission`) | `/logs/agent/answer.txt` (`<<FINAL_ANSWER>>`) |
+| Task output | git patch (`submission`) | `/sandbox/answer.txt` (`<<FINAL_ANSWER>>`) |
 | Reward | run unit tests inline | delegate to `swe_atlas_qna` `/verify` (rubric judge) |
 | Image | SWE-Bench naming convention | `image_template` filled from `verifier_metadata` |
 
@@ -22,7 +22,7 @@ for QnA rather than SWE-Bench:
 1. `/run` launches the mini-swe-agent loop in a sandbox (Ray task, `SPREAD`
    scheduling). The agent runs read-only bash against the repo at `cwd` (`/app`).
 2. The task ends when the agent writes its answer to `answer_path`
-   (`/logs/agent/answer.txt`) and submits `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+   (`/sandbox/answer.txt`) and submits `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
    The harness reads that answer file out of the sandbox.
 3. The extracted answer is POSTed to the resources server `/verify`, which grades
    it against the task's rubrics and returns the reward. The full trajectory is
