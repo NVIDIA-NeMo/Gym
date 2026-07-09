@@ -1,0 +1,3 @@
+*benchmark.jsonl
+# Fallback shallow clone of the SWE-Atlas source repo (see prepare.py).
+_swe_atlas_src/
