@@ -34,6 +34,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
 META_PATH = Path("/root/denovoswe_meta.json")
 REPORT_DIR = Path("/trajectories_mount/eval_results")
 PER_FILE_TIMEOUT = int(os.environ.get("DENOVOSWE_PER_FILE_TIMEOUT", "600"))
@@ -93,11 +94,16 @@ def _collect_test_ids(workdir: str, filepath: str, timeout: int = 120) -> Option
     first, intersect with passed_ptp, then run only the resolvable ids.
     """
     cmd = [
-        sys.executable, "-m", "pytest",
-        "--collect-only", "-q",
+        sys.executable,
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
         "--no-header",
-        "-p", "no:cacheprovider",
-        "-o", "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "addopts=",
         filepath,
     ]
     try:
@@ -140,12 +146,16 @@ def _collect_test_ids(workdir: str, filepath: str, timeout: int = 120) -> Option
 def _run_pytest(workdir: str, test_ids: List[str], timeout: int) -> Tuple[Dict[str, int], str, int]:
     """Run ``python -m pytest <ids>`` in ``workdir``; return (counts, output, exit)."""
     cmd = [
-        sys.executable, "-m", "pytest",
+        sys.executable,
+        "-m",
+        "pytest",
         "--tb=short",
         "-q",
         "--no-header",
-        "-p", "no:cacheprovider",
-        "-o", "addopts=",       # neutralize any project-level coverage / xdist opts
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "addopts=",  # neutralize any project-level coverage / xdist opts
         *test_ids,
     ]
     try:
@@ -196,7 +206,7 @@ def main() -> int:
         }
         (REPORT_DIR / "report.json").write_text(json.dumps(report, indent=2))
         (REPORT_DIR / "reward.txt").write_text("0")
-        print(f"DeNovoSWE eval: workdir missing → reward=0", flush=True)
+        print("DeNovoSWE eval: workdir missing → reward=0", flush=True)
         return 0
 
     if not passed_ptp:
@@ -292,7 +302,7 @@ def main() -> int:
     # Account for any expected-but-not-counted ids (collection skew etc.).
     accounted = total_passed + total_failed + total_errors
     if accounted < total_expected:
-        total_errors += (total_expected - accounted)
+        total_errors += total_expected - accounted
 
     all_passed = (total_passed == total_expected) and total_failed == 0 and total_errors == 0
     pass_rate = (total_passed / total_expected) if total_expected else 0.0

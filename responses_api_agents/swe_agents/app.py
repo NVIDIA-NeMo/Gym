@@ -55,12 +55,12 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OmegaConf, get_global_config_dict
-from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -1453,7 +1453,9 @@ fi
 """
 
         search_path = os.path.join(
-            self.config.persistent_dir, "eval_results", "report.json",
+            self.config.persistent_dir,
+            "eval_results",
+            "report.json",
         )
         return ExecuteContainerCommandArgs(
             command=cmd,
@@ -2373,9 +2375,7 @@ class RunOpenHandsAgent(BaseModel):
         return dest_output
 
     @staticmethod
-    def _apply_watchdog_stats(
-        metrics: "SWEBenchMetrics", active_command: ActiveContainerCommand, mode: str
-    ) -> None:
+    def _apply_watchdog_stats(metrics: "SWEBenchMetrics", active_command: ActiveContainerCommand, mode: str) -> None:
         stats = active_command.watchdog_stats
         if mode == "agent":
             if stats.get("oom_killed"):
@@ -3244,13 +3244,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 binary_path = params.eval_private_dir / "denovoswe_test_binary.b64"
                 if not params.model_patch_path.exists():
                     params.model_patch_path.write_text("")
-                mount_args.append(
-                    f"--mount type=bind,src={test_patch_path},dst=/root/denovoswe_test_patch.diff,ro"
-                )
+                mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/root/denovoswe_test_patch.diff,ro")
                 mount_args.append(f"--mount type=bind,src={meta_path},dst=/root/denovoswe_meta.json,ro")
-                mount_args.append(
-                    f"--mount type=bind,src={binary_path},dst=/root/denovoswe_test_binary.b64,ro"
-                )
+                mount_args.append(f"--mount type=bind,src={binary_path},dst=/root/denovoswe_test_binary.b64,ro")
                 mount_args.append(f"--mount type=bind,src={denovoswe_eval_script},dst=/root/_denovoswe_eval.py,ro")
                 mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
@@ -3638,9 +3634,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if params.opencode_subagents_enabled:
             subagent_trajectories = [
                 entry
-                for entry in self.get_all_session_trajectories_from_completions(
-                    trajectories_dir, params.instance_id
-                )
+                for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
                 if entry.get("parent_session_id")
             ]
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)

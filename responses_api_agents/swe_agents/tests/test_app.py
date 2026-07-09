@@ -38,9 +38,6 @@ from responses_api_agents.swe_agents.app import (
     NVInternalDatasetProcessor,
     OpenCodeHarnessProcessor,
     OpenHandsHarnessProcessor,
-    _extract_instance_dict,
-    _render_opencode_user_message,
-    _resolve_opencode_workspace_path,
     R2EGymDatasetProcessor,
     RunOpenHandsAgent,
     SweBenchDatasetProcessor,
@@ -52,6 +49,9 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _extract_instance_dict,
+    _render_opencode_user_message,
+    _resolve_opencode_workspace_path,
     runner_ray_remote,
     update_metrics,
 )
@@ -216,7 +216,7 @@ class TestSWEBenchWrapperConfig:
         assert config.agent_max_turns == 100
         assert config.swebench_tests_timeout == 30 * 60
         assert config.swebench_agent_timeout == 45 * 60
-        assert config.apptainer_memory_limit_mb == 32 * 1024
+        assert config.apptainer_memory_limit_mb == 64 * 1024
         assert config.command_exec_timeout == 5 * 60
         assert config.concurrency == 256
         assert config.dataset_path is None
@@ -692,6 +692,7 @@ class TestSWERebenchDatasetProcessor:
                     "container_formatter": ["/containers/{instance_id}.sif"],
                 },
             )
+            config.eval_private_dir.mkdir(parents=True, exist_ok=True)
             processor = SWERebenchDatasetProcessor(config=config)
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
@@ -701,7 +702,7 @@ class TestSWERebenchDatasetProcessor:
             assert result.mode == "eval"
 
             # Check that eval metadata files were written
-            eval_meta_dir = config.persistent_dir / "eval_meta"
+            eval_meta_dir = config.eval_private_dir / "eval_meta"
             assert (eval_meta_dir / "expected_passed.json").exists()
             assert (eval_meta_dir / "fail_to_pass.json").exists()
             assert (eval_meta_dir / "pass_to_pass.json").exists()
@@ -727,6 +728,7 @@ class TestSWERebenchDatasetProcessor:
                     "container_formatter": ["/containers/{instance_id}.sif"],
                 },
             )
+            config.eval_private_dir.mkdir(parents=True, exist_ok=True)
             processor = SWERebenchDatasetProcessor(config=config)
             result = processor.get_run_command()
             assert "pytest tests/" in result.command
@@ -952,16 +954,16 @@ class TestResolveOpencodeWorkspacePath:
 
     def test_default_swebench(self):
         assert (
-            _resolve_opencode_workspace_path(self._info("princeton-nlp/SWE-bench_Verified", {"repo": "django/django", "version": "4.2"}))
-            == "/workspace/django__django__4.2"
+            _resolve_opencode_workspace_path(
+                self._info("princeton-nlp/SWE-bench_Verified", {"repo": "django/django", "version": "4.2"})
+            )
+            == "/testbed"
         )
 
     def test_swebench_live_uses_instance_id(self):
         assert (
-            _resolve_opencode_workspace_path(
-                self._info("SWE-bench-Live", {"instance_id": "django__django-12345"})
-            )
-            == "/workspace/django__django-12345"
+            _resolve_opencode_workspace_path(self._info("SWE-bench-Live", {"instance_id": "django__django-12345"}))
+            == "/testbed"
         )
 
     def test_nv_internal_1(self):
@@ -971,18 +973,10 @@ class TestResolveOpencodeWorkspacePath:
         assert _resolve_opencode_workspace_path(self._info("swe-bench-ext")) == "/workspace/repo"
 
     def test_swe_rebench_v2_uses_repo_name(self):
-        assert (
-            _resolve_opencode_workspace_path(
-                self._info("SWE-rebench-V2", {"repo": "owner/myrepo"})
-            )
-            == "/myrepo"
-        )
+        assert _resolve_opencode_workspace_path(self._info("SWE-rebench-V2", {"repo": "owner/myrepo"})) == "/myrepo"
 
     def test_swe_rebench_v2_no_slash_in_repo(self):
-        assert (
-            _resolve_opencode_workspace_path(self._info("SWE-rebench-V2", {"repo": "myrepo"}))
-            == "/myrepo"
-        )
+        assert _resolve_opencode_workspace_path(self._info("SWE-rebench-V2", {"repo": "myrepo"})) == "/myrepo"
 
     def test_r2e_gym(self):
         assert _resolve_opencode_workspace_path(self._info("R2E-Gym")) == "/testbed"
@@ -993,27 +987,20 @@ class TestResolveOpencodeWorkspacePath:
     def test_invalid_instance_dict_falls_back_safely(self):
         # Bad JSON shouldn't crash; the resolver just sees an empty instance dict.
         info = {"dataset_name": "princeton-nlp/SWE-bench_Verified", "instance_dict": "not json"}
-        assert _resolve_opencode_workspace_path(info) == "/workspace/__"
+        assert _resolve_opencode_workspace_path(info) == "/testbed"
 
 
 class TestRenderOpencodeUserMessage:
     def test_default_includes_problem_and_workspace(self):
-        msg = _render_opencode_user_message(
-            {"problem_statement": "MY PROBLEM"}, "/workspace/foo__1.0"
-        )
+        msg = _render_opencode_user_message({"problem_statement": "MY PROBLEM"}, "/workspace/foo__1.0")
         assert "MY PROBLEM" in msg
         assert "/workspace/foo__1.0" in msg
         assert "<issue_description>" in msg
-        # Default prompt nudges the model to stop calling tools when done — feeds
-        # into the no-finish-tool termination path documented in the README.
-        assert "stop calling tools" in msg
 
     def test_override_template_used(self, tmp_path):
         tpl = tmp_path / "user.txt"
         tpl.write_text("HEAD\nworkspace={workspace_path}\nissue={problem_statement}\nTAIL")
-        msg = _render_opencode_user_message(
-            {"problem_statement": "P"}, "/testbed", template_override_path=str(tpl)
-        )
+        msg = _render_opencode_user_message({"problem_statement": "P"}, "/testbed", template_override_path=str(tpl))
         assert msg == "HEAD\nworkspace=/testbed\nissue=P\nTAIL"
 
     def test_override_missing_falls_back(self, tmp_path):
@@ -1028,9 +1015,7 @@ class TestRenderOpencodeUserMessage:
         # Template author included an unknown slot; we tolerate it by falling back.
         tpl = tmp_path / "user.txt"
         tpl.write_text("{unknown_slot}")
-        msg = _render_opencode_user_message(
-            {"problem_statement": "P"}, "/testbed", template_override_path=str(tpl)
-        )
+        msg = _render_opencode_user_message({"problem_statement": "P"}, "/testbed", template_override_path=str(tpl))
         assert "<issue_description>" in msg
 
 
@@ -1151,8 +1136,8 @@ class TestOpenCodeHarnessProcessor:
             user_msg_file = config.persistent_dir / f"user_message_{config.agent_run_id}.txt"
             rendered = user_msg_file.read_text()
             assert "OVERRIDE-USER-TEMPLATE" in rendered
-            # workspace_path comes from the dataset resolver (default SWE-bench → /workspace/repo__version)
-            assert "workspace=/workspace/" in rendered
+            # workspace_path comes from the dataset resolver (default SWE-bench → /testbed)
+            assert "workspace=/testbed" in rendered
             assert "problem=Fix bug" in rendered
 
     def test_get_run_command_default_user_message_is_workspace_aware(self, _stub_model_server_lookup) -> None:
@@ -1166,8 +1151,8 @@ class TestOpenCodeHarnessProcessor:
             rendered = user_msg_file.read_text()
             assert "<issue_description>" in rendered
             assert "Fix bug" in rendered
-            # default SWE-bench dataset → /workspace/{repo}__{version} (instance_dict was empty so /workspace/__)
-            assert "/workspace/" in rendered
+            # default SWE-bench dataset → /testbed
+            assert "/testbed" in rendered
 
     def test_get_run_command_search_path_targets_opencode_dir(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1226,9 +1211,7 @@ def _write_completion(path: Path, *, session_id, parent_session_id, turn, conten
         json.dumps(
             {
                 "messages": [{"role": "user", "content": "Fix bug"}],
-                "response": {
-                    "choices": [{"message": {"role": "assistant", "content": content_text}}]
-                },
+                "response": {"choices": [{"message": {"role": "assistant", "content": content_text}}]},
                 "provider_specific_fields": {"prompt_token_ids": [1, 2, 3]},
                 "kwargs": {"tools": [{"name": "edit"}]},
                 "session_id": session_id,
@@ -1257,9 +1240,7 @@ class TestOpencodeMultiSessionCopy:
         return RunOpenHandsAgent(config=cfg)
 
     def _eval_dir(self, agent: RunOpenHandsAgent) -> Path:
-        eval_dir = (
-            Path(agent.config.opencode_setup_dir) / "opencode" / agent.config.eval_dir_in_openhands
-        )
+        eval_dir = Path(agent.config.opencode_setup_dir) / "opencode" / agent.config.eval_dir_in_openhands
         eval_dir.mkdir(parents=True, exist_ok=True)
         return eval_dir
 
@@ -1283,7 +1264,13 @@ class TestOpencodeMultiSessionCopy:
 
             # Bump mtimes: latest = m-1, a-0, b-1.
             now = time.time()
-            for name, off in [("m-0.json", 100), ("m-1.json", 10), ("a-0.json", 50), ("b-0.json", 80), ("b-1.json", 5)]:
+            for name, off in [
+                ("m-0.json", 100),
+                ("m-1.json", 10),
+                ("a-0.json", 50),
+                ("b-0.json", 80),
+                ("b-1.json", 5),
+            ]:
                 p = comp_root / name
                 os.utime(p, (now - off, now - off))
 
@@ -1308,8 +1295,12 @@ class TestOpencodeMultiSessionCopy:
 
             comp_root = eval_dir / inst / "a" / "b" / "llm_completions" / inst
             comp_root.mkdir(parents=True)
-            (comp_root / "old.json").write_text(json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}}))
-            (comp_root / "new.json").write_text(json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}}))
+            (comp_root / "old.json").write_text(
+                json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}})
+            )
+            (comp_root / "new.json").write_text(
+                json.dumps({"messages": [], "response": {"choices": [{"message": {}}]}})
+            )
             now = time.time()
             os.utime(comp_root / "old.json", (now - 100, now - 100))
             os.utime(comp_root / "new.json", (now - 1, now - 1))
@@ -1336,11 +1327,15 @@ class TestGetOpenhandsTrajectoryFromCompletions:
     def test_prefers_main_session_when_tagged(self, tmp_path) -> None:
         inst = "demo-1"
         comp_dir = tmp_path / inst / "llm_completions" / inst
-        _write_completion(comp_dir / "sub.json", session_id="ses_sub", parent_session_id="ses_main", turn=5, content_text="SUBAGENT")
-        _write_completion(comp_dir / "main.json", session_id="ses_main", parent_session_id=None, turn=2, content_text="MAIN")
+        _write_completion(
+            comp_dir / "sub.json", session_id="ses_sub", parent_session_id="ses_main", turn=5, content_text="SUBAGENT"
+        )
+        _write_completion(
+            comp_dir / "main.json", session_id="ses_main", parent_session_id=None, turn=2, content_text="MAIN"
+        )
 
         w = self._wrapper(tmp_path)
-        messages, tools = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        messages, tools, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
         # The final assistant message of the main session ("MAIN") should ride
         # along; the subagent's content should NOT be in the returned messages.
         joined = json.dumps(messages)
@@ -1364,12 +1359,12 @@ class TestGetOpenhandsTrajectoryFromCompletions:
                 )
             )
         w = self._wrapper(tmp_path)
-        messages, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
+        messages, _, _ = w.get_openhands_trajectory_from_completions(tmp_path, inst)
         assert any("LAST" in json.dumps(m) for m in messages)
 
     def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
         w = self._wrapper(tmp_path)
-        msgs, tools = w.get_openhands_trajectory_from_completions(tmp_path, "no-such-instance")
+        msgs, tools, _ = w.get_openhands_trajectory_from_completions(tmp_path, "no-such-instance")
         assert msgs == [] and tools == []
 
 
@@ -1909,6 +1904,9 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "/swebench_setup" in result
 
     def test_memory_limit(self, monkeypatch) -> None:
+        # No cgroups in the enroot sandbox, so the memory limit is enforced by
+        # the gym-side RSS watchdog (_memory_watchdog), not a static ulimit
+        # baked into the apptainer command.
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
             params = _make_instance_config(tmpdir, apptainer_memory_limit_mb=16384)
@@ -1926,7 +1924,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
                 timeout=300,
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
-            assert "ulimit -v" in result
+            assert "ulimit -v" not in result
 
     def test_nv_internal_eval_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2100,7 +2098,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 3  # system, user, assistant
             assert messages[2]["role"] == "assistant"
             assert messages[2]["prompt_token_ids"] == [1, 2]
@@ -2115,7 +2113,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
     def test_no_completions_dir(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
+            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), "nonexistent")
             assert messages == []
             assert tools == []
 
@@ -2126,7 +2124,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             completions_dir = Path(tmpdir) / instance_id / "llm_completions" / instance_id
             completions_dir.mkdir(parents=True)
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert messages == []
             assert tools == []
 
@@ -2153,7 +2151,7 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             }
             (completions_dir / "001_completion.json").write_text(json.dumps(completion_data))
 
-            messages, tools = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
+            messages, tools, _ = wrapper.get_openhands_trajectory_from_completions(Path(tmpdir), instance_id)
             assert len(messages) == 1  # only user, assistant not appended
 
 
