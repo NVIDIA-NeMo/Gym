@@ -27,6 +27,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 - [Golden-patch validation](#golden-patch-validation)
 - [Output format](#output-format)
 - [GRPO masking and failure modes](#grpo-masking-and-failure-modes)
+- [Memory watchdog (OOM handling)](#memory-watchdog-oom-handling)
 - [Debug / profiling](#debug--profiling)
 
 ---
@@ -101,14 +102,16 @@ Selection is driven by `problem_info["dataset_name"]` (set in the input JSONL). 
 
 | `dataset_name` (substring match)         | Processor class                          | Setup script (one-time)                         | Eval harness                                                                                              |
 |------------------------------------------|------------------------------------------|------------------------------------------------|------------------------------------------------------------------------------------------------------------|
-| `princeton-nlp/SWE-bench*` (default)     | `SweBenchDatasetProcessor`               | `setup_scripts/swebench.sh` (HeyyyyyyG fork)   | `swebench.harness.run_local_evaluation` against the mounted JSONL                                          |
+| anything not matched below (default) — e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Lite`, `SWE-Gym`, `SWE-bench-Live` | `SweBenchDatasetProcessor` | `setup_scripts/swebench.sh` (HeyyyyyyG fork)   | `swebench.harness.run_local_evaluation` against the mounted JSONL                                          |
 | contains `SWE-bench_Multilingual`        | `SweBenchMultilingualDatasetProcessor`   | `setup_scripts/swebench_multilingual.sh` (Kipok fork) | Same harness as SWE-bench but built from the multilingual fork                                       |
 | contains `R2E-Gym`                       | `R2EGymDatasetProcessor`                 | `setup_scripts/r2e_gym.sh` (sdevare-nv fork)   | `r2egym.agenthub.run.run_local_evaluation`                                                                 |
-| contains `SWE-rebench`                   | `SWERebenchDatasetProcessor`             | `setup_scripts/swe_rebench.sh` (V2)            | In-container `git apply` + `test_cmd`; **host-side** parsing via SWE-rebench's `log_parsers`               |
+| contains `SWE-rebench` (e.g. `SWE-rebench-V2`) | `SWERebenchDatasetProcessor`       | `setup_scripts/swe_rebench.sh` (V2)            | In-container `git apply` + `test_cmd`; **host-side** parsing via SWE-rebench's `log_parsers`               |
 | `swe-bench-ext`                          | `SweBenchExtDatasetProcessor`            | none (uses `swe_bench_ext` helper module)      | Run framework-specific test command via `lighthouse`-style flags; host-side parsing via `parse_and_check_tests` |
 | `nv-internal-1`                          | `NVInternalDatasetProcessor`             | none                                            | Synthesizes an env+`run_script.sh`+`parsing_script.py` from the instance's docker `ENV` lines and `before_repo_set_cmd`; tests gated by `f2p ⊆ passed ∧ p2p ⊆ passed` |
 | `deepswe` ⚠️ **WIP**                     | `DeepSWEDatasetProcessor`                | none (uses Harbor task format inline)           | Harbor `tests/test.sh` verifier baked into the SIF; reads `1`/`0` from `/logs/verifier/reward.txt`. Config: [`swebench_deepswe.yaml`](configs/swebench_deepswe.yaml). |
 | `denovoswe` ⚠️ **WIP**                   | `DeNovoSWEDatasetProcessor`              | none (uses bundled `_denovoswe_clean.sh` + in-container `_denovoswe_eval.py`) | Wipes the original source via `clean.sh`, re-injects spec as `README.md`, applies agent patch, lays canonical tests from `test_patch`, runs per-file pytest with `--collect-only` pre-flight; reward = 1 iff every `passed_ptp` test passes. Config: [`swebench_denovoswe.yaml`](configs/swebench_denovoswe.yaml). |
+
+`SWE-Gym` and `SWE-bench-Live` don't get their own processor — they fall into the default `SweBenchDatasetProcessor` row — but both still get dataset-name-specific runtime treatment elsewhere: `SWE-Gym` takes a different conda-activation branch in the opencode harness (see [Dataset-aware environment activation](#opencode-integration)), and `SWE-bench-Live` resolves its OpenHands workspace directory name directly from `instance_id` instead of `{repo}__{version}` (`_resolve_swebench_workspace_dir_name`).
 
 > [!WARNING]
 > **`deepswe` and `denovoswe` are work-in-progress and not fully verified.** Golden-patch validation has been run end-to-end but full agent-driven evaluation hasn't been baselined against a reference model yet:
@@ -237,6 +240,40 @@ Both `swe_opencode_setup/opencode/` and `swe_opencode_setup/bun/` are bind-mount
 
 At container start the wrapper exports `OPENCODE_DISABLE_MODELS_FETCH=1` and seeds an empty `/root/.cache/opencode/models.json` so opencode does not try to fetch the public models catalog over the network — the SIFs typically run with no outbound DNS and the `nemo-gym` provider supplies its own model metadata.
 
+### Prompt overrides
+
+The same `agent_prompt_overrides` / `agent_prompt_override_random` selection machinery described in [Prompt and agent-class diversity](#prompt-and-agent-class-diversity) drives opencode too, but the template format and mount points differ from OpenHands:
+
+- Templates are **flat, single-file, plain-text** (`prompts/opencode_harness/*.txt`), rendered with Python `str.format(workspace_path=..., problem_statement=...)` — not Jinja `.j2` — since `_render_opencode_user_message` does a plain `.format()` call. A malformed template (bad/missing `{...}` placeholder) falls back to the built-in default at `prompts/opencode_harness/user_prompt.txt` and logs a warning rather than failing the rollout.
+- Only `user_prompt_template` is required; `system_prompt_template` is optional and typically left unset for opencode (methodology is folded into the user message instead, since opencode's `swe-bench` agent definition already carries its own default system prompt inside the fork's `.opencode/opencode.jsonc`).
+- The resolved user template is rendered host-side and mounted read-only at `/opencode_setup/opencode/user_message.txt` (passed to `run_infer.sh` as positional arg `$11`). If `resolved_system_prompt_template` is set, it's mounted at `/opencode_setup/opencode/system_prompt.txt` and passed as the optional `$12` — omitting the arg entirely when unset, so opencode's own default system prompt applies.
+- `agent_cls` on the override is informational only for opencode (opencode has no OpenHands-style agent-class switch); `diversify_tool_names` / `camel_case_tool_names` are not implemented in the opencode path.
+
+See `configs/swebench_opencode_multi_tools.yaml` for a working example (11-way user-prompt bundle), and `configs/swebench_opencode_no_instruction.yaml` / `configs/swebench_opencode_empty.yaml` for ablation baselines.
+
+### Dataset-aware environment activation
+
+Before launching opencode, the agent script activates the dataset's Python/venv environment in the parent shell (so `PATH` / `VIRTUAL_ENV` / `CONDA_DEFAULT_ENV` propagate down through `run_infer.sh` → `bun` → opencode's `bash` tool):
+
+| `dataset_name`                                    | Activation                                                              |
+|----------------------------------------------------|--------------------------------------------------------------------------|
+| contains `SWE-Gym`                                  | Deactivates any venv, then `conda activate testbed` under `/opt/miniconda3`. |
+| contains `R2E-Gym`                                  | Deactivates any venv, then sources `/testbed/.venv/bin/activate`.        |
+| `nv-internal-1`, `swe-bench-ext`, or contains `SWE-rebench-V2` | No-op — these SIFs already have the right interpreter on `PATH`.  |
+| default (SWE-bench Verified/Lite/Multilingual/Live) | `conda activate testbed` under `/opt/miniconda3`.                       |
+
+Each branch is wrapped in `|| true` so a missing/misconfigured env cannot kill the rollout.
+
+For `denovoswe`, the agent script also wipes the original source and re-injects the spec as `README.md` *before* opencode starts (`_denovoswe_clean.sh`, folded into the baseline commit via `git commit --amend`) — mirroring the eval-side clean in `DeNovoSWEDatasetProcessor`. Without this the agent could just read the pre-existing source it's supposed to be regenerating.
+
+### Subagents
+
+When `opencode_subagents_enabled: true`, the wrapper exports `ENABLE_SUBAGENTS=1` so opencode's `task` tool is available and the main agent can spawn subagent sessions. Each session (main and subagent) writes its own per-turn trajectory files, tagged with `session_id` / `parent_session_id`, under `llm_completions/<instance_id>/*.json`.
+
+- `_openhands_dir_copy_from_host` groups completion files by `session_id` and copies only the most recent turn per session back to the host (that file's `messages` carries the full cumulative history for the session).
+- `get_openhands_trajectory_from_completions` (used to build the API response's `output`) selects the **main** session — the one with no `parent_session_id` — falling back to the last file on disk for payloads that predate session tagging (the OpenHands path).
+- `get_all_session_trajectories_from_completions` returns every session found on disk. `SWEBenchWrapper._inner_responses` filters this to sessions that *do* have a `parent_session_id` (i.e. subagent sessions only) and surfaces them as `subagent_trajectories` in the response metadata / `run()` output — see [Output format](#output-format).
+
 ### Termination
 
 There is **no explicit `finish` tool** in the opencode bench path — by design. The trajectory ends via one of four signals:
@@ -353,13 +390,17 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `container_formatter`              | `docker://swebench/sweb.eval.x86_64.{instance_id}`| Path template (or list of templates) for SIFs. Supports the `_1776_` / `_s_` rewrites and fuzzy glob fallbacks. |
 | `swebench_agent_timeout`           | `2700` (45 min)                                   | Per-instance agent wall-clock budget.                                   |
 | `swebench_tests_timeout`           | `1800` (30 min)                                   | Per-instance eval wall-clock budget.                                    |
-| `apptainer_memory_limit_mb`        | `32768`                                           | `ulimit -v` applied before `apptainer exec`.                            |
+| `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
+| `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
+| `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
 | `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
+| `skip_eval`                        | `false`                                           | Run the agent normally but skip the eval container entirely; reward is forced to `0.0` since the patch is never graded. Useful for collecting agent trajectories without paying the eval cost. |
 | `agent_prompt_overrides`           | `null`                                            | List of `AgentPromptOverride` entries. See above.                       |
 | `agent_prompt_override_random`     | `false`                                           | `false` = deterministic per `instance_id`; `true` = random per run.     |
+| `opencode_subagents_enabled`       | `false`                                           | (opencode only) Enable opencode's `task` tool so the main agent can spawn subagent sessions. See [Subagents](#opencode-integration). |
 | `openhands_should_log`             | `false`                                           | If true, sets `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, etc.               |
 | `debug`                            | `false`                                           | Enables Profiler around the agent run + dumps callgrind/dot/png.        |
 
@@ -367,9 +408,13 @@ Bundled YAML configs:
 
 - `configs/swebench_openhands.yaml` — single OpenHands `CodeActAgent`, the simplest setup.
 - `configs/swebench_openhands_training.yaml` — same shape as above but tuned for training.
-- `configs/swebench_swe_agent.yaml` — alternative SWE-agent path (uses `agent_tools_file`).
-- `configs/swebench_multi_tools.yaml` — full 15-way prompt × agent-class × tool-name bundle.
-- `configs/swebench_opencode.yaml` — opencode harness (`agent_framework: opencode`), pinned fork + commit.
+- `configs/swe_agent_config.yaml` — alternative SWE-agent path (uses `agent_tools_file`).
+- `configs/swebench_multi_tools.yaml` — full 15-way prompt × agent-class × tool-name bundle (OpenHands).
+- `configs/swebench_opencode.yaml` — opencode harness (`agent_framework: opencode`), pinned fork + commit, no prompt overrides.
+- `configs/swebench_opencode_training.yaml` — opencode harness tuned for training.
+- `configs/swebench_opencode_multi_tools.yaml` — opencode harness with the 11-way `prompts/opencode_harness/*.txt` prompt bundle. See [Prompt overrides](#opencode-integration).
+- `configs/swebench_opencode_no_instruction.yaml` / `configs/swebench_opencode_empty.yaml` — opencode ablation baselines (minimal / no methodology instructions).
+- `configs/swebench_deepswe.yaml` / `configs/swebench_denovoswe.yaml` — the `deepswe` / `denovoswe` datasets (⚠️ WIP, see [Supported datasets and harnesses](#supported-datasets-and-harnesses)).
 
 ---
 
@@ -510,13 +555,13 @@ Then collect rollouts against the dataset of interest:
 ```bash
 # SWE-bench Verified
 ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_public_datasets_val_swebench.jsonl \
+    +input_jsonl_fpath=/path/to/datasets/swe_public_datasets_val_swebench.jsonl \
     +output_jsonl_fpath=results/swebench_verified.golden.jsonl \
     +num_repeats=1
 
 # SWE-bench Multilingual
 ng_collect_rollouts +agent_name=swe_agents \
-    +input_jsonl_fpath=/lustre/fsw/portfolios/llmservice/users/sdevare/repos/ultra/datasets/swe/swe_swebench_multilingual_test.jsonl \
+    +input_jsonl_fpath=/path/to/datasets/swe_swebench_multilingual_test.jsonl \
     +output_jsonl_fpath=results/swebench_multilingual.golden.jsonl \
     +num_repeats=1
 ```
@@ -551,15 +596,20 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "resolved": true,
   "patch_exists": true,
   "model_patch": "diff --git ...",
-  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "other" | null
+  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "oom" | "other" | null
   "agent_timed_out": false,
   "eval_timed_out": false,
+  "oom_killed": false,       // memory watchdog killed the agent container — see Memory watchdog
+  "eval_oom_killed": false,  // memory watchdog killed the eval container
+  "agent_peak_rss_mb": 1024,
+  "eval_peak_rss_mb": 512,
   "ray_queue_time": 0.12,
   "openhands_run_time": 412.3,
   "generation_apptainer_spinup_time": 11.4,
   "final_eval_apptainer_spinup_time":  9.7,
   "final_eval_time": 87.2,
-  "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ }
+  "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ },
+  "subagent_trajectories": null // (opencode only, when opencode_subagents_enabled) list of {session_id, parent_session_id, messages, tools}
 }
 ```
 
@@ -572,6 +622,8 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
 2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
+4. The memory watchdog killed the **agent** container (OOM).
+5. The memory watchdog killed the **eval** container (OOM).
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
@@ -582,6 +634,20 @@ Agent error strings are bucketed by `_classify_agent_error`:
 | `stuck in a loop`                   | `stuck_in_loop`  |
 | anything else                       | `other`          |
 
+`oom` is set directly by `_apply_watchdog_stats` when the memory watchdog kills the agent container — it bypasses `_classify_agent_error` since there's no error string to classify (the container is killed, not erroring out on its own). See [Memory watchdog](#memory-watchdog-oom-handling).
+
+---
+
+## Memory watchdog (OOM handling)
+
+The enroot/apptainer sandbox this runs under has no cgroup support (v1 + fakeroot + no systemd — `ulimit -v` and `apptainer --memory` both fail), so per-container memory limits are enforced in userspace by `RunOpenHandsAgent._memory_watchdog`:
+
+- Every `memory_watchdog_poll_interval_s` seconds, it snapshots the container's full process tree (`_scan_container_tree`, via `/proc/<pid>/task/*/children` where available, else a full `/proc` sweep + ppid walk) and sums `rss_bytes` across every process.
+- If cumulative tree RSS reaches `apptainer_memory_limit_mb`, it SIGKILLs every process group in the tree (`_kill_container_tree` — `os.killpg` per `pgid`, with a per-pid fallback for stragglers that forked mid-kill) and records `oom_killed=True` plus the peak RSS observed (`agent_peak_rss_mb` / `eval_peak_rss_mb`).
+- The watchdog runs as an `asyncio.Task` alongside the container subprocess (started in `_start_container_command`, cancelled in `_finish_container_command`'s `finally`) and is disabled entirely when `memory_watchdog_enabled=false` or `apptainer_memory_limit_mb <= 0`.
+- A watchdog-triggered kill surfaces as a `RuntimeError` from `_finish_container_command`, which `process_single_datapoint` catches and turns into `oom_killed` / `eval_oom_killed` on `SWEBenchMetrics` — both feed into [GRPO masking](#grpo-masking-and-failure-modes) regardless of the (now-irrelevant) `resolved` value.
+- Peak RSS is tracked even when the limit is never crossed, so `agent_peak_rss_mb` / `eval_peak_rss_mb` are useful for right-sizing `apptainer_memory_limit_mb` from real rollout data.
+
 ---
 
 ## Debug / profiling
@@ -591,3 +657,5 @@ Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then 
 Set `openhands_should_log=true` to flip OpenHands to `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, and write per-event logs. Otherwise the wrapper aggressively quiets OpenHands (`LOG_LEVEL=CRITICAL`, all `DEBUG_*` flags off).
 
 Per-instance Apptainer stdout/stderr is always streamed to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log` regardless of these flags.
+
+For the opencode harness, the agent script installs an `EXIT` trap (`opencode_log_trap`) that always copies opencode's internal XDG data dir (`/root/.local/share/opencode`) and any `/tmp/bench-*/data/log` directories back to `<persistent_dir>/opencode_logs/` — useful for debugging opencode-internal issues (e.g. session/storage errors) that don't show up in the `llm_completions` trajectory dump.
