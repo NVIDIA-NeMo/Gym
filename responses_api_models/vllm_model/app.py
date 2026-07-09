@@ -70,6 +70,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    # Force these sampling params on every chat request, overriding whatever the
+    # client sent. Needed for on-policy RL training: an external harness (e.g.
+    # Claude Code) sets its own temperature/top_p, but the training generation
+    # worker requires them to equal its generation config. e.g. {temperature: 1.0, top_p: 1.0}.
+    sampling_overrides: Optional[Dict[str, Any]] = None
+
     default_headers: Dict[str, str] = Field(default_factory=dict)
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
@@ -278,6 +284,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     message_dict["role"] = "system"
 
         body_dict["model"] = self.config.model
+
+        # Pin sampling params for on-policy training (override whatever the client
+        # sent) so requests match the generation worker's generation config.
+        if self.config.sampling_overrides:
+            body_dict.update(self.config.sampling_overrides)
 
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
