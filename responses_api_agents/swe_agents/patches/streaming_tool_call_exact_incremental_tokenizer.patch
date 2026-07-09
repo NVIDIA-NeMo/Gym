@@ -1,0 +1,300 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+index ce74e5b3f..1111c78a2 100644
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -240,18 +240,25 @@ class NemoGymClient:
+     ) -> dict:
+         payload: dict = {"session_id": session_id}
+         if context is not None:
+-            if tool_output is None:
+-                raise ValueError("tool_output is required when context is provided")
+-            chat_completion = deepcopy(context.chat_completion)
+-            chat_completion["messages"].append(
+-                {
+-                    "role": "tool",
+-                    "content": tool_output,
+-                    "tool_call_id": context.tool_call_id,
+-                    "name": context.function_name,
+-                }
++            payload["exact_incremental_tokenizer"] = bool(
++                context.config.get("exact_incremental_tokenizer")
+             )
+-            payload["chat_completion"] = chat_completion
++            if tool_output is None:
++                if action != "abort":
++                    raise ValueError(
++                        "tool_output is required when context is provided"
++                    )
++            else:
++                chat_completion = deepcopy(context.chat_completion)
++                chat_completion["messages"].append(
++                    {
++                        "role": "tool",
++                        "content": tool_output,
++                        "tool_call_id": context.tool_call_id,
++                        "name": context.function_name,
++                    }
++                )
++                payload["chat_completion"] = chat_completion
+         if sequence_no is not None:
+             payload["sequence_no"] = sequence_no
+         if final:
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 9389c231a..1a9fc080c 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -578,6 +578,9 @@ class LocalRuntime(ActionExecutionClient):
+         session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
+         sequence_no = 0
+         tokenizer_only = bool(context.config.get("tokenizer_only"))
++        exact_incremental_tokenizer = tokenizer_only and bool(
++            context.config.get("exact_incremental_tokenizer")
++        )
+         incremental_started = False
+         session_started = False
+         last_sent_content = ""
+@@ -588,6 +591,14 @@ class LocalRuntime(ActionExecutionClient):
+         prefill_tokens = 0
+         tokenizer_requests = 0
+         tokenizer_tokens = 0
++        incremental_encoded_chars = 0
++        incremental_encoded_tokens = 0
++        incremental_reused_tokens = 0
++        incremental_rollback_tokens = 0
++        incremental_checkpoints = 0
++        incremental_checkpoint_tokens = 0
++        incremental_checkpoint_mismatches = 0
++        incremental_valid = True
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+         snapshot_poll_interval = context.config["snapshot_poll_interval_seconds"]
+@@ -626,6 +637,14 @@ class LocalRuntime(ActionExecutionClient):
+         async def tokenize_snapshot(
+             tool_output: str, *, final: bool = False
+         ) -> dict:
++            nonlocal incremental_checkpoint_mismatches
++            nonlocal incremental_checkpoint_tokens
++            nonlocal incremental_checkpoints
++            nonlocal incremental_encoded_chars
++            nonlocal incremental_encoded_tokens
++            nonlocal incremental_reused_tokens
++            nonlocal incremental_rollback_tokens
++            nonlocal incremental_valid
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+             nonlocal tokenizer_tokens
+@@ -644,8 +663,59 @@ class LocalRuntime(ActionExecutionClient):
+             streaming_request_seconds += time.monotonic() - request_start_time
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
++            incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
++            incremental_encoded_tokens += tokenize_result.get("encoded_tokens", 0)
++            incremental_reused_tokens += tokenize_result.get("reused_tokens", 0)
++            incremental_rollback_tokens += tokenize_result.get("rollback_tokens", 0)
++            incremental_checkpoints += tokenize_result.get("checkpoint_count", 0)
++            incremental_checkpoint_tokens += tokenize_result.get(
++                "checkpoint_tokens", 0
++            )
++            incremental_checkpoint_mismatches += tokenize_result.get(
++                "checkpoint_mismatches", 0
++            )
++            incremental_valid = incremental_valid and bool(
++                tokenize_result.get("incremental_valid", True)
++            )
+             return tokenize_result
+ 
++        def incremental_tokenizer_metrics() -> dict[str, int | float]:
++            return {
++                "streaming_tool_call_exact_incremental_tokenizer_actions": int(
++                    exact_incremental_tokenizer and incremental_started
++                ),
++                "streaming_tool_call_incremental_tokenizer_requests": (
++                    tokenizer_requests
++                ),
++                "streaming_tool_call_incremental_tokenizer_tokens": (
++                    tokenizer_tokens
++                ),
++                "streaming_tool_call_incremental_tokenizer_encoded_chars": (
++                    incremental_encoded_chars
++                ),
++                "streaming_tool_call_incremental_tokenizer_encoded_tokens": (
++                    incremental_encoded_tokens
++                ),
++                "streaming_tool_call_incremental_tokenizer_reused_tokens": (
++                    incremental_reused_tokens
++                ),
++                "streaming_tool_call_incremental_tokenizer_rollback_tokens": (
++                    incremental_rollback_tokens
++                ),
++                "streaming_tool_call_incremental_tokenizer_checkpoints": (
++                    incremental_checkpoints
++                ),
++                "streaming_tool_call_incremental_tokenizer_checkpoint_tokens": (
++                    incremental_checkpoint_tokens
++                ),
++                "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches": (
++                    incremental_checkpoint_mismatches
++                ),
++                "streaming_tool_call_incremental_tokenizer_seconds": (
++                    streaming_request_seconds if tokenizer_only else 0.0
++                ),
++            }
++
+         try:
+             while not post_task.done():
+                 await asyncio.sleep(snapshot_poll_interval)
+@@ -796,22 +866,16 @@ class LocalRuntime(ActionExecutionClient):
+                         "streaming_tool_call_prefill_requests": 0,
+                         "streaming_tool_call_prefill_tokens": 0,
+                         "streaming_tool_call_tokenizer_only_actions": 1,
+-                        "streaming_tool_call_valid_tokenizer_actions": 1,
+-                        "streaming_tool_call_prompt_reuse_candidates": 1,
+-                        "streaming_tool_call_incremental_tokenizer_requests": (
+-                            tokenizer_requests
+-                        ),
+-                        "streaming_tool_call_incremental_tokenizer_tokens": (
+-                            tokenizer_tokens
+-                        ),
+-                        "streaming_tool_call_incremental_tokenizer_seconds": (
+-                            streaming_request_seconds
++                        "streaming_tool_call_valid_tokenizer_actions": int(
++                            incremental_valid
+                         ),
++                        "streaming_tool_call_prompt_reuse_candidates": 1,
+                         "streaming_tool_call_overhead_seconds": (
+                             streaming_request_seconds
+                         ),
+                     }
+                 )
++                metrics.update(incremental_tokenizer_metrics())
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
+@@ -862,15 +926,16 @@ class LocalRuntime(ActionExecutionClient):
+             _update_streaming_tool_call_metrics(metrics)
+             return response
+         except Exception as error:
+-            logger.warning(
+-                f"Streaming tool-call prefill disabled for this action: {error}"
+-            )
+-            if session_started:
++            logger.warning(f"Streaming tool call disabled for this action: {error}")
++            if session_started or (
++                exact_incremental_tokenizer and incremental_started
++            ):
+                 assert streaming_http_session is not None
+                 try:
+                     await context.client.streaming_tool_call_request(
+                         action="abort",
+                         session_id=session_id,
++                        context=context if exact_incremental_tokenizer else None,
+                         http_session=streaming_http_session,
+                     )
+                 except Exception as abort_error:
+@@ -888,19 +953,11 @@ class LocalRuntime(ActionExecutionClient):
+                     "streaming_tool_call_tokenizer_only_actions": int(
+                         tokenizer_only and incremental_started
+                     ),
+-                    "streaming_tool_call_incremental_tokenizer_requests": (
+-                        tokenizer_requests
+-                    ),
+-                    "streaming_tool_call_incremental_tokenizer_tokens": (
+-                        tokenizer_tokens
+-                    ),
+-                    "streaming_tool_call_incremental_tokenizer_seconds": (
+-                        streaming_request_seconds if tokenizer_only else 0.0
+-                    ),
+                     "streaming_tool_call_fallbacks": 1,
+                     "streaming_tool_call_overhead_seconds": streaming_request_seconds,
+                 }
+             )
++            metrics.update(incremental_tokenizer_metrics())
+             _update_streaming_tool_call_metrics(metrics)
+             return response
+         finally:
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+index 688f90aa2..8d78a70c9 100644
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -91,6 +91,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         },
+         config={
+             "enabled": True,
++            "exact_incremental_tokenizer": True,
+             "max_sessions": 256,
+             "session_ttl_seconds": 900,
+         },
+@@ -122,6 +123,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     assert request["json"]["chat_completion"]["messages"][-2][
+         "generation_token_ids"
+     ] == [3]
++    assert request["json"]["exact_incremental_tokenizer"] is True
+ 
+     await client.streaming_tool_call_request(
+         action="tokenize",
+@@ -136,6 +138,18 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     assert final_request["max_candidates"] == 256
+     assert final_request["candidate_ttl_seconds"] == 900
+ 
++    await client.streaming_tool_call_request(
++        action="abort",
++        session_id="session",
++        context=context,
++        http_session=http_session,
++    )
++    abort_request = http_session.post.await_args.kwargs["json"]
++    assert abort_request == {
++        "session_id": "session",
++        "exact_incremental_tokenizer": True,
++    }
++
+ 
+ @pytest.mark.asyncio
+ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index 13a8c3912..2e70dd4fd 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -539,6 +539,14 @@ class TestLocalRuntime:
+             result = {
+                 "sequence_no": kwargs["sequence_no"],
+                 "token_count": 17,
++                "encoded_chars": 0 if kwargs["sequence_no"] == 0 else 10,
++                "encoded_tokens": 0 if kwargs["sequence_no"] == 0 else 2,
++                "reused_tokens": 0 if kwargs["sequence_no"] == 0 else 15,
++                "rollback_tokens": 0 if kwargs["sequence_no"] == 0 else 2,
++                "checkpoint_count": int(kwargs["sequence_no"] == 0),
++                "checkpoint_tokens": 17 if kwargs["sequence_no"] == 0 else 0,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
+             }
+             if kwargs["final"]:
+                 result["reuse_id"] = "runtime-session:response:call"
+@@ -556,6 +564,7 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
+                 "min_chunk_chars": 10,
+                 "snapshot_poll_interval_seconds": 0.001,
+                 "flush_interval_seconds": 0.001,
+@@ -606,6 +615,19 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_prompt_reuse_candidates"] == 1
+         assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 3
+         assert metrics["streaming_tool_call_incremental_tokenizer_tokens"] == 51
++        assert metrics["streaming_tool_call_exact_incremental_tokenizer_actions"] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_encoded_chars"] == 20
++        assert metrics["streaming_tool_call_incremental_tokenizer_encoded_tokens"] == 4
++        assert metrics["streaming_tool_call_incremental_tokenizer_reused_tokens"] == 30
++        assert metrics["streaming_tool_call_incremental_tokenizer_rollback_tokens"] == 4
++        assert metrics["streaming_tool_call_incremental_tokenizer_checkpoints"] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_checkpoint_tokens"] == 17
++        assert (
++            metrics[
++                "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches"
++            ]
++            == 0
++        )
+         final_call = (
+             streaming_client.streaming_tool_call_request.await_args_list[-1]
+         )

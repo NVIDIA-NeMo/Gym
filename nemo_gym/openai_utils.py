@@ -337,9 +337,7 @@ class NeMoGymChoice(Choice):
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
     streaming_prompt_reuse_status: Optional[Literal["matched", "mismatch", "missing"]] = None
-    streaming_prompt_reuse_match_kind: Optional[
-        Literal["exact", "token_equivalent"]
-    ] = None
+    streaming_prompt_reuse_match_kind: Optional[Literal["exact", "token_equivalent"]] = None
 
 
 ########################################
@@ -566,6 +564,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
             json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_incremental_tokenize(self, **kwargs):
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/incremental_tokenize",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def abort_incremental_tokenize(self, *, session_id: str):
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/incremental_tokenize/abort",
+            json={"session_id": session_id},
         )
         response = await self._request(method="POST", **request_kwargs)
 

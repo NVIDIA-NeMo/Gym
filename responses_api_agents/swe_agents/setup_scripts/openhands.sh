@@ -26,6 +26,12 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 streaming_tool_call_patch="$script_dir/../patches/streaming_tool_call.patch"
 streaming_tool_call_observability_patch="$script_dir/../patches/streaming_tool_call_observability.patch"
 streaming_tool_call_admission_observability_patch="$script_dir/../patches/streaming_tool_call_admission_observability.patch"
+streaming_tool_call_tokenizer_only_patch="$script_dir/../patches/streaming_tool_call_tokenizer_only.patch"
+streaming_tool_call_valid_action_metrics_patch="$script_dir/../patches/streaming_tool_call_valid_action_metrics.patch"
+openhands_runtime_breakdown_patch="$script_dir/../patches/openhands_runtime_breakdown.patch"
+streaming_tool_call_prompt_reuse_patch="$script_dir/../patches/streaming_tool_call_prompt_reuse.patch"
+streaming_tool_call_exact_incremental_tokenizer_patch="$script_dir/../patches/streaming_tool_call_exact_incremental_tokenizer.patch"
+streaming_tool_call_action_timeout_patch="$script_dir/../patches/streaming_tool_call_action_timeout.patch"
 
 cd $setup_dir
 
@@ -107,6 +113,18 @@ git apply --check "$streaming_tool_call_observability_patch"
 git apply "$streaming_tool_call_observability_patch"
 git apply --check "$streaming_tool_call_admission_observability_patch"
 git apply "$streaming_tool_call_admission_observability_patch"
+git apply --check "$streaming_tool_call_tokenizer_only_patch"
+git apply "$streaming_tool_call_tokenizer_only_patch"
+git apply --check "$streaming_tool_call_valid_action_metrics_patch"
+git apply "$streaming_tool_call_valid_action_metrics_patch"
+git apply --check "$openhands_runtime_breakdown_patch"
+git apply "$openhands_runtime_breakdown_patch"
+git apply --check "$streaming_tool_call_prompt_reuse_patch"
+git apply "$streaming_tool_call_prompt_reuse_patch"
+git apply --check "$streaming_tool_call_exact_incremental_tokenizer_patch"
+git apply "$streaming_tool_call_exact_incremental_tokenizer_patch"
+git apply --check "$streaming_tool_call_action_timeout_patch"
+git apply "$streaming_tool_call_action_timeout_patch"
 
 # Build OpenHands
 echo "Building OpenHands (this may take 5-10 minutes)..."

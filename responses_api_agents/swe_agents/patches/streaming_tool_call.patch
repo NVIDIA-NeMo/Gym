@@ -1147,4 +1147,3 @@ index 000000000..af59d59ec
 +    assert request["json"]["chat_completion"]["messages"][-2][
 +        "generation_token_ids"
 +    ] == [3]
-
