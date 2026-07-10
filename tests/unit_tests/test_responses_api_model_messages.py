@@ -98,13 +98,13 @@ def _config() -> BaseResponsesAPIModelConfig:
 
 
 def _client(model_cls) -> TestClient:
-    server = model_cls(config=_config(), server_client=MagicMock(spec=ServerClient))
+    server = model_cls(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
     return TestClient(server.setup_webserver()), server
 
 
 class TestDefaultMessagesRoute:
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
-        server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient))
+        server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}
         assert {"/v1/messages", "/v1/responses", "/v1/chat/completions"} <= paths
 

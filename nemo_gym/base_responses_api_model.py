@@ -14,13 +14,12 @@
 # limitations under the License.
 import inspect
 from abc import abstractmethod
-from typing import Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import StreamingResponse
-from pydantic import Field
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.observability import install_model_call_capture
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -36,20 +35,7 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    observability_enabled: bool = Field(
-        default=False,
-        description=(
-            "Capture per-rollout model-call evidence (token stats, tool calls, "
-            "messages, reasoning). Opt-in; off by default."
-        ),
-    )
-    model_call_capture_dir: Optional[str] = Field(
-        default=None,
-        description=(
-            "Directory for per-rollout model-call JSONL. Defaults to $NEMO_GYM_MODEL_CALL_CAPTURE_DIR, "
-            "else a per-server dir under the system temp dir."
-        ),
-    )
+    pass
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -61,7 +47,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app = FastAPI()
 
         self.setup_session_middleware(app)
-        install_model_call_capture(app, self.config)
+        capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        install_model_call_capture(app, capture_config, model_server_name=self.config.name)
 
         app.post("/v1/chat/completions")(self.chat_completions)
 

@@ -47,10 +47,12 @@ def _server(tmp_path, *, enabled: bool = True) -> SimpleModelServer:
         openai_model="dummy_model",
         entrypoint="",
         name="srv-e2e",
-        observability_enabled=enabled,
-        model_call_capture_dir=str(tmp_path),
     )
-    return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = (
+        {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)} if enabled else {}
+    )
+    return SimpleModelServer(config=config, server_client=server_client)
 
 
 def _response(text, *, tool=None, reasoning=None, cached=0, reasoning_tokens=0, in_tok=12, out_tok=7) -> dict:
@@ -99,7 +101,7 @@ def _response(text, *, tool=None, reasoning=None, cached=0, reasoning_tokens=0, 
 
 def test_e2e_model_call_capture_through_real_model_server(tmp_path):
     server = _server(tmp_path)
-    app = server.setup_webserver()  # real install path -> install_model_call_capture(app, config)
+    app = server.setup_webserver()  # real install path -> global config -> capture middleware
     client = TestClient(app)
 
     server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
