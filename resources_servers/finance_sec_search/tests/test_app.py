@@ -21,8 +21,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -1033,8 +1035,6 @@ class TestVerify:
 # Test: Dual-transport wire contract (HTTP replay + MCP round-trip + parity)
 # ============================================================================
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 EXPECTED_TOOLS = {
     "sec_filing_search",
     "parse_html_page",
@@ -1042,7 +1042,6 @@ EXPECTED_TOOLS = {
     "submit_final_result",
     "web_search",
 }
-NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
 
 WIRE_FILINGS = {
     "000032019325000001": {
@@ -1074,30 +1073,6 @@ EXPECTED_AAPL_RESULTS = json.dumps(
 )
 
 
-def _rpc(client, method: str, params: dict | None = None, token: str | None = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    return client.post(
-        "/mcp",
-        headers=headers,
-        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}},
-        follow_redirects=False,
-    )
-
-
-def _mcp_list_tools(client, token: str | None = None) -> dict:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _mcp_call(client, name: str, arguments: dict, token: str | None = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
 @pytest.fixture
 def wire_server(server_config, temp_cache_dir):
     """A server whose tickers + filings load from disk cache (no network) with tools registered."""
@@ -1113,8 +1088,6 @@ class TestHTTPWireContract:
     """Replay tests: byte-identical request/response shapes vs. the pre-@gym_tool routes."""
 
     def test_sec_filing_search_replay(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/sec_filing_search", json={"ticker": "AAPL"})
             assert resp.status_code == 200
@@ -1122,8 +1095,6 @@ class TestHTTPWireContract:
 
     def test_sec_filing_search_unknown_ticker_soft_error_bytes(self, wire_server) -> None:
         """Unknown ticker keeps the 200-with-error-string soft contract, byte-identical."""
-        from fastapi.testclient import TestClient
-
         expected = {
             "results": json.dumps(
                 {
@@ -1140,8 +1111,6 @@ class TestHTTPWireContract:
 
     def test_sec_filing_search_bad_args_is_422(self, wire_server) -> None:
         """Missing required field still rejected by body-model validation, loc unchanged."""
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/sec_filing_search", json={})
             assert resp.status_code == 422
@@ -1149,8 +1118,6 @@ class TestHTTPWireContract:
 
     def test_form_types_stringified_coercion_survives_http(self, wire_server) -> None:
         """The _coerce_stringified_collection field validator still runs on the HTTP body."""
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/sec_filing_search", json={"ticker": "AAPL", "form_types": '["10-K"]'})
             assert resp.status_code == 200
@@ -1161,8 +1128,6 @@ class TestHTTPWireContract:
             assert "No filings found" in json.loads(miss.json()["results"])["error"]
 
     def test_submit_final_result_replay_and_empty_soft_error(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/submit_final_result", json={"final_result": "42"})
             assert resp.status_code == 200
@@ -1174,8 +1139,6 @@ class TestHTTPWireContract:
 
     def test_web_search_unavailable_soft_error_bytes(self, wire_server) -> None:
         """No Tavily key configured: same 200-with-error-string body as before."""
-        from fastapi.testclient import TestClient
-
         expected = {
             "results": json.dumps(
                 {
@@ -1189,8 +1152,6 @@ class TestHTTPWireContract:
             assert resp.json() == expected
 
     def test_retrieve_information_missing_key_soft_error(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         wire_server.config.retrieval_model_server = ModelServerRef(type="responses_api_models", name="test-model")
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             client.post("/seed_session", json={})
@@ -1204,8 +1165,6 @@ class TestHTTPWireContract:
 
     def test_unknown_tool_catchall_replay(self, wire_server) -> None:
         """Unknown tool POST keeps today's exact 200 body (error string inside `results`)."""
-        from fastapi.testclient import TestClient
-
         expected_inner = json.dumps(
             {
                 "error": "Tool 'does_not_exist' does not exist. Available tools: "
@@ -1224,18 +1183,14 @@ class TestMCPRoundTrip:
     """MCP surface: tools/list names + tools/call through raw JSON-RPC on /mcp."""
 
     def test_seed_session_advertises_mcp_metadata(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             body = client.post("/seed_session", json={}).json()
             assert body["mcp"]["url_path"] == "/mcp"
             assert TOKEN_HEADER in body["mcp"]["headers"]
 
     def test_tools_list_and_call(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            tools = _mcp_list_tools(client)
+            tools = mcp_list_tools(client)
             assert set(tools) == EXPECTED_TOOLS
             # Model-schema tools advertise their body model's fields; session_id is never visible.
             assert set(tools["sec_filing_search"]["inputSchema"]["properties"]) == {
@@ -1245,24 +1200,20 @@ class TestMCPRoundTrip:
                 "end_date",
             }
 
-            result = _mcp_call(client, "submit_final_result", {"final_result": "42"})
+            result = mcp_call(client, "submit_final_result", {"final_result": "42"})
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"results": json.dumps({"success": True, "result": "42"})}
 
     def test_sec_filing_search_via_mcp_matches_http(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
-            result = _mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=token)
+            token = seed_token(client)
+            result = mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"results": EXPECTED_AAPL_RESULTS}
 
     def test_session_tool_without_token_is_tool_error(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=None)
+            result = mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
@@ -1271,17 +1222,6 @@ class TestTransportParity:
     """MCP tools/list names == HTTP tool routes (minus infra paths) == expected inventory."""
 
     def test_tool_sets_identical_across_transports(self, wire_server) -> None:
-        from fastapi.testclient import TestClient
-
         app = wire_server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_names = set(_mcp_list_tools(client))
-
-        http_names = {
-            route.path.lstrip("/")
-            for route in app.router.routes
-            if getattr(route, "path", None)
-            and "POST" in (getattr(route, "methods", None) or set())
-            and route.path not in NON_TOOL_PATHS
-        }
-        assert mcp_names == http_names == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)

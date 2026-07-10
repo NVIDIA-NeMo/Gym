@@ -19,6 +19,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import MCPSessionError
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, mcp_call, seed_token
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -94,7 +95,7 @@ async def test_verify_rewards_tool_call_from_same_session() -> None:
     seed = await server.seed_session(
         _request("session-1"), ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"})
     )
-    token = seed.mcp.headers["X-NeMo-Gym-Session-Token"]
+    token = seed.mcp.headers[TOKEN_HEADER]
 
     fake_mcp = FakeMCP()
     server.register_mcp_tools(fake_mcp)
@@ -180,32 +181,12 @@ def test_streamable_http_mcp_endpoint_records_same_session() -> None:
     pytest.importorskip("mcp")
     server = _server()
     app = server.setup_webserver()
-    rpc_headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-    }
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-        seed_response = client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}})
-        assert seed_response.status_code == 200
-        token = seed_response.json()["mcp"]["headers"]["X-NeMo-Gym-Session-Token"]
+        token = seed_token(client, {"verifier_metadata": {"expected_city": "Paris"}})
 
-        tool_response = client.post(
-            "/mcp",
-            headers={**rpc_headers, "X-NeMo-Gym-Session-Token": token},
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "get_weather", "arguments": {"city": "Paris"}},
-            },
-            follow_redirects=False,
-        )
-
-        assert tool_response.status_code == 200
-        assert tool_response.json()["result"]["structuredContent"]["result"] == (
-            "The weather in Paris is sunny and 72 F."
-        )
+        result = mcp_call(client, "get_weather", {"city": "Paris"}, token=token)
+        assert result["structuredContent"]["result"] == "The weather in Paris is sunny and 72 F."
 
         verify_response = client.post(
             "/verify",

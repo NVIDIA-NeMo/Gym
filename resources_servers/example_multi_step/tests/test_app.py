@@ -14,6 +14,7 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from nemo_gym.mcp_test_utils import http_tool_names, mcp_call, mcp_list_tools
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_multi_step.app import (
     ExampleMultiStepResourcesServer,
@@ -63,42 +64,16 @@ class TestDualTransport:
     def test_mcp_lists_and_calls_the_same_tools(self) -> None:
         from fastapi.testclient import TestClient
 
-        rpc_headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
         with TestClient(self._server().setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            listing = client.post(
-                "/mcp",
-                headers=rpc_headers,
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                follow_redirects=False,
-            )
-            tools = {t["name"]: t for t in listing.json()["result"]["tools"]}
+            tools = mcp_list_tools(client)
             assert set(tools) == {"get_synonym_value", "extract_synonym_values"}
             assert set(tools["get_synonym_value"]["inputSchema"]["properties"]) == {"synonym"}
             assert set(tools["extract_synonym_values"]["inputSchema"]["properties"]) == {"synonym_values"}
 
-            called = client.post(
-                "/mcp",
-                headers=rpc_headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {"name": "get_synonym_value", "arguments": {"synonym": "Arid"}},
-                },
-                follow_redirects=False,
-            )
-            result = called.json()["result"]
+            result = mcp_call(client, "get_synonym_value", {"synonym": "Arid"})
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"synonym_value": 384}
 
     def test_transport_parity(self) -> None:
         app = self._server().setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            r.path.lstrip("/")
-            for r in app.router.routes
-            if getattr(r, "path", None)
-            and "POST" in (getattr(r, "methods", None) or set())
-            and r.path not in non_tool_paths
-        }
-        assert http_tools == {"get_synonym_value", "extract_synonym_values"}
+        assert http_tool_names(app) == {"get_synonym_value", "extract_synonym_values"}

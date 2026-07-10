@@ -14,6 +14,9 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+
+from nemo_gym.mcp_test_utils import http_tool_names, mcp_call, mcp_list_tools
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_single_tool_call.app import (
     SimpleWeatherResourcesServer,
@@ -42,8 +45,6 @@ class TestDualTransport:
         return SimpleWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     def test_http_wire_contract_is_unchanged(self) -> None:
-        from fastapi.testclient import TestClient
-
         with TestClient(self._server().setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             # The exact request/response bytes simple_agent and the dataset rows rely on.
             resp = client.post("/get_weather", json={"city": "sf"})
@@ -53,43 +54,15 @@ class TestDualTransport:
             assert client.post("/get_weather", json={}).status_code == 422
 
     def test_mcp_lists_and_calls_the_same_tool(self) -> None:
-        from fastapi.testclient import TestClient
-
-        rpc_headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
         with TestClient(self._server().setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            listing = client.post(
-                "/mcp",
-                headers=rpc_headers,
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                follow_redirects=False,
-            )
-            tools = {t["name"]: t for t in listing.json()["result"]["tools"]}
+            tools = mcp_list_tools(client)
             assert set(tools) == {"get_weather"}
             assert set(tools["get_weather"]["inputSchema"]["properties"]) == {"city"}
 
-            called = client.post(
-                "/mcp",
-                headers=rpc_headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {"name": "get_weather", "arguments": {"city": "sf"}},
-                },
-                follow_redirects=False,
-            )
-            result = called.json()["result"]
+            result = mcp_call(client, "get_weather", {"city": "sf"})
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"city": "sf", "weather_description": "The weather in sf is cold."}
 
     def test_transport_parity(self) -> None:
         app = self._server().setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            r.path.lstrip("/")
-            for r in app.router.routes
-            if getattr(r, "path", None)
-            and "POST" in (getattr(r, "methods", None) or set())
-            and r.path not in non_tool_paths
-        }
-        assert http_tools == {"get_weather"}
+        assert http_tool_names(app) == {"get_weather"}

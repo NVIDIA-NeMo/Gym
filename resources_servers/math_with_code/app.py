@@ -54,10 +54,6 @@ class ExecutePythonResponse(BaseModel):
     result: Optional[str] = None
 
 
-class EndSessionRequest(BaseModel):
-    pass
-
-
 def _session_worker(child_conn, max_execution_time: int):
     """Runs forever in its own process, keeping globals between calls."""
     exec_globals = {
@@ -203,8 +199,8 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 error_message=str(e),
             )
 
-    @gym_tool(input_schema=EndSessionRequest)
-    async def end_session(self, session_id: str, body: EndSessionRequest) -> ExecutePythonResponse:
+    @gym_tool
+    async def end_session(self, session_id: str) -> ExecutePythonResponse:
         """Clean up the Python execution session."""
         self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")

@@ -15,11 +15,12 @@
 import json
 import os
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 from pytest import approx, fixture, importorskip
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -403,8 +404,6 @@ class TestApp:
 # All Tavily backends are mocked — no test here ever hits the real Tavily API.
 # --------------------------------------------------------------------------------------------
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 EXPECTED_TOOLS = {"web_search", "find_in_page", "scroll_page"}
 SEARCH_ANSWER_STRING = "Search Answer\n==============\nParis.\n"
 
@@ -443,37 +442,6 @@ def _wire_client():
     app = server.setup_webserver()
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         yield server, app, client
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _mcp_call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
-def _seed(client) -> str:
-    resp = client.post("/seed_session", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
 
 
 class TestHTTPWireReplay:
@@ -546,7 +514,7 @@ class TestHTTPWireReplay:
 
     def test_metrics_recorded_under_the_cookie_session(self) -> None:
         with _wire_client() as (server, _app, client):
-            _seed(client)
+            seed_token(client)
             client.post("/web_search", json={"query": "a"})
             client.post("/web_search", json={"query": "b"})
             (sid,) = server._session_id_to_metrics.keys()
@@ -569,46 +537,35 @@ class TestHTTPWireReplay:
 class TestMCPRoundTrip:
     def test_tools_list_names_schemas_and_call(self) -> None:
         with _wire_client() as (_server, _app, client):
-            token = _seed(client)
-            tools = _list_tools(client, token=token)
+            token = seed_token(client)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == EXPECTED_TOOLS
             # session_id is never model-visible in the advertised schemas.
             for tool in tools.values():
                 assert "session_id" not in tool["inputSchema"].get("properties", {})
             assert set(tools["scroll_page"]["inputSchema"]["properties"]) == {"url", "start_index", "n"}
 
-            result = _mcp_call(client, "web_search", {"query": "capital of France"}, token=token)
+            result = mcp_call(client, "web_search", {"query": "capital of France"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"results_string": SEARCH_ANSWER_STRING}
 
     def test_call_without_token_is_clean_tool_error(self) -> None:
         with _wire_client() as (_server, _app, client):
-            result = _mcp_call(client, "web_search", {"query": "q"}, token=None)
+            result = mcp_call(client, "web_search", {"query": "q"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
     def test_http_cookie_and_mcp_token_share_one_metrics_session(self) -> None:
         with _wire_client() as (server, _app, client):
-            token = _seed(client)
+            token = seed_token(client)
             client.post("/web_search", json={"query": "over http"})
-            result = _mcp_call(client, "web_search", {"query": "over mcp"}, token=token)
+            result = mcp_call(client, "web_search", {"query": "over mcp"}, token=token)
             assert result.get("isError") is not True
             (sid,) = server._session_id_to_metrics.keys()
             assert len(server._session_id_to_metrics[sid].async_tavily_calls) == 2
 
 
 class TestTransportParity:
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-
     def test_tool_sets_identical_across_transports(self) -> None:
         with _wire_client() as (_server, app, client):
-            mcp_names = set(_list_tools(client))
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)

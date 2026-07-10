@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, http_tool_names, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
@@ -26,9 +27,6 @@ from resources_servers.example_session_state_mgmt.app import (
 
 
 pytest.importorskip("mcp")
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 
 
 def _server() -> StatefulCounterResourcesServer:
@@ -41,20 +39,8 @@ def _server() -> StatefulCounterResourcesServer:
     return StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def _rpc(client, method: str, params: dict, token: str | None = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    return client.post(
-        "/mcp",
-        headers=headers,
-        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
-        follow_redirects=False,
-    )
-
-
 class TestApp:
-    def test_sessions_are_isolated_and_persistent(self) -> None:
+    def test_sanity(self) -> None:
         server = _server()
 
         app = server.setup_webserver()
@@ -136,41 +122,28 @@ class TestDualTransport:
     def test_mcp_round_trip_shares_session_state_with_http(self) -> None:
         """tools/list + tools/call over raw JSON-RPC; the token resolves the seeded cookie session."""
         with TestClient(_server().setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = client.post("/seed_session", json={"initial_count": 40}).json()["mcp"]["headers"][TOKEN_HEADER]
+            token = seed_token(client, {"initial_count": 40})
 
-            listing = _rpc(client, "tools/list", {}, token=token)
-            assert listing.status_code == 200, listing.text
-            tools = {tool["name"]: tool for tool in listing.json()["result"]["tools"]}
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"increment_counter", "get_counter_value"}
             # session_id is injected by the base and never model-visible.
             assert set(tools["increment_counter"]["inputSchema"]["properties"]) == {"count"}
             assert tools["get_counter_value"]["inputSchema"].get("properties", {}) == {}
 
-            called = _rpc(
-                client, "tools/call", {"name": "increment_counter", "arguments": {"count": 2}}, token=token, rpc_id=2
-            )
-            result = called.json()["result"]
+            result = mcp_call(client, "increment_counter", {"count": 2}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"success": True}
 
             # HTTP (cookie) and MCP (token) resolve the SAME per-rollout counter.
             assert client.post("/get_counter_value", json={}).json() == {"count": 42}
-            called = _rpc(client, "tools/call", {"name": "get_counter_value", "arguments": {}}, token=token, rpc_id=3)
-            assert called.json()["result"]["structuredContent"] == {"count": 42}
+            result = mcp_call(client, "get_counter_value", {}, token=token)
+            assert result["structuredContent"] == {"count": 42}
 
     def test_transport_parity(self) -> None:
         app = _server().setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            route.path.lstrip("/")
-            for route in app.router.routes
-            if getattr(route, "path", None)
-            and "POST" in (getattr(route, "methods", None) or set())
-            and route.path not in non_tool_paths
-        }
+        http_tools = http_tool_names(app)
         assert http_tools == {"increment_counter", "get_counter_value"}
 
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            listing = _rpc(client, "tools/list", {})
-            mcp_tools = {tool["name"] for tool in listing.json()["result"]["tools"]}
+            mcp_tools = set(mcp_list_tools(client))
         assert mcp_tools == http_tools

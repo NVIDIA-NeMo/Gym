@@ -83,7 +83,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     _env_class: Any = None
     _action_class: Any = None
     _is_mcp: bool = False
-    _mcp_tools: Dict[str, Any] = {}
 
     def model_post_init(self, context: Any) -> None:
         """Initialize private attributes, import the env classes, and register the gym tools.
@@ -117,8 +116,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         if hasattr(temp_env, "close"):
             temp_env.close()
 
-        self._mcp_tools = {tool.name: tool for tool in tools}
-
         for tool in tools:
             request_model = self._schema_to_pydantic(tool.name, tool.input_schema)
             gym_tool(
@@ -129,6 +126,33 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
                 validate=True,
                 owner=self,
             )
+
+    def _schema_to_pydantic(self, tool_name: str, schema: dict) -> type:
+        """Convert a JSON schema dict to a Pydantic model class."""
+        fields = {}
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        for name, prop in properties.items():
+            python_type = self._json_type_to_python(prop.get("type", "string"))
+            if name in required:
+                fields[name] = (python_type, ...)
+            else:
+                fields[name] = (Optional[python_type], None)
+        model_name = f"{tool_name.title().replace('_', '')}Request"
+        return create_model(model_name, **fields)
+
+    @staticmethod
+    def _json_type_to_python(json_type: str) -> type:
+        """Map JSON schema types to Python types."""
+        mapping = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+            "object": dict,
+            "array": list,
+        }
+        return mapping.get(json_type, str)
 
     def _make_mcp_tool_closure(self, tool_name: str, request_model: type):
         """Build the tool callable for one discovered MCP tool (served over HTTP and MCP).
@@ -204,33 +228,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             validate=False,
             owner=self,
         )
-
-    def _schema_to_pydantic(self, tool_name: str, schema: dict) -> type:
-        """Convert a JSON schema dict to a Pydantic model class."""
-        fields = {}
-        properties = schema.get("properties", {})
-        required = set(schema.get("required", []))
-        for name, prop in properties.items():
-            python_type = self._json_type_to_python(prop.get("type", "string"))
-            if name in required:
-                fields[name] = (python_type, ...)
-            else:
-                fields[name] = (Optional[python_type], None)
-        model_name = f"{tool_name.title().replace('_', '')}Request"
-        return create_model(model_name, **fields)
-
-    @staticmethod
-    def _json_type_to_python(json_type: str) -> type:
-        """Map JSON schema types to Python types."""
-        mapping = {
-            "string": str,
-            "integer": int,
-            "number": float,
-            "boolean": bool,
-            "object": dict,
-            "array": list,
-        }
-        return mapping.get(json_type, str)
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         """Create a new environment instance, call reset(), and store session state.

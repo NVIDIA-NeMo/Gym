@@ -19,13 +19,14 @@ import logging
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from itsdangerous import BadSignature, URLSafeSerializer
-from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError, create_model
+from pydantic import BaseModel, PrivateAttr, ValidationError, create_model
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -73,29 +74,24 @@ class GymToolSpec(BaseModel):
     a Pydantic model class — the model's fields are the schema, arguments validate into an instance.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     name: str
     description: Optional[str] = None
     input_schema: Optional[Any] = None
     validate_input: bool = False
 
 
+@dataclass(slots=True)
 class _RawToolEntry:
     """Precomputed dispatch record for a dict/model-schema gym tool, built once at setup so the MCP
     hot path (tools/list, tools/call) rebuilds nothing per request."""
 
-    __slots__ = ("spec", "fn", "model", "body_param", "validator", "inject_session", "is_coro", "tool")
-
-    def __init__(self, *, spec, fn, model, body_param, validator, inject_session, is_coro, tool):
-        self.spec = spec
-        self.fn = fn
-        self.model = model  # the Pydantic input model (model schema) or None (dict schema)
-        self.body_param = body_param  # name of the single non-session param (model schema) or None
-        self.validator = validator  # shallow validator (dict schema + validate=True) or None
-        self.inject_session = inject_session
-        self.is_coro = is_coro
-        self.tool = tool  # precomputed mcp.types.Tool advertised by tools/list
+    fn: Callable
+    model: Optional[type[BaseModel]]  # the Pydantic input model (model schema) or None (dict schema)
+    body_param: Optional[str]  # name of the single non-session param (model schema) or None
+    validator: Optional[type[BaseModel]]  # shallow validator (dict schema + validate=True) or None
+    inject_session: bool
+    is_coro: bool
+    tool: Any  # precomputed mcp.types.Tool advertised by tools/list
 
 
 def gym_tool(
@@ -236,7 +232,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _dynamic_gym_tools: list = PrivateAttr(default_factory=list)
     _raw_dispatch: dict = PrivateAttr(default_factory=dict)
     _gym_tool_names: tuple = PrivateAttr(default=())
-    _mcp_mounted: bool = PrivateAttr(default=False)
     _cached_token_serializer: Any = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
@@ -288,10 +283,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             spec = getattr(func, "__gym_tool__", None)
             if spec is not None:
                 tools.append((spec, getattr(self, attr_name)))
-        for func in self._dynamic_gym_tools:
-            spec = getattr(func, "__gym_tool__", None)
-            if spec is not None:
-                tools.append((spec, func))
+        # Runtime-registered callables always carry the spec (gym_tool sets it before appending).
+        tools.extend((func.__gym_tool__, func) for func in self._dynamic_gym_tools)
 
         seen: set[str] = set()
         for spec, _ in tools:
@@ -326,8 +319,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
 
-        import mcp.types as types
-
         # Precompute everything the MCP hot path would otherwise rebuild per request — the validator,
         # the advertised inputSchema, and the types.Tool object — so tools/list and tools/call reuse
         # them (mirrors the HTTP twin in _register_http_gym_tool, which already precomputes at setup).
@@ -335,7 +326,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         for spec, fn in gym_tools:
             if spec.input_schema is not None:
                 self._check_no_request_param(spec.name, fn)
-                self._raw_dispatch[spec.name] = self._build_raw_tool_entry(spec, fn, types)
+                self._raw_dispatch[spec.name] = self._build_raw_tool_entry(spec, fn)
 
         self.register_mcp_tools(mcp)
         self._install_mcp_list_handler(mcp)
@@ -371,7 +362,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
         app.mount(self.mcp_url_path, _MCPHeaderSessionMiddleware(mcp_app))
-        self._mcp_mounted = True
 
     def register_mcp_tools(self, mcp: Any) -> None:
         """Register this server's typed gym_tool declarations as MCP tools.
@@ -494,16 +484,18 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             entry = self._raw_dispatch.get(name)
             if entry is None:
                 return await mcp.call_tool(name, arguments or {})
-            result = await self._call_raw_gym_tool(entry, arguments or {}, self.require_mcp_session_id)
+            result = await self._call_raw_gym_tool(entry, arguments or {})
             return self._to_call_tool_return(result)
 
-    def _build_raw_tool_entry(self, spec: GymToolSpec, fn: Callable, types: Any) -> "_RawToolEntry":
+    def _build_raw_tool_entry(self, spec: GymToolSpec, fn: Callable) -> "_RawToolEntry":
         """Precompute (once, at setup) everything a raw dict/model-schema tool call needs.
 
         Hoists the per-request work out of the MCP hot path: the validated-instance model (model
         schema) or the shallow JSON-schema validator (dict schema + validate=True), the advertised
         inputSchema, the single body-param name, and the sync/async + session-injection flags.
         """
+        import mcp.types as types
+
         signature = inspect.signature(fn)
         schema = spec.input_schema
         body_param: Optional[str] = None
@@ -522,7 +514,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             if spec.validate_input:
                 validator = self._model_from_json_schema(spec.name, schema)
         return _RawToolEntry(
-            spec=spec,
             fn=fn,
             model=schema if body_param is not None else None,
             body_param=body_param,
@@ -532,13 +523,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             tool=types.Tool(name=spec.name, description=spec.description, inputSchema=input_schema),
         )
 
-    async def _call_raw_gym_tool(
-        self,
-        entry: "_RawToolEntry",
-        arguments: dict,
-        resolve_session_id: Callable[[], str],
-    ) -> Any:
-        """Invoke a dict/model-schema gym tool with raw arguments; shared by both transports."""
+    async def _call_raw_gym_tool(self, entry: "_RawToolEntry", arguments: dict) -> Any:
+        """Invoke a dict/model-schema gym tool with raw arguments (MCP call path)."""
         if entry.model is not None:
             kwargs: dict[str, Any] = {entry.body_param: entry.model.model_validate(arguments)}
         else:
@@ -549,7 +535,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             kwargs.pop("session_id", None)
 
         if entry.inject_session:
-            kwargs["session_id"] = resolve_session_id()
+            kwargs["session_id"] = self.require_mcp_session_id()
 
         if entry.is_coro:
             return await entry.fn(**kwargs)
@@ -599,9 +585,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         async def invoke(kwargs: dict, request: Request) -> Any:
             if inject_session:
                 kwargs["session_id"] = request.session[SESSION_ID_KEY]
-            if is_coro:
-                return await fn(**kwargs)
-            return await run_in_threadpool(fn, **kwargs)
+            result = await fn(**kwargs) if is_coro else await run_in_threadpool(fn, **kwargs)
+            return PlainTextResponse(result) if isinstance(result, str) else result
 
         schema = spec.input_schema
         if schema is None:
@@ -612,8 +597,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 # Shallow one-level unpack: nested models must stay model instances (a deep
                 # body.model_dump() would hand the tool dicts where MCP hands it models).
                 kwargs = {field: getattr(body, field) for field in type(body).model_fields}
-                result = await invoke(kwargs, request)
-                return PlainTextResponse(result) if isinstance(result, str) else result
+                return await invoke(kwargs, request)
 
             # Pin annotations so FastAPI introspects `body` as the request body even if a future
             # maintainer adds `from __future__ import annotations` to this module. The return
@@ -624,24 +608,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             if isinstance(return_hint, type) and issubclass(return_hint, BaseModel):
                 annotations["return"] = return_hint
             http_handler.__annotations__ = annotations
-            app.post(f"/{name}")(http_handler)
         elif isinstance(schema, type) and issubclass(schema, BaseModel):
-            body_params = [p for p in signature.parameters if p != "session_id"]
-            if len(body_params) != 1:
-                raise ValueError(
-                    f"gym_tool {name!r} with a model input_schema must take exactly one "
-                    f"non-session parameter (the validated instance); got {body_params}."
-                )
-            body_param = body_params[0]
+            # _setup_mcp built the _RawToolEntry (incl. the arity check) before this registration.
+            body_param = self._raw_dispatch[name].body_param
 
             async def http_handler(body: Any, request: Request) -> Any:
-                result = await invoke({body_param: body}, request)
-                return PlainTextResponse(result) if isinstance(result, str) else result
+                return await invoke({body_param: body}, request)
 
             http_handler.__annotations__ = {"body": schema, "request": Request}
-            app.post(f"/{name}")(http_handler)
         else:
-            validator = self._model_from_json_schema(name, schema) if spec.validate_input else None
+            validator = self._raw_dispatch[name].validator
 
             async def http_handler(request: Request) -> Any:
                 body_bytes = await request.body()
@@ -671,12 +647,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 kwargs = dict(raw)
                 # The session id is never injectable from the model-facing payload.
                 kwargs.pop("session_id", None)
-                result = await invoke(kwargs, request)
-                if isinstance(result, str):
-                    return PlainTextResponse(result)
-                return result
+                return await invoke(kwargs, request)
 
-            app.post(f"/{name}")(http_handler)
+        app.post(f"/{name}")(http_handler)
 
     def _synth_body_model(self, name: str, signature: inspect.Signature, hints: dict) -> type[BaseModel]:
         """Synthesize the HTTP body model from a typed tool's visible (non-session) parameters."""
@@ -769,15 +742,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             param.replace(annotation=hints.get(param_name, param.annotation))
             for param_name, param in signature.parameters.items()
         ]
+        passthrough = tuple(signature.parameters)
         if request_param_name is None:
             request_param_name = "request"
             params = [
                 inspect.Parameter("request", kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
                 *params,
             ]
-            passthrough = tuple(signature.parameters)
-        else:
-            passthrough = tuple(signature.parameters)
 
         async def seed_session_endpoint(**kwargs: Any) -> JSONResponse:
             request: Request = kwargs[request_param_name]

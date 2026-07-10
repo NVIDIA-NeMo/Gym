@@ -23,11 +23,12 @@ parity (E9). All MCP traffic runs through TestClient (in-memory ASGI) — no net
 
 import json
 import logging
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import Request
+from fastapi.testclient import TestClient
 from pydantic import BaseModel, BeforeValidator, Field
 
 from nemo_gym.base_resources_server import (
@@ -38,13 +39,19 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     gym_tool,
 )
+from nemo_gym.mcp_test_utils import (
+    TOKEN_HEADER,
+    assert_transport_parity,
+    mcp_call,
+    mcp_handshake,
+    mcp_list_tools,
+    mcp_result_payload,
+    seed_token,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 pytest.importorskip("mcp")
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 
 SEND_MESSAGE_SCHEMA = {
     "type": "object",
@@ -144,73 +151,16 @@ def _make(server_cls, name: str = "dual_server"):
     return server_cls(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _handshake(client, token: Optional[str] = None) -> None:
-    resp = _rpc(
-        client,
-        "initialize",
-        {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "pytest", "version": "0"},
-        },
-        token=token,
-    )
-    assert resp.status_code == 200, resp.text
-    resp = _rpc(client, "notifications/initialized", token=token)
-    assert resp.status_code in (200, 202)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
-def _seed(client) -> str:
-    resp = client.post("/seed_session", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
-
-
-def _payload(result: dict) -> Any:
-    """The tool's return payload: structuredContent when the tool has an output schema (model
-    returns / raw dict returns), else the JSON text block (typed tools annotated ``-> dict``)."""
-    if "structuredContent" in result and result["structuredContent"] is not None:
-        return result["structuredContent"]
-    return json.loads(result["content"][0]["text"])
-
-
 class TestFullHandshake:
     """E1/E1b: the full JSON-RPC lifecycle, including raw-argument fidelity for schema tools."""
 
     def test_initialize_list_call_lifecycle(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = _seed(client)
-            _handshake(client, token=token)
+            token = seed_token(client)
+            mcp_handshake(client, token=token)
 
-            tools = _list_tools(client, token=token)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"bump", "locate", "greet", "coerce", "send_message", "repeat"}
             # The dict schema is advertised byte-for-byte verbatim.
             assert tools["send_message"]["inputSchema"] == SEND_MESSAGE_SCHEMA
@@ -219,31 +169,27 @@ class TestFullHandshake:
             # session_id is never model-visible.
             assert "session_id" not in tools["bump"]["inputSchema"]["properties"]
 
-            result = _call(client, "bump", {"amount": 5}, token=token)
+            result = mcp_call(client, "bump", {"amount": 5}, token=token)
             assert result.get("isError") is not True
-            assert _payload(result)["counter"] == 5
+            assert mcp_result_payload(result)["counter"] == 5
 
     def test_dict_schema_tool_receives_out_of_schema_args_verbatim(self) -> None:
         """The exact case FastMCP validation silently corrupts: undeclared arg names must survive."""
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = _seed(client)
-            result = _call(client, "send_message", {"to": "alice", "message": "hi"}, token=token)
+            token = seed_token(client)
+            result = mcp_call(client, "send_message", {"to": "alice", "message": "hi"}, token=token)
             assert result.get("isError") is not True
             assert server.observed_raw_args == {"to": "alice", "message": "hi"}
 
     def test_model_schema_tool_validates_and_passes_instance(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            ok = _call(client, "repeat", {"count": 3, "label": "ab"})
+            ok = mcp_call(client, "repeat", {"count": 3, "label": "ab"})
             assert ok.get("isError") is not True
             assert ok["content"][0]["text"] == "ababab"
 
-            bad = _call(client, "repeat", {"count": "not-an-int", "label": "ab"})
+            bad = mcp_call(client, "repeat", {"count": "not-an-int", "label": "ab"})
             assert bad["isError"] is True
             assert "count" in bad["content"][0]["text"]
 
@@ -252,21 +198,17 @@ class TestCrossTransportParity:
     """E3/E4 + the promoted cookie-and-token-same-session test."""
 
     def test_nested_model_param_arrives_as_model_on_both_transports(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             http = client.post("/locate", json={"point": {"x": 3, "y": 4}})
             assert http.status_code == 200, http.text
             assert http.json()["param_type"] == "Point"
 
-            mcp = _call(client, "locate", {"point": {"x": 3, "y": 4}})
+            mcp = mcp_call(client, "locate", {"point": {"x": 3, "y": 4}})
             assert mcp.get("isError") is not True
             assert mcp["structuredContent"]["param_type"] == "Point"
 
     def test_annotated_validator_and_description_survive_both_transports(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             # BeforeValidator coerces the comma string on the HTTP body model...
@@ -275,27 +217,25 @@ class TestCrossTransportParity:
             assert http.json()["values"] == [1, 2, 3]
 
             # ...and on the MCP argument model; the Field description reaches the MCP schema.
-            tools = _list_tools(client)
+            tools = mcp_list_tools(client)
             assert tools["coerce"]["inputSchema"]["properties"]["detail"]["description"] == "Detail marker"
-            mcp = _call(client, "coerce", {"values": "4,5"})
+            mcp = mcp_call(client, "coerce", {"values": "4,5"})
             assert mcp.get("isError") is not True
-            assert _payload(mcp)["values"] == [4, 5]
+            assert mcp_result_payload(mcp)["values"] == [4, 5]
 
     def test_cookie_and_token_resolve_the_same_session(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = _seed(client)
+            token = seed_token(client)
 
             http = client.post("/bump", json={"amount": 5})
             assert http.status_code == 200, http.text
             http_sid, counter = http.json()["session_id"], http.json()["counter"]
             assert counter == 5
 
-            mcp = _call(client, "bump", {"amount": 3}, token=token)
-            assert _payload(mcp)["session_id"] == http_sid
-            assert _payload(mcp)["counter"] == 8
+            mcp = mcp_call(client, "bump", {"amount": 3}, token=token)
+            assert mcp_result_payload(mcp)["session_id"] == http_sid
+            assert mcp_result_payload(mcp)["counter"] == 8
 
 
 class TestAllowedToolsClaim:
@@ -307,47 +247,34 @@ class TestAllowedToolsClaim:
         return server.build_mcp_session_metadata(request, allowed_tools=["bump"]).headers[TOKEN_HEADER]
 
     def test_list_filtered_and_call_gated(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         token = self._restricted_token(server)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            assert set(_list_tools(client, token=token)) == {"bump"}
+            assert set(mcp_list_tools(client, token=token)) == {"bump"}
 
-            blocked = _call(client, "greet", {"name": "eve"}, token=token)
+            blocked = mcp_call(client, "greet", {"name": "eve"}, token=token)
             assert blocked["isError"] is True
             assert "not available" in blocked["content"][0]["text"]
 
-            allowed = _call(client, "bump", {"amount": 2}, token=token)
+            # Status-quo HTTP behavior: the claim narrows the per-session MCP view only.
+            assert client.post("/greet", json={"name": "eve"}).status_code == 200
+
+            allowed = mcp_call(client, "bump", {"amount": 2}, token=token)
             assert allowed.get("isError") is not True
-            assert _payload(allowed)["session_id"] == "restricted-session"
+            assert mcp_result_payload(allowed)["session_id"] == "restricted-session"
 
     def test_legacy_bare_token_and_no_token_list_everything(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            bare_token = _seed(client)  # bare payload: no allowed_tools claim
-            assert len(_list_tools(client, token=bare_token)) == 6
-            assert len(_list_tools(client, token=None)) == 6
-
-    def test_http_routes_are_not_restricted_by_the_claim(self) -> None:
-        """Status-quo HTTP behavior: the claim narrows the per-session MCP view only."""
-        from fastapi.testclient import TestClient
-
-        server = _make(_DualServer)
-        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            resp = client.post("/greet", json={"name": "eve"})
-            assert resp.status_code == 200
-            assert resp.text == "hello eve"
+            bare_token = seed_token(client)  # bare payload: no allowed_tools claim
+            assert len(mcp_list_tools(client, token=bare_token)) == 6
+            assert len(mcp_list_tools(client, token=None)) == 6
 
 
 class TestUnknownToolCatchall:
     """E6: catch-all ordering, idempotence, and the informative default miss-path."""
 
     def test_default_404_lists_available_tools(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/no_such_tool", json={})
@@ -356,8 +283,6 @@ class TestUnknownToolCatchall:
             assert "bump" in resp.json()["error"]
 
     def test_catchall_absent_on_tool_less_servers(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_ToolLessServer, name="tool_less")
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/no_such_tool", json={})
@@ -365,8 +290,6 @@ class TestUnknownToolCatchall:
             assert resp.json() == {"detail": "Not Found"}  # FastAPI stock 404, no catch-all mounted
 
     def test_catchall_does_not_shadow_subclass_routes_and_registers_once(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _WithExtraRoute(_DualServer):
             def setup_webserver(self):
                 app = super().setup_webserver()
@@ -391,8 +314,6 @@ class TestUnknownToolCatchall:
         assert len(catchalls) == 1
 
     def test_override_preserves_historical_bytes(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _SoftErrorServer(_DualServer):
             async def handle_unknown_tool(self, tool_name: str, request: Request):
                 return {"results": f"Error executing tool '{tool_name}': unknown"}
@@ -408,8 +329,6 @@ class TestSeedSessionAutoAugment:
     """E7: the seed wrapper matrix, asserted over the wire (response_model must not strip the key)."""
 
     def test_inherited_default_seed_gets_mcp_injected(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             body = client.post("/seed_session", json={}).json()
@@ -417,8 +336,6 @@ class TestSeedSessionAutoAugment:
             assert TOKEN_HEADER in body["mcp"]["headers"]
 
     def test_override_with_extra_fields_keeps_both(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _SeedBody(BaseSeedSessionRequest):
             task_id: str
 
@@ -437,8 +354,6 @@ class TestSeedSessionAutoAugment:
             assert client.post("/seed_session", json={}).status_code == 422
 
     def test_existing_mcp_value_is_never_clobbered(self) -> None:
-        from fastapi.testclient import TestClient
-
         custom_mcp = {"server_name": "mine", "url_path": "/mcp", "transport": "http", "headers": {"k": "v"}}
 
         class _OwnMCP(_DualServer):
@@ -452,8 +367,6 @@ class TestSeedSessionAutoAugment:
             assert body["note"] == "mine"
 
     def test_tool_less_server_seed_response_is_unchanged(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_ToolLessServer, name="tool_less")
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             body = client.post("/seed_session", json={}).json()
@@ -464,8 +377,6 @@ class TestContractLongTail:
     """E8: str->text/plain, 422s, session_id hygiene, lazy gate, deletion, schema names."""
 
     def test_str_return_is_text_plain_over_http(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/greet", json={"name": "sam"})
@@ -474,16 +385,12 @@ class TestContractLongTail:
             assert resp.text == "hello sam"
 
     def test_typed_route_validates_body(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             assert client.post("/bump", json={}).status_code == 422
             assert client.post("/bump", json={"amount": "NaN"}).status_code == 422
 
     def test_session_id_not_injectable_from_http_payload(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             client.post("/seed_session", json={})
@@ -540,24 +447,12 @@ class TestTransportParity:
     """E9: the tested invariant — unfiltered tools/list == HTTP tool routes == expected inventory."""
 
     EXPECTED = {"bump", "locate", "greet", "coerce", "send_message", "repeat"}
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
 
     def test_tool_sets_identical_across_transports(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_names = set(_list_tools(client))
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == self.EXPECTED
+            assert_transport_parity(app, client, self.EXPECTED)
 
     def test_manual_mcp_only_tool_triggers_parity_warning(self, caplog) -> None:
         class _ManualServer(_DualServer):
@@ -578,8 +473,6 @@ class TestModeCoverage:
     """The remaining mode branches: BaseModel-mode over HTTP, validate=True, return shapes."""
 
     def test_model_schema_tool_over_http_validates_like_a_handwritten_route(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             ok = client.post("/repeat", json={"count": 2, "label": "xy"})
@@ -588,8 +481,6 @@ class TestModeCoverage:
             assert client.post("/repeat", json={"count": "bad", "label": "xy"}).status_code == 422
 
     def test_validated_dict_tool_gates_both_transports_but_passes_raw(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _Validated(_DualServer):
             def model_post_init(self, context: Any) -> None:
                 super().model_post_init(context)
@@ -613,19 +504,17 @@ class TestModeCoverage:
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             # Shallow validation gates the declared property's type...
             assert client.post("/strict_echo", json={"n": "not-an-int"}).status_code == 422
-            bad = _call(client, "strict_echo", {"n": "not-an-int"})
+            bad = mcp_call(client, "strict_echo", {"n": "not-an-int"})
             assert bad["isError"] is True
             # ...but undeclared args still pass through raw (list return -> JSON text block).
             ok = client.post("/strict_echo", json={"n": 1, "extra": "kept"})
             assert ok.status_code == 200
             assert ok.json() == ["extra", "n"]
-            mcp_ok = _call(client, "strict_echo", {"n": 1, "extra": "kept"})
+            mcp_ok = mcp_call(client, "strict_echo", {"n": 1, "extra": "kept"})
             assert mcp_ok.get("isError") is not True
             assert json.loads(mcp_ok["content"][0]["text"]) == ["extra", "n"]
 
     def test_dict_tool_rejects_non_object_body_and_tolerates_empty(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             assert client.post("/send_message", json=[1, 2]).status_code == 422  # non-object JSON
@@ -636,8 +525,6 @@ class TestModeCoverage:
     def test_dict_tool_rejects_malformed_body_without_dispatching(self) -> None:
         """A non-empty but unparseable body is a client 422, not a coerce-to-{} dispatch (regression
         guard: the pre-migration typed-body route returned 422 and never ran the tool)."""
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         server.observed_raw_args = {"sentinel": True}
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
@@ -646,8 +533,6 @@ class TestModeCoverage:
             assert server.observed_raw_args == {"sentinel": True}  # tool was NOT dispatched
 
     def test_raw_tool_model_return_renders_structured_content(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _ModelReturn(_DualServer):
             def model_post_init(self, context: Any) -> None:
                 super().model_post_init(context)
@@ -659,7 +544,7 @@ class TestModeCoverage:
 
         server = _make(_ModelReturn)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _call(client, "locate_raw", {})
+            result = mcp_call(client, "locate_raw", {})
             assert result["structuredContent"] == {"param_type": "raw", "x": 9}
             http = client.post("/locate_raw", json={})
             assert http.status_code == 200
@@ -690,11 +575,9 @@ class TestModeCoverage:
         assert TOKEN_HEADER in metadata.headers
 
     def test_garbage_token_lists_everything(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            assert len(_list_tools(client, token="garbage-token")) == 6
+            assert len(mcp_list_tools(client, token="garbage-token")) == 6
 
     def test_header_middleware_passes_non_http_scopes_through(self) -> None:
         import asyncio
@@ -722,17 +605,13 @@ class TestModeCoverage:
 
 class TestMCPErrorSurface:
     def test_session_tool_without_token_is_clean_tool_error_for_raw_tools(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _call(client, "send_message", {"recipient": "a", "message": "b"}, token=None)
+            result = mcp_call(client, "send_message", {"recipient": "a", "message": "b"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
     def test_tool_exception_becomes_is_error_not_transport_error(self) -> None:
-        from fastapi.testclient import TestClient
-
         class _Exploding(_DualServer):
             @gym_tool
             async def explode(self) -> str:
@@ -741,17 +620,15 @@ class TestMCPErrorSurface:
 
         server = _make(_Exploding)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _call(client, "explode", {})
+            result = mcp_call(client, "explode", {})
             assert result["isError"] is True
             assert "kaboom" in result["content"][0]["text"]
 
     def test_raw_dict_result_renders_structured_content(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = _seed(client)
-            result = _call(client, "send_message", {"recipient": "a", "message": "b"}, token=token)
+            token = seed_token(client)
+            result = mcp_call(client, "send_message", {"recipient": "a", "message": "b"}, token=token)
             assert result["structuredContent"]["delivered"] is True
             # The text block is valid JSON of the same payload (SDK renders both).
             assert json.loads(result["content"][0]["text"])["delivered"] is True

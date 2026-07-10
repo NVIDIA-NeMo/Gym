@@ -17,8 +17,10 @@ import math
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from pytest import fixture
 
+from nemo_gym.mcp_test_utils import assert_transport_parity, mcp_call, mcp_list_tools
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -46,7 +48,6 @@ EXPECTED_TOOLS = {
     "negate",
     "return_constant",
 }
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
 
 def _solution_bytes(value: float) -> bytes:
@@ -96,8 +97,6 @@ class TestApp:
         body: dict,
         expected_solution: float,
     ) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post(path, json=body)
@@ -106,8 +105,6 @@ class TestApp:
 
     def test_null_arguments_are_silently_filtered(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         """The old dispatcher dropped explicit-null args before calling the function; that stays."""
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post("/add", json={"a": 1.0, "b": 3.0, "radians": None, "base": None})
@@ -117,8 +114,6 @@ class TestApp:
     def test_unknown_tool_preserves_historical_404_bytes(
         self, config: MultiVerseMathHardResourcesServerConfig
     ) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post("/no_such_function", json={})
@@ -128,8 +123,6 @@ class TestApp:
     def test_missing_argument_preserves_historical_500_bytes(
         self, config: MultiVerseMathHardResourcesServerConfig
     ) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post("/add", json={"a": 1.0})
@@ -137,8 +130,6 @@ class TestApp:
             assert response.content == b'{"detail":"add() missing 1 required positional argument: \'b\'"}'
 
     def test_math_error_preserves_historical_500_bytes(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post("/divide", json={"a": 1.0, "b": 0.0})
@@ -146,8 +137,6 @@ class TestApp:
             assert response.content == b'{"detail":"float division by zero"}'
 
     def test_bad_argument_type_is_422(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             response = client.post("/add", json={"a": "x", "b": 1.0})
@@ -160,51 +149,23 @@ class TestApp:
     # MCP round-trip and transport parity
     # ----------------------------------------------------------------------------------------
 
-    def _rpc(self, client, method: str, params: dict, rpc_id: int = 1):
-        return client.post(
-            "/mcp",
-            headers=RPC_HEADERS,
-            json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
-            follow_redirects=False,
-        )
-
     def test_mcp_lists_and_calls_the_same_tools(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         with TestClient(resources_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            listing = self._rpc(client, "tools/list", {})
-            assert listing.status_code == 200, listing.text
-            tools = {tool["name"]: tool for tool in listing.json()["result"]["tools"]}
+            tools = mcp_list_tools(client)
             assert set(tools) == EXPECTED_TOOLS
             assert set(tools["add"]["inputSchema"]["properties"]) == {"a", "b"}
             assert "session_id" not in tools["add"]["inputSchema"]["properties"]
 
-            called = self._rpc(client, "tools/call", {"name": "add", "arguments": {"a": 1.0, "b": 3.0}}, rpc_id=2)
-            assert called.status_code == 200, called.text
-            result = called.json()["result"]
+            result = mcp_call(client, "add", {"a": 1.0, "b": 3.0})
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"solution": 5.2}
 
     def test_transport_parity(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
-        from fastapi.testclient import TestClient
-
         resources_server = self.init_server(config)
         app = resources_server.setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            route.path.lstrip("/")
-            for route in app.router.routes
-            if getattr(route, "path", None)
-            and "POST" in (getattr(route, "methods", None) or set())
-            and route.path not in non_tool_paths
-        }
-
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            listing = self._rpc(client, "tools/list", {})
-            mcp_tools = {tool["name"] for tool in listing.json()["result"]["tools"]}
-
-        assert mcp_tools == http_tools == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)
 
     # ----------------------------------------------------------------------------------------
     # Verification

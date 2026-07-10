@@ -25,7 +25,21 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     gym_tool,
 )
-from resources_servers.math_advanced_calculations import math_advanced_calculations_tools as math_tools
+
+# Import all functions from the tools file
+from resources_servers.math_advanced_calculations.math_advanced_calculations_tools import (
+    add,
+    cos,
+    divide,
+    log,
+    multiply,
+    negate,
+    pi,
+    power,
+    return_constant,
+    sin,
+    subtract,
+)
 
 
 class MultiVerseMathHardResourcesServerConfig(BaseResourcesServerConfig):
@@ -53,57 +67,57 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
     @gym_tool
     async def add(self, a: Optional[float] = None, b: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Add two numbers; a + b."""
-        return self._solve(math_tools.add, a=a, b=b)
+        return self._solve(add, a=a, b=b)
 
     @gym_tool
     async def subtract(self, a: Optional[float] = None, b: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Subtract two numbers; a - b."""
-        return self._solve(math_tools.subtract, a=a, b=b)
+        return self._solve(subtract, a=a, b=b)
 
     @gym_tool
     async def multiply(self, a: Optional[float] = None, b: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Multiply two numbers; a * b."""
-        return self._solve(math_tools.multiply, a=a, b=b)
+        return self._solve(multiply, a=a, b=b)
 
     @gym_tool
     async def divide(self, a: Optional[float] = None, b: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Divide two numbers; a / b."""
-        return self._solve(math_tools.divide, a=a, b=b)
+        return self._solve(divide, a=a, b=b)
 
     @gym_tool
     async def sin(self, radians: Optional[float] = None) -> MultiVerseMathHardResponse:
         """The sine of an angle in radians."""
-        return self._solve(math_tools.sin, radians=radians)
+        return self._solve(sin, radians=radians)
 
     @gym_tool
     async def cos(self, radians: Optional[float] = None) -> MultiVerseMathHardResponse:
         """The cosine of an angle in radians."""
-        return self._solve(math_tools.cos, radians=radians)
+        return self._solve(cos, radians=radians)
 
     @gym_tool
     async def power(self, a: Optional[float] = None, b: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Raise a number to a power; a ** b."""
-        return self._solve(math_tools.power, a=a, b=b)
+        return self._solve(power, a=a, b=b)
 
     @gym_tool
     async def log(self, a: Optional[float] = None, base: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Take the log of a number; log(a, base)."""
-        return self._solve(math_tools.log, a=a, base=base)
+        return self._solve(log, a=a, base=base)
 
     @gym_tool
     async def pi(self) -> MultiVerseMathHardResponse:
         """Returns a precise value of PI for this alternate universe."""
-        return self._solve(math_tools.pi)
+        return self._solve(pi)
 
     @gym_tool
     async def negate(self, a: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Negate a number; -a."""
-        return self._solve(math_tools.negate, a=a)
+        return self._solve(negate, a=a)
 
     @gym_tool
     async def return_constant(self, a: Optional[float] = None) -> MultiVerseMathHardResponse:
         """Return a constant number: a with no modifications"""
-        return self._solve(math_tools.return_constant, a=a)
+        return self._solve(return_constant, a=a)
 
     def _solve(self, func: Callable[..., float], **arguments: Optional[float]) -> MultiVerseMathHardResponse:
         # The pre-migration dispatcher contract, verbatim: null (or omitted) arguments are silently

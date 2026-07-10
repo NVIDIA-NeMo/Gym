@@ -114,13 +114,6 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         # ("Error executing tool '<name>': '<name>'").
         session_id = request.session[SESSION_ID_KEY]
 
-        if session_id not in self.session_id_to_tool_env:
-            raise HTTPException(
-                status_code=400,
-                detail="Session not initialized. Please call seed_session first.",
-            )
-
-        tool_env = self.session_id_to_tool_env[session_id]
         try:
             raw = await request.json()
         except Exception:
@@ -128,14 +121,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         body = WorkbenchRequest.model_validate(raw) if isinstance(raw, dict) else WorkbenchRequest()
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
-        try:
-            function = tool_env["functions"][tool_name]
-            result = function(**args)
-            return WorkbenchResponse(output=result)
-        except Exception as e:
-            return WorkbenchResponse(
-                output=f"Error executing tool '{tool_name}': {str(e)}"
-            )  # return error to model so that it can correct itself
+        return self._make_tool_closure(tool_name)(session_id, **args)
 
     async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         ground_truth = body.ground_truth

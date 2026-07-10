@@ -16,7 +16,7 @@ import asyncio
 import json
 import subprocess
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,9 +26,11 @@ from app import (
     NSToolsVerifyRequest,
 )
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
@@ -395,8 +397,6 @@ class TestSidecarTeardownWiredToLifespan:
         assert server._python_tool_process is None
 
     def test_lifespan_shutdown_reaps_sidecar_via_testclient(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = self._make_server()
         app = server.setup_webserver()
 
@@ -468,9 +468,6 @@ class TestSidecarTeardownWiredToLifespan:
 # ============================================================
 # Dual-transport migration: HTTP wire-format replay + MCP round-trip
 # ============================================================
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 
 PYTHON_TOOL_SCHEMA = {
     "type": "object",
@@ -548,43 +545,10 @@ def _make_tools_server() -> NSToolsResourcesServer:
         loop.close()
 
 
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _list_tools(client, token: Optional[str] = None) -> Dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
-def _seed(client) -> str:
-    resp = client.post("/seed_session", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
-
-
 class TestHTTPWireContractReplay:
     """The migrated gym_tool routes must serve byte-identical bodies to the old catch-all route."""
 
     def test_dict_result_is_json_dumped_text_plain(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/execute_python", json={"code": "print(2+2)"})
@@ -608,8 +572,6 @@ class TestHTTPWireContractReplay:
             assert records[0]["is_request_timeout"] is False
 
     def test_str_result_passes_through_verbatim(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/execute_python", json={"code": "str-result"})
@@ -618,8 +580,6 @@ class TestHTTPWireContractReplay:
             assert resp.text == STR_RESULT  # no double JSON serialization
 
     def test_unknown_tool_keeps_the_200_soft_error_bytes(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/nonexistent_tool", json={"code": "x"})
@@ -628,8 +588,6 @@ class TestHTTPWireContractReplay:
             assert resp.text == '{"error": "Unknown tool: nonexistent_tool"}'
 
     def test_tool_exception_becomes_200_error_string(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/execute_python", json={"code": "boom"})
@@ -637,8 +595,6 @@ class TestHTTPWireContractReplay:
             assert resp.text == '{"error": "sandbox exploded"}'
 
     def test_request_timeout_becomes_200_timeout_body_and_is_counted(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/execute_python", json={"code": "request-timeout"})
@@ -650,8 +606,6 @@ class TestHTTPWireContractReplay:
             assert records[0]["is_internal_timeout"] is False
 
     def test_internal_sandbox_timeout_is_flagged_and_body_preserved(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/execute_python", json={"code": "internal-timeout"})
@@ -663,8 +617,6 @@ class TestHTTPWireContractReplay:
             assert records[0]["is_request_timeout"] is False
 
     def test_tool_less_server_keeps_the_stock_404(self) -> None:
-        from fastapi.testclient import TestClient
-
         config = NSToolsConfig(host="0.0.0.0", port=8080, entrypoint="", name="ns_tools")
         server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
@@ -677,18 +629,16 @@ class TestMCPRoundTrip:
     """tools/list advertises the nemo_skills schema verbatim; tools/call shares the HTTP session."""
 
     def test_list_and_call_over_mcp(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = _seed(client)
+            token = seed_token(client)
 
-            tools = _list_tools(client, token=token)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"execute_python"}
             assert tools["execute_python"]["inputSchema"] == PYTHON_TOOL_SCHEMA
             assert tools["execute_python"]["description"] == "Execute python code."
 
-            result = _call(client, "execute_python", {"code": "print(2+2)"}, token=token)
+            result = mcp_call(client, "execute_python", {"code": "print(2+2)"}, token=token)
             assert result.get("isError") is not True
             assert result["content"][0]["text"] == json.dumps(DICT_RESULT)
 
@@ -698,11 +648,9 @@ class TestMCPRoundTrip:
             assert extra["request_id"] in server._timing_by_session
 
     def test_call_without_session_token_is_a_tool_error(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _call(client, "execute_python", {"code": "print(2+2)"}, token=None)
+            result = mcp_call(client, "execute_python", {"code": "print(2+2)"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
@@ -710,21 +658,8 @@ class TestMCPRoundTrip:
 class TestTransportParity:
     """MCP tools/list names == HTTP POST tool routes == the discovered nemo_skills inventory."""
 
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-
     def test_tool_sets_identical_across_transports(self) -> None:
-        from fastapi.testclient import TestClient
-
         server = _make_tools_server()
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_names = set(_list_tools(client))
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == {"execute_python"}
+            assert_transport_parity(app, client, {"execute_python"})

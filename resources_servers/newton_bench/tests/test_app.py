@@ -24,6 +24,7 @@ import pytest
 from fastapi import HTTPException, Request
 from pytest import fixture, mark, raises
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.newton_bench.app import (
@@ -1251,9 +1252,6 @@ result
 # Dual-registration wire-format tests (HTTP replay, MCP round-trip, transport parity)
 # ================================================================================
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-
 EXPECTED_TOOLS = {"execute_python", "end_session"} | {
     f"run_experiment_{module_name}" for module_name in MODULE_REQUEST_CLASSES_MAPPING
 }
@@ -1288,35 +1286,8 @@ def _wire_client():
         yield server, app, client
 
 
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
 def _seed(client, body: Optional[dict] = None) -> str:
-    resp = client.post("/seed_session", json=body or SEED_BODY)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
+    return seed_token(client, body or SEED_BODY)
 
 
 def _mock_module(result: Any = 42.0, error: Optional[Exception] = None) -> dict:
@@ -1425,13 +1396,13 @@ class TestMCPRoundTrip:
     def test_tools_list_names_and_call(self) -> None:
         with _wire_client() as (_server, _app, client):
             token = _seed(client)
-            tools = _list_tools(client, token=token)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == EXPECTED_TOOLS
             # session_id is never model-visible in the advertised schemas.
             assert "session_id" not in tools["run_experiment_m0_gravity"]["inputSchema"].get("properties", {})
 
             with patch("resources_servers.newton_bench.app._load_module", return_value=_mock_module(42.0)):
-                result = _call(
+                result = mcp_call(
                     client,
                     "run_experiment_m0_gravity",
                     {"mass1": 10.0, "mass2": 20.0, "distance": 5.0},
@@ -1443,7 +1414,7 @@ class TestMCPRoundTrip:
     def test_wrong_module_guard_is_tool_error_over_mcp(self) -> None:
         with _wire_client() as (_server, _app, client):
             token = _seed(client)  # seeded for m0_gravity
-            result = _call(
+            result = mcp_call(
                 client, "run_experiment_m1_coulomb_force", {"q1": 1.0, "q2": 1.0, "distance": 1.0}, token=token
             )
             assert result["isError"] is True
@@ -1451,23 +1422,12 @@ class TestMCPRoundTrip:
 
     def test_call_without_token_is_clean_tool_error(self) -> None:
         with _wire_client() as (_server, _app, client):
-            result = _call(client, "execute_python", {"code": "1 + 1"}, token=None)
+            result = mcp_call(client, "execute_python", {"code": "1 + 1"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
 
 class TestTransportParity:
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-
     def test_tool_sets_identical_across_transports(self) -> None:
         with _wire_client() as (_server, app, client):
-            mcp_names = set(_list_tools(client))
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)

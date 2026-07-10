@@ -14,11 +14,12 @@
 # limitations under the License.
 import json
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.server_utils import ServerClient
 from resources_servers.math_with_code.app import (
     PythonExecutorResourcesServer,
@@ -46,9 +47,6 @@ class TestApp:
 # Dual-registration wire-format tests (HTTP replay, MCP round-trip, transport parity)
 # ================================================================================
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-
 EXPECTED_TOOLS = {"execute_python", "end_session"}
 
 
@@ -75,32 +73,6 @@ def _wire_client():
         # Reap any worker subprocesses left behind by the test.
         for sid in list(server._sessions):
             server._cleanup_session(sid)
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": rpc_id, "params": params or {}}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
-def _seed(client) -> str:
-    resp = client.post("/seed_session", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
 
 
 class TestHTTPReplay:
@@ -180,14 +152,14 @@ class TestHTTPReplay:
 class TestMCPRoundTrip:
     def test_tools_list_names_and_call(self) -> None:
         with _wire_client() as (server, _app, client):
-            token = _seed(client)
-            tools = _list_tools(client, token=token)
+            token = seed_token(client)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == EXPECTED_TOOLS
             # session_id is never model-visible in the advertised schemas.
             for tool in tools.values():
                 assert "session_id" not in tool["inputSchema"].get("properties", {})
 
-            result = _call(client, "execute_python", {"code": "20 + 22"}, token=token)
+            result = mcp_call(client, "execute_python", {"code": "20 + 22"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {
                 "success": True,
@@ -197,29 +169,18 @@ class TestMCPRoundTrip:
                 "result": "42",
             }
 
-            end_result = _call(client, "end_session", {}, token=token)
+            end_result = mcp_call(client, "end_session", {}, token=token)
             assert end_result.get("isError") is not True
             assert server._sessions == {}
 
     def test_call_without_token_is_clean_tool_error(self) -> None:
         with _wire_client() as (_server, _app, client):
-            result = _call(client, "execute_python", {"code": "1 + 1"}, token=None)
+            result = mcp_call(client, "execute_python", {"code": "1 + 1"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
 
 class TestTransportParity:
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-
     def test_tool_sets_identical_across_transports(self) -> None:
         with _wire_client() as (_server, app, client):
-            mcp_names = set(_list_tools(client))
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)

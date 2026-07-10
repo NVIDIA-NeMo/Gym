@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import approx, fixture
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -294,10 +295,7 @@ class TestApp:
 # Dual-transport wire contract (HTTP replay + MCP round-trip + parity)
 # ============================================================================
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 EXPECTED_TOOLS = {"search", "browse"}
-NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
 
 # The exact results_string the pre-migration /search handler produced for {"queries": ["NVIDIA GPU"]}
 # against the mocked Tavily response below.
@@ -346,30 +344,6 @@ def _make_wire_server() -> TavilySearchResourcesServer:
 def wire_server() -> TavilySearchResourcesServer:
     pytest.importorskip("mcp")
     return _make_wire_server()
-
-
-def _rpc(client, method: str, params: dict | None = None, token: str | None = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    return client.post(
-        "/mcp",
-        headers=headers,
-        json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}},
-        follow_redirects=False,
-    )
-
-
-def _mcp_list_tools(client, token: str | None = None) -> dict:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _mcp_call(client, name: str, arguments: dict, token: str | None = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
 
 
 class TestHTTPWireContract:
@@ -461,14 +435,14 @@ class TestMCPRoundTrip:
         from fastapi.testclient import TestClient
 
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            tools = _mcp_list_tools(client)
+            tools = mcp_list_tools(client)
             assert set(tools) == EXPECTED_TOOLS
             # Model-schema tools advertise their body model's fields; session_id is never visible.
             assert set(tools["search"]["inputSchema"]["properties"]) == {"queries", "max_total_length"}
             assert set(tools["browse"]["inputSchema"]["properties"]) == {"urls", "goal", "max_total_length"}
 
-            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
-            result = _mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=token)
+            token = seed_token(client)
+            result = mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"results_string": EXPECTED_SEARCH_RESULTS_STRING}
 
@@ -476,8 +450,8 @@ class TestMCPRoundTrip:
         from fastapi.testclient import TestClient
 
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            token = client.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
-            result = _mcp_call(client, "browse", {"urls": ["https://example.com"]}, token=token)
+            token = seed_token(client)
+            result = mcp_call(client, "browse", {"urls": ["https://example.com"]}, token=token)
             assert result.get("isError") is not True
 
         assert len(wire_server._session_id_to_metrics) == 1
@@ -488,7 +462,7 @@ class TestMCPRoundTrip:
         from fastapi.testclient import TestClient
 
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=None)
+            result = mcp_call(client, "search", {"queries": ["NVIDIA GPU"]}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
@@ -501,13 +475,4 @@ class TestTransportParity:
 
         app = wire_server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_names = set(_mcp_list_tools(client))
-
-        http_names = {
-            route.path.lstrip("/")
-            for route in app.router.routes
-            if getattr(route, "path", None)
-            and "POST" in (getattr(route, "methods", None) or set())
-            and route.path not in NON_TOOL_PATHS
-        }
-        assert mcp_names == http_names == EXPECTED_TOOLS
+            assert_transport_parity(app, client, EXPECTED_TOOLS)

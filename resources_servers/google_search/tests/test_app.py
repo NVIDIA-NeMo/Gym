@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.mcp_test_utils import assert_transport_parity, mcp_call, mcp_handshake, mcp_list_tools
 from nemo_gym.server_utils import ServerClient
 from resources_servers.google_search.app import (
     GoogleSearchResourcesServer,
@@ -27,8 +27,6 @@ from resources_servers.google_search.app import (
 
 
 pytest.importorskip("trafilatura")
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
 
 def _make_server() -> GoogleSearchResourcesServer:
@@ -41,27 +39,6 @@ def _make_server() -> GoogleSearchResourcesServer:
         google_cx="dummy_cx",
     )
     return GoogleSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, rpc_id: int = 1):
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=RPC_HEADERS, json=payload, follow_redirects=False)
-
-
-def _handshake(client) -> None:
-    resp = _rpc(
-        client,
-        "initialize",
-        {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "pytest", "version": "0"}},
-    )
-    assert resp.status_code == 200, resp.text
-    resp = _rpc(client, "notifications/initialized")
-    assert resp.status_code in (200, 202)
 
 
 class TestApp:
@@ -197,26 +174,20 @@ class TestMCPRoundTrip:
 
         server = _make_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            _handshake(client)
+            mcp_handshake(client)
 
-            listed = _rpc(client, "tools/list", rpc_id=2)
-            assert listed.status_code == 200, listed.text
-            tools = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
+            tools = mcp_list_tools(client)
             assert set(tools) == {"search", "browse"}
             assert set(tools["search"]["inputSchema"]["properties"]) == {"query"}
             assert set(tools["browse"]["inputSchema"]["properties"]) == {"url"}
 
-            called = _rpc(client, "tools/call", {"name": "search", "arguments": {"query": "q"}}, rpc_id=3)
-            assert called.status_code == 200, called.text
-            result = called.json()["result"]
+            result = mcp_call(client, "search", {"query": "q"})
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"search_results": json.dumps(payload)}
 
 
 class TestTransportParity:
     """MCP tool names match HTTP tool routes (minus non-tool endpoints)."""
-
-    NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
 
     def test_tool_sets_identical_across_transports(self) -> None:
         pytest.importorskip("mcp")
@@ -225,15 +196,5 @@ class TestTransportParity:
         server = _make_server()
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            _handshake(client)
-            listed = _rpc(client, "tools/list", rpc_id=2)
-            mcp_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-
-            http_names = set()
-            for route in app.router.routes:
-                path = getattr(route, "path", None)
-                methods = getattr(route, "methods", None) or set()
-                if path and "POST" in methods and path not in self.NON_TOOL_PATHS:
-                    http_names.add(path.lstrip("/"))
-
-            assert mcp_names == http_names == {"search", "browse"}
+            mcp_handshake(client)
+            assert_transport_parity(app, client, {"search", "browse"})

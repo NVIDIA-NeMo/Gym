@@ -15,7 +15,6 @@
 import sys
 import types
 from contextlib import contextmanager
-from typing import Any, Optional
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -23,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
+from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.server_utils import ServerClient
 from resources_servers.openenv.app import (
     OpenEnvResourcesServer,
@@ -33,10 +33,6 @@ from resources_servers.openenv.app import (
 
 # Every OpenEnv server declares at least one gym tool, so setup_webserver requires the MCP SDK.
 pytest.importorskip("mcp")
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
 
 
 class StatelessCookies(Cookies):
@@ -149,37 +145,6 @@ def _make_mcp_server(tools, session_envs=()):
     server = _make_server(is_mcp=True, env_class_obj=env_class)
     server._action_class = MagicMock()
     return server
-
-
-# ------------------------------------------------------------------------------------------------
-# MCP JSON-RPC helpers (in-memory, via TestClient; stateless_http mode needs no initialize)
-# ------------------------------------------------------------------------------------------------
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params or {}}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
-
-
-def _seed(client) -> str:
-    resp = client.post("/seed_session", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["mcp"]["headers"][TOKEN_HEADER]
 
 
 class TestApp:
@@ -791,14 +756,14 @@ class TestMCPRoundTrip:
         server._action_class = MagicMock()
 
         with _make_lifespan_client(server) as client:
-            token = _seed(client)
+            token = seed_token(client)
 
-            tools = _list_tools(client, token=token)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"step"}
             # The permissive schema is advertised verbatim.
             assert tools["step"]["inputSchema"] == {"type": "object"}
 
-            result = _call(client, "step", {"move": "e2e4"}, token=token)
+            result = mcp_call(client, "step", {"move": "e2e4"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"reward": 0.5, "done": False}
 
@@ -811,14 +776,14 @@ class TestMCPRoundTrip:
         server = _make_mcp_server(mock_tools, session_envs=[_make_mock_env(step_obs=mock_tool_obs)])
 
         with _make_lifespan_client(server) as client:
-            token = _seed(client)
+            token = seed_token(client)
 
-            tools = _list_tools(client, token=token)
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"echo_message", "echo_with_length"}
             # Fidelity win over the old lossy _json_type_to_python round trip: verbatim schema.
             assert tools["echo_message"]["inputSchema"] == mock_tools[0].input_schema
 
-            result = _call(client, "echo_message", {"message": "hello"}, token=token)
+            result = mcp_call(client, "echo_message", {"message": "hello"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"result": "echoed: hello", "error": None}
 
@@ -827,7 +792,7 @@ class TestMCPRoundTrip:
         server._action_class = MagicMock()
 
         with _make_lifespan_client(server) as client:
-            result = _call(client, "step", {"move": "e2e4"}, token=None)
+            result = mcp_call(client, "step", {"move": "e2e4"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
@@ -835,20 +800,11 @@ class TestMCPRoundTrip:
 class TestTransportParity:
     """MCP tools/list names == HTTP tool routes (minus fixed endpoints) == expected inventory."""
 
-    def _http_tool_names(self, app) -> set:
-        names = set()
-        for route in app.router.routes:
-            path = getattr(route, "path", None)
-            methods = getattr(route, "methods", None) or set()
-            if path and "POST" in methods and path not in NON_TOOL_PATHS:
-                names.add(path.lstrip("/"))
-        return names
-
     def test_non_mcp_env_parity(self) -> None:
         server = _make_server(is_mcp=False)
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            assert set(_list_tools(client)) == self._http_tool_names(app) == {"step"}
+            assert_transport_parity(app, client, {"step"})
 
     def test_mcp_env_parity(self) -> None:
         mock_tools = [
@@ -858,8 +814,7 @@ class TestTransportParity:
         server = _make_mcp_server(mock_tools)
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            expected = {"echo_message", "echo_with_length"}
-            assert set(_list_tools(client)) == self._http_tool_names(app) == expected
+            assert_transport_parity(app, client, {"echo_message", "echo_with_length"})
 
 
 class TestIntegrationMCPLifecycle:

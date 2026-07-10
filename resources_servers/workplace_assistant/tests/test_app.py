@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,6 +23,14 @@ pytest.importorskip("mcp")
 from fastapi.testclient import TestClient
 from pytest import fixture
 
+from nemo_gym.mcp_test_utils import (
+    TOKEN_HEADER,
+    assert_transport_parity,
+    http_tool_names,
+    mcp_call,
+    mcp_handshake,
+    mcp_list_tools,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -37,9 +44,6 @@ from resources_servers.workplace_assistant.app import (
 )
 from resources_servers.workplace_assistant.utils import get_tools
 
-
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 
 EXPECTED_TOOLS = frozenset(
     {
@@ -72,47 +76,6 @@ EXPECTED_TOOLS = frozenset(
         "customer_relationship_manager_delete_customer",
     }
 )
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
-def _handshake(client, token: Optional[str] = None) -> None:
-    resp = _rpc(
-        client,
-        "initialize",
-        {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "pytest", "version": "0"},
-        },
-        token=token,
-    )
-    assert resp.status_code == 200, resp.text
-    resp = _rpc(client, "notifications/initialized", token=token)
-    assert resp.status_code in (200, 202)
-
-
-def _list_tools(client, token: Optional[str] = None) -> dict[str, dict]:
-    resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-    assert resp.status_code == 200, resp.text
-    return {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
-
-
-def _call(client, name: str, arguments: dict, token: Optional[str] = None) -> dict:
-    resp = _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token=token, rpc_id=3)
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
 
 
 class TestApp:
@@ -1529,9 +1492,9 @@ class TestDualTransport:
             with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
                 seed_body = client.post("/seed_session", json={}).json()
                 token = seed_body["mcp"]["headers"][TOKEN_HEADER]
-                _handshake(client, token=token)
+                mcp_handshake(client, token=token)
 
-                tools = _list_tools(client, token=token)
+                tools = mcp_list_tools(client, token=token)
                 assert set(tools) == EXPECTED_TOOLS
                 # The hand-authored schema dict is advertised verbatim over MCP.
                 schemas = {schema["name"]: schema for schema in get_tools(TOOLKITS)["schemas"]}
@@ -1540,29 +1503,20 @@ class TestDualTransport:
                     == schemas["company_directory_find_email_address"]["parameters"]
                 )
 
-                result = _call(client, "company_directory_find_email_address", {"name": "aisha"}, token=token)
+                result = mcp_call(client, "company_directory_find_email_address", {"name": "aisha"}, token=token)
                 assert result.get("isError") is not True
                 assert result["structuredContent"] == {"output": ["aisha.chen@atlas.com"]}
 
     def test_mcp_call_without_token_is_tool_error(self) -> None:
         server = self._server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = _call(client, "company_directory_find_email_address", {"name": "aisha"}, token=None)
+            result = mcp_call(client, "company_directory_find_email_address", {"name": "aisha"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
 
     def test_transport_parity(self) -> None:
         server = self._server()
         app = server.setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            r.path.lstrip("/")
-            for r in app.router.routes
-            if getattr(r, "path", None)
-            and "POST" in (getattr(r, "methods", None) or set())
-            and r.path not in non_tool_paths
-        }
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_names = set(_list_tools(client))
-        assert mcp_names == http_tools == EXPECTED_TOOLS
-        assert http_tools == set(get_tools(TOOLKITS)["functions"])
+            assert_transport_parity(app, client, EXPECTED_TOOLS)
+        assert http_tool_names(app) == set(get_tools(TOOLKITS)["functions"])

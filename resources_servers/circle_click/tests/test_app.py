@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 
+from nemo_gym.mcp_test_utils import assert_transport_parity, mcp_call, mcp_handshake, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.circle_click.app import (
@@ -201,24 +201,6 @@ def _reference_app() -> FastAPI:
     return app
 
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-NON_TOOL_PATHS = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-
-
-def _rpc(client, method: str, params: Optional[dict] = None, token: Optional[str] = None, rpc_id: int = 1):
-    headers = dict(RPC_HEADERS)
-    if token is not None:
-        headers[TOKEN_HEADER] = token
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-    if method.startswith("notifications/"):
-        payload["params"] = params or {}
-    else:
-        payload["id"] = rpc_id
-        payload["params"] = params or {}
-    return client.post("/mcp", headers=headers, json=payload, follow_redirects=False)
-
-
 class TestClickHTTPReplay:
     """Wire-format preservation: /click responses must match the hand-written route byte-for-byte."""
 
@@ -269,36 +251,16 @@ class TestClickMCP:
 
         server = _make_server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            seed = client.post("/seed_session", json={})
-            assert seed.status_code == 200
-            token = seed.json()["mcp"]["headers"][TOKEN_HEADER]
+            token = seed_token(client)
 
-            resp = _rpc(
-                client,
-                "initialize",
-                {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": {"name": "pytest", "version": "0"},
-                },
-                token=token,
-            )
-            assert resp.status_code == 200, resp.text
-            resp = _rpc(client, "notifications/initialized", token=token)
-            assert resp.status_code in (200, 202)
+            mcp_handshake(client, token=token)
 
-            resp = _rpc(client, "tools/list", token=token, rpc_id=2)
-            assert resp.status_code == 200, resp.text
-            tools = {tool["name"]: tool for tool in resp.json()["result"]["tools"]}
+            tools = mcp_list_tools(client, token=token)
             assert set(tools) == {"click"}
             assert set(tools["click"]["inputSchema"]["properties"]) == {"x", "y"}
             assert set(tools["click"]["inputSchema"]["required"]) == {"x", "y"}
 
-            resp = _rpc(
-                client, "tools/call", {"name": "click", "arguments": {"x": 10, "y": 20}}, token=token, rpc_id=3
-            )
-            assert resp.status_code == 200, resp.text
-            result = resp.json()["result"]
+            result = mcp_call(client, "click", {"x": 10, "y": 20}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"x": 10, "y": 20}
 
@@ -311,15 +273,4 @@ class TestTransportParity:
         server = _make_server()
         app = server.setup_webserver()
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            resp = _rpc(client, "tools/list", rpc_id=2)
-            assert resp.status_code == 200, resp.text
-            mcp_names = {tool["name"] for tool in resp.json()["result"]["tools"]}
-
-        http_names = set()
-        for route in app.router.routes:
-            path = getattr(route, "path", None)
-            methods = getattr(route, "methods", None) or set()
-            if path and "POST" in methods and path not in NON_TOOL_PATHS:
-                http_names.add(path.lstrip("/"))
-
-        assert mcp_names == http_names == {"click"}
+            assert_transport_parity(app, client, {"click"})

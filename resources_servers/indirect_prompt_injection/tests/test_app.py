@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 from fastapi import Request
 from pytest import fixture
 
+from nemo_gym.mcp_test_utils import assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -490,10 +491,6 @@ class TestApp:
             assert "Error executing tool" in resp.json()["output"]
 
 
-RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-
-
 class TestMCPDualTransport:
     """The migration's new surface: MCP list/call with the per-task allowed_tools claim."""
 
@@ -501,54 +498,29 @@ class TestMCPDualTransport:
         config = IPIResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="indirect_prompt_injection")
         return IPIResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def _list_tools(self, client, token=None):
-        headers = dict(RPC_HEADERS)
-        if token:
-            headers[TOKEN_HEADER] = token
-        resp = client.post(
-            "/mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-            follow_redirects=False,
-        )
-        return {t["name"] for t in resp.json()["result"]["tools"]}
-
-    def _call(self, client, name, arguments, token=None):
-        headers = dict(RPC_HEADERS)
-        if token:
-            headers[TOKEN_HEADER] = token
-        resp = client.post(
-            "/mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
-            follow_redirects=False,
-        )
-        return resp.json()["result"]
-
     def test_seed_with_row_tools_scopes_the_mcp_session(self) -> None:
         from fastapi.testclient import TestClient
 
         server = self._server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            seed = client.post(
-                "/seed_session",
-                json={
+            token = seed_token(
+                client,
+                {
                     "environment": SAMPLE_ENV,
                     "responses_create_params": SAMPLE_RESPONSES_CREATE_PARAMS.model_dump(),
                 },
-            ).json()
-            token = seed["mcp"]["headers"][TOKEN_HEADER]
+            )
 
             # tools/list shows exactly the row's tools for this session, not all 90+.
-            assert self._list_tools(client, token=token) == {"get_lab_results", "send_message"}
+            assert set(mcp_list_tools(client, token=token)) == {"get_lab_results", "send_message"}
 
             # In-set call works and shares the HTTP session's state.
-            result = self._call(client, "get_lab_results", {"patient_id": "P001"}, token=token)
+            result = mcp_call(client, "get_lab_results", {"patient_id": "P001"}, token=token)
             assert result.get("isError") is not True
             assert "HbA1c" in result["structuredContent"]["output"]
 
             # Out-of-set call is gated, not just hidden.
-            blocked = self._call(client, "get_patient_record", {"patient_id": "P001"}, token=token)
+            blocked = mcp_call(client, "get_patient_record", {"patient_id": "P001"}, token=token)
             assert blocked["isError"] is True
             assert "not available" in blocked["content"][0]["text"]
 
@@ -558,10 +530,9 @@ class TestMCPDualTransport:
 
         server = self._server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            seed = client.post("/seed_session", json={"environment": SAMPLE_ENV}).json()
-            token = seed["mcp"]["headers"][TOKEN_HEADER]
+            token = seed_token(client, {"environment": SAMPLE_ENV})
 
-            result = self._call(
+            result = mcp_call(
                 client,
                 "send_message",
                 {"recipient": "admin@clinic.example", "subject": "Test", "body": "Hello"},
@@ -577,9 +548,8 @@ class TestMCPDualTransport:
 
         server = self._server()
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            seed = client.post("/seed_session", json={"environment": SAMPLE_ENV}).json()
-            token = seed["mcp"]["headers"][TOKEN_HEADER]
-            assert self._list_tools(client, token=token) == set(TOOL_HANDLERS)
+            token = seed_token(client, {"environment": SAMPLE_ENV})
+            assert set(mcp_list_tools(client, token=token)) == set(TOOL_HANDLERS)
 
     def test_http_routes_are_not_restricted_by_the_claim(self) -> None:
         """Status quo preserved: the claim narrows MCP only; any registry tool executes over HTTP."""
@@ -602,14 +572,5 @@ class TestMCPDualTransport:
 
         server = self._server()
         app = server.setup_webserver()
-        non_tool_paths = {"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"}
-        http_tools = {
-            r.path.lstrip("/")
-            for r in app.router.routes
-            if getattr(r, "path", None)
-            and "POST" in (getattr(r, "methods", None) or set())
-            and r.path not in non_tool_paths
-        }
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
-            mcp_tools = self._list_tools(client)  # unfiltered (no token)
-        assert mcp_tools == http_tools == set(TOOL_HANDLERS)
+            assert_transport_parity(app, client, set(TOOL_HANDLERS))  # unfiltered (no token)
