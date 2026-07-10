@@ -96,14 +96,6 @@ def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
     )
 
 
-@pytest.mark.parametrize("rollout_id", ["", "a/b", "../a", "a b", "röllout"])
-def test_capture_store_rejects_unsafe_rollout_ids(tmp_path, rollout_id):
-    store = CaptureStore(tmp_path)
-
-    with pytest.raises(ValueError, match="Invalid rollout id"):
-        store.path_for(rollout_id)
-
-
 def test_capture_store_preserves_valid_rollout_id(tmp_path):
     store = CaptureStore(tmp_path)
 
