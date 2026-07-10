@@ -118,10 +118,7 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
 
 
-# Failure-routing sentinels read by the rollout dispatcher
-# (nemo_gym.rollout_collection): rows with a failure class go to the failures
-# sidecar (bounded retry on resume) instead of the main jsonl; kill_shaped
-# rows are not persisted at all so resume's set-difference re-dispatches them.
+# Failure-routing sentinels read by the rollout dispatcher (nemo_gym.rollout_collection).
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
@@ -132,8 +129,7 @@ class SandboxKilledError(RuntimeError):
 
 
 def _classify_task_failure(exc: BaseException) -> str:
-    """Route a task failure: 'kill_shaped' (re-dispatch on resume, never a row),
-    'timeout_exceeded' (sidecar, terminal), or 'legitimate' (sidecar, bounded retry)."""
+    """Map a task failure onto the dispatcher's routing classes."""
     if isinstance(exc, SandboxKilledError):
         return "kill_shaped"
     if isinstance(exc, TimeoutError):
@@ -381,8 +377,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             run_log = staging_dir / "out" / "run.log"
             run_tail = run_log.read_text(errors="replace")[-4000:] if run_log.exists() else ""
             detail = (stderr or stdout or run_tail or "no output").strip()
-            # Negative rc = killed by signal; 137/143 = 128+SIGKILL/SIGTERM from the
-            # inner shell. That's the walltime/preemption shape, not a task failure.
+            # rc<0 or 137/143 = killed by signal (walltime/preemption), not a task failure.
             if proc.returncode is not None and (proc.returncode < 0 or proc.returncode in (137, 143)):
                 raise SandboxKilledError(
                     f"direct apptainer exec killed (rc={proc.returncode}) for task {task_id}: {detail[:1000]}"
