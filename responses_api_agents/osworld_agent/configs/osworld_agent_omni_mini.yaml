@@ -1,13 +1,7 @@
 # Nemotron 3 Nano Omni overlay. The Gym adapter sends one current screenshot,
 # retains bounded text-only history, and parses the model's ## Action/## Code
-# protocol. It intentionally does not use the Qwen3-Omni scaffold.
-policy_model:
-  responses_api_models:
-    openai_model:
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: true
-          reasoning_budget: 4096
+# protocol. Select an OpenAI-compatible model transport in a separate config;
+# this overlay intentionally does not create a competing policy model.
 
 osworld_simple_agent:
   responses_api_agents:

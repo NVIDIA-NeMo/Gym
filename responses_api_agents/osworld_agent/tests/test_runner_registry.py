@@ -137,14 +137,14 @@ def test_model_runner_overlays(
     assert server_config["task_timeout"] == task_timeout
 
 
-def test_omni_mini_overlay_enables_hosted_reasoning_template() -> None:
+def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
     config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_omni_mini.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    chat_template = config["policy_model"]["responses_api_models"]["openai_model"]["extra_body"][
-        "chat_template_kwargs"
-    ]
-    assert chat_template == {"enable_thinking": True, "reasoning_budget": 4096}
+    assert "policy_model" not in config
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    assert server_config["runner_name"] == "omni_mini_agent"
+    assert server_config["agent_kwargs"]["thinking"] is True
 
 
 @pytest.mark.parametrize(
