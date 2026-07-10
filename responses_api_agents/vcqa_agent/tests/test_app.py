@@ -416,7 +416,7 @@ class TestJudgeGrade:
             problem_statement="",
             model_answer="anything",
             base_url="https://example.invalid/v1",
-            api_key="dummy",
+            api_key="dummy",  # pragma: allowlist secret
             model_name="judge-model",
         )
         assert result.reward == 0.0
@@ -429,7 +429,7 @@ class TestJudgeGrade:
             problem_statement="",
             model_answer="   ",
             base_url="https://example.invalid/v1",
-            api_key="dummy",
+            api_key="dummy",  # pragma: allowlist secret
             model_name="judge-model",
         )
         assert result.reward == 0.0
@@ -466,7 +466,7 @@ class TestJudgeGrade:
             problem_statement="problem",
             model_answer="answer",
             base_url="https://example.invalid/v1",
-            api_key="dummy",
+            api_key="dummy",  # pragma: allowlist secret
             model_name="judge-model",
         )
         assert result.must_total == 3
@@ -489,7 +489,7 @@ class TestJudgeGrade:
             problem_statement="problem",
             model_answer="answer",
             base_url="https://example.invalid/v1",
-            api_key="dummy",
+            api_key="dummy",  # pragma: allowlist secret
             model_name="judge-model",
         )
         assert result.reward == 0.0
@@ -877,13 +877,13 @@ def test_fetch_artifact_threads_auth_header(tmp_path: Path, monkeypatch: pytest.
             url="https://example.test/file",
             dest_path=dest,
             timeout_s=5,
-            headers={"Authorization": "Bearer abc123"},
+            headers={"Authorization": "Bearer abc123"},  # pragma: allowlist secret
         )
     )
     assert dest.read_bytes() == b"hello world"
     assert captured["method"] == "GET"
     assert captured["url"] == "https://example.test/file"
-    assert captured["headers"] == {"Authorization": "Bearer abc123"}
+    assert captured["headers"] == {"Authorization": "Bearer abc123"}  # pragma: allowlist secret
 
 
 def test_fetch_artifact_omits_headers_when_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
