@@ -1,0 +1,48 @@
+# Example Haystack Agent pipeline for the NeMo Gym haystack_agent.
+# The Agent's chat_generator is a NeMoGymResponsesChatGenerator (calls a native NeMo Gym model
+# server). Tools live entirely on the Haystack side; swap `get_weather` for your own Tool /
+# PipelineTool (e.g. a retrieval sub-pipeline). Regenerate with Haystack's Pipeline.dumps().
+components:
+  agent:
+    init_parameters:
+      chat_generator:
+        init_parameters:
+          generation_kwargs: {}
+          server_name: policy_model
+        type: responses_api_agents.haystack_agent.chat_generator.NeMoGymResponsesChatGenerator
+      exit_conditions:
+      - text
+      hooks: null
+      max_agent_steps: 6
+      raise_on_tool_invocation_failure: false
+      required_variables: null
+      state_schema: {}
+      streaming_callback: null
+      system_prompt: You are a helpful assistant. Always use the get_weather tool when the
+        user asks about weather. When you have enough information, reply with a concise
+        final answer and no further tool calls.
+      tool_concurrency_limit: 4
+      tool_streaming_callback_passthrough: false
+      tools:
+      - data:
+          async_function: null
+          description: Get the current weather for a given city.
+          function: responses_api_agents.haystack_agent.example_tools.get_weather
+          inputs_from_state: null
+          name: get_weather
+          outputs_to_state: null
+          outputs_to_string: null
+          parameters:
+            properties:
+              city:
+                type: string
+            required:
+            - city
+            type: object
+        type: haystack.tools.tool.Tool
+      user_prompt: null
+    type: haystack.components.agents.agent.Agent
+connection_type_validation: true
+connections: []
+max_runs_per_component: 100
+metadata: {}
