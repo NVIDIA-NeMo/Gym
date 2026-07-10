@@ -811,15 +811,6 @@ def get_global_config_dict(
     return _GLOBAL_CONFIG_DICT
 
 
-def peek_global_config_dict() -> Optional[DictConfig]:
-    """Return the cached global config if already loaded, else ``None`` (never triggers a CLI parse).
-
-    Lets best-effort consumers (e.g. model-call capture) read the config when it is
-    available without forcing a Hydra argv parse when it is not (unit tests / non-CLI callers).
-    """
-    return _GLOBAL_CONFIG_DICT
-
-
 def _apply_verbosity(global_config_dict: DictConfig) -> None:
     """Set logging to DEBUG when `verbose` is in the config. Runs in the CLI process and, because the
     config dict is forwarded to every spun-up server, in each server process too."""

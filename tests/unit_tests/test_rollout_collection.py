@@ -41,6 +41,14 @@ from nemo_gym.rollout_collection import (
 )
 
 
+@pytest.fixture
+def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    get_global_config_dict = MagicMock(return_value={})
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
+    return get_global_config_dict
+
+
 class TestLoadsJsonlLine:
     def test_parses_valid_line(self) -> None:
         assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
@@ -530,7 +538,13 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
-    async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
+    async def test_run_from_config_sanity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -575,6 +589,9 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        empty_global_config.assert_called_once_with()
+        clear_captures.assert_not_called()
+        merge_capture.assert_not_called()
 
         expected_results = [
             {
@@ -644,7 +661,7 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
-    async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
+    async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -983,7 +1000,9 @@ class TestDisableAggregationAndCallerTaskIndex:
     the existing default-on aggregation + auto-numbering behaviour.
     """
 
-    async def test_run_from_config_disable_aggregation_skips_call(self, tmp_path: Path) -> None:
+    async def test_run_from_config_disable_aggregation_skips_call(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
         """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
 
         Shows up in chunked-rollouts flows where the aggregation pass is deferred

@@ -26,7 +26,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Mapping, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -793,7 +793,7 @@ def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
     return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
 
 
-def rollout_id_from_run_body(body: Any) -> Optional[str]:
+def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
     """Per-rollout model-call capture id from a run-request's task/rollout indices.
 
     Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
@@ -802,9 +802,9 @@ def rollout_id_from_run_body(body: Any) -> Optional[str]:
     stay separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
     key for backward compatibility.
     """
-    if hasattr(body, "model_dump"):
+    if isinstance(body, BaseModel):
         data = body.model_dump()
-    elif isinstance(body, dict):
+    elif isinstance(body, Mapping):
         data = body
     else:
         return None
@@ -814,9 +814,8 @@ def rollout_id_from_run_body(body: Any) -> Optional[str]:
         return None
     rollout_id = f"{task}-{rollout}"
     attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
-    try:
-        if attempt is not None and int(attempt) > 0:
-            rollout_id = f"{rollout_id}-a{int(attempt)}"
-    except (TypeError, ValueError):
-        pass
+    if attempt is not None:
+        attempt_index = int(attempt)
+        if attempt_index > 0:
+            rollout_id = f"{rollout_id}-a{attempt_index}"
     return rollout_id

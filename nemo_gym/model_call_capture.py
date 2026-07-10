@@ -23,12 +23,14 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+import orjson
 from pydantic import BaseModel, Field
 
 
-def _sanitize(rollout_id: str) -> str:
-    cleaned = "".join(c for c in rollout_id if c.isalnum() or c in ("-", "_", "."))
-    return cleaned or "rollout"
+def _validate_rollout_id(rollout_id: str) -> str:
+    if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
+        raise ValueError(f"Invalid rollout id: {rollout_id!r}")
+    return rollout_id
 
 
 class CaptureStore:
@@ -44,7 +46,7 @@ class CaptureStore:
         return self._root
 
     def path_for(self, rollout_id: str) -> Path:
-        return self._root / f"{_sanitize(rollout_id)}.capture.jsonl"
+        return self._root / f"{_validate_rollout_id(rollout_id)}.capture.jsonl"
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
@@ -54,13 +56,13 @@ class CaptureStore:
         serializes threads. This does blocking file IO + fsync, so callers run it off the event
         loop (the capture middleware offloads it via ``asyncio.to_thread``).
         """
-        line = json.dumps(exchange, default=str, ensure_ascii=False)
+        line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
         with self._lock:
-            with path.open("a", encoding="utf-8") as handle:
+            with path.open("ab") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:
-                    handle.write(line + "\n")
+                    handle.write(line)
                     handle.flush()
                     os.fsync(handle.fileno())
                 finally:
@@ -72,15 +74,17 @@ class CaptureStore:
             return []
         exchanges: list[dict[str, Any]] = []
         # Stream line-by-line; a capture can be large (token-ids / logprobs).
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
+        with self._lock:
+            with path.open("rb") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
                 try:
-                    exchanges.append(json.loads(stripped))
-                except json.JSONDecodeError:
-                    continue
+                    for line in handle:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        exchanges.append(orjson.loads(stripped))
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
 
 

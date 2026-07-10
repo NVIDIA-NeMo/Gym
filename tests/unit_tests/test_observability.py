@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
+import orjson
+import pytest
 from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 
@@ -30,6 +32,46 @@ from nemo_gym.observability import install_model_call_capture, make_capture_stor
 
 def test_make_capture_store_disabled_returns_none():
     assert make_capture_store(SimpleNamespace(observability_enabled=False)) is None
+
+
+@pytest.mark.parametrize("rollout_id", ["", "a/b", "../a", "a b", "röllout"])
+def test_capture_store_rejects_unsafe_rollout_ids(tmp_path, rollout_id):
+    store = CaptureStore(tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        store.path_for(rollout_id)
+
+
+def test_capture_store_preserves_valid_rollout_id(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    assert store.path_for("task-1_a.2").name == "task-1_a.2.capture.jsonl"
+
+
+def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.path_for("rollout-1").write_bytes(b"\n")
+    exchange = {
+        "request": {"text": "Unicode payload: café 東京", "path": tmp_path / "payload"},
+        "response": {},
+    }
+
+    store.record("rollout-1", exchange)
+
+    assert store.read("rollout-1") == [
+        {
+            "request": {"text": "Unicode payload: café 東京", "path": str(tmp_path / "payload")},
+            "response": {},
+        }
+    ]
+
+
+def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.path_for("rollout-1").write_bytes(b'{"request": {}}\n{not-json}\n')
+
+    with pytest.raises(orjson.JSONDecodeError):
+        store.read("rollout-1")
 
 
 def test_build_model_call_record_from_exchange():
@@ -343,24 +385,25 @@ def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
     assert match and match.group("rollout_id") == "task-7" and match.group("rest") == "/v1/chat/completions"
 
 
-def test_rollout_id_from_run_body_reads_canonical_indices():
+def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
     from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.server_utils import rollout_id_from_run_body
+    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
 
-    assert rollout_id_from_run_body({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}) == "3-1"
-    assert rollout_id_from_run_body({TASK_INDEX_KEY_NAME: 3}) is None  # partial -> None
-    assert rollout_id_from_run_body({}) is None
-    assert rollout_id_from_run_body(None) is None
+    mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
+    assert maybe_rollout_id_from_run_body(mapping) == "3-1"
+    assert maybe_rollout_id_from_run_body({TASK_INDEX_KEY_NAME: 3}) is None  # partial -> None
+    assert maybe_rollout_id_from_run_body({}) is None
+    assert maybe_rollout_id_from_run_body(None) is None
 
     # The shape agents actually receive: a run-request model with extra="allow".
     class _Body(BaseModel):
         model_config = ConfigDict(extra="allow")
 
     body = _Body.model_validate({TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 2})
-    assert rollout_id_from_run_body(body) == "5-2"
+    assert maybe_rollout_id_from_run_body(body) == "5-2"
 
 
 # --- error classification ---
@@ -432,12 +475,6 @@ def test_record_swallows_store_failure():
         error_category=None,
         latency_ms=1.0,
     )
-
-
-def test_capture_store_read_skips_blank_and_bad_lines(tmp_path):
-    store = CaptureStore(tmp_path)
-    store.path_for("r").write_text('{"a": 1}\n\nnot json\n{"b": 2}\n')
-    assert store.read("r") == [{"a": 1}, {"b": 2}]
 
 
 def test_capture_records_non_json_response_as_none(tmp_path):
@@ -727,15 +764,17 @@ def test_reconstruct_streamed_response_best_effort_none():
     assert _reconstruct_streamed_response(ping, "responses") is None
 
 
-def test_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.server_utils import rollout_id_from_run_body
+def test_maybe_rollout_id_from_run_body_attempt_suffix():
+    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
-    assert rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
-    assert rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # attempt 0 -> bare (back-compat)
-    assert rollout_id_from_run_body({**base, "_ng_attempt_index": 1}) == "3-2-a1"
-    assert rollout_id_from_run_body({**base, "_ng_attempt_index": "2"}) == "3-2-a2"  # coerced
-    assert rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
+    assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
+    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # first attempt -> bare
+    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 1}) == "3-2-a1"
+    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "2"}) == "3-2-a2"  # coerced
+    assert maybe_rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
+    with pytest.raises(ValueError):
+        maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
 def test_model_call_capture_dirs_from_config_resolves_env_and_config(tmp_path):
@@ -828,6 +867,18 @@ def test_merge_capture_noop_without_capture(tmp_path):
     assert "ng_model_call_capture" not in rec
 
 
+def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
+    from nemo_gym.observability import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.path_for("9-9").write_bytes(b"{not-json}\n")
+    record = {"_ng_task_index": 9, "_ng_rollout_index": 9}
+
+    merge_model_call_capture_into_record(record, [])
+    with pytest.raises(orjson.JSONDecodeError):
+        merge_model_call_capture_into_record(record, [tmp_path])
+
+
 def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
     import nemo_gym.observability as obs
     from nemo_gym.observability import clear_model_call_captures_for_rollouts
@@ -843,12 +894,13 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
     assert store.read("1-0")
 
-    # Best-effort: a dir whose store can't be opened is skipped, not raised.
+    # A stale-capture cleanup failure must be visible rather than mixing old and new calls.
     def _boom(_directory):
         raise OSError("cannot open")
 
     monkeypatch.setattr(obs, "CaptureStore", _boom)
-    clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
+    with pytest.raises(OSError, match="cannot open"):
+        clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
 
 
 def test_aggregate_model_call_records_sums_and_counts():
@@ -1020,6 +1072,51 @@ def test_capture_store_concurrent_append_no_loss(tmp_path):
     rows = store.read("0-0")
     assert len(rows) == 20  # flock + in-process lock: no lost or corrupted appends
     assert sorted(r["request"]["i"] for r in rows) == list(range(20))
+
+
+def test_capture_store_read_waits_for_in_progress_append(tmp_path):
+    import fcntl
+    import threading
+
+    store = CaptureStore(tmp_path)
+    path = store.path_for("0-0")
+    writer_ready = threading.Event()
+    finish_write = threading.Event()
+    reader_done = threading.Event()
+    rows = []
+
+    def _write() -> None:
+        with path.open("ab") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.write(b'{"request":')
+                handle.flush()
+                writer_ready.set()
+                assert finish_write.wait(timeout=5)
+                handle.write(b'{},"response":{}}\n')
+                handle.flush()
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _read() -> None:
+        rows.extend(store.read("0-0"))
+        reader_done.set()
+
+    writer = threading.Thread(target=_write)
+    reader = threading.Thread(target=_read)
+    writer.start()
+    assert writer_ready.wait(timeout=5)
+    reader.start()
+    try:
+        assert not reader_done.wait(timeout=0.1)
+    finally:
+        finish_write.set()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert rows == [{"request": {}, "response": {}}]
 
 
 def _cross_process_writer(root: str, base: int) -> None:
