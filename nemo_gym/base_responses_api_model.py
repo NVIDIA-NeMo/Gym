@@ -364,7 +364,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         try:
             response = await self.messages(request, body)
-            mcr_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(response, mcr_dict["request"])
+            mcr_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(
+                response, mcr_dict["request"], model=mcr_dict["request"].model
+            )
             mcr_dict["error_response"] = None
             mcr_dict["raw_response"] = response
 
