@@ -118,12 +118,10 @@ def test_e2e_model_call_capture_through_real_model_server(tmp_path):
         ]
     )
 
-    h = {"x-nemo-gym-rollout-id": "0-0"}
-    r1 = client.post("/v1/responses", json={"input": "solve"}, headers=h)
+    r1 = client.post("/ng-rollout/0-0/v1/responses", json={"input": "solve"})
     r2 = client.post(
-        "/v1/responses",
+        "/ng-rollout/0-0/v1/responses",
         json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-        headers=h,
     )
     assert r1.status_code == 200 and r2.status_code == 200
 
@@ -165,7 +163,7 @@ def test_e2e_error_category_through_real_model_server(tmp_path):
     server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
     server._client.create_response = AsyncMock(side_effect=asyncio.TimeoutError())
 
-    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-timeout"})
+    r = client.post("/ng-rollout/r-timeout/v1/responses", json={"input": "x"})
     assert r.status_code == 500  # response unchanged for the caller
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-timeout")
@@ -180,7 +178,7 @@ def test_e2e_off_by_default_writes_nothing(tmp_path):
     server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
     server._client.create_response = AsyncMock(return_value=_response("hi"))
 
-    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-off"})
+    r = client.post("/ng-rollout/r-off/v1/responses", json={"input": "x"})
     assert r.status_code == 200
     assert CaptureStore(tmp_path).read("r-off") == []  # disabled => no capture
 
@@ -218,8 +216,8 @@ def test_e2e_per_rollout_url_prefix(tmp_path):
 def test_e2e_streaming_messages_is_captured_and_correlated(tmp_path):
     """Claude Code always streams /v1/messages. Through the real server install path the SSE is
     forwarded intact (status 200, text/event-stream) and the call is captured + correlated by the
-    /ng-rollout/<id> URL prefix -- the path the sandboxed CLI uses (it cannot inject headers). The
-    streamed events are also reassembled, so token stats survive on the streamed path too."""
+    /ng-rollout/<id> URL prefix. The streamed events are also reassembled, so token stats survive
+    on the streamed path too."""
     server = _server(tmp_path)
     app = server.setup_webserver()
     client = TestClient(app)

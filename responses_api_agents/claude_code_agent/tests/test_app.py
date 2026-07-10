@@ -606,8 +606,7 @@ class TestRolloutMCPConfig:
 
 
 class TestRolloutCorrelation:
-    """The CLI streams /v1/messages, so correlation rides on the ANTHROPIC_BASE_URL path prefix
-    (headers can't be injected into the sandboxed CLI). These assert the prefix wiring."""
+    """The CLI streams /v1/messages, so correlation rides on the ANTHROPIC_BASE_URL path prefix."""
 
     def _fake_proc(self):
         class FakeProc:

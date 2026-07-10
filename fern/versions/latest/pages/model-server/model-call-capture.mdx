@@ -34,14 +34,11 @@ and fsynced. Capture failures are logged and do not fail model requests.
 
 ## Correlate calls with a rollout
 
-Clients can provide the rollout id in either form:
+Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append their standard
+`/v1/responses`, `/v1/chat/completions`, or `/v1/messages` path after it, and the model server removes
+the rollout prefix before routing.
 
-1. Set the `x-nemo-gym-rollout-id` request header.
-2. Use `/ng-rollout/<rollout_id>/v1` as the model base URL. The model server removes the prefix
-   before routing the request to the standard `/v1/...` endpoint.
-
-Correlation is caller-supplied. A call without a rollout id is stored under the default `rollout`
-key and cannot be attached to a specific rollout record.
+Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
 
 The producer and `rollout_collection` must use the same capture directory. The temporary-directory
 default works only when they share a filesystem. For separate pods or nodes, mount a shared volume

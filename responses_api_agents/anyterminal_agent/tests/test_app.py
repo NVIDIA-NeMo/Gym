@@ -73,6 +73,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
+        assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
         # The runner's agent-agnostic contract is to persist the response where the host reads it.
@@ -502,9 +503,9 @@ class TestBuildAgentCmd:
         assert "agent_done" in script
 
     def test_model_url_env_when_set(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000")
+        cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000/ng-rollout/2-1")
         cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        assert "NGTB_MODEL_URL" in cmd
+        assert "NGTB_MODEL_URL=http://model:8000/ng-rollout/2-1" in cmd
 
     def test_no_model_url_env_when_empty(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, model_server_url="")

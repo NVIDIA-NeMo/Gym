@@ -15,7 +15,6 @@
 import asyncio
 import atexit
 import json
-import re
 import resource
 import sys
 import time
@@ -773,29 +772,25 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-# Per-rollout model-call correlation. A caller tags its model calls by setting
-# ROLLOUT_HEADER or using a /ng-rollout/<rollout_id>/v1 base_url. Producer: apply_rollout_prefix;
-# consumer: the capture middleware in observability.py.
-ROLLOUT_HEADER = "x-nemo-gym-rollout-id"
+# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
+# the capture middleware in observability.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 
-_ROLLOUT_VERSION_SUFFIX_RE = re.compile(r"/v\d+/?$")
+
+def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+    """Return the model-server path prefix for a rollout, or an empty string when unavailable."""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
 
 
 def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-    """Tag a model-server base_url with a rollout id (OpenAI-compatible).
+    """Append a rollout prefix to a model-server root URL.
 
-    No-op when ``rollout_id`` is falsy. Inserts the prefix before a trailing ``/vN`` segment when
-    present, else appends it, so a caller can wrap an already-resolved base_url. The model server
-    strips the prefix before routing, so ``/v1/...`` is unchanged.
+    ``base_url`` must be the server root, without an API-version suffix. SDKs can then append their
+    normal ``/v1/...`` path; the model server strips the rollout prefix before routing.
     """
     if not rollout_id:
         return base_url
-    prefix = f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}"
-    match = _ROLLOUT_VERSION_SUFFIX_RE.search(base_url)
-    if match:
-        return base_url[: match.start()] + prefix + base_url[match.start() :]
-    return base_url.rstrip("/") + prefix
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
 
 
 def rollout_id_from_run_body(body: Any) -> Optional[str]:

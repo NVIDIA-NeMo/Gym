@@ -248,11 +248,10 @@ class TestTrajectoryToOutputItems:
 
 
 class TestRolloutCorrelation:
-    """The rollout header (set by run()) makes responses() build AIAgent with the per-rollout URL
-    prefix on the model base_url, so the model server captures the agent's calls per rollout."""
+    """The prefixed self-call path makes responses() build AIAgent with the same model URL prefix."""
 
-    async def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
-        from fastapi import Request
+    def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
+        from fastapi.testclient import TestClient
 
         import nemo_gym.base_responses_api_agent as base_agent
         from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -262,6 +261,7 @@ class TestRolloutCorrelation:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
         seen: dict = {}
 
@@ -275,15 +275,10 @@ class TestRolloutCorrelation:
                 return {"messages": [{"role": "assistant", "content": "ok"}]}
 
         monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        client = TestClient(agent.setup_webserver())
 
-        def _request(headers: dict) -> Request:
-            return Request({"type": "http", "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
-
-        await agent.responses(
-            request=_request({"x-nemo-gym-rollout-id": "rid"}),
-            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
-        )
+        assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
         assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
 
-        await agent.responses(request=_request({}), body=NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["base_url"] == "http://h:1/v1"
