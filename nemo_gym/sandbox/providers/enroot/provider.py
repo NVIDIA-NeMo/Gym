@@ -86,6 +86,65 @@ class EnrootCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
+def _read_proc_stat_ppid(pid: int) -> int | None:
+    """Return the parent PID from /proc/<pid>/stat, or None if unreadable.
+
+    /proc/<pid>/stat is: ``pid (comm) state ppid pgrp session ...``. comm may contain
+    spaces/parens, so parse the fields AFTER the last ')'.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read().decode(errors="replace")
+        after = data[data.rfind(")") + 2 :].split()
+        return int(after[1])  # state=after[0], ppid=after[1]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_proc_cmdline(pid: int) -> str:
+    """Return /proc/<pid>/cmdline as a space-joined string, or '' if unreadable."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().decode(errors="replace").replace("\x00", " ").strip()
+    except OSError:
+        return ""
+
+
+def _find_pid_in_tree(root_pid: int | None, init_command: str) -> int | None:
+    """Find the container init PID under the ``enroot start`` process (root_pid).
+
+    Nested inside pyxis, enroot runs as real root without a per-container user
+    namespace, so ``enroot list`` cannot map a PID to the container name. Since the
+    detached ``enroot start`` stays in the foreground, the container init is a
+    descendant of it — walk the process tree from root_pid and return the descendant
+    whose cmdline contains the (per-start) init command. root_pid uniquely scopes the
+    search to this one container even under high concurrency.
+    """
+    if root_pid is None:
+        return None
+    # Build ppid -> children over all current processes.
+    children: dict[int, list[int]] = {}
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        ppid = _read_proc_stat_ppid(pid)
+        if ppid is not None:
+            children.setdefault(ppid, []).append(pid)
+    # BFS from root_pid's children; return the first descendant running init_command.
+    stack = list(children.get(root_pid, []))
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if init_command and init_command in _read_proc_cmdline(pid):
+            return pid
+        stack.extend(children.get(pid, []))
+    return None
+
+
 def _require_enroot() -> str:
     """Return the enroot binary path or hard-error if it is not installed."""
     path = shutil.which("enroot")
@@ -524,6 +583,19 @@ class EnrootProvider:
                     f"enroot start exited early (code={instance.proc.returncode}) for {instance.name!r}: {stderr}"
                 )
             pid, _running = await self._lookup_container(instance.name)
+            if pid is None:
+                # Nested-in-pyxis fallback: when enroot runs as real root
+                # (ENROOT_ALLOW_SUPERUSER) it does not create a per-container user
+                # namespace, so `enroot list` shows the container as present but cannot
+                # map a PID to it. The detached `enroot start` stays in the foreground
+                # for the container lifetime, so its init is a descendant — find it by
+                # walking the start process's tree for the init command.
+                pid = await loop.run_in_executor(
+                    None,
+                    _find_pid_in_tree,
+                    instance.start_pgid,
+                    self._create_config.init_command,
+                )
             if pid is not None:
                 return pid
             if deadline is not None and loop.time() >= deadline:
