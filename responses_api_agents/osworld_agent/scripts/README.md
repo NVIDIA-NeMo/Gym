@@ -190,6 +190,9 @@ agent-facing request/response stream to `model-io-agent.jsonl`, the final VLLM
 transport payload/response stream to `model-io-transport.jsonl`, and a
 run-level VM command/response stream to `vm-exec.jsonl`. Full requests retain
 embedded screenshots, so the files are intentionally opt-in and may be large.
+The runner resolves `RUN_DIR` and all three model-I/O paths to absolute paths
+before starting Gym, so agent and policy services cannot split the files
+across their component-specific working directories.
 
 ## Legacy remote-host helper
 

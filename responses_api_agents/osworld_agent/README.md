@@ -543,6 +543,10 @@ The run directory then contains:
   the raw vLLM response or transport error;
 - `vm-exec.jsonl`: controller commands and VM responses across the run.
 
+The launcher resolves `RUN_DIR` and these three output paths to absolute paths
+before it starts the component services. This keeps the agent and transport
+evidence together even though their servers use different working directories.
+
 Every event has `schema_version`, an event name, call/step identifiers,
 nanosecond timestamps, and a process id. Embedded image data remains in the
 full request; a separate image index records encoded/decoded sizes and

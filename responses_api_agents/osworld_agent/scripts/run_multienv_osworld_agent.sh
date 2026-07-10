@@ -16,12 +16,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GYM_ROOT="${GYM_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 cd "${GYM_ROOT}"
+GYM_ROOT="$(pwd -P)"
+
+gym_absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "${GYM_ROOT}" "$1" ;;
+    esac
+}
 
 AGENT_NAME="${AGENT_NAME:-osworld_simple_agent}"
 RUNNER_NAME="${RUNNER_NAME:-prompt_agent}"
 INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
 RUN_TAG="${RUN_TAG:-osworld-multienv-${RUNNER_NAME}-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${RUN_DIR:-results/${RUN_TAG}}"
+RUN_DIR="$(gym_absolute_path "${RUN_DIR}")"
+export RUN_DIR
 OUTPUT_JSONL="${OUTPUT_JSONL:-${RUN_DIR}/rollouts.jsonl}"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 LIMIT="${LIMIT:-4}"
@@ -54,9 +64,10 @@ MAX_STEPS="${MAX_STEPS:-}"
 mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")"
 
 if [[ "${FULL_MODEL_IO}" == "1" ]]; then
-    export OSWORLD_MODEL_IO_LOG="${OSWORLD_MODEL_IO_LOG:-${RUN_DIR}/model-io-agent.jsonl}"
-    export OSWORLD_TRANSPORT_IO_LOG="${OSWORLD_TRANSPORT_IO_LOG:-${RUN_DIR}/model-io-transport.jsonl}"
-    export OSWORLD_VM_EXEC_LOG="${OSWORLD_VM_EXEC_LOG:-${RUN_DIR}/vm-exec.jsonl}"
+    OSWORLD_MODEL_IO_LOG="$(gym_absolute_path "${OSWORLD_MODEL_IO_LOG:-${RUN_DIR}/model-io-agent.jsonl}")"
+    OSWORLD_TRANSPORT_IO_LOG="$(gym_absolute_path "${OSWORLD_TRANSPORT_IO_LOG:-${RUN_DIR}/model-io-transport.jsonl}")"
+    OSWORLD_VM_EXEC_LOG="$(gym_absolute_path "${OSWORLD_VM_EXEC_LOG:-${RUN_DIR}/vm-exec.jsonl}")"
+    export OSWORLD_MODEL_IO_LOG OSWORLD_TRANSPORT_IO_LOG OSWORLD_VM_EXEC_LOG
     mkdir -p \
         "$(dirname "${OSWORLD_MODEL_IO_LOG}")" \
         "$(dirname "${OSWORLD_TRANSPORT_IO_LOG}")" \
