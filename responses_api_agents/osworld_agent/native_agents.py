@@ -440,6 +440,7 @@ class NemotronV3Agent:
         client_password: str = "password",  # pragma: allowlist secret
         thinking: bool = True,
         parse_retries: int = 5,
+        log_context: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
         if coordinate_type not in {"relative", "absolute", "qwen25"}:
@@ -463,6 +464,9 @@ class NemotronV3Agent:
         self.client_password = client_password
         self.thinking = thinking
         self.parse_retries = max(1, parse_retries)
+        self.log_context = {
+            str(key): value for key, value in dict(log_context or {}).items() if value is not None and value != ""
+        }
         prompt = SYSTEM_PROMPT_THINKING if thinking else SYSTEM_PROMPT_NON_THINKING
         self.system_prompt = prompt.replace("{password}", client_password)
         self.assistant_history_template = (
@@ -480,6 +484,11 @@ class NemotronV3Agent:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
 
         raise RuntimeError("NemotronV3Agent requires an injected Gym model transport")
+
+    def _log_event_context(self, *, step: int, parse_attempt: int) -> Dict[str, Any]:
+        context = dict(self.log_context)
+        context.update({"step": step, "parse_attempt": parse_attempt})
+        return context
 
     def _assistant_history(self, cot: Dict[str, Any]) -> str:
         return self.assistant_history_template.format(
@@ -560,6 +569,9 @@ class NemotronV3Agent:
 
         for attempt in range(self.parse_retries):
             response: Any = None
+            step_number = len(self.actions) + 1
+            parse_attempt = attempt + 1
+            call_log_context = self._log_event_context(step=step_number, parse_attempt=parse_attempt)
             payload: Dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
@@ -567,6 +579,7 @@ class NemotronV3Agent:
                 "temperature": self.temperature if attempt == 0 else max(0.2, self.temperature),
                 "_nemo_gym_return_message": True,
                 "_nemo_gym_require_stop": True,
+                "_osworld_log_context": call_log_context,
             }
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
@@ -587,12 +600,14 @@ class NemotronV3Agent:
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
-                            "schema_version": 1,
+                            **call_log_context,
+                            "schema_version": 2,
                             "event": "agent_parse",
                             "timestamp_unix_ns": time.time_ns(),
                             "pid": os.getpid(),
-                            "step": len(self.actions) + 1,
-                            "attempt": attempt + 1,
+                            "step": step_number,
+                            "attempt": parse_attempt,
+                            "parse_attempt": parse_attempt,
                             "normalized_model_response": response,
                             "parsed_low_level": low_level,
                             "parsed_actions": actions,
@@ -605,12 +620,14 @@ class NemotronV3Agent:
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
-                            "schema_version": 1,
+                            **call_log_context,
+                            "schema_version": 2,
                             "event": "agent_parse_error",
                             "timestamp_unix_ns": time.time_ns(),
                             "pid": os.getpid(),
-                            "step": len(self.actions) + 1,
-                            "attempt": attempt + 1,
+                            "step": step_number,
+                            "attempt": parse_attempt,
+                            "parse_attempt": parse_attempt,
                             "normalized_model_response": response,
                             "error_type": type(exc).__name__,
                             "error": repr(exc),

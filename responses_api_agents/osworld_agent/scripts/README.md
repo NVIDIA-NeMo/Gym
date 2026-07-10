@@ -73,6 +73,17 @@ The script writes per-task logs, trajectories, screenshots, VM execution logs,
 and result metadata under `${RUN_DIR}/task-artifacts`. Disable them with
 `TASK_ARTIFACTS=0`, or move them with `TASK_ARTIFACT_ROOT=/path/to/artifacts`.
 
+For adapter-parity debugging, add `FULL_MODEL_IO=1`. This writes the complete
+agent-facing request/response stream to `model-io-agent.jsonl`, the final VLLM
+transport payload/response stream to `model-io-transport.jsonl`, and a
+run-level VM command/response stream to `vm-exec.jsonl`. Full requests retain
+embedded screenshots, so the files are intentionally opt-in and may be large.
+Each schema-v2 event includes the run/task/domain/attempt/step identity; the
+transport service receives it through headers rather than model-body fields.
+The runner resolves `RUN_DIR` and all three model-I/O paths to absolute paths
+before starting Gym, so agent and policy services cannot split the files
+across their component-specific working directories.
+
 Use `FULL_MODEL_IO=1` only for targeted diagnostics. It records full agent and
 vLLM payloads, including embedded screenshots, in the run directory.
 

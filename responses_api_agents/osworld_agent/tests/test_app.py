@@ -26,6 +26,8 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     OSWorldVerifyResponse,
     _append_model_io,
+    _build_messages_model_fn,
+    _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
     _resolve_policy_model_name,
@@ -104,6 +106,72 @@ def test_full_model_io_writer_keeps_payload_and_indexes_images(monkeypatch, tmp_
             "decoded_sha256": hashlib.sha256(b"abc").hexdigest(),
         }
     ]
+
+
+def test_log_context_headers_do_not_change_model_payload() -> None:
+    context = {
+        "run_id": "run-001",
+        "adapter": "gym",
+        "task_id": "task-001",
+        "domain": "chrome",
+        "task_attempt": 2,
+        "step": 3,
+        "parse_attempt": 1,
+    }
+
+    assert _log_context_headers(context) == {
+        "x-osworld-run-id": "run-001",
+        "x-osworld-adapter": "gym",
+        "x-osworld-task-id": "task-001",
+        "x-osworld-domain": "chrome",
+        "x-osworld-task-attempt": "2",
+        "x-osworld-step": "3",
+        "x-osworld-parse-attempt": "1",
+    }
+
+
+@patch("openai.OpenAI")
+def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_openai, monkeypatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-agent.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+    client = mock_openai.return_value
+    client.chat.completions.create.return_value = response
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",
+        log_context={"run_id": "run-001", "adapter": "gym", "task_id": "task-001"},
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "inspect"}]}]
+    payload = {
+        "model": "policy",
+        "messages": messages,
+        "max_tokens": 32,
+        "temperature": 0.6,
+        "_nemo_gym_return_message": True,
+        "_osworld_log_context": {"step": 4, "parse_attempt": 2},
+    }
+
+    call(messages, payload)
+
+    sent = client.chat.completions.create.call_args.kwargs
+    assert sent["messages"] == messages
+    assert "_osworld_log_context" not in sent
+    assert sent["extra_headers"]["x-osworld-task-id"] == "task-001"
+    assert sent["extra_headers"]["x-osworld-step"] == "4"
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in rows] == ["model_request", "model_response"]
+    assert all(row["task_id"] == "task-001" for row in rows)
+    assert all(row["step"] == 4 for row in rows)
+    assert all(row["parse_attempt"] == 2 for row in rows)
+    assert rows[0]["openai_request"] == {
+        "model": "policy",
+        "messages": messages,
+        "max_tokens": 32,
+        "temperature": 0.6,
+    }
 
 
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
@@ -433,8 +501,10 @@ class TestApp:
         mock_remote,
         mock_get_first_server_config_dict,
         mock_load_from_global_config,
+        monkeypatch,
     ) -> None:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("RUN_TAG", "run-001")
 
         # Mock the Ray-remote ``.options(...).remote(...)`` call chain.
         future = MagicMock()
@@ -467,6 +537,13 @@ class TestApp:
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
         assert positional_args[1]["evaluator_disable_gpu"] is True
+        assert positional_args[1]["log_context"] == {
+            "run_id": "run-001",
+            "adapter": "gym",
+            "task_id": "test-task-001",
+            "domain": "chrome",
+            "task_attempt": 1,
+        }
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")

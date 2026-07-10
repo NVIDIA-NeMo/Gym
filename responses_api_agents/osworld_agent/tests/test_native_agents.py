@@ -290,7 +290,18 @@ def test_nemotron_agent_retries_invalid_python_action() -> None:
 def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
-    agent = NemotronV3Agent(model="policy", max_steps=2, parse_retries=2)
+    agent = NemotronV3Agent(
+        model="policy",
+        max_steps=2,
+        parse_retries=2,
+        log_context={
+            "run_id": "run-001",
+            "adapter": "gym",
+            "task_id": "task-001",
+            "domain": "chrome",
+            "task_attempt": 1,
+        },
+    )
     responses = [
         {
             "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(]\n```",
@@ -310,6 +321,9 @@ def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> N
     assert [row["event"] for row in rows] == ["agent_parse_error", "agent_parse"]
     assert rows[0]["attempt"] == 1
     assert rows[1]["attempt"] == 2
+    assert all(row["task_id"] == "task-001" for row in rows)
+    assert all(row["step"] == 1 for row in rows)
+    assert [row["parse_attempt"] for row in rows] == [1, 2]
     assert rows[1]["parsed_actions"] == ["pyautogui.click(960, 540)"]
 
 

@@ -918,6 +918,7 @@ def run_osworld_task(
     policy_top_p: Optional[float] = 0.9,
     evaluator_disable_gpu: bool = True,
     reward_mode: str = "binary",
+    log_context: Optional[Mapping[str, Any]] = None,
 ) -> RolloutResult:
     """Run a single OSWorld task and return a structured result.
 
@@ -954,6 +955,17 @@ def run_osworld_task(
     )
     env_cls = load_attr(runner_spec.env_class_path)
     instruction = task_config.get("instruction", "")
+    event_context = dict(log_context or {})
+    event_context.update(
+        {
+            "adapter": "gym",
+            "task_id": _safe_task_id(task_config),
+            "domain": task_config.get("domain")
+            or task_config.get("snapshot")
+            or next(iter(task_config.get("related_apps") or []), None),
+        }
+    )
+    event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
     _patch_extension_name_aliases()
 
     env: Optional[Any] = None
@@ -1070,6 +1082,7 @@ def run_osworld_task(
                 "max_image_history_length": max_trajectory_length,
             }
             nemotron_kwargs.update(runner_spec.agent_kwargs)
+            nemotron_kwargs["log_context"] = event_context
             native_agent = agent_cls(**nemotron_kwargs)
 
             def _call_nemotron_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> Any:
@@ -1214,6 +1227,7 @@ def run_osworld_task(
         if task_artifacts is not None:
             _vm_exec_log_paths.append(os.path.join(task_artifacts.directory, "vm-exec.jsonl"))
         _vm_exec_log_paths = list(dict.fromkeys(_vm_exec_log_paths))
+        _current_step = [0]
         if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
             for vm_exec_log_path in _vm_exec_log_paths:
                 os.makedirs(os.path.dirname(vm_exec_log_path), exist_ok=True)
@@ -1227,8 +1241,11 @@ def run_osworld_task(
                 try:
                     record = json.dumps(
                         {
+                            **event_context,
+                            "schema_version": 2,
                             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                             "task_id": _safe_task_id(task_config),
+                            "step": _current_step[0],
                             "call_idx": idx,
                             "command": command or "",
                             "response": result if isinstance(result, dict) else {"_repr": repr(result)},
@@ -1385,6 +1402,8 @@ def run_osworld_task(
             step_done = False
             step_reward = 0.0
             step_info: Dict[str, Any] = {}
+            if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
+                _current_step[0] = step_idx + 1
             for action in actions:
                 task_logger.info("Step %d executing action: %r", step_idx + 1, action)
                 try:

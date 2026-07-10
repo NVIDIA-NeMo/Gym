@@ -27,7 +27,7 @@ import re
 import sys
 import time
 from asyncio import Semaphore
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
@@ -54,6 +54,47 @@ from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NA
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
+
+_OSWORLD_LOG_CONTEXT_FIELDS = (
+    "run_id",
+    "adapter",
+    "task_id",
+    "domain",
+    "task_attempt",
+    "step",
+    "parse_attempt",
+)
+_OSWORLD_LOG_CONTEXT_HEADERS = {field: f"x-osworld-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS}
+
+
+def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """Keep the small, non-secret identity fields allowed in evidence logs."""
+
+    if not isinstance(context, Mapping):
+        return {}
+    normalized: Dict[str, Any] = {}
+    for field in _OSWORLD_LOG_CONTEXT_FIELDS:
+        value = context.get(field)
+        if value is None or value == "":
+            continue
+        if field in {"task_attempt", "step", "parse_attempt"}:
+            try:
+                normalized[field] = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            normalized[field] = str(value)
+    return normalized
+
+
+def _log_context_headers(context: Mapping[str, Any] | None) -> Dict[str, str]:
+    """Encode OSWorld identity as headers without changing the model body."""
+
+    headers: Dict[str, str] = {}
+    for field, value in _normalize_log_context(context).items():
+        header_value = str(value).replace("\r", "").replace("\n", "")
+        headers[_OSWORLD_LOG_CONTEXT_HEADERS[field]] = header_value[:1024]
+    return headers
 
 
 def _jsonable(value: Any) -> Any:
@@ -285,6 +326,7 @@ def _build_messages_model_fn(
     base_url: str,
     model_name: str,
     api_key: str,
+    log_context: Optional[Mapping[str, Any]] = None,
 ):
     """Return a sync model caller for native OSWorld agents.
 
@@ -296,9 +338,12 @@ def _build_messages_model_fn(
 
     client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
     call_index = 0
+    base_log_context = _normalize_log_context(log_context)
 
     def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Any:
         nonlocal call_index
+        call_log_context = dict(base_log_context)
+        call_log_context.update(_normalize_log_context(payload.get("_osworld_log_context")))
         create_kwargs: Dict[str, Any] = {
             "model": payload.get("model") or model_name,
             "messages": messages,
@@ -320,7 +365,8 @@ def _build_messages_model_fn(
             started_ns = time.time_ns()
             _append_model_io(
                 {
-                    "schema_version": 1,
+                    **call_log_context,
+                    "schema_version": 2,
                     "event": "model_request",
                     "call_index": current_call,
                     "timestamp_unix_ns": started_ns,
@@ -334,13 +380,18 @@ def _build_messages_model_fn(
                 }
             )
         try:
-            resp = client.chat.completions.create(**create_kwargs)
+            request_kwargs = dict(create_kwargs)
+            context_headers = _log_context_headers(call_log_context)
+            if context_headers:
+                request_kwargs["extra_headers"] = context_headers
+            resp = client.chat.completions.create(**request_kwargs)
         except Exception as exc:
             if model_io_enabled:
                 finished_ns = time.time_ns()
                 _append_model_io(
                     {
-                        "schema_version": 1,
+                        **call_log_context,
+                        "schema_version": 2,
                         "event": "model_error",
                         "call_index": current_call,
                         "timestamp_unix_ns": finished_ns,
@@ -374,7 +425,8 @@ def _build_messages_model_fn(
         finished_ns = time.time_ns()
         _append_model_io(
             {
-                "schema_version": 1,
+                **call_log_context,
+                "schema_version": 2,
                 "event": "model_response",
                 "call_index": current_call,
                 "timestamp_unix_ns": finished_ns,
@@ -567,6 +619,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     max_tokens = runner_kwargs.pop("max_tokens")
     temperature = runner_kwargs.pop("temperature")
     top_p = runner_kwargs.pop("top_p")
+    log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     model_fn = _build_model_fn(
         base_url=base_url,
         model_name=model_name,
@@ -579,6 +632,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         base_url=base_url,
         model_name=model_name,
         api_key=api_key,
+        log_context=log_context,
     )
     result = run_osworld_task(
         task_config,
@@ -590,6 +644,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         policy_max_tokens=max_tokens,
         policy_temperature=temperature,
         policy_top_p=top_p,
+        log_context=log_context,
         **runner_kwargs,
     )
     return {
@@ -646,6 +701,20 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
             temperature = body.responses_create_params.temperature or self.config.temperature
             top_p = body.responses_create_params.top_p or self.config.top_p
+            extra = body.model_extra or {}
+            try:
+                task_attempt = int(extra.get("_ng_rollout_index", 0)) + 1
+            except (TypeError, ValueError):
+                task_attempt = 1
+            log_context = _normalize_log_context(
+                {
+                    "run_id": os.environ.get("OSWORLD_RUN_ID") or os.environ.get("RUN_TAG"),
+                    "adapter": "gym",
+                    "task_id": metadata.get("task_id") or task_config.get("id") or task_config.get("task_id"),
+                    "domain": metadata.get("domain") or task_config.get("domain") or task_config.get("snapshot"),
+                    "task_attempt": task_attempt,
+                }
+            )
 
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
@@ -676,6 +745,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "env_class_path": self.config.env_class_path,
                 "agent_class_path": self.config.agent_class_path,
                 "agent_kwargs": self.config.agent_kwargs,
+                "log_context": log_context,
             }
 
             try:

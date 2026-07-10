@@ -59,6 +59,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModelConfig,
     _append_transport_io,
     _transport_images,
+    _transport_log_context,
 )
 
 
@@ -92,6 +93,29 @@ def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_pa
     row = json.loads(log_path.read_text(encoding="utf-8"))
     assert row["request_payload"]["messages"] == messages
     assert row["embedded_images"][0]["decoded_bytes"] == 3
+
+
+def test_transport_log_context_reads_osworld_headers_without_body_fields() -> None:
+    request = MagicMock()
+    request.headers = {
+        "x-osworld-run-id": "run-001",
+        "x-osworld-adapter": "gym",
+        "x-osworld-task-id": "task-001",
+        "x-osworld-domain": "chrome",
+        "x-osworld-task-attempt": "2",
+        "x-osworld-step": "3",
+        "x-osworld-parse-attempt": "1",
+    }
+
+    assert _transport_log_context(request) == {
+        "run_id": "run-001",
+        "adapter": "gym",
+        "task_id": "task-001",
+        "domain": "chrome",
+        "task_attempt": 2,
+        "step": 3,
+        "parse_attempt": 1,
+    }
 
 
 class FakeUUID:

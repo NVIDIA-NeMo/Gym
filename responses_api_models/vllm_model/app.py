@@ -53,6 +53,34 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 
+_OSWORLD_LOG_CONTEXT_HEADERS = {
+    "run_id": "x-osworld-run-id",
+    "adapter": "x-osworld-adapter",
+    "task_id": "x-osworld-task-id",
+    "domain": "x-osworld-domain",
+    "task_attempt": "x-osworld-task-attempt",
+    "step": "x-osworld-step",
+    "parse_attempt": "x-osworld-parse-attempt",
+}
+
+
+def _transport_log_context(request: Request) -> Dict[str, Any]:
+    """Read opt-in OSWorld identity headers without changing the model body."""
+
+    context: Dict[str, Any] = {}
+    for field, header in _OSWORLD_LOG_CONTEXT_HEADERS.items():
+        value = request.headers.get(header)
+        if not value:
+            continue
+        if field in {"task_attempt", "step", "parse_attempt"}:
+            try:
+                context[field] = int(value)
+            except ValueError:
+                continue
+        else:
+            context[field] = value
+    return context
+
 
 def _jsonable(value: Any) -> Any:
     """Return a JSON-compatible representation for transport logs."""
@@ -523,6 +551,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
 
         transport_io_enabled = bool(os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip())
+        log_context = _transport_log_context(request)
         call_index = 0
         started_ns = 0
         if transport_io_enabled:
@@ -533,7 +562,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             started_ns = time_ns()
             _append_transport_io(
                 {
-                    "schema_version": 1,
+                    **log_context,
+                    "schema_version": 2,
                     "event": "transport_request",
                     "call_index": call_index,
                     "timestamp_unix_ns": started_ns,
@@ -552,7 +582,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 finished_ns = time_ns()
                 _append_transport_io(
                     {
-                        "schema_version": 1,
+                        **log_context,
+                        "schema_version": 2,
                         "event": "transport_error_response",
                         "call_index": call_index,
                         "timestamp_unix_ns": finished_ns,
@@ -590,7 +621,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 finished_ns = time_ns()
                 _append_transport_io(
                     {
-                        "schema_version": 1,
+                        **log_context,
+                        "schema_version": 2,
                         "event": "transport_error",
                         "call_index": call_index,
                         "timestamp_unix_ns": finished_ns,
@@ -606,7 +638,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             finished_ns = time_ns()
             _append_transport_io(
                 {
-                    "schema_version": 1,
+                    **log_context,
+                    "schema_version": 2,
                     "event": "transport_response",
                     "call_index": call_index,
                     "timestamp_unix_ns": finished_ns,
