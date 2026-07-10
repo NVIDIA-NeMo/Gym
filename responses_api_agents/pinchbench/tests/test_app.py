@@ -24,7 +24,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.pinchbench.app import PinchBenchAgent, PinchBenchAgentConfig
+from responses_api_agents.pinchbench.app import (
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    PinchBenchAgent,
+    PinchBenchAgentConfig,
+    SandboxKilledError,
+    _classify_task_failure,
+)
 
 
 def make_config(**over) -> PinchBenchAgentConfig:
@@ -34,12 +42,12 @@ def make_config(**over) -> PinchBenchAgentConfig:
         port=0,
         entrypoint="app.py",
         model_base_url="http://endpoint/v1",
-        model_api_key="sk-policy",
+        model_api_key="sk-policy",  # pragma: allowlist secret
         model_name="vendor/model",
         judge_model="judge/model",
         judge_base_url="http://endpoint/v1",
-        judge_api_key="sk-judge",
-        brave_api_key="brave-key",
+        judge_api_key="sk-judge",  # pragma: allowlist secret
+        brave_api_key="brave-key",  # pragma: allowlist secret
     )
     base.update(over)
     return PinchBenchAgentConfig(**base)
@@ -69,7 +77,7 @@ def test_task_env_gateway_mode():
     assert "PINCHBENCH_FORCE_LOCAL" not in env
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
-    assert env["BRAVE_API_KEY"] == "brave-key"
+    assert env["BRAVE_API_KEY"] == "brave-key"  # pragma: allowlist secret
 
 
 def test_build_spec_from_config():
@@ -239,3 +247,113 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     assert resp.status == "error"
     assert resp.task_id == "task_x"
     assert "sandbox exploded" in resp.grading_notes
+
+
+# --- failure routing (resume-after-walltime correctness) ---------------------
+#
+# The dispatcher (nemo_gym.rollout_collection) writes rows WITHOUT a
+# `_ng_failure_class` to the main rollouts jsonl, where `_load_from_cache`
+# treats them as permanently done. A failed task that reaches main is
+# therefore never retried on resume — the pre-fix behavior these tests pin.
+
+
+def _run_body(task_id="task_x"):
+    body = MagicMock()
+    body.model_dump.return_value = {
+        "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+        "verifier_metadata": {"task_id": task_id},
+    }
+    return body
+
+
+def _routed_agent(tmp_path, exc):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def boom(task_id, out_dir):
+        raise exc
+
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch):
+    """Pre-fix vulnerability: a failed task produced a sentinel-free row, which the
+    dispatcher wrote to the main jsonl and resume counted as done forever."""
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def boom(task_id, out_dir):
+        raise RuntimeError("sandbox exploded")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", boom)
+    resp = await agent.run(body=_run_body())
+    dumped = resp.model_dump()
+    assert dumped.get(NG_FAILURE_CLASS_KEY) == "legitimate"  # sidecar, bounded retry
+    assert not dumped.get(NG_NO_PERSIST_KEY)
+    assert not dumped.get(NG_TERMINAL_KEY)
+
+
+@pytest.mark.asyncio
+async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, monkeypatch):
+    """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def killed(task_id, out_dir):
+        raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", killed)
+    resp = await agent.run(body=_run_body())
+    dumped = resp.model_dump()
+    assert dumped.get(NG_FAILURE_CLASS_KEY) == "kill_shaped"
+    assert dumped.get(NG_NO_PERSIST_KEY) is True
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
+    """Per-task timeout consumed its budget: one sidecar row, never retried."""
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def slow(task_id, out_dir):
+        raise TimeoutError("direct apptainer exec timed out for task task_x")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", slow)
+    resp = await agent.run(body=_run_body())
+    dumped = resp.model_dump()
+    assert dumped.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded"
+    assert dumped.get(NG_TERMINAL_KEY) is True
+    assert not dumped.get(NG_NO_PERSIST_KEY)
+
+
+@pytest.mark.asyncio
+async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatch):
+    """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def ok(task_id, out_dir):
+        return None
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", ok)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda task_id, out_dir: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    monkeypatch.setattr(agent, "_response_from_transcript", lambda task_id, out_dir: agent._empty_response(task_id))
+    monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([], ""))
+    resp = await agent.run(body=_run_body())
+    dumped = resp.model_dump()
+    assert dumped["reward"] == 1.0
+    for key in (NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY):
+        assert key not in dumped
+
+
+def test_classify_task_failure_mapping():
+    assert _classify_task_failure(SandboxKilledError("rc=-15")) == "kill_shaped"
+    assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
+    assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
+    assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
