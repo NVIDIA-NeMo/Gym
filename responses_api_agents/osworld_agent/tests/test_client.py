@@ -383,7 +383,7 @@ def test_task_artifacts_capture_logs_trajectory_screenshots_and_result(monkeypat
         {
             "id": "artifact-task",
             "snapshot": "chrome",
-            "instruction": "Capture complete evidence.",
+            "instruction": "Capture complete task logs.",
         },
         model_fn=lambda _system, _instruction, _history: "```DONE```",
         env_class_path="fake.FakeEnv",

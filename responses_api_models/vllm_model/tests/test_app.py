@@ -67,7 +67,7 @@ FIXED_TIME = 1691418000
 FIXED_UUID = "123"
 
 
-def test_transport_evidence_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
+def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("OSWORLD_TRANSPORT_IO_LOG", str(log_path))
     messages = [

@@ -2,11 +2,11 @@
 # =============================================================================
 # bringup_local_host.sh — one-shot host prep for the OSWorld `docker` provider
 # -----------------------------------------------------------------------------
-# Mode A: controller (`ng_run`) and the docker VM host live on the SAME box.
-# This script handles the bits that aren't fixable in the repo:
+# The controller (`ng_run`) and OSWorld Docker VMs run on the same host.
+# This script prepares the required host tools:
 #
 #   1. apt install: docker.io + (recording stack) ffmpeg + xvfb + tigervnc-viewer
-#                   + git/curl/unzip (uv pip install osworld @ git+... needs them)
+#                   + git/curl/unzip
 #   2. enable docker daemon + add $USER to docker group
 #   3. install uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 #   4. symlink uv into /usr/local/bin so ng_run's non-interactive `bash -c`
@@ -21,9 +21,8 @@
 # Usage:
 #   bash bringup_local_host.sh
 #
-# After this completes, follow the agent README's Quickstart:
-#   git clone https://github.com/.../Gym.git -b feature/osworld
-#   cd Gym && uv venv && uv sync --extra dev
+# After this completes, follow the agent README's Quickstart from a Gym
+# checkout and run `uv sync --extra dev`.
 #   # then prestage Ubuntu.qcow2 (see README "First-Run Cache Acquisition" —
 #   # required when concurrency > 1) and run ng_run + ng_collect_rollouts.
 # =============================================================================
@@ -136,7 +135,7 @@ fi
 
 cat <<EOF
 
-✓ Host is ready for OSWorld Mode A. Three things left to do before \`ng_run\`:
+✓ Host is ready for OSWorld. Three things remain before \`ng_run\`:
 
   [1] Get the agent code
   -----------------------------------------------------------------------------

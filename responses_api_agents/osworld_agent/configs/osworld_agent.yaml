@@ -53,8 +53,8 @@ osworld_simple_agent:
       env_class_path: null        # null = runner default DesktopEnv. Custom runners can point at an OSWorld custom env class.
       agent_class_path: null      # null = runner default agent class.
       agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
-      mem_limit_mb: 0           # upstream Docker controls QEMU/container resources internally; nonzero only emits a warning
+      mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
       task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
-      evaluator_disable_gpu: true  # internal nemotron-v3 forced EasyOCR onto CPU; model inference is remote
+      evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention

@@ -360,7 +360,7 @@ def test_omni_mini_agent_sends_one_image_and_keeps_text_history() -> None:
     assert "Click settings." in payloads[1]["messages"][0]["content"]
 
 
-def test_internal_parity_agent_sends_current_image_and_full_text_history() -> None:
+def test_nemotron_agent_sends_current_image_and_full_text_history() -> None:
     agent = NemotronV3Agent(
         model="nemotron-3-nano-omni",
         max_steps=100,

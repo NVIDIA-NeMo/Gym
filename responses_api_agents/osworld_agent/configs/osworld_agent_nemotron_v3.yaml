@@ -1,5 +1,5 @@
-# NVIDIA internal Nemotron v3 OSWorld scaffold, implemented in the Gym
-# adapter rather than a patched OSWorld checkout.
+# Nemotron v3 runner implemented in Gym so it works with an unmodified
+# OSWorld checkout.
 osworld_simple_agent:
   responses_api_agents:
     osworld_agent:

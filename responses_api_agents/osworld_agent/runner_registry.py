@@ -130,8 +130,8 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         observation_type="screenshot",
         agent_class_path=_M3_AGENT,
     ),
-    # NVIDIA's internal nemotron-v3 OSWorld scaffold, moved into the Gym
-    # adapter so the OSWorld dependency does not need model-specific patches.
+    # Nemotron's prompt, history, parser, and coordinate projection live in
+    # the Gym adapter so the OSWorld dependency remains unmodified.
     "nemotron_v3_agent": RunnerSpec(
         name="nemotron_v3_agent",
         kind="nemotron_v3_agent",

@@ -53,7 +53,7 @@ def main() -> int:
     parser.add_argument("--api-key", default="local-vllm")
     parser.add_argument(
         "--model",
-        default="nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        default="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
     )
     parser.add_argument("--models-only", action="store_true")
     parser.add_argument(

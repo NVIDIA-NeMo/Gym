@@ -117,11 +117,10 @@ def test_m3_config_overrides_the_osworld_server_config() -> None:
     [
         ("osworld_agent_nemotron_v3.yaml", "nemotron_v3_agent", 100, 4096, 7200),
         ("osworld_agent_omni_mini.yaml", "omni_mini_agent", 100, 8192, 3600),
-        ("osworld_agent_omni_mini_parity.yaml", "omni_mini_agent", 100, 8192, 7200),
         ("osworld_agent_qwen3_omni.yaml", "qwen3_omni_agent", 100, 32768, 7200),
     ],
 )
-def test_internal_runner_overlays(
+def test_model_runner_overlays(
     config_name: str,
     runner_name: str,
     max_steps: int,
@@ -136,18 +135,6 @@ def test_internal_runner_overlays(
     assert server_config["max_steps"] == max_steps
     assert server_config["max_tokens"] == max_tokens
     assert server_config["task_timeout"] == task_timeout
-
-
-def test_omni_mini_parity_overlay_matches_internal_scaffold() -> None:
-    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_omni_mini_parity.yaml"
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
-
-    assert server_config["agent_class_path"].endswith(".NemotronV3Agent")
-    assert server_config["max_trajectory_length"] == 1
-    assert server_config["sleep_after_execution"] == 5.0
-    assert server_config["reward_mode"] == "raw"
-    assert server_config["agent_kwargs"]["max_image_history_length"] == 1
 
 
 def test_omni_mini_overlay_enables_hosted_reasoning_template() -> None:

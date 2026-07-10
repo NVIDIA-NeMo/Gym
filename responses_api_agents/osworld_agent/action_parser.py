@@ -46,16 +46,8 @@ def parse_actions(model_output: str) -> List[str]:
     matches = _CODE_FENCE_PATTERN.findall(text)
     actions: List[str] = []
     for match in matches:
-        # Pass the fence body through verbatim. An earlier version did
-        # `match.split(";")` here, but that breaks any line whose `;` sits
-        # inside a `# Reflection: ...; ...` comment — agents commonly emit
-        # comment + code in the same code block, and splitting drops the `#`
-        # prefix on the continuation. Python then treats the continuation
-        # as code; e.g. an apostrophe in Chrome's throws SyntaxError, and
-        # the entire pyautogui block silently no-ops. Python natively
-        # handles `;`-separated statements like
-        # `pyautogui.click(1,2); time.sleep(0.5)`, so the pre-split was
-        # unnecessary to begin with.
+        # Preserve the complete fence body. Python already handles
+        # semicolon-separated statements, and comments may contain semicolons.
         block = match.strip()
         if not block:
             continue

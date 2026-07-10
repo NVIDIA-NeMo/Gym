@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapter-owned Nemotron OSWorld agents.
 
-The internal OSWorld ``nemotron-v3`` branch carried model-specific prompt,
-history, parsing, and coordinate logic in ``mm_agents``. Keeping that logic
-here lets Gym use an unmodified OSWorld dependency: the adapter injects the
-actual model call at runtime while OSWorld continues to own DesktopEnv and
-task evaluation. ``NemotronOmniAgent`` specializes the same protocol for the
-hosted Nemotron 3 Nano Omni endpoint, which accepts only one image per prompt.
+The adapter owns model-specific prompting, history, parsing, and coordinate
+projection while OSWorld continues to own ``DesktopEnv`` and task evaluation.
+``NemotronOmniAgent`` specializes the protocol for Nemotron 3 Nano Omni,
+which accepts one image per prompt.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ LOG = logging.getLogger("nemo_gym.osworld_agent.native_agents")
 
 
 def _jsonable(value: Any) -> Any:
-    """Convert parser evidence to JSON without changing rollout behavior."""
+    """Convert parser details to JSON without changing rollout behavior."""
 
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
@@ -40,7 +38,7 @@ def _jsonable(value: Any) -> Any:
 
 
 def _append_agent_io(event: Dict[str, Any]) -> None:
-    """Append parser evidence beside the agent model-I/O events."""
+    """Append parser details beside the agent model-I/O events."""
 
     path = os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip()
     if not path:
@@ -54,7 +52,7 @@ def _append_agent_io(event: Dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
     except OSError:
-        LOG.exception("Failed to append OSWorld parser evidence to %s", path)
+        LOG.exception("Failed to append OSWorld parser log to %s", path)
 
 
 INSTRUCTION_TEMPLATE = (
@@ -169,7 +167,7 @@ def normalize_response_content(content: str) -> str:
 
     The public BF16 checkpoint can emit literal ``\\n`` around Action/Code
     headings. Preserve escapes inside Python fences while restoring the prose
-    structure expected by the internal Nemotron parser.
+    structure expected by the Nemotron response parser.
     """
 
     if not isinstance(content, str):
@@ -339,7 +337,7 @@ def parse_nemotron_response(
     coordinate_type: str,
     thinking: bool,
 ) -> tuple[str, List[str], Dict[str, Any]]:
-    """Parse the internal Nemotron GUI protocol into OSWorld actions."""
+    """Parse the Nemotron GUI protocol into OSWorld actions."""
 
     content, reasoning = _response_parts(response)
     content = normalize_response_content(content).lstrip()
@@ -641,7 +639,7 @@ class NemotronV3Agent:
 class NemotronOmniAgent(NemotronV3Agent):
     """Nemotron 3 Nano Omni scaffold with single-image prompt semantics.
 
-    The hosted reasoning endpoint rejects a request containing more than one
+    Nemotron 3 Nano Omni rejects a request containing more than one
     image. Previous interactions are therefore rendered as bounded text in
     the system message; the current user message is the only image-bearing
     turn. This is deliberately separate from Qwen3-Omni's ``Qwen3VLAgent``:

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Start the official Omni Mini BF16 checkpoint with vLLM 0.20.0.
-# Intended for one B200/H200/H100-80GB GPU. Extra command-line arguments are
-# appended verbatim, for example: ./launch_omni_mini_vllm.sh --download-dir /lustre/cache
+# Extra command-line arguments are appended verbatim, for example:
+# ./launch_omni_mini_vllm.sh --download-dir /path/to/model-cache
 
 set -euo pipefail
 
 MODEL="${MODEL:-nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}"
 MODEL_REVISION="${MODEL_REVISION:-24e67ea000b7c2837fc8f9488aa2008524fac8ba}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-${MODEL}}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-64000}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -29,7 +29,6 @@ cmd=(
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
   --trust-remote-code
   --reasoning-parser nemotron_v3
-  --allowed-local-media-path /
 )
 cmd+=("$@")
 

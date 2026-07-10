@@ -57,7 +57,7 @@ LOG = logging.getLogger("nemo_gym.osworld_agent")
 
 
 def _jsonable(value: Any) -> Any:
-    """Return a JSON-compatible representation for model-I/O evidence."""
+    """Return a JSON-compatible representation for model-I/O logs."""
 
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
@@ -88,7 +88,7 @@ def _model_io_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             encoded = url.split(",", 1)[1] if url.startswith("data:") and "," in url else ""
             try:
                 decoded = base64.b64decode(encoded, validate=False) if encoded else b""
-            except Exception:  # noqa: BLE001 - evidence logging must not break a rollout.
+            except Exception:  # noqa: BLE001 - logging must not break a rollout.
                 decoded = b""
             images.append(
                 {
@@ -119,7 +119,7 @@ def _append_model_io(event: Dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
     except OSError:
-        LOG.exception("Failed to append OSWorld model-I/O evidence to %s", path)
+        LOG.exception("Failed to append OSWorld model-I/O log to %s", path)
 
 
 def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) -> str:
@@ -170,7 +170,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
-    mem_limit_mb: int = 0  # clean upstream Docker controls QEMU/container resources internally
+    mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
     task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
     evaluator_disable_gpu: bool = True

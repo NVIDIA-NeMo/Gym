@@ -55,7 +55,7 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 
 
 def _jsonable(value: Any) -> Any:
-    """Return a JSON-compatible representation for transport evidence."""
+    """Return a JSON-compatible representation for transport logs."""
 
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
@@ -86,7 +86,7 @@ def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             encoded = url.split(",", 1)[1] if url.startswith("data:") and "," in url else ""
             try:
                 decoded = base64.b64decode(encoded, validate=False) if encoded else b""
-            except Exception:  # noqa: BLE001 - evidence logging must not break a request.
+            except Exception:  # noqa: BLE001 - logging must not break a request.
                 decoded = b""
             images.append(
                 {
@@ -102,7 +102,7 @@ def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _append_transport_io(event: Dict[str, Any]) -> None:
-    """Append exact vLLM request/response evidence when explicitly enabled."""
+    """Append exact vLLM request/response data when explicitly enabled."""
 
     path = os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip()
     if not path:
@@ -116,7 +116,7 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
     except OSError:
-        LOG.exception("Failed to append vLLM transport evidence to %s", path)
+        LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):

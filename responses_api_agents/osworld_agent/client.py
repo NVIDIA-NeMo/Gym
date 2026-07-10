@@ -66,14 +66,14 @@ class RolloutResult:
     #  • loop exhausted max_steps without DONE/FAIL (finished=False), or
     #  • task_timeout tripped.
     mask_sample: bool = False
-    # Absolute path to the per-task on-disk evidence bundle when
+    # Absolute path to the per-task log and artifact directory when
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
 
 
 @dataclass
 class _TaskArtifacts:
-    """Per-rollout file handlers and evidence paths.
+    """Per-rollout file handlers and artifact paths.
 
     Ray reuses worker processes, so every handler installed for a task must be
     removed and closed when that task finishes. Keeping the lifecycle in one
@@ -128,10 +128,8 @@ def _flatten_actions(actions: Any) -> List[Any]:
 def _merge_consecutive_pyautogui_actions(actions: List[Any]) -> List[Any]:
     """Execute adjacent Qwen pyautogui calls as one OSWorld step.
 
-    The internal ``nemotron-v3`` branch added this to Qwen3VLAgent so a
-    compound model tool call does not incur a screenshot/wait between every
-    individual key or click. It belongs at the adapter boundary because it is
-    an execution policy, not an OSWorld environment change.
+    This prevents a compound tool call from adding an observation and delay
+    between every individual key or click.
     """
 
     merged: List[Any] = []
@@ -172,9 +170,8 @@ def _link_if_present(source: str, destination: str) -> bool:
 def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
     """Expose pre-staged setup artifacts through OSWorld's per-task cache.
 
-    This is the adapter equivalent of the internal branch's changes to
-    ``DesktopEnv._set_task_info``. Staging before ``env.reset`` avoids any
-    mutation of OSWorld while preserving its existing SetupController flow.
+    Staging before ``env.reset`` preserves OSWorld's existing
+    ``SetupController`` flow without modifying the OSWorld checkout.
     """
 
     task_id = str(task_config.get("id") or task_config.get("task_id") or "")
@@ -221,7 +218,7 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
 
 
 def _patch_extension_name_aliases() -> None:
-    """Apply the internal Chrome extension alias without forking OSWorld."""
+    """Normalize a renamed Chrome extension for stable task evaluation."""
 
     try:
         from desktop_env.evaluators import metrics as metrics_package  # type: ignore
@@ -581,7 +578,7 @@ def _setup_task_artifacts(
     *,
     run_metadata: Dict[str, Any],
 ) -> Optional[_TaskArtifacts]:
-    """Create an internal-OSWorld-style evidence directory for one rollout.
+    """Create a log and artifact directory for one rollout.
 
     The Python boundary is opt-in; the multienv launch script enables it by
     default. A collision-safe directory supports ``num_repeats > 1`` and
@@ -694,7 +691,7 @@ def _append_task_trajectory(
     try:
         with open(artifacts.trajectory_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception:  # noqa: BLE001 - evidence I/O must not fail a rollout.
+    except Exception:  # noqa: BLE001 - artifact I/O must not fail a rollout.
         artifacts.task_logger.exception("Failed to append task trajectory")
 
 
@@ -848,10 +845,8 @@ def _evaluate_osworld_env(
 ) -> float:
     """Call the OSWorld evaluator across DesktopEnv variants.
 
-    Internal OSWorld forced EasyOCR onto CPU to keep evaluation from
-    reserving or initializing rollout GPUs. The Gym worker calls the model
-    remotely, so temporarily hiding CUDA for the whole inline evaluator is a
-    dependency-agnostic equivalent.
+    When requested, temporarily hide CUDA and force EasyOCR onto CPU so the
+    inline evaluator does not reserve GPU memory needed by rollout workers.
     """
 
     evaluate = env.evaluate
@@ -940,7 +935,7 @@ def run_osworld_task(
     if mem_limit_mb > 0:
         LOG.warning(
             "mem_limit_mb=%d is not enforced by the clean upstream Docker provider; "
-            "configure Docker/QEMU resources on the Colossus host instead",
+            "configure Docker/QEMU resources on the rollout host instead",
             mem_limit_mb,
         )
 
@@ -1210,13 +1205,8 @@ def run_osworld_task(
                 "Skipping VM recording for task %s; not selected by OSWORLD_RECORD_VIDEO_TASK_IDS_FILE",
                 task_config.get("id") or task_config.get("task_id") or "unknown",
             )
-        # Opt-in: log every controller.execute_python_command request +
-        # response from the VM's /execute endpoint as JSONL. The /execute
-        # endpoint returns {status, output, error, returncode}; OSWorld's
-        # env.step throws this away, but for debugging we want to see if
-        # pyautogui clicks land an error / non-zero returncode silently in
-        # the VM (hypothesis observed in earlier experiments: clicks hit
-        # the right pixel but the X event never reaches the target window).
+        # Optionally log every controller command and VM response as JSONL.
+        # OSWorld's env.step does not otherwise retain the /execute response.
         _vm_exec_log_paths: List[str] = []
         configured_vm_exec_log = os.environ.get("OSWORLD_VM_EXEC_LOG", "").strip()
         if configured_vm_exec_log:
@@ -1257,83 +1247,9 @@ def run_osworld_task(
         elif _vm_exec_log_paths:
             task_logger.debug("Controller has no execute_python_command; VM exec trace is unavailable")
 
-        # Opt-in one-shot diagnostic: probe the VM's actual display +
-        # pyautogui dimensions. Output lands in OSWORLD_VM_EXEC_LOG (via the
-        # monkey-patch above, if that env var is also set). Useful for
-        # verifying: is the 1920x1080 screenshot resolution actually matched
-        # by what pyautogui sees inside the VM, or is there a coord-scaling
-        # mismatch?
-        if os.environ.get("OSWORLD_VM_DIAG"):
-            try:
-                env.controller.execute_python_command(
-                    "import subprocess\n"
-                    "print('PYAUTOGUI_SIZE:', pyautogui.size())\n"
-                    "print('PYAUTOGUI_POSITION:', pyautogui.position())\n"
-                    "for cmd in (['xrandr','--current'],['xdpyinfo'],['xwininfo','-root']):\n"
-                    "    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)\n"
-                    "    print(f'== {cmd[0]} stdout (rc={r.returncode}) ==')\n"
-                    "    print(r.stdout[:800])\n"
-                    "    if r.stderr: print(f'   stderr: {r.stderr[:200]}')\n"
-                    "print('DISPLAY env:', subprocess.run(['printenv','DISPLAY'], capture_output=True, text=True).stdout.strip())\n"
-                )
-            except Exception:
-                LOG.exception("VM diag probe failed (non-fatal)")
-
-        # NOTE: OSWORLD_CONTROLLED_CLICK setup is wired AFTER the cold-boot
-        # poll below — empirically, controlled-click is meaningless until
-        # Chrome has rendered a real frame (cold-boot ordering rule).
-
-        # Opt-in: replace controller.pkgs_prefix with a version that wraps
-        # pyautogui.click in moveTo → sleep → click(at-current-pos). Some
-        # CSS-styled UI elements (e.g. Chrome's per-row `⋮` menu on
-        # chrome://settings/searchEngines) are hover-gated (CSS
-        # `display:none` until `:hover`). A bare pyautogui.click(x, y)
-        # does moveTo + immediate mouseDown/mouseUp — too fast for the
-        # row's :hover state to render the icon, so the click lands on
-        # empty space. With a 0.5s pause between move and click, the
-        # hover state has time to register and the click lands correctly.
-        if os.environ.get("OSWORLD_HOVER_BEFORE_CLICK"):
-            env.controller.pkgs_prefix = (
-                "import pyautogui as _pa\n"
-                "import time as _t\n"
-                "_pa.FAILSAFE = False\n"
-                "_orig_click = _pa.click\n"
-                "_orig_dbl = _pa.doubleClick\n"
-                "_orig_right = _pa.rightClick\n"
-                "def _hover(x=None, y=None, *a, _orig=None, **kw):\n"
-                "    if x is not None and y is not None and isinstance(x, (int, float)):\n"
-                "        _pa.moveTo(x, y, duration=0.2)\n"
-                "        _t.sleep(0.5)\n"
-                "        return _orig(*a, **kw)\n"
-                "    return _orig(x, y, *a, **kw)\n"
-                "_pa.click = lambda *a, **kw: _hover(*a, _orig=_orig_click, **kw)\n"
-                "_pa.doubleClick = lambda *a, **kw: _hover(*a, _orig=_orig_dbl, **kw)\n"
-                "_pa.rightClick = lambda *a, **kw: _hover(*a, _orig=_orig_right, **kw)\n"
-                "pyautogui = _pa\n"
-                "time = _t\n"
-                "{command}"
-            )
-
-        # Poll the VM screenshot until it shows real desktop content (not a
-        # solid black frame), or until OSWORLD_COLD_BOOT_TIMEOUT_S elapses.
-        # Why polling beats a fixed sleep:
-        #   - A black-screen PNG of a 1920x1080 frame compresses to ~6.4 KB;
-        #     a real desktop with any content is 15-50 KB. The size gap is
-        #     clean enough to use as a "ready" signal.
-        #   - On KVM-enabled hosts (/dev/kvm exposed) the desktop is up in
-        #     ~10-20s; on TCG-only hosts (software emulation, no /dev/kvm)
-        #     it takes 60-90s. A fixed sleep either wastes time on the fast
-        #     path or under-waits on the slow path; polling adapts.
-        #   - The threshold is intentionally conservative so it errs toward
-        #     waiting more, not less. Override via env if a task starts on a
-        #     genuinely small / mostly-blank screen (e.g. a fullscreen black
-        #     terminal).
+        # Wait for the VM to render a non-empty desktop. Polling adapts to
+        # both KVM and slower software-emulated startup.
         cold_boot_timeout = int(os.environ.get("OSWORLD_COLD_BOOT_TIMEOUT_S", "180"))
-        # Empirical step-0 PNG sizes observed during chrome cold-boot:
-        #   ~6 KB = solid black (qemu loading), ~17 KB = Chrome window loading
-        #   with blank New Tab, 19-42 KB = loaded New Tab content, ~58 KB =
-        #   New Tab with extra popups. 10K passes the loading state cleanly;
-        #   25K requires real content. Default set to 25K to err on caution.
         cold_boot_min_png_bytes = int(os.environ.get("OSWORLD_COLD_BOOT_MIN_PNG_BYTES", "25000"))
         cold_boot_poll_s = float(os.environ.get("OSWORLD_COLD_BOOT_POLL_S", "5"))
         boot_start = time.monotonic()
@@ -1361,89 +1277,6 @@ def run_osworld_task(
                 len(obs.get("screenshot") or b""),
             )
 
-        # Capture the focus state of the X server right before the
-        # controlled-click fires. Useful when investigating: is Chrome
-        # actually the X-focused window after cold-boot? If not, synthesized
-        # clicks may land on a different window's client and the target app
-        # never sees them. Output lands in OSWORLD_VM_EXEC_LOG via the
-        # monkey-patch above.
-        if os.environ.get("OSWORLD_CONTROLLED_CLICK"):
-            try:
-                env.controller.execute_python_command(
-                    "import subprocess\n"
-                    "for cmd in (['xdotool','getactivewindow'],\n"
-                    "            ['xdotool','getactivewindow','getwindowname'],\n"
-                    "            ['xdotool','getactivewindow','getwindowgeometry'],\n"
-                    "            ['wmctrl','-l'],\n"
-                    "            ['wmctrl','-lG']):\n"
-                    "    r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)\n"
-                    "    print(f'== {\" \".join(cmd)} rc={r.returncode} ==')\n"
-                    "    print(r.stdout[:600])\n"
-                    "    if r.stderr: print(f'   stderr: {r.stderr[:200]}')\n"
-                )
-            except Exception:
-                LOG.exception("focus diag probe failed (non-fatal)")
-
-        # Opt-in: drive a sequence of controlled moveTo + sleep + click
-        # actions with before/after screenshot capture. Verifies whether a
-        # known coord actually opens the expected UI, bypassing the model.
-        # Useful for debugging click-delivery (does the X event reach the
-        # target window?) without coupling to the model's spatial reasoning.
-        # Pick a target on whatever page is rendered after cold-boot.
-        # Format: OSWORLD_CONTROLLED_CLICK="x,y" or "x,y;x,y;..." for sequence.
-        controlled_click = os.environ.get("OSWORLD_CONTROLLED_CLICK")
-        if controlled_click:
-            cc_dir = os.environ.get("OSWORLD_CONTROLLED_CLICK_DIR", "/tmp/controlled_click")
-            try:
-                os.makedirs(cc_dir, exist_ok=True)
-                LOG.info("OSWORLD_CONTROLLED_CLICK=%r dir=%r", controlled_click, cc_dir)
-                obs_before = env._get_obs()  # noqa: SLF001
-                png_before = obs_before.get("screenshot") if isinstance(obs_before, dict) else None
-                if png_before:
-                    with open(os.path.join(cc_dir, "before.png"), "wb") as fh:
-                        fh.write(png_before)
-                for i, coord_str in enumerate(controlled_click.split(";")):
-                    if not coord_str.strip():
-                        continue
-                    try:
-                        x_str, y_str = coord_str.strip().split(",")
-                        x, y = int(x_str), int(y_str)
-                        # Long mouseDown hold (1.0s). Earlier experiments showed
-                        # 200ms did not rescue some clicks (target app did not
-                        # open even when cursor was visibly on the icon).
-                        # TCG is roughly 50x slower than KVM, so a 200ms hold
-                        # inside TCG may amount to a microscopic interval
-                        # against the emulated input pipeline. 1.0s is
-                        # comfortably in the TCG order-of-magnitude.
-                        env.controller.execute_python_command(
-                            "import time as _t\n"
-                            f"pyautogui.moveTo({x}, {y}, duration=0.3)\n"
-                            "_t.sleep(1.0)\n"
-                            "pyautogui.mouseDown()\n"
-                            "_t.sleep(1.0)\n"
-                            "pyautogui.mouseUp()\n"
-                            "_t.sleep(2.0)\n"
-                        )
-                        obs_after = env._get_obs()  # noqa: SLF001
-                        png_after = obs_after.get("screenshot") if isinstance(obs_after, dict) else None
-                        if png_after:
-                            fname = f"after_click_{i:02d}_x{x}_y{y}.png"
-                            with open(os.path.join(cc_dir, fname), "wb") as fh:
-                                fh.write(png_after)
-                    except Exception:
-                        LOG.exception("Controlled click %d (%r) failed", i, coord_str)
-            except Exception:
-                LOG.exception("OSWORLD_CONTROLLED_CLICK setup failed")
-
-        # Refresh obs so step 0 of the agent loop sees the post-controlled-
-        # click state (whatever the click triggered should be visible to
-        # the agent now).
-        if os.environ.get("OSWORLD_CONTROLLED_CLICK"):
-            try:
-                obs = env._get_obs()  # noqa: SLF001
-            except Exception:
-                LOG.exception("Failed to refresh obs after controlled-click")
-
         initial_screenshot = _save_task_screenshot(task_artifacts, 0, obs)
         _append_task_trajectory(
             task_artifacts,
@@ -1470,66 +1303,6 @@ def run_osworld_task(
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
             }
-            if os.environ.get("OSWORLD_OMIT_SCREENSHOT_IN_OBS"):
-                obs_entry["screenshot_b64"] = ""
-            # Opt-in screenshot dump for debug (set OSWORLD_SAVE_SCREENSHOTS_DIR
-            # to a path on shared storage). Writes <task_id>-step<NN>.png so
-            # we can eyeball what the agent actually saw at each step.
-            screenshots_dir = os.environ.get("OSWORLD_SAVE_SCREENSHOTS_DIR")
-            if screenshots_dir and obs.get("screenshot"):
-                try:
-                    os.makedirs(screenshots_dir, exist_ok=True)
-                    fname = os.path.join(screenshots_dir, f"{task_config.get('id', 'unknown')}-step{step_idx:02d}.png")
-                    with open(fname, "wb") as fh:
-                        fh.write(obs["screenshot"])
-                except Exception:
-                    LOG.exception("Failed to save screenshot for step %d", step_idx)
-            # Opt-in obs diag: per-step log of screenshot size + a11y_tree
-            # size + head. Verifies whether require_a11y_tree=true actually
-            # produces non-empty a11y data — useful when investigating "did
-            # the model see DOM info, or did it fall back to vision-only?"
-            # (same click coords with vs without a11y suggest the latter).
-            obs_diag_log = os.environ.get("OSWORLD_OBS_DIAG_LOG")
-            if obs_diag_log:
-                try:
-                    os.makedirs(os.path.dirname(obs_diag_log), exist_ok=True)
-                    a11y = obs.get("accessibility_tree") or ""
-                    with open(obs_diag_log, "a") as fh:
-                        fh.write(
-                            json.dumps(
-                                {
-                                    "step": step_idx,
-                                    "png_bytes": len(obs.get("screenshot") or b""),
-                                    "a11y_type": type(a11y).__name__,
-                                    "a11y_bytes": len(a11y) if isinstance(a11y, (str, bytes)) else -1,
-                                    "a11y_head": (a11y[:300] if isinstance(a11y, str) else repr(a11y)[:300])
-                                    if a11y
-                                    else "",
-                                }
-                            )
-                            + "\n"
-                        )
-                except Exception:
-                    LOG.exception("Failed to write obs diag for step %d", step_idx)
-            # Opt-in: dump the FULL a11y XML per step to a sidecar dir, so
-            # we can grep for specific UI elements, check whether per-row
-            # menu elements have positions reported, etc. a11y XML is
-            # typically 60-150 KB per step for Chrome / file manager.
-            a11y_dump_dir = os.environ.get("OSWORLD_A11Y_DUMP_DIR")
-            if a11y_dump_dir and obs.get("accessibility_tree"):
-                try:
-                    os.makedirs(a11y_dump_dir, exist_ok=True)
-                    a11y_fpath = os.path.join(
-                        a11y_dump_dir,
-                        f"{task_config.get('id', 'unknown')}-step{step_idx:02d}.xml",
-                    )
-                    a11y_data = obs["accessibility_tree"]
-                    if isinstance(a11y_data, bytes):
-                        a11y_data = a11y_data.decode("utf-8", errors="replace")
-                    with open(a11y_fpath, "w") as fh:
-                        fh.write(a11y_data)
-                except Exception:
-                    LOG.exception("Failed to dump a11y XML for step %d", step_idx)
             history_window = obs_history[-max_trajectory_length:] if max_trajectory_length else []
 
             agent_step_info: Dict[str, Any] = {}
