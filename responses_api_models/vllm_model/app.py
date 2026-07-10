@@ -393,10 +393,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # prompt_logprobs=0,
             )
 
-        if (
-            self.config.uses_reasoning_parser
-            and not self.config.preserve_reasoning_in_assistant_content
-        ):
+        if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") != "assistant" or "content" not in message_dict:
                     continue

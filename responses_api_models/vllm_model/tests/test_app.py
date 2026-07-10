@@ -3394,9 +3394,7 @@ class TestAssistantReasoningHistoryPreprocess:
     def test_preserve_mode_keeps_string_history_byte_for_byte(self) -> None:
         model = _make_reasoning_history_model(preserve_content=True)
         original = "<think>reason</think>\n## Action:\nact"
-        result = model._preprocess_chat_completion_create_params(
-            MagicMock(), self._body(original)
-        )
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
 
         assistant = result["messages"][1]
         assert assistant == {"role": "assistant", "content": original}
@@ -3404,9 +3402,7 @@ class TestAssistantReasoningHistoryPreprocess:
     def test_preserve_mode_keeps_list_history_byte_for_byte(self) -> None:
         model = _make_reasoning_history_model(preserve_content=True)
         original = [{"type": "text", "text": "<think>reason</think>\n## Action:\nact"}]
-        result = model._preprocess_chat_completion_create_params(
-            MagicMock(), self._body(original)
-        )
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
 
         assistant = result["messages"][1]
         assert assistant == {"role": "assistant", "content": original}

@@ -473,7 +473,7 @@ Pre-staged task files remain supported without changing `DesktopEnv`. Set
 `OSWORLD_SETUP_CACHE_DIR`, `OW_SETUP_CACHE_DIR`,
 `SPREADSHEETBENCH_SETUP_CACHE_DIR`, or `PPTC_SETUP_CACHE_DIR`; the adapter
 links matching artifacts into OSWorld's per-task cache before `env.reset()`.
-See [NEMOTRON_V3_MIGRATION.md](NEMOTRON_V3_MIGRATION.md) for the full porting
+See [NEMOTRON-V3-MIGRATION.md](NEMOTRON-V3-MIGRATION.md) for the full porting
 matrix and the changes that intentionally remain outside this adapter.
 
 ### Pointer Agent
