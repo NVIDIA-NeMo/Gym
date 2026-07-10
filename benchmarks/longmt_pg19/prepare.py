@@ -10,22 +10,16 @@ grouped or filtered by context length.
 Books are truncated from the end so the model always sees the beginning of the
 book without skipping content.
 
-Also pre-fetches the SEGALE judge models (LASER2, ersatz, wmt22-cometkiwi-da)
-into their cache directories so the resource server can run with
-HF_HUB_OFFLINE=1 from the first verify() call.
-
 Usage:
     python prepare.py
     python prepare.py --target_languages de_DE fr_FR ja_JP
     python prepare.py --lengths 8 32 65
-    python prepare.py --no_prefetch
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from datasets import load_dataset
@@ -144,48 +138,9 @@ def _truncate_end(text: str, max_tokens: int) -> str:
     return enc.decode(tokens[:max_tokens])
 
 
-def _prefetch_judge_models() -> None:
-    """Pre-fetch LASER2, ersatz, and wmt22-cometkiwi-da into their cache dirs."""
-    laser_home = os.environ.get("LASER_HOME")
-    try:
-        from laser_encoders import LaserEncoderPipeline
-
-        print(f"Pre-fetching LASER2 (LASER_HOME={laser_home})...")
-        LaserEncoderPipeline(laser="laser2", model_dir=laser_home)
-        print("LASER2 cached")
-    except ImportError:
-        print("laser-encoders not installed; skipping LASER2 prefetch")
-    except Exception as exc:
-        print(f"LASER2 prefetch failed (will retry at server start): {exc}")
-
-    try:
-        import ersatz
-
-        print("Pre-fetching ersatz default-multilingual model...")
-        ersatz.split(model="default-multilingual", text=".")
-        print("ersatz cached")
-    except ImportError:
-        print("ersatz not installed; skipping prefetch")
-    except Exception as exc:
-        print(f"ersatz prefetch failed: {exc}")
-
-    try:
-        from comet import download_model, load_from_checkpoint
-
-        print("Pre-fetching Unbabel/wmt22-cometkiwi-da...")
-        ckpt = download_model("Unbabel/wmt22-cometkiwi-da")
-        load_from_checkpoint(ckpt)
-        print("wmt22-cometkiwi-da cached")
-    except ImportError:
-        print("unbabel-comet not installed; skipping COMETKiwi prefetch")
-    except Exception as exc:
-        print(f"COMETKiwi prefetch failed: {exc}")
-
-
 def prepare(
     target_languages: list[str] | None = None,
     lengths: list[int] | None = None,
-    prefetch: bool = True,
 ) -> Path:
     """Download emozilla/pg19 test split and write pg19_benchmark.jsonl.
 
@@ -238,9 +193,6 @@ def prepare(
         f"to {output_fpath}"
     )
 
-    if prefetch:
-        _prefetch_judge_models()
-
     return output_fpath
 
 
@@ -260,10 +212,7 @@ if __name__ == "__main__":
         metavar="N",
         help=f"Truncation lengths in tiktoken tokens (default: {DEFAULT_LENGTHS})",
     )
-    parser.add_argument(
-        "--no_prefetch", action="store_true", help="Skip judge model prefetch (useful on machines without GPU)"
-    )
     args = parser.parse_args()
 
     langs = ALL_LANGUAGES if args.all_languages else args.target_languages
-    prepare(target_languages=langs, lengths=args.lengths, prefetch=not args.no_prefetch)
+    prepare(target_languages=langs, lengths=args.lengths)
