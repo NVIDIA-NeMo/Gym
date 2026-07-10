@@ -634,7 +634,7 @@ class TestErrorHandling:
         client.post("/step", json={}, cookies=cookies)
         assert mock_env_instance.step.call_count == 1
 
-        # Second step should NOT call env.step
+        # Second step should not call env.step
         response = client.post("/step", json={}, cookies=cookies)
         data = response.json()
         assert "error" in data

@@ -117,7 +117,7 @@ class IPIResourcesServer(SimpleResourcesServer):
         # no schemas (per-task schemas live in the dataset rows, which stay the model-facing truth
         # for HTTP agents), so the MCP-advertised schema is a permissive object and call arguments
         # pass through raw. Per-task visibility over MCP comes from the allowed_tools claim minted
-        # in seed_session, which filters tools/list AND gates tools/call for that session.
+        # in seed_session, which filters tools/list and gates tools/call for that session.
         for tool_name, handler in TOOL_HANDLERS.items():
             gym_tool(
                 self._make_tool_closure(tool_name, handler),

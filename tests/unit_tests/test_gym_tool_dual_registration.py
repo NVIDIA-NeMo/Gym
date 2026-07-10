@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Dual-registration test suite: every gym_tool is served over BOTH transports (HTTP POST + MCP).
+"""Dual-registration test suite: every gym_tool is served over both transports (HTTP POST + MCP).
 
 Covers the E-tests from the single-entry-point design review: the full JSON-RPC handshake (E1),
 raw-argument fidelity for dict/model-schema tools (E1b), nested-model parity across transports (E3),
@@ -239,7 +239,7 @@ class TestCrossTransportParity:
 
 
 class TestAllowedToolsClaim:
-    """E5: the signed allowed_tools claim filters tools/list AND gates tools/call (MCP only)."""
+    """E5: the signed allowed_tools claim filters tools/list and gates tools/call (MCP only)."""
 
     def _restricted_token(self, server) -> str:
         request = MagicMock(spec=Request)
@@ -530,7 +530,7 @@ class TestModeCoverage:
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             resp = client.post("/send_message", content=b"{not json", headers={"Content-Type": "application/json"})
             assert resp.status_code == 422
-            assert server.observed_raw_args == {"sentinel": True}  # tool was NOT dispatched
+            assert server.observed_raw_args == {"sentinel": True}  # tool was not dispatched
 
     def test_raw_tool_model_return_renders_structured_content(self) -> None:
         class _ModelReturn(_DualServer):
@@ -652,3 +652,30 @@ class TestNormalizeToolName:
         assert server.normalize_tool_name("mcp__dual_server__bump") == "bump"
         assert server.normalize_tool_name("bump") == "bump"
         assert server.normalize_tool_name("mcp__other_server__bump") == "mcp__other_server__bump"
+
+
+class TestLazyMCPImport:
+    def test_tool_less_server_never_imports_mcp(self) -> None:
+        """The mcp package must not be imported for servers with no gym tools (lazy gate).
+
+        Runs in a fresh subprocess: this test process has long since imported mcp via other tests.
+        """
+        import subprocess
+        import sys
+
+        code = (
+            "import sys\n"
+            "from unittest.mock import MagicMock\n"
+            "from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer\n"
+            "from nemo_gym.server_utils import ServerClient\n"
+            "class S(SimpleResourcesServer):\n"
+            "    async def verify(self, body): pass\n"
+            "s = S(config=BaseResourcesServerConfig(host='', port=0, entrypoint='', name='t'),\n"
+            "      server_client=MagicMock(spec=ServerClient))\n"
+            "s.setup_webserver()\n"
+            "assert not any(m == 'mcp' or m.startswith('mcp.') for m in sys.modules), 'mcp was imported'\n"
+            "print('OK')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout

@@ -48,7 +48,7 @@ Flow (the MCP endpoint and /verify share one session_id)
   3) Claude Code -> ResourcesServer POST /mcp  (tools/call get_weather, carrying the token header)
      - the tool resolves the token back to session_id and records the call
   4) Agent -> ResourcesServer POST /verify {"verifier_metadata": {"expected_city": "Paris"}, "response": ...}
-     - reward = 1.0 iff the tool was called in this session AND the answer contains the sentence
+     - reward = 1.0 iff the tool was called in this session and the answer contains the sentence
 ```
 
 ---
@@ -136,7 +136,7 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
         expected_city = expected_city_value.casefold()
         expected = _weather_sentence(expected_city_value)
-        # reward iff the tool was called for this city in this session AND the final answer repeats it
+        # reward iff the tool was called for this city in this session and the final answer repeats it
         # (match case-insensitively, so a correct call/answer that used different casing still counts)
         tool_called = any(str(c.get("city", "")).casefold() == expected_city for c in state["weather_calls"])
         final_text = _extract_assistant_text(body)  # join the assistant message text from body.response

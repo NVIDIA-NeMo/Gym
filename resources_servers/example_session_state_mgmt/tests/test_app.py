@@ -134,7 +134,7 @@ class TestDualTransport:
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"success": True}
 
-            # HTTP (cookie) and MCP (token) resolve the SAME per-rollout counter.
+            # HTTP (cookie) and MCP (token) resolve the same per-rollout counter.
             assert client.post("/get_counter_value", json={}).json() == {"count": 42}
             result = mcp_call(client, "get_counter_value", {}, token=token)
             assert result["structuredContent"] == {"count": 42}

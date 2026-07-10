@@ -569,7 +569,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def _parse_judge(self, text: str) -> tuple[bool, str, bool]:
         """Parse grading output. Returns (is_correct, extracted, parsed_ok).
 
-        Uses the LAST 'correct: yes/no' match to avoid picking up template
+        Uses the last 'correct: yes/no' match to avoid picking up template
         echoes or reasoning inside <think> blocks.
         """
         matches = list(re.finditer(r"correct:\s*(yes|no)\b", text, re.IGNORECASE))

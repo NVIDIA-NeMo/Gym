@@ -478,7 +478,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return text[:cut], True
 
     def _postprocess_search_results(self, results: dict) -> list[str]:
-        # If an answer is present, return ONLY the answer (no individual search results)
+        # If an answer is present, return only the answer (no individual search results)
         answer = results.get("answer")
         if answer is not None:
             return [f"Search Answer\n==============\n{answer}\n"]

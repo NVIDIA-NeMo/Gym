@@ -643,7 +643,7 @@ class TestDownloadAndParseFiling:
         assert "Revenue Details" in result
         assert "$1,000,000" in result
 
-        # Should NOT have script/style content
+        # Should not have script/style content
         assert "alert" not in result
         assert "color: red" not in result
 

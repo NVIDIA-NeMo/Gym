@@ -16,7 +16,7 @@
 
 Wraps any OpenEnv Environment class and exposes it through NeMo-Gym's
 three-server architecture. Every tool is declared via ``gym_tool`` and served
-over BOTH transports (HTTP ``POST /<tool_name>`` and MCP). MCP environments
+over both transports (HTTP ``POST /<tool_name>`` and MCP). MCP environments
 discover their tools at construction time (``model_post_init``) and register
 one gym tool per discovered tool, advertising the environment's original JSON
 schema verbatim over MCP. Non-MCP environments register a single lax "step"
@@ -104,7 +104,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     def _register_mcp_env_tools(self) -> None:
         """Discover the environment's MCP tools and declare each one as a gym tool.
 
-        The environment's ORIGINAL JSON schema is advertised verbatim over MCP; ``validate=True``
+        The environment's original JSON schema is advertised verbatim over MCP; ``validate=True``
         keeps a shallow 422 gate over HTTP like the previously synthesized per-tool body models.
         """
         from openenv.core.env_server.mcp_types import ListToolsAction

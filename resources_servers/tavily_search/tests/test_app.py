@@ -142,7 +142,7 @@ class TestApp:
         assert "URL: https://example.com/page2" in joined
         assert "This is the content of page 1" in joined
         assert "This is the content of page 2" in joined
-        # score and raw_content should NOT appear
+        # score and raw_content should not appear
         assert "0.95" not in joined
         assert "raw content" not in joined
 
@@ -158,7 +158,7 @@ class TestApp:
         joined = "".join(formatted)
         assert "Search Answer" in joined
         assert "The capital of France is Paris." in joined
-        # Individual results should NOT be shown
+        # Individual results should not be shown
         assert "[1]" not in joined
 
     # ---- web_search ----

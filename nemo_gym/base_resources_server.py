@@ -104,7 +104,7 @@ def gym_tool(
     validate: bool = False,
     owner: Optional["SimpleResourcesServer"] = None,
 ):
-    """Declare a callable as a Gym tool, served over BOTH transports: MCP and HTTP ``POST /<name>``.
+    """Declare a callable as a Gym tool, served over both transports: MCP and HTTP ``POST /<name>``.
 
     This is the single tool-registration entry point. Two binding times, one API:
 
@@ -120,23 +120,37 @@ def gym_tool(
                  input_schema=tool.input_schema, owner=self)
 
     Contract (both transports):
-    - Declare ``session_id: str`` to receive the per-rollout Gym session id. It is injected by the
-      base — from the session cookie on HTTP, from the signed session token on MCP — and is never
-      visible in, nor injectable from, the model-facing payload.
-    - Never take a ``request`` parameter; there is no FastAPI ``Request`` on the MCP path.
-    - With ``input_schema=None`` use flat typed params (NOT one wrapping Pydantic ``body`` arg —
-      the parameter name would leak into the MCP argument shape); the HTTP body is validated by a
-      synthesized model (422 on bad input) and the MCP schema is derived from the same params.
-    - With a JSON-schema ``dict``, the schema is advertised verbatim and call arguments are passed
-      through RAW on both transports (set ``validate=True`` for shallow 422-gating over HTTP).
-    - With a Pydantic model class, the callable receives the validated instance as its single
-      non-session parameter; HTTP body validation is byte-identical to a hand-written route.
-    - ``str`` return values are served as ``text/plain`` over HTTP; models/dicts as JSON.
-    - Sync callables are offloaded to a threadpool on both transports (never block the event loop).
-    - Error shapes differ per transport by design: an exception surfaces over MCP as a tool error
-      (``isError: true`` on HTTP 200) and over HTTP as a 500 with ``repr(e)``. Session presence also
-      differs: MCP without a token raises a clean tool error, while HTTP without a cookie mints a
-      fresh (unseeded) session id per request — stateful tools should keep a seeded-session guard.
+    - ``session_id``: declare a ``session_id: str`` parameter when the tool reads or writes
+      per-rollout state; leave it out for stateless tools. The base fills it in itself — from the
+      session cookie on HTTP, from the signed session token on MCP — so it never appears in the
+      model-facing schema, and a ``session_id`` key sent in the payload is ignored.
+    - Never take a ``request`` parameter: on the MCP path there is no FastAPI ``Request`` object to
+      pass (the MCP library calls the function directly with the JSON-RPC arguments).
+    - ``input_schema=None`` (the default): the schema is derived from the function's typed
+      parameters, so write them flat — ``def get_weather(self, city: str)`` gives callers the
+      argument shape ``{"city": ...}`` on both transports. Do not wrap the arguments in a single
+      Pydantic parameter (``def get_weather(self, body: WeatherArgs)``): the schema derives from
+      the parameter list, so MCP callers would have to send ``{"body": {"city": ...}}`` while HTTP
+      callers send the flat form — one tool, two conflicting argument shapes.
+    - ``input_schema=<dict>``: for tools whose JSON schema already exists as data (registries,
+      discovered tool sets). The dict is advertised over MCP exactly as given, and call arguments
+      reach the callable unmodified on both transports — re-validating against a derived model
+      would silently drop argument names the schema doesn't declare. ``validate=True`` adds a
+      shallow type check (422 on mismatch) for the HTTP route.
+    - ``input_schema=<Pydantic model class>``: for tools that already had a hand-written request
+      model. The model's fields become the schema (callers still send flat arguments), the base
+      validates them into an instance, and the callable receives that instance as its single
+      parameter besides ``session_id`` — the same object a hand-written FastAPI route received, so
+      a migrated route keeps its exact validation behavior.
+    - Return values: ``str`` is served as ``text/plain`` over HTTP; models and dicts as JSON.
+    - Sync callables run in a threadpool on both transports so they cannot stall the event loop.
+    - Error shapes differ per transport because the protocols do. MCP is JSON-RPC, which separates
+      transport success from tool failure: an exception becomes a tool result with
+      ``isError: true`` inside an HTTP 200, which the client hands to the model as tool output.
+      Plain HTTP has only status codes, so the same exception surfaces as a 500 with ``repr(e)``.
+      Session presence differs the same way: MCP without a token is a clean tool error, while HTTP
+      without a cookie simply mints a fresh (unseeded) session id — stateful tools should keep a
+      seeded-session guard in their body.
     """
 
     def apply(func: Callable) -> Callable:
@@ -233,7 +247,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     """Resources server base: /seed_session, /verify, /aggregate_metrics — and, lazily, Gym tools.
 
     Declare tools with ``gym_tool`` (see its docstring for the full contract). Each declared tool is
-    served over BOTH transports: an HTTP ``POST /<name>`` route and an MCP tool on ``mcp_url_path``.
+    served over both transports: an HTTP ``POST /<name>`` route and an MCP tool on ``mcp_url_path``.
     The MCP endpoint (and the ``mcp`` package import) only exists when the server declares at least
     one tool or overrides ``register_mcp_tools``; a tool-less server's app is unchanged.
 
@@ -361,7 +375,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         @asynccontextmanager
         async def lifespan_wrapper(app: FastAPI):
-            # The catch-all must land AFTER every subclass-added route, and exactly once across
+            # The catch-all must land after every subclass-added route, and exactly once across
             # repeated lifespan cycles (TestClient re-entry) — hence registered here, guarded.
             self._ensure_unknown_tool_catchall(app)
             async with mcp.session_manager.run():
@@ -489,9 +503,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def _install_mcp_call_handler(self, mcp: Any) -> None:
         """Re-register the low-level tools/call handler: claim gate + raw-argument dispatch.
 
-        Dict/model-schema tools must NOT pass through FastMCP's argument validation — it silently
+        Dict/model-schema tools must not pass through FastMCP's argument validation — it silently
         drops every argument name not present in its synthesized signature. This handler enforces
-        the ``allowed_tools`` claim for ALL tools (hiding alone does not block), dispatches
+        the ``allowed_tools`` claim for all tools (hiding alone does not block), dispatches
         raw-schema tools with the caller's arguments verbatim, and delegates typed tools to FastMCP.
         """
 
@@ -738,7 +752,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         absent) so FastAPI body binding is unchanged, then injects :data:`NEMO_GYM_MCP_METADATA_KEY`
         with setdefault semantics. It returns a plain JSONResponse: adopting the method's
         ``-> BaseSeedSessionResponse`` annotation would make FastAPI's response filtering silently
-        strip the injected key, so the return annotation is deliberately NOT pinned here — the exact
+        strip the injected key, so the return annotation is deliberately not pinned here — the exact
         opposite of the tool routes above.
         """
         method = self.seed_session

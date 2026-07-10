@@ -368,7 +368,7 @@ class TestGenRMCompareResourcesServer:
 
 
 class TestCompareHttpWireContract:
-    """/compare is a HARNESS-called judge endpoint, not a model-facing gym tool.
+    """/compare is a harness-called judge endpoint, not a model-facing gym tool.
 
     Evidence: every dataset row in data/example.jsonl carries ``"tools": []`` (the model is never
     advertised a compare tool), and the only caller is harness code — ``GenRMStrategy.compare`` in

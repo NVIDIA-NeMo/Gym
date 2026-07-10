@@ -27,7 +27,7 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-# Paths every tool-bearing server has that are NOT tools (harness endpoints, the MCP mount, and
+# Paths every tool-bearing server has that are not tools (harness endpoints, the MCP mount, and
 # the unknown-tool catch-all), excluded from transport-parity comparisons.
 NON_TOOL_PATHS = frozenset({"/seed_session", "/verify", "/aggregate_metrics", "/mcp", "/{tool_name}"})
 

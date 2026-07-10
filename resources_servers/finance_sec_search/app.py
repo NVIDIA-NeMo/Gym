@@ -1166,7 +1166,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     question = content
 
         # Extract the model's answer from the submit_final_result tool call.
-        # HARD GATE: we only accept answers submitted via submit_final_result.
+        # Hard gate: we only accept answers submitted via submit_final_result.
         # Previously we fell back to the last assistant text message, which
         # created a reward shortcut: the model could skip all tool use and
         # answer from parametric knowledge. A lenient judge then still gave
