@@ -33,6 +33,8 @@ import os
 import threading
 from abc import abstractmethod
 from pathlib import Path
+from time import perf_counter
+from traceback import format_exc
 from typing import Any, Dict, Optional
 
 import orjson
@@ -88,7 +90,29 @@ class ModelCallCaptureConfig(BaseModel):
         return self
 
 
-# --- Capture configuration + rollout-keyed storage ---
+class ModelCallRecord(BaseModel):
+    """Observability record derived from one captured model-server exchange."""
+
+    # HTTP information
+    route: str
+
+    # Timing information
+    timestamp_start: float
+    timestamp_end: float
+
+    # Gym information
+    model_ref: ModelServerRef
+
+    # Model-call record
+    request: NeMoGymResponseCreateParamsNonStreaming
+    response: Optional[NeMoGymResponse]  # Only present if the call succeeded
+    error_response: Optional[str]  # Only present if the call failed
+
+    # Used for cases where we never hit a NeMoGymResponsesCreateParams or NeMoGymResponse in a model call e.g. calling an Anthropic model with /v1/messages
+    # For those scenarios we always store the raw_request and raw_response and provided a normalized version by converting to Responses
+    # For normal Responses routes, this is empty.
+    raw_request: Optional[Dict[str, Any]]
+    raw_response: Optional[Dict[str, Any]]
 
 
 def _validate_rollout_id(rollout_id: str) -> str:
@@ -157,8 +181,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app = FastAPI()
 
         self.setup_session_middleware(app)
-        capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        self.install_model_call_capture(app, capture_config)
 
         app.post("/v1/chat/completions")(self.chat_completions)
 
@@ -170,54 +192,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # model server directly.
         app.post("/v1/messages")(self.messages)
 
+        self.capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if self.capture_config.observability_enabled:
+            app.post("/v1/chat/completions")(self.chat_completions_with_model_capture)
+            app.post("/v1/responses")(self.responses)  # TODO
+            app.post("/v1/messages")(self.messages)  # TODO
+
+            self._store = CaptureStore(self.capture_config.model_call_capture_dir)
+
         return app
-
-    def install_model_call_capture(self, app: Any, capture_config: ModelCallCaptureConfig) -> None:
-        """Install model-call capture middleware.
-
-        Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
-        regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-        prefixed model call). When capture is enabled the middleware additionally records each observed
-        call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-        unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
-        durable capture write).
-        """
-        if not capture_config.observability_enabled:
-            return
-
-        # path = scope.get("path", "")
-        # rollout_from_path: Optional[str] = None
-        # prefix_match = _ROLLOUT_PATH_RE.match(path)
-        # if prefix_match:
-        #     rollout_from_path = prefix_match.group("rollout_id")
-        #     path = prefix_match.group("rest")
-        #     scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
-
-        # # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
-        # if self._store is None:
-        #     await self._app(scope, receive, send)
-        #     return
-
-        # await asyncio.to_thread(
-        #     self._store.record,
-        #     rollout_id,
-        #     {
-        #         "dialect": dialect,
-        #         "model_server": model_server_name,
-        #         "latency_ms": round(latency_ms, 2),
-        #         "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
-        #         "status_code": status_code,
-        #         "error_category": error_category,
-        #         "request": json.loads(request_bytes) if request_bytes else None,
-        #         "response": response_body,
-        #     },
-        # )
-
-        app.add_middleware(
-            None,
-            store=CaptureStore(capture_config.model_call_capture_dir),
-            model_server_name=self.config.name,
-        )
 
     @abstractmethod
     async def chat_completions(
@@ -259,29 +242,43 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             return await self.responses(request=request, body=params)
         return await self.responses(body=params)
 
+    # Model call capture methods
+    async def chat_completions_with_model_capture(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        if not self.capture_config.observability_enabled:
+            return await self.chat_completions(body)
+
+        mcr_dict = {
+            "route": "/v1/chat/completions",
+            "timestamp_start": perf_counter(),
+            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
+            "request": None,  # TODO
+            "raw_request": body.model_dump(),
+        }
+
+        try:
+            response = await self.chat_completions(body)
+            mcr_dict["response"] = None  # TODO
+            mcr_dict["error_response"] = None
+            mcr_dict["raw_response"] = response
+
+            mcr_dict["timestamp_end"] = perf_counter()
+            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+
+            return response
+        except Exception as e:
+            mcr_dict["response"] = None
+            mcr_dict["error_response"] = format_exc()
+            mcr_dict["raw_response"] = None
+
+            mcr_dict["timestamp_end"] = perf_counter()
+            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+
+            raise e
+
 
 # --- Observability records derived from captured exchanges ---
-
-
-class ModelCallRecord(BaseModel):
-    """Observability record derived from one captured model-server exchange."""
-
-    # HTTP information
-    status_code: int
-    route: str
-
-    # Gym information
-    model_ref: ModelServerRef
-
-    # Model-call record
-    request: NeMoGymResponseCreateParamsNonStreaming
-    response: Optional[NeMoGymResponse]  # Only present if the call succeeded
-
-    # Used for cases where we never hit a NeMoGymResponsesCreateParams or NeMoGymResponse in a model call e.g. calling an Anthropic model with /v1/messages
-    # For those scenarios we always store the raw_request and raw_response and provided a normalized version by converting to Responses
-    # For normal Responses routes, this is empty.
-    raw_request: Optional[Dict[str, Any]]
-    raw_response: Optional[Dict[str, Any]]
 
 
 def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelCallRecord]:
