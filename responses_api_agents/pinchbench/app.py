@@ -118,6 +118,29 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
 
 
+# Failure-routing sentinels read by the rollout dispatcher
+# (nemo_gym.rollout_collection): rows with a failure class go to the failures
+# sidecar (bounded retry on resume) instead of the main jsonl; kill_shaped
+# rows are not persisted at all so resume's set-difference re-dispatches them.
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_NO_PERSIST_KEY = "_ng_no_persist"
+NG_TERMINAL_KEY = "_ng_failure_terminal"
+
+
+class SandboxKilledError(RuntimeError):
+    """Sandbox process died by signal (walltime SIGTERM / preemption / OOM kill)."""
+
+
+def _classify_task_failure(exc: BaseException) -> str:
+    """Route a task failure: 'kill_shaped' (re-dispatch on resume, never a row),
+    'timeout_exceeded' (sidecar, terminal), or 'legitimate' (sidecar, bounded retry)."""
+    if isinstance(exc, SandboxKilledError):
+        return "kill_shaped"
+    if isinstance(exc, TimeoutError):
+        return "timeout_exceeded"
+    return "legitimate"
+
+
 class PinchBenchRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
@@ -358,6 +381,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             run_log = staging_dir / "out" / "run.log"
             run_tail = run_log.read_text(errors="replace")[-4000:] if run_log.exists() else ""
             detail = (stderr or stdout or run_tail or "no output").strip()
+            # Negative rc = killed by signal; 137/143 = 128+SIGKILL/SIGTERM from the
+            # inner shell. That's the walltime/preemption shape, not a task failure.
+            if proc.returncode is not None and (proc.returncode < 0 or proc.returncode in (137, 143)):
+                raise SandboxKilledError(
+                    f"direct apptainer exec killed (rc={proc.returncode}) for task {task_id}: {detail[:1000]}"
+                )
             raise RuntimeError(f"direct apptainer exec failed for task {task_id}: {detail[:4000]}")
         if not archive.exists():
             raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
@@ -634,6 +663,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         out_dir = Path(self.config.work_root) / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         result = {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
+        routing: dict = {}
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
@@ -644,6 +674,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
         except Exception as exc:  # noqa: BLE001 -- never 500; one task must not abort the whole collection (ng_collect is fail-fast)
+            failure_class = _classify_task_failure(exc)
+            print(f"[pinchbench-{failure_class}] {task_id}: {type(exc).__name__}: {exc}", flush=True)
             result = {
                 "reward": 0.0,
                 "grading_type": "unknown",
@@ -651,6 +683,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "notes": f"run failed: {type(exc).__name__}: {exc}",
                 "status": "error",
             }
+            routing[NG_FAILURE_CLASS_KEY] = failure_class
+            if failure_class == "kill_shaped":
+                routing[NG_NO_PERSIST_KEY] = True
+            elif failure_class == "timeout_exceeded":
+                routing[NG_TERMINAL_KEY] = True
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -668,6 +705,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "archived_to": archive_path,
                 "run_id": run_id,
             },
+            **routing,
         )
 
 
