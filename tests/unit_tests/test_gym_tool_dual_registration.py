@@ -628,10 +628,22 @@ class TestModeCoverage:
 
         server = _make(_DualServer)
         with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            assert client.post("/send_message", json=[1, 2]).status_code == 422
+            assert client.post("/send_message", json=[1, 2]).status_code == 422  # non-object JSON
             resp = client.post("/send_message", content=b"", headers={"Content-Type": "application/json"})
-            assert resp.status_code == 200  # empty body -> {} -> closure sees no args
+            assert resp.status_code == 200  # genuinely empty body -> {} -> closure sees no args
             assert server.observed_raw_args == {}
+
+    def test_dict_tool_rejects_malformed_body_without_dispatching(self) -> None:
+        """A non-empty but unparseable body is a client 422, not a coerce-to-{} dispatch (regression
+        guard: the pre-migration typed-body route returned 422 and never ran the tool)."""
+        from fastapi.testclient import TestClient
+
+        server = _make(_DualServer)
+        server.observed_raw_args = {"sentinel": True}
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            resp = client.post("/send_message", content=b"{not json", headers={"Content-Type": "application/json"})
+            assert resp.status_code == 422
+            assert server.observed_raw_args == {"sentinel": True}  # tool was NOT dispatched
 
     def test_raw_tool_model_return_renders_structured_content(self) -> None:
         from fastapi.testclient import TestClient

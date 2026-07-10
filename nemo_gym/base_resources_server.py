@@ -644,10 +644,21 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             validator = self._model_from_json_schema(name, schema) if spec.validate_input else None
 
             async def http_handler(request: Request) -> Any:
-                try:
-                    raw = await request.json()
-                except Exception:
-                    raw = {}
+                body_bytes = await request.body()
+                if not body_bytes.strip():
+                    # A genuinely empty body is tolerated as no-args (the pre-existing dispatchers did
+                    # the same via exclude_unset on an all-optional body model).
+                    raw: Any = {}
+                else:
+                    try:
+                        raw = json.loads(body_bytes)
+                    except Exception:
+                        # A non-empty but malformed body is a client error — reject it rather than
+                        # silently dispatching the tool on empty args (which would, e.g., step an env
+                        # on garbage input). Matches the pre-migration typed-body 422.
+                        return JSONResponse(
+                            status_code=422, content={"error": f"Tool {name!r} expects a valid JSON object body."}
+                        )
                 if not isinstance(raw, dict):
                     return JSONResponse(
                         status_code=422, content={"error": f"Tool {name!r} expects a JSON object body."}
