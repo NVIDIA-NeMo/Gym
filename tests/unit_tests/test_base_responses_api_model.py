@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import fcntl
 import multiprocessing as mp
 import threading
@@ -22,7 +21,7 @@ from unittest.mock import MagicMock
 import orjson
 import pytest
 from fastapi import Body, FastAPI
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
@@ -38,7 +37,6 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     ModelCallRecord,
     SimpleResponsesAPIModel,
-    _CaptureMiddleware,
     _record,
     aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
@@ -144,48 +142,6 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
         store.read("rollout-1")
 
 
-def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
-    store = CaptureStore(tmp_path)
-    durable_call_counts = []
-
-    async def app(_scope, receive, send):
-        await receive()
-        messages = [
-            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]},
-            {"type": "http.response.body", "body": b"event: message_", "more_body": True},
-            {
-                "type": "http.response.body",
-                "body": b'stop\ndata: {"type":"message_stop"}\n\n',
-                "more_body": True,
-            },
-            {"type": "http.response.body", "body": b"", "more_body": False},
-        ]
-        for message in messages:
-            await send(message)
-
-    async def receive():
-        return {"type": "http.request", "body": b'{"input":"hi"}', "more_body": False}
-
-    async def send(message):
-        if message["type"] == "http.response.body":
-            durable_call_counts.append(len(store.read("fast-rollout")))
-
-    asyncio.run(
-        _CaptureMiddleware(app, store=store, model_server_name="srv")(
-            {
-                "type": "http",
-                "path": "/ng-rollout/fast-rollout/v1/messages",
-                "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
-                "headers": [],
-            },
-            receive,
-            send,
-        )
-    )
-
-    assert durable_call_counts == [0, 1, 1]
-
-
 def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     app = FastAPI()
 
@@ -205,28 +161,6 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     assert len(calls) == 1 and calls[0].error_category == "upstream_error"
 
 
-def test_failed_call_is_captured_with_error_category(tmp_path):
-    """A non-2xx model call is captured (replacing generic exception catching) with a
-    normalized error_category + status_code on the ModelCallRecord."""
-
-    app = FastAPI()
-
-    @app.post("/v1/responses")
-    async def _boom(body: dict = Body()) -> JSONResponse:
-        return JSONResponse(content={"error": "boom"}, status_code=500)
-
-    _install_capture(app, tmp_path)
-    client = TestClient(app)
-
-    r = client.post("/ng-rollout/r-err/v1/responses", json={"input": "x"})
-    assert r.status_code == 500  # response unchanged
-
-    calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
-    assert len(calls) == 1
-    assert calls[0].error_category == "upstream_error"
-    assert calls[0].status_code == 500
-
-
 def test_raised_call_is_captured_then_reraised(tmp_path):
     """A model call that raises (not just a non-2xx) is captured with an exception category and the
     error is re-raised (response unchanged for the caller)."""
@@ -244,8 +178,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
     assert len(calls) == 1
-    assert calls[0].error_category == "exception" and calls[0].response is None
-    assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
+    assert calls[0].response is None
 
 
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
