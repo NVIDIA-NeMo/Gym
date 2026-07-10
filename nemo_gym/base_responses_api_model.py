@@ -125,7 +125,7 @@ class CaptureStore:
     def path_for(self, rollout_id: str) -> Path:
         return self._root / f"{rollout_id}.capture.jsonl"
 
-    def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
+    def record(self, model_call_record: ModelCallRecord) -> None:
         """Append one exchange and fsync (durable across a killed box).
 
         ``flock`` serializes appends across worker processes (a model server may run with
@@ -133,8 +133,8 @@ class CaptureStore:
         serializes threads. This does blocking file IO + fsync, so callers run it off the event
         loop (the capture middleware offloads it via ``asyncio.to_thread``).
         """
-        line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(rollout_id)
+        line = orjson.dumps(model_call_record.model_dump(), default=str, option=orjson.OPT_APPEND_NEWLINE)
+        path = self.path_for(model_call_record.rollout_id)
         with self._lock:
             with path.open("ab") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
