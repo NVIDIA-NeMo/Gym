@@ -346,7 +346,41 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise e
 
     async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
-        pass
+        if not self.capture_config.observability_enabled:
+            return await self.messages(request, body)
+
+        mcr_dict = {
+            "rollout_id": rollout_id,
+            "route": "/v1/messages",
+            "timestamp_start": perf_counter(),
+            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
+            "request": _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body),
+            "raw_request": body,
+        }
+
+        assert not mcr_dict["request"].stream, (
+            "Model call capture for /v1/messages to /v1/responses converstion with streaming is currently not supported!"
+        )
+
+        try:
+            response = await self.messages(request, body)
+            mcr_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(response, mcr_dict["request"])
+            mcr_dict["error_response"] = None
+            mcr_dict["raw_response"] = response
+
+            mcr_dict["timestamp_end"] = perf_counter()
+            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+
+            return response
+        except Exception as e:
+            mcr_dict["response"] = None
+            mcr_dict["error_response"] = format_exc()
+            mcr_dict["raw_response"] = None
+
+            mcr_dict["timestamp_end"] = perf_counter()
+            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+
+            raise e
 
 
 # --- Observability records derived from captured exchanges ---
