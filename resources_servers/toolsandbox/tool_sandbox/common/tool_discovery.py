@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 from collections import defaultdict
 from enum import auto
 from inspect import getmembers, getmodule, isfunction, ismodule

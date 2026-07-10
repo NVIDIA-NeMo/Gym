@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 """Scenarios where user prompts and provided tools are not sufficient to complete the task
 
 Used to test whether the agent understands if it has enough information to complete the task

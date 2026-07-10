@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 # Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 """Per-scenario execution context, scoped via :mod:`contextvars`.
 

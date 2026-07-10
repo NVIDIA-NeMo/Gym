@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 """Taken from https://github.com/langchain-ai/langchain/blob/
 90184255f880a26cbdffd7b764deae9be3242ece/libs/core/langchain_core/utils/function_calling.py#L276
 

@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 """Helper function that supports tool_trace_dependant_similarity. Extract certain values from
 a tool trace
 """

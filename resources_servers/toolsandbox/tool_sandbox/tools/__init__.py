@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 
 # Make sure to import submodule here so that it's visible to inspect
 import tool_sandbox.tools.messaging

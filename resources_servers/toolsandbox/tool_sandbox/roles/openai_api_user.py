@@ -1,5 +1,5 @@
-# For licensing see accompanying LICENSE file.
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+# For licensing see accompanying LICENSE file.
 # Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 """User simulator role against any OpenAI-compatible chat endpoint."""
 from __future__ import annotations
