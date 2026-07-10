@@ -23,14 +23,18 @@ from __future__ import annotations
 import base64
 import math
 import os
+import random
 import shutil
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from openai import APITimeoutError
+
+from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
 
 
 JUDGE_PROMPT = (
@@ -343,26 +347,27 @@ def send_judge_request(
     model: str,
     messages: list[dict],
     max_output_tokens: int = 65535,
-    create_overrides: dict | None = None,
+    create_overrides: Optional[dict] = None,
 ) -> str:
     """Send a judge request with exponential-backoff retry.  Returns response text.
 
-    *create_overrides* is merged into the kwargs passed to
-    ``client.chat.completions.create``; user-supplied keys win over defaults.
-    Mirrors the override mechanism used by ``scoring.score_with_rubric``.
+    *create_overrides* (a panel member's reasoning/generation knobs) is merged
+    over the default create kwargs; a ``None`` value removes the matching
+    default (e.g. to drop ``temperature`` for a reasoning model that rejects it).
     """
     backoff = REQUEST_INITIAL_BACKOFF_SECONDS
+    create_kwargs = merge_create_kwargs(
+        {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_output_tokens,
+            "temperature": 1.0,
+        },
+        create_overrides,
+    )
 
     for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
         try:
-            create_kwargs: dict = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_output_tokens,
-                "temperature": 1.0,
-            }
-            if create_overrides:
-                create_kwargs.update(create_overrides)
             response = client.chat.completions.create(**create_kwargs)
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
@@ -427,9 +432,26 @@ def tally_result(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class Judge:
+    """A panel member bound to a live (sync) OpenAI client for the trial loop.
+
+    Built by the resources server from a
+    :class:`resources_servers.gdpval.judge_panel.ResolvedJudge` (with one OpenAI
+    client per distinct upstream, so members that share a proxy reuse a client).
+    ``run_trials`` samples one of these per trial.
+    """
+
+    name: str
+    client: Any
+    model: str
+    create_overrides: Optional[dict] = None
+    weight: float = 1.0
+    handles_audio_video: bool = False
+
+
 def run_trials(
-    client: Any,
-    model: str,
+    judges: list[Judge],
     task_prompt: str,
     refs: list[dict],
     submission_a: list[dict],
@@ -437,27 +459,40 @@ def run_trials(
     num_trials: int = 4,
     max_output_tokens: int = 65535,
     return_raw_responses: bool = False,
-    create_overrides: dict | None = None,
+    rng: Optional[random.Random] = None,
 ) -> dict:
     """Run ``num_trials`` judge calls, alternating swapped/unswapped positions.
 
+    For each trial one member of *judges* is sampled (see
+    ``judge_panel.sample_judge``) — the "sample between the judges for each
+    comparison" panel behavior. With a single-member panel this reduces to the
+    historical single-judge loop. Pass *rng* (a seeded ``random.Random``) for
+    reproducible judge selection.
+
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
-    ``tie_count``, and ``task_count``.
+    ``tie_count``, ``task_count``, ``per_judge`` (per-member a/b/tie/trial
+    counts keyed by judge name), and ``trial_judges`` (the judge name that graded
+    each trial, ordered by trial index — always present so the grader of every
+    match is documented).
 
     When ``return_raw_responses`` is True, the dict also carries
-    ``raw_responses``: a list of the per-trial judge completion strings,
-    ordered by trial index (so trial ``i`` was swapped iff ``i % 2 != 0``).
-
-    *create_overrides* flows through to ``send_judge_request`` and lets the
-    caller override any ``chat.completions.create`` kwarg (``max_tokens``,
-    ``temperature``, …).
+    ``raw_responses`` (per-trial judge completion strings, same ordering as
+    ``trial_judges`` — trial ``i`` was swapped iff ``i % 2 != 0``).
     """
+    if not judges:
+        raise ValueError("run_trials requires a non-empty judge panel")
+    rng = rng or random.Random()
+
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
     raw_responses: list[str] = []
+    trial_judges: list[str] = []
+    per_judge: dict[str, dict] = {}
 
     for i in range(num_trials):
+        judge = sample_judge(judges, rng)
+        trial_judges.append(judge.name)
         swapped = i % 2 != 0
         current_a = submission_b if swapped else submission_a
         current_b = submission_a if swapped else submission_b
@@ -469,12 +504,20 @@ def run_trials(
             submission_b=current_b,
         )
         response_text = send_judge_request(
-            client, model, messages, max_output_tokens, create_overrides=create_overrides
+            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
         )
         if return_raw_responses:
             raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
         win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
+
+        # Per-judge tally (same A=submission_a / B=submission_b convention as the
+        # global counts) so the panel's per-member balance is auditable.
+        jc = per_judge.setdefault(judge.name, {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0})
+        jc["win_count_a"], jc["win_count_b"], jc["tie_count"] = tally_result(
+            judgement, swapped, jc["win_count_a"], jc["win_count_b"], jc["tie_count"]
+        )
+        jc["trials"] += 1
 
     if win_count_a > win_count_b:
         winner = A_WIN_RESPONSE
@@ -489,6 +532,10 @@ def run_trials(
         "win_count_b": win_count_b,
         "tie_count": tie_count,
         "task_count": num_trials,
+        "per_judge": per_judge,
+        # Always recorded (just judge names, ordered by trial) so every match's
+        # per-trial grader is documented even when raw responses aren't kept.
+        "trial_judges": trial_judges,
     }
     if return_raw_responses:
         result["raw_responses"] = raw_responses
@@ -510,6 +557,87 @@ def calculate_elo(win_rate: float, ref_elo: float) -> tuple[float, float]:
     elo = ref_elo - 400.0 * (math.log10(1.0 - win_rate) - math.log10(win_rate))
     normalized_elo = (elo - 500.0) / 2000.0
     return elo, normalized_elo
+
+
+def calculate_mle_elo(
+    battles: list[tuple[float, float, float, float]],
+    scale: float = 400.0,
+    base: float = 10.0,
+) -> tuple[float, float] | None:
+    """Anchored Bradley-Terry MLE ELO for one eval model vs N fixed references.
+
+    This is the multi-reference generalization of ``calculate_elo``. It applies
+    the traditional ELO rating system (logistic / Bradley-Terry) to the pooled
+    pairwise comparisons, estimating the eval model's rating globally rather
+    than inverting a single win rate against a single anchor.
+
+    ``battles`` is a list of ``(reference_elo, wins, losses, ties)`` where the
+    counts are the eval model's win / loss / tie vote totals against that
+    reference model (ties counted as half a win). The reference ratings are
+    held **fixed** at their known ELOs (e.g. published Arena/AA numbers); the
+    eval model's rating ``R`` is the single free parameter, found by maximizing
+    the Bradley-Terry log-likelihood
+
+        L(R) = sum_i [ s_i * log(p_i) + (n_i - s_i) * log(1 - p_i) ]
+
+    with ``p_i = 1 / (1 + base**((reference_elo_i - R) / scale))``, ``n_i`` the
+    number of games vs reference ``i`` and ``s_i = wins_i + 0.5 * ties_i``.
+
+    For a single reference this reduces exactly to ``calculate_elo``. Returns
+    ``(elo, normalized_elo)`` with ``normalized_elo = (elo - 500) / 2000``, or
+    ``None`` when there are no games to fit.
+    """
+    data: list[tuple[float, float, float]] = []
+    for ref_elo, wins, losses, ties in battles:
+        n = float(wins) + float(losses) + float(ties)
+        if n <= 0:
+            continue
+        s = float(wins) + 0.5 * float(ties)
+        data.append((float(ref_elo), s, n))
+
+    if not data:
+        return None
+
+    total_s = sum(s for _, s, _ in data)
+    total_n = sum(n for _, _, n in data)
+    eps = 1e-3
+
+    overall_win_rate = total_s / total_n
+    if overall_win_rate <= eps or overall_win_rate >= 1.0 - eps:
+        # Degenerate: the eval model won (or lost) every battle, so the MLE
+        # rating diverges to ±inf. Clamp exactly like ``calculate_elo`` does,
+        # anchored to the game-weighted mean reference ELO.
+        clamped = min(max(overall_win_rate, eps), 1.0 - eps)
+        mean_ref = sum(ref_elo * n for ref_elo, _, n in data) / total_n
+        elo = mean_ref - scale * (math.log10(1.0 - clamped) - math.log10(clamped))
+        return elo, (elo - 500.0) / 2000.0
+
+    def gradient(rating: float) -> float:
+        # dL/dR up to the positive constant ln(base)/scale: sum_i (s_i - n_i*p_i).
+        # Strictly decreasing in ``rating``, so the root is unique.
+        total = 0.0
+        for ref_elo, s, n in data:
+            p = 1.0 / (1.0 + base ** ((ref_elo - rating) / scale))
+            total += s - n * p
+        return total
+
+    # gradient(lo) > 0 and gradient(hi) < 0 are guaranteed once the overall win
+    # rate is strictly inside (0, 1); bisect for the unique root.
+    lo = min(ref_elo for ref_elo, _, _ in data) - 4000.0
+    hi = max(ref_elo for ref_elo, _, _ in data) + 4000.0
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if gradient(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+    elo = 0.5 * (lo + hi)
+    return elo, (elo - 500.0) / 2000.0
+
+
+def predict_win_rate(eval_elo: float, ref_elo: float, scale: float = 400.0, base: float = 10.0) -> float:
+    """Expected eval-model win probability vs a reference at ``ref_elo``."""
+    return 1.0 / (1.0 + base ** ((ref_elo - eval_elo) / scale))
 
 
 def compute_comparison_reward(winner: str) -> float:

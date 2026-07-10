@@ -1,0 +1,26 @@
+# ECS Fargate sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `ecs_fargate` selects the provider and its value is passed to the
+# provider constructor. Every shipped provider config binds the same name `sandbox`,
+# so swapping providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml, $MODEL]"
+#
+# Requires AWS credentials (AWS_REGION + access keys or an instance role) and the `sandbox`
+# extra (boto3). See the ECS Fargate provider page under infrastructure/sandbox for setup
+# (SSM infrastructure, the :52222 network requirement, and on-demand image mirroring).
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: ecs-fargate
+  ecs_fargate:
+    # Region-only: cluster / subnets / security-groups / roles and the SSH-sidecar key ARNs
+    # auto-discover from SSM (/<ssm_project>/ecs-sandbox/config; ssm_project defaults to harbor).
+    # Task cpu / memory / disk come from the agent's sandbox_spec.resources (mapped onto the
+    # Fargate task); set cpu / memory / ephemeral_storage_gib here only to change the defaults.
+    region: ${oc.env:AWS_REGION}

@@ -7,25 +7,26 @@ Math benchmark from [google-deepmind/superhuman](https://github.com/google-deepm
 `prepare.py` downloads `answerbench_v2.csv` from the exact pinned superhuman commit that Skills uses, and writes `data/imo_answerbench_benchmark.jsonl` with one row per problem (`question`, `expected_answer`, plus `problem_id` / `category` / `subcategory` / `source`).
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/imo_answerbench/config.yaml]"
+gym eval prepare --benchmark imo_answerbench
 ```
 
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/imo_answerbench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark imo_answerbench
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=imo_answerbench_math_with_autograder_simple_agent \
-    +input_jsonl_fpath=benchmarks/imo_answerbench/data/imo_answerbench_benchmark.jsonl \
-    +output_jsonl_fpath=results/imo_answerbench_rollouts.jsonl \
-    +prompt_config=benchmarks/imo_answerbench/prompts/default.yaml \
-    +num_repeats=4 \
+gym eval run --no-serve \
+    --agent imo_answerbench_math_with_autograder_simple_agent \
+    --input benchmarks/imo_answerbench/data/imo_answerbench_benchmark.jsonl \
+    --output results/imo_answerbench_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/imo_answerbench/prompts/default.yaml \
     +num_repeats_add_seed=true
 ```
 
