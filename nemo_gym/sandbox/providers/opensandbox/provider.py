@@ -291,6 +291,43 @@ def _resource_map(resources: SandboxResources) -> dict[str, str]:
     return values
 
 
+def _split_resource_maps(spec: SandboxSpec) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    requests = _resource_map(spec.resource_requests) if spec.resource_requests is not None else None
+    limits = _resource_map(spec.resource_limits) if spec.resource_limits is not None else None
+    return requests, limits
+
+
+def _build_split_create_request(
+    spec: SandboxSpec,
+    *,
+    resource_requests: dict[str, str] | None,
+    resource_limits: dict[str, str] | None,
+) -> Any:
+    from opensandbox.adapters.converter.sandbox_model_converter import SandboxModelConverter
+    from opensandbox.models.sandboxes import SandboxImageSpec
+
+    image = SandboxImageSpec(image=spec.image) if spec.image is not None else None
+    request = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=image,
+        entrypoint=spec.entrypoint,
+        env=spec.env,
+        metadata=spec.metadata,
+        timeout=timedelta(seconds=spec.ttl_s) if spec.ttl_s is not None else None,
+        resource=resource_limits or _resource_map(spec.resources),
+        platform=None,
+        network_policy=None,
+        extensions=None,
+        volumes=None,
+        secure_access=False,
+        snapshot_id=None,
+    )
+    if resource_requests is not None:
+        request["resourceRequests"] = resource_requests
+    if resource_limits is not None:
+        request["resourceLimits"] = resource_limits
+    return request
+
+
 def _metadata_value(value: Any) -> str:
     normalized = METADATA_VALUE_RE.sub("_", str(value)).strip("._-")
     normalized = normalized[:63].strip("._-")
@@ -722,6 +759,14 @@ class OpenSandboxProvider:
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        resource_requests, resource_limits = _split_resource_maps(spec)
+        if resource_requests is not None or resource_limits is not None:
+            return await self._create_once_with_split_resources(
+                spec,
+                resource_requests=resource_requests,
+                resource_limits=resource_limits,
+            )
+
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
@@ -780,6 +825,82 @@ class OpenSandboxProvider:
             sandbox_id=sandbox_id,
             provider_name=self.name,
             raw=sandbox,
+        )
+        handle = created_handle
+        try:
+            if self._create.skip_health_check:
+                handle = await self._connect_after_create(created_handle, spec)
+            await self._verify_created_handle(handle)
+        except Exception:
+            await self._cleanup_failed_create_handle(created_handle)
+            raise
+        return handle
+
+    async def _create_once_with_split_resources(
+        self,
+        spec: SandboxSpec,
+        *,
+        resource_requests: dict[str, str] | None,
+        resource_limits: dict[str, str] | None,
+    ) -> SandboxHandle:
+        try:
+            from opensandbox.adapters.converter.response_handler import handle_api_error, require_parsed
+            from opensandbox.adapters.sandboxes_adapter import SandboxesAdapter
+            from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
+            from opensandbox.api.lifecycle.models import CreateSandboxResponse
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "OpenSandbox lifecycle API client is required for split resource create requests"
+            ) from e
+
+        options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
+        request = _build_split_create_request(
+            replace(spec, provider_options={}),
+            resource_requests=resource_requests,
+            resource_limits=resource_limits,
+        )
+        if options.platform is not None:
+            request["platform"] = _to_platform_spec(options.platform)
+        if options.volumes:
+            request["volumes"] = _to_volumes(list(options.volumes))
+        extensions = self._resolve_extensions(options.extensions)
+        if extensions:
+            request["extensions"] = extensions
+        if options.snapshot_id is not None:
+            request["snapshotId"] = options.snapshot_id
+
+        adapter = SandboxesAdapter(self._connection_config(request_timeout_s=self._create.request_timeout_s))
+        timeout_s = self._create.timeout_s
+        if timeout_s is None and self._connection.request_timeout_s is not None:
+            timeout_s = float(self._connection.request_timeout_s)
+
+        sandbox_id: str | None = None
+        try:
+            client = await adapter._get_client()
+            request_coro = post_sandboxes.asyncio_detailed(client=client, body=request)
+            if timeout_s is None:
+                response_obj = await request_coro
+            else:
+                response_obj = await asyncio.wait_for(request_coro, timeout=timeout_s)
+            handle_api_error(response_obj, "Create sandbox")
+            parsed = require_parsed(response_obj, CreateSandboxResponse, "Create sandbox")
+            sandbox_id = parsed.id
+        except TimeoutError as e:
+            error = OpenSandboxCreateTimeoutError(
+                "Timed out creating OpenSandbox sandbox after "
+                f"{timeout_s:g}s; image={spec.image!r}, "
+                f"ready_timeout_s={spec.ready_timeout_s!r}"
+            )
+            raise error from e
+        finally:
+            await adapter._httpx_client.aclose()
+
+        if sandbox_id is None:
+            raise RuntimeError("OpenSandbox create returned no sandbox id")
+        created_handle = SandboxHandle(
+            sandbox_id=sandbox_id,
+            provider_name=self.name,
+            raw=None,
         )
         handle = created_handle
         try:
