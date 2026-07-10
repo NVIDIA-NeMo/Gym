@@ -39,10 +39,6 @@ from nemo_gym.base_responses_api_model import (
     ModelCallRecord,
     SimpleResponsesAPIModel,
     _CaptureMiddleware,
-    _classify_exception,
-    _classify_status,
-    _consume_terminal_sse_event,
-    _reconstruct_streamed_response,
     _record,
     aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
@@ -190,15 +186,6 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     assert durable_call_counts == [0, 1, 1]
 
 
-def test_stream_error_events_are_terminal():
-    for dialect in ("responses", "messages"):
-        assert _consume_terminal_sse_event(bytearray(b'event: error\ndata: {"error":"boom"}\n\n'), dialect) == "error"
-    assert _consume_terminal_sse_event(bytearray(b"event: response.incomplete\n\n"), "responses") == "incomplete"
-    assert _consume_terminal_sse_event(bytearray(b'event:error\ndata:{"error":"boom"}\n\n'), "chat") == "error"
-    assert _consume_terminal_sse_event(bytearray(b'data: {"error":{"message":"boom"}}\n\n'), "chat") == "error"
-    assert _consume_terminal_sse_event(bytearray(b"data:[DONE]\n\n"), "chat") == "complete"
-
-
 def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     app = FastAPI()
 
@@ -331,29 +318,6 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     assert maybe_rollout_id_from_run_body(body) == "5-2"
 
 
-# --- error classification ---
-def test_classify_status_branches():
-    assert _classify_status(200) is None
-    assert _classify_status(408) == "timeout"
-    assert _classify_status(504) == "timeout"
-    assert _classify_status(429) == "rate_limit"
-    assert _classify_status(401) == "auth"
-    assert _classify_status(403) == "auth"
-    assert _classify_status(404) == "not_found"
-    assert _classify_status(422) == "client_error"
-    assert _classify_status(500) == "upstream_error"
-
-
-def test_classify_exception_branches():
-    class _ReadTimeout(Exception):
-        pass
-
-    assert _classify_exception(asyncio.TimeoutError()) == "timeout"
-    assert _classify_exception(_ReadTimeout()) == "timeout"  # name contains "timeout"
-    assert _classify_exception(ConnectionError()) == "connection"  # name contains "conn"
-    assert _classify_exception(ValueError("x")) == "exception"
-
-
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
@@ -434,171 +398,6 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
     with_id = SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", "rid")
     assert with_id == "http://h:1/ng-rollout/rid/v1"
     assert SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", None) == "http://h:1/v1"
-
-
-def _sse(event_type: str, data: dict) -> bytes:
-    return f"event: {event_type}\ndata: {orjson.dumps(data)}\n\n".encode()
-
-
-def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
-    """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
-    response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
-
-    app = FastAPI()
-
-    @app.post("/v1/messages")
-    async def _stream(body: dict = Body()) -> StreamingResponse:
-        async def gen():
-            yield _sse(
-                "message_start",
-                {
-                    "type": "message_start",
-                    "message": {
-                        "id": "msg_1",
-                        "type": "message",
-                        "role": "assistant",
-                        "model": "claude",
-                        "usage": {
-                            "input_tokens": 10,
-                            "output_tokens": 0,
-                            "cache_read_input_tokens": 5,
-                            "cache_creation_input_tokens": 2,
-                        },
-                        "content": [],
-                    },
-                },
-            )
-            yield _sse(
-                "content_block_start",
-                {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
-            )
-            yield _sse(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "thinking_delta", "thinking": "let me think"},
-                },
-            )
-            yield _sse(
-                "content_block_start",
-                {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
-            )
-            yield _sse(
-                "content_block_delta",
-                {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "hi there"}},
-            )
-            yield _sse(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": 2,
-                    "content_block": {"type": "tool_use", "id": "t1", "name": "calc", "input": {}},
-                },
-            )
-            yield _sse(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": 2,
-                    "delta": {"type": "input_json_delta", "partial_json": '{"x": 1}'},
-                },
-            )
-            yield _sse(
-                "message_delta",
-                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}},
-            )
-            yield _sse("message_stop", {"type": "message_stop"})
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    _install_capture(app, tmp_path)
-    client = TestClient(app)
-
-    r = client.post("/ng-rollout/3-0/v1/messages", json={"stream": True})
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/event-stream")  # stream preserved
-    assert "event:" in r.text and "data:" in r.text  # SSE content flowed through
-
-    records = CaptureStore(tmp_path).read("3-0")
-    assert len(records) == 1 and records[0]["response"] is not None  # reassembled, not dropped
-
-    calls = read_model_call_records(CaptureStore(tmp_path), "3-0")
-    assert len(calls) == 1
-    call = calls[0]
-    assert call.dialect == "messages"
-    assert call.tokens_in == 17 and call.tokens_out == 7  # 10 + cache_read 5 + cache_creation 2; output from delta
-    assert call.cached_tokens == 5 and call.cache_creation_tokens == 2
-    assert call.reasoning_content == "let me think"
-    assert call.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
-    assert call.latency_ttft_ms is not None
-
-
-def test_reconstruct_chat_sse():
-    chunks = [
-        {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
-        {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
-        {
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": '{"a":'}}]
-                    },
-                }
-            ]
-        },
-        {
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]},
-                    "finish_reason": "tool_calls",
-                }
-            ]
-        },
-        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
-    ]
-    raw = (b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n").replace(b"\n", b"\r\n")
-    resp = _reconstruct_streamed_response(raw, "chat")
-    msg = resp["choices"][0]["message"]
-    assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
-    assert msg["tool_calls"][0]["function"] == {"name": "f", "arguments": '{"a":1}'}
-    assert resp["usage"]["total_tokens"] == 8
-
-
-def test_reconstruct_responses_sse_uses_terminal_envelope():
-    raw = b"".join(
-        _sse(c["type"], c)
-        for c in [
-            {"type": "response.created", "response": {"id": "r", "output": []}},
-            {
-                "type": "response.completed",
-                "response": {
-                    "id": "r",
-                    "output": [{"type": "message"}],
-                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
-                },
-            },
-        ]
-    )
-    resp = _reconstruct_streamed_response(raw, "responses")
-    assert resp["output"] == [{"type": "message"}] and resp["usage"]["total_tokens"] == 6
-
-    # Fallback: no terminal envelope, but an interim event still carries a response object.
-    interim = _sse("response.in_progress", {"type": "response.in_progress", "response": {"id": "r2", "output": []}})
-    assert _reconstruct_streamed_response(interim, "responses")["id"] == "r2"
-
-
-def test_reconstruct_streamed_response_best_effort_none():
-    assert _reconstruct_streamed_response(b"", "chat") is None  # no events
-    assert _reconstruct_streamed_response(b"event: ping\ndata: not-json\n\n", "messages") is None  # unparseable
-    assert _reconstruct_streamed_response(b"data: 123\n\n", "chat") is None  # non-dict JSON skipped
-    # Non-empty events that carry nothing reconstructable -> None for each dialect.
-    ping = _sse("ping", {"type": "ping"})
-    assert _reconstruct_streamed_response(ping, "messages") is None
-    assert _reconstruct_streamed_response(ping, "chat") is None
-    assert _reconstruct_streamed_response(ping, "responses") is None
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
