@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.model_call_capture import CaptureStore, aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.base_responses_api_model import CaptureStore, aggregate_model_call_metrics, read_model_call_records
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
