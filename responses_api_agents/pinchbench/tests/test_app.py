@@ -42,12 +42,12 @@ def make_config(**over) -> PinchBenchAgentConfig:
         port=0,
         entrypoint="app.py",
         model_base_url="http://endpoint/v1",
-        model_api_key="sk-policy",  # pragma: allowlist secret
+        model_api_key="sk-policy",
         model_name="vendor/model",
         judge_model="judge/model",
         judge_base_url="http://endpoint/v1",
-        judge_api_key="sk-judge",  # pragma: allowlist secret
-        brave_api_key="brave-key",  # pragma: allowlist secret
+        judge_api_key="sk-judge",
+        brave_api_key="brave-key",
     )
     base.update(over)
     return PinchBenchAgentConfig(**base)
@@ -77,7 +77,7 @@ def test_task_env_gateway_mode():
     assert "PINCHBENCH_FORCE_LOCAL" not in env
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
-    assert env["BRAVE_API_KEY"] == "brave-key"  # pragma: allowlist secret
+    assert env["BRAVE_API_KEY"] == "brave-key"
 
 
 def test_build_spec_from_config():
@@ -249,12 +249,8 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     assert "sandbox exploded" in resp.grading_notes
 
 
-# --- failure routing (resume-after-walltime correctness) ---------------------
-#
-# The dispatcher (nemo_gym.rollout_collection) writes rows WITHOUT a
-# `_ng_failure_class` to the main rollouts jsonl, where `_load_from_cache`
-# treats them as permanently done. A failed task that reaches main is
-# therefore never retried on resume — the pre-fix behavior these tests pin.
+# Failure routing: rows without `_ng_failure_class` land in the main jsonl, where
+# resume counts them as done forever — the pre-fix behavior these tests pin.
 
 
 def _run_body(task_id="task_x"):
@@ -266,19 +262,9 @@ def _run_body(task_id="task_x"):
     return body
 
 
-def _routed_agent(tmp_path, exc):
-    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
-
-    async def boom(task_id, out_dir):
-        raise exc
-
-    return agent
-
-
 @pytest.mark.asyncio
 async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch):
-    """Pre-fix vulnerability: a failed task produced a sentinel-free row, which the
-    dispatcher wrote to the main jsonl and resume counted as done forever."""
+    """A failed task must carry a failure class so it never lands in the main jsonl."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
     async def boom(task_id, out_dir):
