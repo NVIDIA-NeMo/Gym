@@ -27,7 +27,7 @@ gym eval run --no-serve \
 
 ## Generating Additional Training Data
 
-To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](notebooks/synthetic-data-generation/).
+To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](../../resources_servers/workplace_assistant/notebooks/synthetic-data-generation/).
 
 # Licensing information
 Code: Apache 2.0

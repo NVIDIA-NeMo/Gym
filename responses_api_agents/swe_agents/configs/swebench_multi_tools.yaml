@@ -12,7 +12,7 @@ swe_agents:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 25bacbc60f7491e562022d6021e155af6b92fccb  # pragma: allowlist secret
+      agent_framework_commit: 5f0180054732945df08ad2293903e6873f0492b6  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???
@@ -61,12 +61,6 @@ swe_agents:
         agent_cls: OpenCodeAgent
         diversify_tool_names: true
 
-      # Minimalist agent - CodeActAgent 
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimalist/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/minimalist/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: true
-
       # Test driven agent - CodeActAgent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/system_prompt.j2
@@ -76,13 +70,13 @@ swe_agents:
       # Hypothesis driven agent - CodexAgent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/system_prompt.j2
-        agent_cls: CodexAgent
+        agent_cls: CodeActAgent
         diversify_tool_names: true
 
       # Incremental agent - CodexAgent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/incremental/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/incremental/system_prompt.j2
-        agent_cls: CodexAgent
+        agent_cls: OpenCodeAgent
         diversify_tool_names: true
 
       # Root cause agent - OpenCodeAgent
@@ -103,17 +97,16 @@ swe_agents:
         agent_cls: CodeActAgent
         diversify_tool_names: true
 
-      # Surgical agent - OpenCodeAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/surgical/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/surgical/system_prompt.j2
-        agent_cls: OpenCodeAgent
-        diversify_tool_names: true
+      # MM prompt
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimax/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/minimax/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
 
-      # Verify first agent - CodexAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/verify_first/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/verify_first/system_prompt.j2
-        agent_cls: CodexAgent
-        diversify_tool_names: true
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimax/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/minimax/system_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: false
       
       # Optional model server reference
       model_server:

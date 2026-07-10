@@ -24,6 +24,8 @@ import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AlmostServerError,
+    ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     MalformedConfigPathsError,
@@ -895,8 +897,10 @@ class TestGlobalConfig:
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        with raises(ValueError, match="almost-server.*validation errors"):
+        # AlmostServerError is a ConfigError, so the CLI reports it cleanly (no traceback).
+        with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
+        assert isinstance(exc_info.value, ConfigError)
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
@@ -1350,6 +1354,30 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert str(missing) in message
         assert message.count("  - ") == 1
+
+    def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("foo: [1, 2\nbar: : :\n")  # invalid YAML syntax
+        parser = GlobalConfigDictParser()
+        with raises(ConfigError) as exc_info:
+            parser.load_extra_config_paths([str(bad)])
+
+        message = str(exc_info.value)
+        assert "Malformed YAML" in message
+        assert str(bad) in message
+        assert "line" in message and "column" in message
+
+    def test_malformed_dotenv_yaml_raises_config_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "env.yaml"
+        bad.write_text("policy_api_key: [oops\n")  # invalid YAML syntax
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(dotenv_path=bad, skip_load_from_cli=True)
+        with raises(ConfigError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "Malformed YAML" in message
+        assert str(bad) in message
 
     def test_parse_malformed_config_paths_raises_actionable_error(self) -> None:
         parser = GlobalConfigDictParser()

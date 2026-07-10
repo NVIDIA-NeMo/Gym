@@ -19,7 +19,7 @@ used by Codex CLI and Claude Code. A skill is a *directory* containing a ``SKILL
 file (YAML frontmatter + markdown body) plus optional supporting files. The ``skills.path``
 config points at a directory of such skill directories.
 
-Skills are a run-level knob (specified on ``ng_collect_rollouts``), applied to a fixed,
+Skills are a run-level knob (specified on ``gym eval run``), applied to a fixed,
 skill-agnostic dataset -- mirroring how ``prompt.py`` applies a prompt template. They are
 *not* a dataset-row field, so the same dataset is reusable across skill variants. Each
 rollout result is stamped with a ``skills_ref`` for provenance/grouping in reward profiling.

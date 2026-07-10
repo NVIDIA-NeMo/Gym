@@ -5,13 +5,13 @@
 # model server; the CLI appends /v1/messages. Needs NO anthropic_* env vars.
 #
 # Compose with any model server as `policy_model`, e.g. a vLLM OpenAI-compatible endpoint:
-#   ng_run "+config_paths=[\
-#     resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml,\
-#     responses_api_models/vllm_model/configs/vllm_model.yaml]"
-#   ng_collect_rollouts \
-#     +agent_name=reasoning_gym_claude_code_agent_model_server \
-#     +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-#     +output_jsonl_fpath=claude_code_via_model_server_rollout.jsonl +limit=1
+#   gym env start \
+#     --resources-server reasoning_gym/reasoning_gym_claude_code_agent_model_server \
+#     --model-type vllm_model
+#   gym eval run --no-serve \
+#     --agent reasoning_gym_claude_code_agent_model_server \
+#     --input resources_servers/reasoning_gym/data/example.jsonl \
+#     --output claude_code_via_model_server_rollout.jsonl --limit 1
 
 reasoning_gym:
   resources_servers:

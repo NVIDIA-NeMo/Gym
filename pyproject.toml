@@ -156,9 +156,9 @@ dependencies = [
     "mlflow>=3.14.0",
 
     # aiohttp: async http backend
-    # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
+    # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
-    "aiohttp>=3.13.3",
+    "aiohttp>=3.14.1",
 
     # yappi: profiling tool
     # Updated Mon Sep 22, 2025 with yappi==1.6.10
@@ -234,6 +234,10 @@ docs = [
 ]
 
 [project.optional-dependencies]
+all = [
+    "nemo-gym[dev,sandbox]",
+]
+
 sandbox = [
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
@@ -244,6 +248,12 @@ sandbox = [
     # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
     # License: Apache 2.0
     "opensandbox>=0.1.9",
+
+    # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
+    # CodeBuild/S3/SSM/Secrets Manager calls.
+    # Updated: Tue Jun 03, 2026 with boto3>=1.34
+    # License: Apache 2.0 https://github.com/boto/boto3/blob/develop/LICENSE
+    "boto3>=1.34",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
@@ -298,14 +308,14 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# NOTE: server venvs install nemo-gym editably and inherit this list, so anything
+# here is also silently dropped from them (uv >=0.11.24). Don't add a package any
+# server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
 exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cffi",
-    "contourpy",
     "cryptography",
-    "cycler",
     "flask",
     "flask-cors",
     "graphene",
@@ -313,16 +323,9 @@ exclude-dependencies = [
     "graphql-relay",
     "gunicorn",
     "huey",
-    "joblib",
-    "kiwisolver",
-    "matplotlib",
-    "pillow",
     "prettytable",
-    "scikit-learn",
-    "scipy",
     "skops",
     "sqlalchemy",
-    "threadpoolctl",
     "wcwidth",
     "werkzeug",
     "waitress",
@@ -498,6 +501,7 @@ markers = [
     "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
+    "sandbox: marks sandbox unit tests (deselect with '-m \"not sandbox\"')",
     "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
