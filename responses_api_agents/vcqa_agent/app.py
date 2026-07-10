@@ -124,7 +124,9 @@ class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
         "lookup) works as usual.",
     )
     judge_base_url: str = Field(description="OpenAI-compatible judge endpoint base URL.")
-    judge_api_key: str = Field(default="dummy", description="Bearer token for the judge endpoint.")
+    judge_api_key: str = Field(
+        default="dummy", description="Bearer token for the judge endpoint."
+    )  # pragma: allowlist secret
     judge_model_name: str = Field(description="Model name to send to the judge endpoint.")
     judge_timeout_s: int = Field(default=60, description="Per-criterion judge call timeout.")
     judge_max_completion_tokens: int = Field(
