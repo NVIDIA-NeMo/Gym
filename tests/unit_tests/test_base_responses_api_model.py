@@ -43,11 +43,15 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
     read_model_call_records,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -102,24 +106,71 @@ def test_capture_store_preserves_valid_rollout_id(tmp_path):
     assert store.path_for("task-1_a.2").name == "task-1_a.2.capture.jsonl"
 
 
+TEST_ROLLOUT_ID = "my-test-rollout-id"
+
+
+def _create_test_model_call_record() -> ModelCallRecord:
+    return ModelCallRecord(
+        rollout_id=TEST_ROLLOUT_ID,
+        route="my-test-route",
+        timestamp_start=0.0,
+        timestamp_end=0.0,
+        model_ref=ModelServerRef(type="responses_api_models", name="my-server-name"),
+        request=NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content=[{"type": "input_text", "text": "hello"}],
+                    type="message",
+                ),
+            ]
+        ),
+        response=NeMoGymResponse(
+            id="resp_123",
+            created_at=1691418000,
+            model="dummy_model",
+            tools=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_123",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            text="hi :) how are you?",
+                            type="output_text",
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            object="response",
+        ),
+        error_response=None,
+        raw_request=None,
+        raw_response=None,
+    )
+
+
 def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_path):
     store = CaptureStore(tmp_path)
-    store.path_for("rollout-1").write_bytes(b"\n")
-    exchange = {
-        "request": {"text": "Unicode payload: café 東京", "path": tmp_path / "payload"},
-        "response": {},
-    }
+    store.path_for(TEST_ROLLOUT_ID).write_bytes(b"\n")
 
-    store.record("rollout-1", exchange)
+    record = _create_test_model_call_record()
+    record.request.input[0].content[0]["text"] = "Unicode payload: café 東京"
 
-    assert store.read("rollout-1") == [
-        {
-            "request": {"text": "Unicode payload: café 東京", "path": str(tmp_path / "payload")},
-            "response": {},
-        }
-    ]
-    store.record("rollout-1", {"request": {"text": "second"}, "response": {}})
-    assert [record.call_index for record in read_model_call_records(store, "rollout-1")] == [0, 1]
+    store.record(record)
+
+    assert store.read(TEST_ROLLOUT_ID) == [record.model_dump()]
+
+    record2 = record.model_copy(deep=True)
+    record2.request.input[0].content[0]["text"] = "second"
+
+    store.record(record2)
+    assert read_model_call_records(store, TEST_ROLLOUT_ID) == [record.model_dump(), record2.model_dump()]
 
 
 def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
