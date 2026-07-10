@@ -45,7 +45,6 @@ from nemo_gym.rollout_collection import (
 def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
     monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
-    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
     return get_global_config_dict
 
 
@@ -660,6 +659,47 @@ class TestRolloutCollection:
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
+
+    async def test_run_from_config_uses_global_capture_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        capture_dir = tmp_path / "captures"
+        get_global_config_dict = MagicMock(
+            return_value={
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+            }
+        )
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}}) + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result((examples[0], {"response": {"usage": {}}}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        capture_dirs = [capture_dir]
+        clear_captures.assert_called_once()
+        assert clear_captures.call_args.args[1] == capture_dirs
+        merge_capture.assert_called_once()
+        assert merge_capture.call_args.args[1] == capture_dirs
+        assert "Clearing previously captured model calls" in capsys.readouterr().out
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

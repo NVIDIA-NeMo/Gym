@@ -19,9 +19,12 @@ import orjson
 import pytest
 from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 from nemo_gym.model_call_capture import (
     CaptureStore,
+    ModelCallCaptureConfig,
     ModelCallRecord,
     aggregate_model_call_metrics,
     build_model_call_record,
@@ -30,8 +33,23 @@ from nemo_gym.model_call_capture import (
 from nemo_gym.observability import install_model_call_capture, make_capture_store
 
 
+def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
+    return ModelCallCaptureConfig(
+        observability_enabled=enabled,
+        model_call_capture_dir=tmp_path if enabled else None,
+    )
+
+
+def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
+    install_model_call_capture(
+        app,
+        _capture_config(tmp_path),
+        model_server_name=model_server_name,
+    )
+
+
 def test_make_capture_store_disabled_returns_none():
-    assert make_capture_store(SimpleNamespace(observability_enabled=False)) is None
+    assert make_capture_store(ModelCallCaptureConfig()) is None
 
 
 @pytest.mark.parametrize("rollout_id", ["", "a/b", "../a", "a b", "röllout"])
@@ -173,8 +191,7 @@ def test_capture_records_model_calls(tmp_path):
         seen_requests.append(body)
         return responses[len(seen_requests) - 1]
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     r1 = client.post("/ng-rollout/rollout-x/v1/responses", json={"input": "solve it"})
@@ -233,7 +250,7 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
             durable_call_counts.append(len(store.read("fast-rollout")))
 
     asyncio.run(
-        _CaptureMiddleware(app, store=store, config=SimpleNamespace(name="srv"))(
+        _CaptureMiddleware(app, store=store, model_server_name="srv")(
             {
                 "type": "http",
                 "path": "/ng-rollout/fast-rollout/v1/messages",
@@ -271,8 +288,7 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
             media_type="text/event-stream",
         )
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
 
     response = TestClient(app).post("/ng-rollout/r-error/v1/messages", json={"messages": []})
 
@@ -292,8 +308,7 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     async def _boom(body: dict = Body()) -> JSONResponse:
         return JSONResponse(content={"error": "boom"}, status_code=500)
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     r = client.post("/ng-rollout/r-err/v1/responses", json={"input": "x"})
@@ -314,8 +329,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     async def _boom(body: dict = Body()) -> dict:
         raise RuntimeError("kaboom")
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app, raise_server_exceptions=False)
 
     r = client.post("/ng-rollout/r-raise/v1/responses", json={"input": "x"})
@@ -336,8 +350,7 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     async def _responses(body: dict = Body()) -> dict:
         return {"output": [], "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
@@ -361,8 +374,7 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     async def _models() -> dict:
         return {"object": "list", "data": []}
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     r = client.get("/ng-rollout/abc/v1/models")
@@ -435,14 +447,17 @@ def test_classify_exception_branches():
     assert _classify_exception(ValueError("x")) == "exception"
 
 
-# --- capture-store dir resolution + init failure ---
-def test_default_capture_dir(monkeypatch):
-    from nemo_gym.observability import _default_capture_dir
+# --- capture-store config + init failure ---
+def test_model_call_capture_keys_are_reserved_global_config():
+    assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
 
-    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", "/tmp/custom_model_calls")
-    assert _default_capture_dir("srv") == "/tmp/custom_model_calls"
-    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
-    assert _default_capture_dir("srv").endswith("nemo_gym_model_calls/srv")
+
+def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path):
+    with pytest.raises(ValueError, match="required"):
+        ModelCallCaptureConfig(observability_enabled=True)
+    with pytest.raises(ValueError, match="absolute"):
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="relative")
+    assert _capture_config(tmp_path).model_call_capture_dir == tmp_path
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
@@ -452,7 +467,7 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
         raise OSError("cannot create")
 
     monkeypatch.setattr(obs, "CaptureStore", _boom)
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir="/tmp/x", name="srv")
+    config = ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="/tmp/x")
     assert obs.make_capture_store(config) is None
 
 
@@ -467,7 +482,7 @@ def test_record_swallows_store_failure():
     _record(
         _BadStore(),
         "chat",
-        SimpleNamespace(name="srv"),
+        "srv",
         b"{}",
         rollout_id="r",
         response_body={},
@@ -486,8 +501,7 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     async def _r(body: dict = Body()) -> PlainTextResponse:
         return PlainTextResponse("not json")
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     r = client.post("/ng-rollout/rnj/v1/responses", json={"input": "x"})
@@ -668,8 +682,7 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
-    install_model_call_capture(app, config)
+    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     r = client.post("/ng-rollout/3-0/v1/messages", json={"stream": True})
@@ -777,32 +790,20 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
-def test_model_call_capture_dirs_from_config_resolves_env_and_config(tmp_path):
+def test_model_call_capture_dirs_from_global_config(tmp_path, monkeypatch):
     from nemo_gym.observability import model_call_capture_dirs_from_config
 
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    server_dir = tmp_path / "srv"
-    server_dir.mkdir()
-    config = {
-        "policy_model": {
-            "responses_api_models": {
-                "openai_model": {
-                    "observability_enabled": True,
-                    "model_call_capture_dir": str(server_dir),
-                    "name": "srv",
-                }
-            }
-        }
-    }
-    dirs = model_call_capture_dirs_from_config(config, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)})
-    assert shared in dirs and server_dir in dirs
-    # Capture-off servers contribute nothing, including from an existing shared directory.
-    off = {"a": {"b": {"observability_enabled": False, "model_call_capture_dir": str(tmp_path / "nope")}}}
-    assert model_call_capture_dirs_from_config(off, env={}) == []
-    assert model_call_capture_dirs_from_config(off, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)}) == []
-    # A separate --no-serve collector has no model config; the explicit shared directory is enough.
-    assert model_call_capture_dirs_from_config({}, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)}) == [shared]
+    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
+    assert model_call_capture_dirs_from_config({}) == []
+    assert (
+        model_call_capture_dirs_from_config(
+            {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
+        )
+        == []
+    )
+    assert model_call_capture_dirs_from_config(
+        {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+    ) == [tmp_path]
 
 
 def _capture_exchange(dialect, model_server, usage, response):
@@ -934,58 +935,20 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     async def _cc() -> dict:
         return {"ok": True}
 
-    install_model_call_capture(app, SimpleNamespace(observability_enabled=False))
+    install_model_call_capture(app, ModelCallCaptureConfig())
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
 
 
-def test_capture_dirs_resolves_default_by_config_key(tmp_path, monkeypatch):
-    # Bare opt-in (no model_call_capture_dir / NEMO_GYM_MODEL_CALL_CAPTURE_DIR): the consumer must resolve the
-    # SAME default dir the producer writes to. The producer keys it off config.name (the top-level
-    # server-instance key, == server_name), not the leaf impl key -- so exercise BOTH sides and assert
-    # they agree (the prior version only checked the consumer against a hand-built dir).
+def test_producer_and_consumer_use_same_global_capture_dir(tmp_path):
     import nemo_gym.observability as obs
 
-    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
-    monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))
-
-    class _ProducerCfg:
-        observability_enabled = True
-        model_call_capture_dir = None
-        name = "policy_model"  # top-level instance key, not the leaf impl key
-
-    store = obs.make_capture_store(_ProducerCfg())
+    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
+    store = obs.make_capture_store(ModelCallCaptureConfig.model_validate(global_config))
     assert store is not None
-    producer_dir = store.root  # CaptureStore created it under the instance key
-
-    # The observability node sits under the leaf impl key (openai_model), but the consumer must
-    # resolve the producer's dir (keyed off policy_model), not the leaf or the "model_server" fallback.
-    gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
-    dirs = obs.model_call_capture_dirs_from_config(gc, env={})
-    assert producer_dir == tmp_path / "nemo_gym_model_calls" / "policy_model"
-    assert producer_dir in dirs
-    assert (tmp_path / "nemo_gym_model_calls" / "openai_model") not in dirs
-    assert (tmp_path / "nemo_gym_model_calls" / "model_server") not in dirs
-
-
-def test_capture_dirs_warns_once_when_unresolved(tmp_path, monkeypatch, caplog):
-    import logging
-
-    import nemo_gym.observability as obs
-
-    monkeypatch.delenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", raising=False)
-    monkeypatch.setattr(obs.tempfile, "gettempdir", lambda: str(tmp_path))  # nothing created -> unresolved
-    obs._model_call_capture_dirs_warned = False
-    gc = {"policy_model": {"responses_api_models": {"openai_model": {"observability_enabled": True}}}}
-    try:
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.observability"):
-            assert obs.model_call_capture_dirs_from_config(gc, env={}) == []
-            assert obs.model_call_capture_dirs_from_config(gc, env={}) == []  # second call: no new warning
-        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "capture directory" in r.message]
-        assert len(warns) == 1
-    finally:
-        obs._model_call_capture_dirs_warned = False
+    assert store.root == tmp_path
+    assert obs.model_call_capture_dirs_from_config(global_config) == [store.root]
 
 
 # --- P1 review regressions: Anthropic cache tokens + concurrent-append integrity ---

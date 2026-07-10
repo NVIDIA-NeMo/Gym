@@ -24,7 +24,24 @@ from pathlib import Path
 from typing import Any, Optional
 
 import orjson
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class ModelCallCaptureConfig(BaseModel):
+    """Run-wide model-call capture settings from Gym's global config."""
+
+    observability_enabled: bool = False
+    model_call_capture_dir: Optional[Path] = None
+
+    @model_validator(mode="after")
+    def validate_capture_dir(self) -> "ModelCallCaptureConfig":
+        if not self.observability_enabled:
+            return self
+        if self.model_call_capture_dir is None:
+            raise ValueError("model_call_capture_dir is required when observability_enabled=true")
+        if not self.model_call_capture_dir.is_absolute():
+            raise ValueError("model_call_capture_dir must be an absolute path")
+        return self
 
 
 def _validate_rollout_id(rollout_id: str) -> str:

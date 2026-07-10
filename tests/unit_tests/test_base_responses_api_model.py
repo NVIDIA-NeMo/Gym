@@ -31,6 +31,8 @@ class TestBaseResponsesAPIModel:
     def test_BaseResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
         BaseResponsesAPIModel(config=config)
+        assert "observability_enabled" not in BaseResponsesAPIModelConfig.model_fields
+        assert "model_call_capture_dir" not in BaseResponsesAPIModelConfig.model_fields
 
     def test_SimpleResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
@@ -44,5 +46,7 @@ class TestBaseResponsesAPIModel:
             async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
                 raise NotImplementedError
 
-        model = TestSimpleResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()

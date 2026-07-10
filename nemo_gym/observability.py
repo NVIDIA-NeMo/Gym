@@ -27,14 +27,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.model_call_capture import CaptureStore, aggregate_model_call_records, read_model_call_records
+from nemo_gym.model_call_capture import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    aggregate_model_call_records,
+    read_model_call_records,
+)
 from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, maybe_rollout_id_from_run_body
 
 
@@ -94,21 +97,12 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
 _ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
 
 
-# --- Model-call exchange capture ---
-def _default_capture_dir(server_name: str) -> str:
-    env_dir = os.environ.get("NEMO_GYM_MODEL_CALL_CAPTURE_DIR")
-    if env_dir:
-        return env_dir
-    return str(Path(tempfile.gettempdir()) / "nemo_gym_model_calls" / server_name)
-
-
-def make_capture_store(config: Any) -> Optional[CaptureStore]:
+def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
     """Build a CaptureStore when observability is enabled; otherwise None."""
-    if not getattr(config, "observability_enabled", False):
+    if not config.observability_enabled:
         return None
-    root = getattr(config, "model_call_capture_dir", None) or _default_capture_dir(
-        getattr(config, "name", None) or "model_server"
-    )
+    root = config.model_call_capture_dir
+    assert root is not None  # enforced by ModelCallCaptureConfig
     try:
         return CaptureStore(root)
     except Exception:
@@ -297,7 +291,7 @@ def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[st
 def _record(
     store: CaptureStore,
     dialect: str,
-    config: Any,
+    model_server_name: Optional[str],
     request_bytes: bytes,
     *,
     rollout_id: str,
@@ -313,7 +307,7 @@ def _record(
             rollout_id,
             {
                 "dialect": dialect,
-                "model_server": getattr(config, "name", None),
+                "model_server": model_server_name,
                 "latency_ms": round(latency_ms, 2),
                 "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
                 "status_code": status_code,
@@ -339,10 +333,10 @@ class _CaptureMiddleware:
     prefix and forwards only.
     """
 
-    def __init__(self, app: Any, *, store: Optional[CaptureStore], config: Any) -> None:
+    def __init__(self, app: Any, *, store: Optional[CaptureStore], model_server_name: Optional[str]) -> None:
         self._app = app
         self._store = store
-        self._config = config
+        self._model_server_name = model_server_name
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -432,7 +426,7 @@ class _CaptureMiddleware:
                     _record,
                     self._store,
                     dialect,
-                    self._config,
+                    self._model_server_name,
                     bytes(request_body),
                     rollout_id=rollout_id,
                     response_body=None,
@@ -454,7 +448,7 @@ class _CaptureMiddleware:
         stream_error_category = state["stream_error_category"]
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
-        store, config = self._store, self._config
+        store, model_server_name = self._store, self._model_server_name
 
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
@@ -477,7 +471,7 @@ class _CaptureMiddleware:
             _record(
                 store,
                 dialect,
-                config,
+                model_server_name,
                 request_bytes,
                 rollout_id=rollout_id,
                 response_body=response_body,
@@ -495,7 +489,9 @@ class _CaptureMiddleware:
             await _flush_deferred_response()
 
 
-def install_model_call_capture(app: Any, config: Any) -> None:
+def install_model_call_capture(
+    app: Any, config: ModelCallCaptureConfig, *, model_server_name: Optional[str] = None
+) -> None:
     """Install model-call capture middleware.
 
     Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
@@ -505,90 +501,20 @@ def install_model_call_capture(app: Any, config: Any) -> None:
     unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
     durable capture write).
     """
-    app.add_middleware(_CaptureMiddleware, store=make_capture_store(config), config=config)
-
-
-# --- Consumer read: fold per-rollout capture into the rollout record (uniform across agents) ---
-_model_call_capture_dirs_warned = False
-
-
-def _warn_model_call_capture_dirs_unresolved() -> None:
-    """Warn once when capture is enabled but no readable capture dir was resolved (silent no-op guard)."""
-    global _model_call_capture_dirs_warned
-    if _model_call_capture_dirs_warned:
-        return
-    _model_call_capture_dirs_warned = True
-    logger.warning(
-        "Model-call capture is enabled but no capture directory was resolved to merge from -- "
-        "per-rollout calls will not be attached. Set NEMO_GYM_MODEL_CALL_CAPTURE_DIR (shared by the "
-        "model server and rollout collection) for a deterministic location."
+    app.add_middleware(
+        _CaptureMiddleware,
+        store=make_capture_store(config),
+        model_server_name=model_server_name,
     )
 
 
-def model_call_capture_dirs_from_config(global_config_dict: Any, env: Optional[dict[str, str]] = None) -> list[Path]:
-    """Candidate directories to read per-rollout captures from.
-
-    Collects ``$NEMO_GYM_MODEL_CALL_CAPTURE_DIR`` plus the resolved directory of every
-    observability-enabled model server in the global config. Deduped; existing dirs only.
-    """
-    environ = env if env is not None else os.environ
-    dirs: list[Path] = []
-    shared = environ.get("NEMO_GYM_MODEL_CALL_CAPTURE_DIR")
-    if shared:
-        dirs.append(Path(shared))
-
-    # Normalize an OmegaConf config to plain containers so the walk below sees dict/list nodes.
-    try:
-        from omegaconf import DictConfig as _DictConfig
-        from omegaconf import OmegaConf
-
-        if isinstance(global_config_dict, _DictConfig):
-            global_config_dict = OmegaConf.to_container(global_config_dict, resolve=False)
-    except Exception:
-        pass
-
-    saw_enabled = False
-    saw_observability_setting = False
-
-    def _walk(node: Any, key: Optional[str] = None, instance_key: Optional[str] = None) -> None:
-        nonlocal saw_enabled, saw_observability_setting
-        if isinstance(node, dict):
-            if "observability_enabled" in node:
-                saw_observability_setting = True
-            if node.get("observability_enabled"):
-                saw_enabled = True
-                # The producer (make_capture_store) keys its default dir off ``config.name`` -- the
-                # top-level server-instance key (== server_name), not the leaf impl key the node sits
-                # under. Resolve off that instance key so the consumer reads the producer's directory.
-                resolved = (
-                    node.get("model_call_capture_dir")
-                    or shared
-                    or _default_capture_dir(instance_key or node.get("name") or key or "model_server")
-                )
-                dirs.append(Path(resolved))
-            for child_key, value in node.items():
-                _walk(value, child_key, instance_key if instance_key is not None else child_key)
-        elif isinstance(node, (list, tuple)):
-            for value in node:
-                _walk(value, key, instance_key)
-
-    try:
-        _walk(global_config_dict)
-    except Exception:
-        logger.debug("Could not resolve capture dirs from the global config.", exc_info=True)
-
-    if not saw_enabled and (saw_observability_setting or not shared):
+def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
+    """Return the single run-wide capture directory when capture is enabled."""
+    config = ModelCallCaptureConfig.model_validate(global_config_dict)
+    if not config.observability_enabled:
         return []
-
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for directory in dirs:
-        if directory not in seen and directory.exists():
-            seen.add(directory)
-            unique.append(directory)
-    if saw_enabled and not unique:
-        _warn_model_call_capture_dirs_unresolved()
-    return unique
+    assert config.model_call_capture_dir is not None  # enforced by ModelCallCaptureConfig
+    return [config.model_call_capture_dir]
 
 
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
