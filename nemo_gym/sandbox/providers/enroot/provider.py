@@ -88,17 +88,20 @@ class EnrootCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
-def _read_proc_stat_ppid(pid: int) -> int | None:
-    """Return the parent PID from /proc/<pid>/stat, or None if unreadable.
+def _read_proc_stat(pid: int) -> tuple[int, str] | None:
+    """Return (ppid, comm) from /proc/<pid>/stat, or None if unreadable.
 
-    /proc/<pid>/stat is: ``pid (comm) state ppid pgrp session ...``. comm may contain
-    spaces/parens, so parse the fields AFTER the last ')'.
+    /proc/<pid>/stat is ``pid (comm) state ppid pgrp session ...``. comm can contain
+    spaces/parens, so take it between the first '(' and last ')', then parse the
+    numeric fields after the last ')'.
     """
     try:
         with open(f"/proc/{pid}/stat", "rb") as f:
             data = f.read().decode(errors="replace")
-        after = data[data.rfind(")") + 2 :].split()
-        return int(after[1])  # state=after[0], ppid=after[1]
+        lparen, rparen = data.find("("), data.rfind(")")
+        comm = data[lparen + 1 : rparen]
+        after = data[rparen + 2 :].split()
+        return int(after[1]), comm  # after[0]=state, after[1]=ppid
     except (OSError, ValueError, IndexError):
         return None
 
@@ -118,22 +121,29 @@ def _find_pid_in_tree(root_pid: int | None, init_command: str) -> int | None:
     Nested inside pyxis, enroot runs as real root without a per-container user
     namespace, so ``enroot list`` cannot map a PID to the container name. Since the
     detached ``enroot start`` stays in the foreground, the container init is a
-    descendant of it — walk the process tree from root_pid and return the descendant
-    whose cmdline contains the (per-start) init command. root_pid uniquely scopes the
-    search to this one container even under high concurrency.
+    descendant of it. Walk the process tree from root_pid and return the descendant
+    that is the ACTUAL init: comm == "sh" and cmdline EXACTLY ``sh -c <init_command>``.
+    Matching exactly (not a substring) skips the ``enroot start ... sh -c <init>``
+    wrapper and any transient helper that merely carries the init command as an
+    argument — those are short-lived and dead by the time we `enroot exec` the PID.
+    root_pid uniquely scopes the search to this one container even under concurrency.
     """
     if root_pid is None:
         return None
-    # Build ppid -> children over all current processes.
+    target_cmdline = f"sh -c {init_command}"
     children: dict[int, list[int]] = {}
+    comm_by_pid: dict[int, str] = {}
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
-        ppid = _read_proc_stat_ppid(pid)
-        if ppid is not None:
-            children.setdefault(ppid, []).append(pid)
-    # BFS from root_pid's children; return the first descendant running init_command.
+        info = _read_proc_stat(pid)
+        if info is None:
+            continue
+        ppid, comm = info
+        children.setdefault(ppid, []).append(pid)
+        comm_by_pid[pid] = comm
+    # BFS from root_pid's children; return the actual container init.
     stack = list(children.get(root_pid, []))
     seen: set[int] = set()
     while stack:
@@ -141,7 +151,7 @@ def _find_pid_in_tree(root_pid: int | None, init_command: str) -> int | None:
         if pid in seen:
             continue
         seen.add(pid)
-        if init_command and init_command in _read_proc_cmdline(pid):
+        if comm_by_pid.get(pid) == "sh" and _read_proc_cmdline(pid) == target_cmdline:
             return pid
         stack.extend(children.get(pid, []))
     return None
