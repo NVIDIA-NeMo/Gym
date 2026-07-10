@@ -33,6 +33,11 @@ from wandb import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -43,11 +48,6 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
     get_wandb_run,
-)
-from nemo_gym.observability import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (

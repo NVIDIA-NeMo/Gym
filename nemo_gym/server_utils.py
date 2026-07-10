@@ -773,7 +773,7 @@ def get_server_url(server_name: str) -> str:
 
 
 # Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
-# the capture middleware in observability.py strips this prefix before routing.
+# the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 
 
