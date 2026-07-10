@@ -123,9 +123,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
         durable capture write).
         """
+        if not capture_config.observability_enabled:
+            return
+
         app.add_middleware(
             _CaptureMiddleware,
-            store=make_capture_store(capture_config),
+            store=CaptureStore(capture_config.model_call_capture_dir),
             model_server_name=self.config.name,
         )
 
@@ -305,19 +308,6 @@ def _headers_content_type(headers: list) -> bytes:
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
 # <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
 _ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
-
-
-def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
-    """Build a CaptureStore when observability is enabled; otherwise None."""
-    if not config.observability_enabled:
-        return None
-    root = config.model_call_capture_dir
-    assert root is not None  # enforced by ModelCallCaptureConfig
-    try:
-        return CaptureStore(root)
-    except Exception:
-        logger.warning("Could not initialize model-call capture at %s; disabling it.", root, exc_info=True)
-        return None
 
 
 def _record(

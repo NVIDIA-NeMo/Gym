@@ -40,7 +40,6 @@ from nemo_gym.base_responses_api_model import (
     _record,
     aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
-    make_capture_store,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     read_model_call_records,
@@ -258,7 +257,6 @@ def test_model_call_capture_keys_are_reserved_global_config():
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
-    assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
         ModelCallCaptureConfig(observability_enabled=True)
     with pytest.raises(ValueError, match="absolute"):
@@ -266,7 +264,7 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
 
     global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
     config = ModelCallCaptureConfig.model_validate(global_config)
-    store = make_capture_store(config)
+    store = CaptureStore(config.model_call_capture_dir)
     assert store is not None and store.root == tmp_path
     assert model_call_capture_dirs_from_config(global_config) == [store.root]
 
@@ -274,15 +272,6 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config({}) == []
     nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
     assert model_call_capture_dirs_from_config(nested_config) == []
-
-
-def test_make_capture_store_init_failure_returns_none(monkeypatch):
-    def _boom(_root):
-        raise OSError("cannot create")
-
-    monkeypatch.setattr(obs, "CaptureStore", _boom)
-    config = ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="/tmp/x")
-    assert obs.make_capture_store(config) is None
 
 
 def test_record_swallows_store_failure():
