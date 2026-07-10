@@ -30,16 +30,15 @@ import nemo_gym.base_responses_api_agent as ba
 import nemo_gym.base_responses_api_model as obs
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
-    _ROLLOUT_PATH_RE,
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
     CaptureStore,
     ModelCallCaptureConfig,
     ModelCallRecord,
     SimpleResponsesAPIModel,
-    _record,
     aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
+    maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     read_model_call_records,
@@ -52,9 +51,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import (
     ServerClient,
-    apply_rollout_prefix,
-    maybe_rollout_id_from_run_body,
-    rollout_path_prefix,
 )
 
 
@@ -222,18 +218,6 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     assert CaptureStore(tmp_path).read("abc") == []  # non-observed path -> routed, not captured
 
 
-def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
-    """The shared agent-side builder accepts a server root and round-trips with the parser."""
-    assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
-    assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
-    assert rollout_path_prefix(None) == ""
-
-    # Producer (agent) and consumer (server) agree: a prefixed call round-trips to the id + /v1 path.
-    client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
-    match = _ROLLOUT_PATH_RE.match(client_path)
-    assert match and match.group("rollout_id") == "task-7" and match.group("rest") == "/v1/chat/completions"
-
-
 def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
 
@@ -272,25 +256,6 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config({}) == []
     nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
     assert model_call_capture_dirs_from_config(nested_config) == []
-
-
-def test_record_swallows_store_failure():
-    class _BadStore:
-        def record(self, *args, **kwargs):
-            raise RuntimeError("disk full")
-
-    # Best-effort: a failing store must not raise out of _record.
-    _record(
-        _BadStore(),
-        "chat",
-        "srv",
-        b"{}",
-        rollout_id="r",
-        response_body={},
-        status_code=200,
-        error_category=None,
-        latency_ms=1.0,
-    )
 
 
 def test_capture_records_non_json_response_as_none(tmp_path):
