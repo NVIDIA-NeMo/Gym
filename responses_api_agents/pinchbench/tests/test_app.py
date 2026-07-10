@@ -77,7 +77,7 @@ def test_task_env_gateway_mode():
     assert "PINCHBENCH_FORCE_LOCAL" not in env
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
-    assert env["BRAVE_API_KEY"] == "brave-key"
+    assert env["BRAVE_API_KEY"] == "brave-key"  # pragma: allowlist secret
 
 
 def test_build_spec_from_config():
