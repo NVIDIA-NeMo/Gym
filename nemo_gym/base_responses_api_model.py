@@ -26,15 +26,11 @@ carried by a /ng-rollout/<rollout_id>/v1/... base_url prefix, which is stripped 
 routing.
 """
 
-import asyncio
 import fcntl
 import inspect
-import json
 import logging
 import os
-import re
 import threading
-import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -53,7 +49,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import (
-    ROLLOUT_PATH_PREFIX,
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
@@ -91,86 +86,6 @@ class ModelCallCaptureConfig(BaseModel):
         if not self.model_call_capture_dir.is_absolute():
             raise ValueError("model_call_capture_dir must be an absolute path")
         return self
-
-
-class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
-    def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-
-        self.setup_session_middleware(app)
-        capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        self.install_model_call_capture(app, capture_config)
-
-        app.post("/v1/chat/completions")(self.chat_completions)
-
-        app.post("/v1/responses")(self.responses)
-
-        # Every Gym model server speaks the Anthropic Messages API by default, mapping
-        # Messages <-> Responses around its own responses() implementation. This lets blackbox
-        # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
-        # model server directly.
-        app.post("/v1/messages")(self.messages)
-
-        return app
-
-    def install_model_call_capture(self, app: Any, capture_config: ModelCallCaptureConfig) -> None:
-        """Install model-call capture middleware.
-
-        Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
-        regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-        prefixed model call). When capture is enabled the middleware additionally records each observed
-        call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-        unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
-        durable capture write).
-        """
-        if not capture_config.observability_enabled:
-            return
-
-        app.add_middleware(
-            _CaptureMiddleware,
-            store=CaptureStore(capture_config.model_call_capture_dir),
-            model_server_name=self.config.name,
-        )
-
-    @abstractmethod
-    async def chat_completions(
-        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
-    ) -> NeMoGymChatCompletion:
-        pass
-
-    @abstractmethod
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        pass
-
-    async def messages(self, request: Request, body: dict = Body()):
-        """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
-
-        Translates the inbound Anthropic Messages request to the Responses API, delegates to this
-        server's own ``responses()`` (so it reuses whatever backend the server has), and maps the
-        result back to an Anthropic Messages response. When the client requested ``stream: true``
-        (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
-        Anthropic SSE event stream. Servers may override this for native Messages handling.
-        """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
-        response = await self._invoke_responses(request, params)
-        model_name = body.get("model") or response.model
-        anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
-        if body.get("stream"):
-            return StreamingResponse(
-                _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
-                media_type="text/event-stream",
-            )
-        return anthropic_response
-
-    async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
-    ) -> NeMoGymResponse:
-        # responses() signatures vary across servers: some take a leading `request`, some only
-        # `body`. Dispatch on whichever this server declares so the default messages() works for
-        # all of them.
-        if "request" in inspect.signature(self.responses).parameters:
-            return await self.responses(request=request, body=params)
-        return await self.responses(body=params)
 
 
 # --- Capture configuration + rollout-keyed storage ---
@@ -237,6 +152,114 @@ class CaptureStore:
         return exchanges
 
 
+class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    def setup_webserver(self) -> FastAPI:
+        app = FastAPI()
+
+        self.setup_session_middleware(app)
+        capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        self.install_model_call_capture(app, capture_config)
+
+        app.post("/v1/chat/completions")(self.chat_completions)
+
+        app.post("/v1/responses")(self.responses)
+
+        # Every Gym model server speaks the Anthropic Messages API by default, mapping
+        # Messages <-> Responses around its own responses() implementation. This lets blackbox
+        # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
+        # model server directly.
+        app.post("/v1/messages")(self.messages)
+
+        return app
+
+    def install_model_call_capture(self, app: Any, capture_config: ModelCallCaptureConfig) -> None:
+        """Install model-call capture middleware.
+
+        Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
+        regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
+        prefixed model call). When capture is enabled the middleware additionally records each observed
+        call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
+        unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
+        durable capture write).
+        """
+        if not capture_config.observability_enabled:
+            return
+
+        # path = scope.get("path", "")
+        # rollout_from_path: Optional[str] = None
+        # prefix_match = _ROLLOUT_PATH_RE.match(path)
+        # if prefix_match:
+        #     rollout_from_path = prefix_match.group("rollout_id")
+        #     path = prefix_match.group("rest")
+        #     scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+
+        # # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
+        # if self._store is None:
+        #     await self._app(scope, receive, send)
+        #     return
+
+        # await asyncio.to_thread(
+        #     self._store.record,
+        #     rollout_id,
+        #     {
+        #         "dialect": dialect,
+        #         "model_server": model_server_name,
+        #         "latency_ms": round(latency_ms, 2),
+        #         "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
+        #         "status_code": status_code,
+        #         "error_category": error_category,
+        #         "request": json.loads(request_bytes) if request_bytes else None,
+        #         "response": response_body,
+        #     },
+        # )
+
+        app.add_middleware(
+            None,
+            store=CaptureStore(capture_config.model_call_capture_dir),
+            model_server_name=self.config.name,
+        )
+
+    @abstractmethod
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        pass
+
+    @abstractmethod
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        pass
+
+    async def messages(self, request: Request, body: dict = Body()):
+        """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
+
+        Translates the inbound Anthropic Messages request to the Responses API, delegates to this
+        server's own ``responses()`` (so it reuses whatever backend the server has), and maps the
+        result back to an Anthropic Messages response. When the client requested ``stream: true``
+        (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
+        Anthropic SSE event stream. Servers may override this for native Messages handling.
+        """
+        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        response = await self._invoke_responses(request, params)
+        model_name = body.get("model") or response.model
+        anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        if body.get("stream"):
+            return StreamingResponse(
+                _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
+                media_type="text/event-stream",
+            )
+        return anthropic_response
+
+    async def _invoke_responses(
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        # responses() signatures vary across servers: some take a leading `request`, some only
+        # `body`. Dispatch on whichever this server declares so the default messages() works for
+        # all of them.
+        if "request" in inspect.signature(self.responses).parameters:
+            return await self.responses(request=request, body=params)
+        return await self.responses(body=params)
+
+
 # --- Observability records derived from captured exchanges ---
 
 
@@ -286,220 +309,6 @@ def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]
 def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
     """Aggregate model-call metrics for one rollout id."""
     return aggregate_model_call_records(read_model_call_records(store, rollout_id))
-
-
-# --- Capture middleware ---
-
-
-_OBSERVED_PATHS = {
-    "/v1/responses": "responses",
-    "/v1/chat/completions": "chat",
-    "/v1/messages": "messages",
-}
-
-
-def _headers_content_type(headers: list) -> bytes:
-    for key, value in headers:
-        if key.lower() == b"content-type":
-            return value
-    return b""
-
-
-# Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
-# <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
-_ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
-
-
-def _record(
-    store: CaptureStore,
-    dialect: str,
-    model_server_name: Optional[str],
-    request_bytes: bytes,
-    *,
-    rollout_id: str,
-    response_body: Any,
-    status_code: Optional[int],
-    error_category: Optional[str],
-    latency_ms: float,
-    ttft_ms: Optional[float] = None,
-) -> None:
-    """Append one exchange (success or failure). Best-effort: never raises."""
-    store.record(
-        rollout_id,
-        {
-            "dialect": dialect,
-            "model_server": model_server_name,
-            "latency_ms": round(latency_ms, 2),
-            "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
-            "status_code": status_code,
-            "error_category": error_category,
-            "request": json.loads(request_bytes) if request_bytes else None,
-            "response": response_body,
-        },
-    )
-
-
-class _CaptureMiddleware:
-    """Pure-ASGI per-rollout capture.
-
-    Always strips an optional ``/ng-rollout/<id>`` path prefix before routing (used as the capture
-    key) so the prefix is a stable routing feature independent of capture.
-    When ``store`` is set it buffers the request body and a copy of the response while forwarding both
-    downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
-    the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
-    after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
-    prefix and forwards only.
-    """
-
-    def __init__(self, app: Any, *, store: Optional[CaptureStore], model_server_name: Optional[str]) -> None:
-        self._app = app
-        self._store = store
-        self._model_server_name = model_server_name
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http":
-            await self._app(scope, receive, send)
-            return
-
-        path = scope.get("path", "")
-        rollout_from_path: Optional[str] = None
-        prefix_match = _ROLLOUT_PATH_RE.match(path)
-        if prefix_match:
-            rollout_from_path = prefix_match.group("rollout_id")
-            path = prefix_match.group("rest")
-            scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
-
-        # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
-        if self._store is None:
-            await self._app(scope, receive, send)
-            return
-
-        # Only explicitly correlated model calls are captured. An unprefixed call is forwarded
-        # unchanged rather than being mixed with unrelated calls under a shared fallback key.
-        if rollout_from_path is None:
-            await self._app(scope, receive, send)
-            return
-
-        dialect = _OBSERVED_PATHS.get(path)
-        if dialect is None:
-            await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
-            return
-
-        rollout_id = rollout_from_path
-        request_body = bytearray()
-
-        async def _receive() -> dict[str, Any]:
-            message = await receive()
-            if message.get("type") == "http.request":
-                request_body.extend(message.get("body", b"") or b"")
-            return message
-
-        state: dict[str, Any] = {
-            "status": None,
-            "streaming": False,
-            "body": bytearray(),
-            "ttft_ms": None,
-            "stream_error_category": None,
-        }
-        start = time.perf_counter()
-        deferred_response_messages: list[dict[str, Any]] = []
-        sse_event_buffer = bytearray()
-        defer_response = False
-
-        async def _send(message: dict[str, Any]) -> None:
-            nonlocal defer_response
-            message_type = message.get("type")
-            if message_type == "http.response.start":
-                state["status"] = message.get("status")
-                content_type = _headers_content_type(message.get("headers") or [])
-                state["streaming"] = content_type.startswith(b"text/event-stream")
-            elif message_type == "http.response.body":
-                chunk = message.get("body", b"") or b""
-                if chunk and state["ttft_ms"] is None:
-                    state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
-                state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
-                if state["streaming"] and chunk and not defer_response:
-                    sse_event_buffer.extend(chunk)
-                    terminal = None
-                    defer_response = terminal is not None
-                    state["stream_error_category"] = {
-                        "error": "upstream_error",
-                        "incomplete": "incomplete",
-                    }.get(terminal)
-                if defer_response or not message.get("more_body", False):
-                    deferred_response_messages.append(dict(message))
-                    return
-            await send(message)  # forward unchanged -> streaming is preserved
-
-        async def _flush_deferred_response() -> None:
-            for message in deferred_response_messages:
-                await send(message)
-
-        try:
-            await self._app(scope, _receive, _send)
-        except Exception:
-            # Offload the blocking write+fsync so it never stalls the event loop.
-            try:
-                await asyncio.to_thread(
-                    _record,
-                    self._store,
-                    dialect,
-                    self._model_server_name,
-                    bytes(request_body),
-                    rollout_id=rollout_id,
-                    response_body=None,
-                    status_code=None,
-                    error_category=None,
-                    latency_ms=(time.perf_counter() - start) * 1000.0,
-                    ttft_ms=state["ttft_ms"],
-                )
-            except Exception:
-                logger.warning("Model-call capture finalization failed.", exc_info=True)
-            finally:
-                await _flush_deferred_response()
-            raise
-
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        status = state["status"]
-        body_bytes = bytes(state["body"])
-        stream_error_category = state["stream_error_category"]
-        ttft_ms = state["ttft_ms"]
-        request_bytes = bytes(request_body)
-        store, model_server_name = self._store, self._model_server_name
-
-        def _parse_and_record() -> None:
-            # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
-            # malformed body can never surface as an ASGI error after the response was already sent.
-            response_body = None
-            if body_bytes:
-                response_body = orjson.loads(body_bytes)
-            error_category = None
-            if error_category is None and stream_error_category:
-                error_category = stream_error_category
-            # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
-            # doesn't silently count as a success with null tokens in reliability/cost sums.
-            if error_category is None and body_bytes and response_body is None:
-                error_category = "capture_parse_error"
-            _record(
-                store,
-                dialect,
-                model_server_name,
-                request_bytes,
-                rollout_id=rollout_id,
-                response_body=response_body,
-                status_code=status,
-                error_category=error_category,
-                latency_ms=latency_ms,
-                ttft_ms=ttft_ms,
-            )
-
-        try:
-            await asyncio.to_thread(_parse_and_record)
-        except Exception:
-            logger.warning("Model-call capture finalization failed.", exc_info=True)
-        finally:
-            await _flush_deferred_response()
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
