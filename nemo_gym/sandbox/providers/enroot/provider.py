@@ -47,6 +47,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,17 +156,6 @@ def _require_enroot() -> str:
             "Install enroot (https://github.com/NVIDIA/enroot) before selecting the enroot provider."
         )
     return path
-
-
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    """Accept either a config dataclass instance or a plain mapping (Hydra YAML)."""
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        return config_cls(**value)
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
 @dataclass(frozen=True)
@@ -285,38 +276,6 @@ def _resource_gpu_env(resources: SandboxResources) -> dict[str, str]:
     if not resources.gpu:
         return {}
     return {"NVIDIA_VISIBLE_DEVICES": ",".join(str(i) for i in range(resources.gpu))}
-
-
-def _to_sandbox_status(state: str | None) -> SandboxStatus:
-    """Map an enroot-reported state string to the neutral status enum."""
-    normalized = str(state or "").lower()
-    if normalized in {"running", "active", "ready", "s", "r", "d"}:
-        return SandboxStatus.RUNNING
-    if normalized in {"starting", "creating", "pending"}:
-        return SandboxStatus.STARTING
-    if normalized in {"stopped", "exited", "terminated", "z", "t", "x"}:
-        return SandboxStatus.STOPPED
-    if normalized in {"error", "failed", "unhealthy"}:
-        return SandboxStatus.ERROR
-    return SandboxStatus.UNKNOWN
-
-
-def _path_under_mount(mount_point: str, path: str) -> str | None:
-    """If `path` is inside the mount, return its path relative to the mount; else None."""
-    if not path.startswith("/"):
-        return None
-    mp = posixpath.normpath(mount_point.rstrip("/") or "/")
-    normalized = posixpath.normpath(path)
-    if normalized == mp:
-        return ""
-    try:
-        if posixpath.commonpath([mp, normalized]) != mp:
-            return None
-    except ValueError:
-        return None
-    if mp == "/":
-        return normalized.lstrip("/")
-    return normalized[len(mp) + 1 :]
 
 
 def _is_runtime_failure(stderr: str) -> bool:

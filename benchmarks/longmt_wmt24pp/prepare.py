@@ -10,21 +10,15 @@ source_sentences and reference_sentences lists for downstream analysis.
 wmt24pp documents are short (typically < 300 sentences, < 2K tokens) so no
 truncation is needed.
 
-Also pre-fetches the SEGALE judge models (LASER2, ersatz, wmt22-cometkiwi-da)
-into their cache directories so the resource server can run with
-HF_HUB_OFFLINE=1 from the first verify() call.
-
 Usage:
     python prepare.py
     python prepare.py --target_languages de_DE fr_FR ja_JP
-    python prepare.py --no_prefetch
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections import OrderedDict
 from pathlib import Path
 
@@ -116,47 +110,8 @@ def _lang_name(lang_code: str) -> str:
         return _FALLBACK.get(lang_code, lang_code)
 
 
-def _prefetch_judge_models() -> None:
-    """Pre-fetch LASER2, ersatz, and wmt22-cometkiwi-da into their cache dirs."""
-    laser_home = os.environ.get("LASER_HOME")
-    try:
-        from laser_encoders import LaserEncoderPipeline
-
-        print(f"Pre-fetching LASER2 (LASER_HOME={laser_home})...")
-        LaserEncoderPipeline(laser="laser2", model_dir=laser_home)
-        print("LASER2 cached")
-    except ImportError:
-        print("laser-encoders not installed; skipping LASER2 prefetch")
-    except Exception as exc:
-        print(f"LASER2 prefetch failed (will retry at server start): {exc}")
-
-    try:
-        import ersatz
-
-        print("Pre-fetching ersatz default-multilingual model...")
-        ersatz.split(model="default-multilingual", text=".")
-        print("ersatz cached")
-    except ImportError:
-        print("ersatz not installed; skipping prefetch")
-    except Exception as exc:
-        print(f"ersatz prefetch failed: {exc}")
-
-    try:
-        from comet import download_model, load_from_checkpoint
-
-        print("Pre-fetching Unbabel/wmt22-cometkiwi-da...")
-        ckpt = download_model("Unbabel/wmt22-cometkiwi-da")
-        load_from_checkpoint(ckpt)
-        print("wmt22-cometkiwi-da cached")
-    except ImportError:
-        print("unbabel-comet not installed; skipping COMETKiwi prefetch")
-    except Exception as exc:
-        print(f"COMETKiwi prefetch failed: {exc}")
-
-
 def prepare(
     target_languages: list[str] | None = None,
-    prefetch: bool = True,
 ) -> Path:
     """Download google/wmt24pp and write wmt24pp_benchmark.jsonl.
 
@@ -205,17 +160,11 @@ def prepare(
 
     print(f"Wrote {count} rows to {OUTPUT_FPATH}")
 
-    if prefetch:
-        _prefetch_judge_models()
-
     return OUTPUT_FPATH
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target_languages", nargs="+", default=None, help="Target language codes (default: all 55)")
-    parser.add_argument(
-        "--no_prefetch", action="store_true", help="Skip judge model prefetch (useful on machines without GPU)"
-    )
     args = parser.parse_args()
-    prepare(target_languages=args.target_languages, prefetch=not args.no_prefetch)
+    prepare(target_languages=args.target_languages)
