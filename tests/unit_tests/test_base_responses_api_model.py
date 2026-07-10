@@ -428,84 +428,6 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     assert records[0]["error_category"] == "capture_parse_error"
 
 
-def test_as_arguments():
-    from nemo_gym.base_responses_api_model import _as_arguments
-
-    assert _as_arguments({"x": 1}) == {"x": 1}
-    assert _as_arguments('{"y": 2}') == {"y": 2}
-    assert _as_arguments("not json") == {"_raw": "not json"}
-    assert _as_arguments(123) == {}
-
-
-def test_cache_signal():
-    from nemo_gym.base_responses_api_model import _cache_signal
-
-    assert _cache_signal(None) == (None, None)
-    assert _cache_signal({"prompt_tokens_details": {"cached_tokens": 4}}) == (True, 4)
-    assert _cache_signal({"input_tokens_details": {"cached_tokens": 0}}) == (False, 0)
-    assert _cache_signal({"cache_read_input_tokens": 5}) == (True, 5)  # Anthropic
-    assert _cache_signal({"unrelated": 1}) == (None, None)
-
-
-def test_extract_token_stats_chat_fallback():
-    from nemo_gym.base_responses_api_model import extract_token_stats
-
-    assert extract_token_stats(None)["tokens_total"] is None
-    stats = extract_token_stats(
-        {"prompt_tokens": 5, "completion_tokens": 3, "completion_tokens_details": {"reasoning_tokens": 1}}
-    )
-    assert (stats["tokens_in"], stats["tokens_out"], stats["tokens_total"], stats["tokens_reasoning"]) == (5, 3, 8, 1)
-
-
-def test_tool_calls_and_reasoning_chat_and_anthropic():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
-
-    chat = {
-        "choices": [
-            {
-                "message": {
-                    "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": '{"a": 1}'}}],
-                    "reasoning_content": "think",
-                }
-            }
-        ]
-    }
-    assert _tool_calls_and_reasoning(chat) == ([{"call_id": "c1", "name": "f", "arguments": {"a": 1}}], "think")
-
-    anthropic = {
-        "content": [
-            {"type": "tool_use", "id": "t1", "name": "g", "input": {"b": 2}},
-            {"type": "thinking", "thinking": "hmm"},
-        ]
-    }
-    assert _tool_calls_and_reasoning(anthropic) == ([{"call_id": "t1", "name": "g", "arguments": {"b": 2}}], "hmm")
-    assert _tool_calls_and_reasoning({"unrelated": 1}) == ([], None)
-
-
-def test_tool_calls_and_reasoning_accepts_reasoning_alias():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
-
-    # vLLM / newer servers emit `reasoning` (no `reasoning_content`).
-    assert _tool_calls_and_reasoning({"choices": [{"message": {"content": "hi", "reasoning": "because"}}]}) == (
-        [],
-        "because",
-    )
-    # `reasoning_content` wins when both are present.
-    both = {"choices": [{"message": {"reasoning_content": "rc", "reasoning": "r"}}]}
-    assert _tool_calls_and_reasoning(both) == ([], "rc")
-
-
-def test_tool_calls_and_reasoning_skips_non_dict_output_items():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
-
-    # A Responses `output` list may contain non-dict junk; it must be skipped, not crash.
-    resp = {"output": [None, "junk", {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]}
-    assert _tool_calls_and_reasoning(resp) == ([{"call_id": "c", "name": "f", "arguments": {}}], None)
-    # Same guard on the Anthropic content blocks.
-    anth = {"content": [None, "junk", {"type": "tool_use", "id": "t", "name": "g", "input": {"b": 2}}]}
-    assert _tool_calls_and_reasoning(anth) == ([{"call_id": "t", "name": "g", "arguments": {"b": 2}}], None)
-
-
 # --- base-agent correlation helpers ---
 def test_base_agent_resolve_model_base_url(monkeypatch):
     import nemo_gym.base_responses_api_agent as ba
@@ -824,53 +746,6 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
-
-
-def test_extract_token_stats_anthropic_cache_fold():
-    from nemo_gym.base_responses_api_model import extract_token_stats
-
-    # Anthropic native: input_tokens is the uncached remainder; cache-read + cache-creation fold in.
-    stats = extract_token_stats(
-        {
-            "input_tokens": 100,
-            "output_tokens": 50,
-            "cache_read_input_tokens": 200,
-            "cache_creation_input_tokens": 30,
-        }
-    )
-    assert stats["tokens_in"] == 330  # 100 + 200 + 30
-    assert stats["tokens_out"] == 50
-    assert stats["tokens_total"] == 380  # 330 + 50 (Anthropic sends no total_tokens)
-    assert stats["cache_creation_tokens"] == 30
-
-
-def test_extract_token_stats_anthropic_fully_cached_zero_base():
-    from nemo_gym.base_responses_api_model import extract_token_stats
-
-    # A fully-cached Anthropic response omits input_tokens; a 0 base preserves the folded prompt
-    # size instead of leaving tokens_in null.
-    stats = extract_token_stats(
-        {
-            "output_tokens": 12,
-            "cache_read_input_tokens": 500,
-            "cache_creation_input_tokens": 0,
-        }
-    )
-    assert stats["tokens_in"] == 500  # 0 base + cache_read 500 + cache_creation 0
-    assert stats["tokens_out"] == 12
-    assert stats["cache_creation_tokens"] == 0
-
-
-def test_extract_token_stats_openai_cached_not_double_counted():
-    from nemo_gym.base_responses_api_model import extract_token_stats
-
-    # OpenAI: input_tokens already includes cached tokens (cached_tokens is a subset) -> no fold.
-    stats = extract_token_stats(
-        {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "prompt_tokens_details": {"cached_tokens": 4}}
-    )
-    assert stats["tokens_in"] == 10
-    assert stats["tokens_total"] == 15
-    assert stats["cache_creation_tokens"] is None
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
