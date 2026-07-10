@@ -212,8 +212,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # model server directly.
         app.post("/v1/messages")(self.messages)
 
-        self.capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if self.capture_config.observability_enabled:
+        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if self._capture_config.observability_enabled:
             # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
             # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
             app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
@@ -229,7 +229,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
             app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
 
-            self._store = CaptureStore(self.capture_config.model_call_capture_dir)
+            self._store = CaptureStore(self._capture_config.model_call_capture_dir)
 
         return app
 
@@ -277,7 +277,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def chat_completions_with_call_capture(
         self, rollout_id: str, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        if not self.capture_config.observability_enabled:
+        if not self._capture_config.observability_enabled:
             return await self.chat_completions(body)
 
         body_dict = body.model_dump()
@@ -313,7 +313,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses_with_call_capture(
         self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        if not self.capture_config.observability_enabled:
+        if not self._capture_config.observability_enabled:
             return await self._invoke_responses(request, body)
 
         mcr_dict = {
@@ -347,7 +347,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
         # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
-        if not self.capture_config.observability_enabled:
+        if not self._capture_config.observability_enabled:
             return await self.messages(request, body)
 
         mcr_dict = {
