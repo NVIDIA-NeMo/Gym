@@ -346,6 +346,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise e
 
     async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
+        # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
         if not self.capture_config.observability_enabled:
             return await self.messages(request, body)
 
