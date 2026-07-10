@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
@@ -129,31 +130,6 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_terminates_on_first_step(self):
         agent = _make_agent()
-        call_log = _wire_mock_client(
-            agent,
-            {
-                "/reset": [{"observation": "go", "info": {}}],
-                "/v1/responses": [_model_response("move A")],
-                "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
-            },
-        )
-        req = MagicMock()
-        req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
-        result = await agent.run(req, body)
-        assert result.terminated is True
-        assert result.reward == 1.0
-        # reset + exactly 1 model call + 1 step
-        urls = [u for (_s, u, _) in call_log]
-        assert urls.count("/reset") == 1
-        assert urls.count("/v1/responses") == 1
-        assert urls.count("/step") == 1
-
-    @pytest.mark.asyncio
-    async def test_model_calls_use_rollout_prefixed_path(self):
-        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-
-        agent = _make_agent()
         model_path = "/ng-rollout/2-0/v1/responses"
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
@@ -173,7 +149,13 @@ class TestRun:
             responses_create_params={"input": [{"role": "user", "content": "play"}]},
             **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
         )
-        await agent.run(req, body)
+        result = await agent.run(req, body)
+        assert result.terminated is True
+        assert result.reward == 1.0
+
+        urls = [url for url, _headers in seen]
+        assert urls.count("/reset") == 1
+        assert urls.count("/step") == 1
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
 

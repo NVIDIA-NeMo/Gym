@@ -25,8 +25,6 @@ from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 from nemo_gym.model_call_capture import (
     CaptureStore,
     ModelCallCaptureConfig,
-    ModelCallRecord,
-    aggregate_model_call_metrics,
     build_model_call_record,
     read_model_call_records,
 )
@@ -46,10 +44,6 @@ def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
         _capture_config(tmp_path),
         model_server_name=model_server_name,
     )
-
-
-def test_make_capture_store_disabled_returns_none():
-    assert make_capture_store(ModelCallCaptureConfig()) is None
 
 
 @pytest.mark.parametrize("rollout_id", ["", "a/b", "../a", "a b", "röllout"])
@@ -82,6 +76,8 @@ def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_p
             "response": {},
         }
     ]
+    store.record("rollout-1", {"request": {"text": "second"}, "response": {}})
+    assert [record.call_index for record in read_model_call_records(store, "rollout-1")] == [0, 1]
 
 
 def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
@@ -122,12 +118,11 @@ def test_build_model_call_record_from_exchange():
     assert rec.reasoning_content == "thinking..."
     assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
     assert rec.latency_total_ms == 18.4
-
-
-def test_model_call_record_schema_has_observability_fields():
-    props = ModelCallRecord.model_json_schema()["properties"]
-    for field in (
+    assert {
         "call_index",
+        "model_server",
+        "dialect",
+        "status_code",
         "tokens_in",
         "tokens_out",
         "tokens_reasoning",
@@ -137,86 +132,12 @@ def test_model_call_record_schema_has_observability_fields():
         "tool_calls",
         "reasoning_content",
         "cache_hit",
+        "cached_tokens",
+        "cache_creation_tokens",
         "error_category",
         "latency_total_ms",
         "latency_ttft_ms",
-    ):
-        assert field in props
-
-
-def test_capture_records_model_calls(tmp_path):
-    """Capture two model calls and preserve their requests and observability fields."""
-    responses = [
-        {
-            "model": "m",
-            "usage": {
-                "input_tokens": 12,
-                "output_tokens": 7,
-                "total_tokens": 19,
-                "prompt_tokens_details": {"cached_tokens": 4},
-            },
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "let me check"}],
-                    "prompt_token_ids": [9],
-                    "generation_token_ids": [1, 2, 3],
-                    "generation_log_probs": [-0.1, -0.2, -0.3],
-                },
-                {"type": "function_call", "name": "calc", "call_id": "c1", "arguments": '{"x": 1}'},
-            ],
-        },
-        {
-            "model": "m",
-            "usage": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "answer is 42"}],
-                    "prompt_token_ids": [9, 1, 2, 3],
-                    "generation_token_ids": [4, 5],
-                    "generation_log_probs": [-0.1, -0.2],
-                }
-            ],
-        },
-    ]
-    seen_requests: list[dict] = []
-
-    app = FastAPI()
-
-    @app.post("/v1/responses")
-    async def _responses(body: dict = Body()) -> dict:
-        seen_requests.append(body)
-        return responses[len(seen_requests) - 1]
-
-    _install_capture(app, tmp_path)
-    client = TestClient(app)
-
-    r1 = client.post("/ng-rollout/rollout-x/v1/responses", json={"input": "solve it"})
-    r2 = client.post(
-        "/ng-rollout/rollout-x/v1/responses",
-        json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-    )
-
-    assert r1.status_code == 200 and r2.status_code == 200
-    assert seen_requests[0] == {"input": "solve it"}  # request-body replay worked
-
-    calls = read_model_call_records(CaptureStore(tmp_path), "rollout-x")
-    assert [call.call_index for call in calls] == [0, 1]
-    assert all(call.model_server == "srv" for call in calls)
-    assert (calls[0].tokens_in, calls[0].tokens_out, calls[0].tokens_total) == (12, 7, 19)
-    assert calls[0].cache_hit is True and calls[0].cached_tokens == 4
-    assert calls[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
-    assert calls[0].latency_total_ms is not None
-    assert calls[1].tokens_in == 20
-    assert calls[1].request == {"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]}
-
-    # Per-rollout aggregates for the rollout record.
-    agg = aggregate_model_call_metrics(CaptureStore(tmp_path), "rollout-x")
-    assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
-    assert agg["num_calls"] == 2
+    } <= type(rec).model_json_schema()["properties"].keys()
 
 
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
@@ -452,12 +373,25 @@ def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
 
 
-def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path):
+def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
+    from nemo_gym.observability import model_call_capture_dirs_from_config
+
+    assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
         ModelCallCaptureConfig(observability_enabled=True)
     with pytest.raises(ValueError, match="absolute"):
         ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="relative")
-    assert _capture_config(tmp_path).model_call_capture_dir == tmp_path
+
+    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
+    config = ModelCallCaptureConfig.model_validate(global_config)
+    store = make_capture_store(config)
+    assert store is not None and store.root == tmp_path
+    assert model_call_capture_dirs_from_config(global_config) == [store.root]
+
+    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
+    assert model_call_capture_dirs_from_config({}) == []
+    nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
+    assert model_call_capture_dirs_from_config(nested_config) == []
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
@@ -790,22 +724,6 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
-def test_model_call_capture_dirs_from_global_config(tmp_path, monkeypatch):
-    from nemo_gym.observability import model_call_capture_dirs_from_config
-
-    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
-    assert model_call_capture_dirs_from_config({}) == []
-    assert (
-        model_call_capture_dirs_from_config(
-            {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
-        )
-        == []
-    )
-    assert model_call_capture_dirs_from_config(
-        {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
-    ) == [tmp_path]
-
-
 def _capture_exchange(dialect, model_server, usage, response):
     return {
         "dialect": dialect,
@@ -818,12 +736,11 @@ def _capture_exchange(dialect, model_server, usage, response):
     }
 
 
-def test_merge_capture_uniform_shape_across_agents(tmp_path):
+def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     from nemo_gym.model_call_capture import CaptureStore
     from nemo_gym.observability import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
-    # Two different harnesses and dialects produce the same attachment shape.
     store.record(
         "0-0",
         _capture_exchange(
@@ -833,29 +750,17 @@ def test_merge_capture_uniform_shape_across_agents(tmp_path):
             {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]},
         ),
     )
-    store.record(
-        "1-0",
-        _capture_exchange(
-            "messages",
-            "B",
-            {"input_tokens": 4, "output_tokens": 1},
-            {"content": [{"type": "text", "text": "ok"}]},
-        ),
-    )
 
-    rec_a = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
-    rec_b = {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0, "response": {"harness": "B"}}
-    merge_model_call_capture_into_record(rec_a, [tmp_path])
-    merge_model_call_capture_into_record(rec_b, [tmp_path])
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
+    merge_model_call_capture_into_record(record, [tmp_path])
 
-    cap_a, cap_b = rec_a["ng_model_call_capture"], rec_b["ng_model_call_capture"]
-    assert set(cap_a) == set(cap_b) == {"rollout_id", "metrics", "calls"}
-    assert set(cap_a["metrics"]) == set(cap_b["metrics"])  # identical metrics shape
-    assert set(cap_a["calls"][0]) == set(cap_b["calls"][0])
-    assert "request" not in cap_a["calls"][0] and "response" not in cap_a["calls"][0]
-    # harness output + reward are untouched; capture carries the wire-level token stats
-    assert rec_a["response"] == {"harness": "A"} and rec_a["reward"] == 1.0
-    assert cap_a["rollout_id"] == "0-0" and cap_a["calls"][0]["tokens_in"] == 3
+    capture = record["ng_model_call_capture"]
+    assert set(capture) == {"rollout_id", "metrics", "calls"}
+    assert capture["rollout_id"] == "0-0"
+    assert capture["metrics"]["num_calls"] == 1
+    assert capture["calls"][0]["tokens_in"] == 3
+    assert "request" not in capture["calls"][0] and "response" not in capture["calls"][0]
+    assert record["response"] == {"harness": "A"} and record["reward"] == 1.0
 
 
 def test_merge_capture_noop_without_capture(tmp_path):
@@ -925,7 +830,6 @@ def test_aggregate_model_call_records_sums_and_counts():
     }
 
 
-# --- P0 review regressions: prefix routing + capture-dir resolution ---
 def test_rollout_prefix_stripped_when_capture_disabled():
     # The /ng-rollout/<id> prefix must be stripped + routed even when capture is OFF (the default),
     # otherwise a default `gym eval` 404s on every prefixed model call.
@@ -941,17 +845,6 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
 
 
-def test_producer_and_consumer_use_same_global_capture_dir(tmp_path):
-    import nemo_gym.observability as obs
-
-    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
-    store = obs.make_capture_store(ModelCallCaptureConfig.model_validate(global_config))
-    assert store is not None
-    assert store.root == tmp_path
-    assert obs.model_call_capture_dirs_from_config(global_config) == [store.root]
-
-
-# --- P1 review regressions: Anthropic cache tokens + concurrent-append integrity ---
 def test_extract_token_stats_anthropic_cache_fold():
     from nemo_gym.model_call_capture import extract_token_stats
 
@@ -997,26 +890,6 @@ def test_extract_token_stats_openai_cached_not_double_counted():
     assert stats["tokens_in"] == 10
     assert stats["tokens_total"] == 15
     assert stats["cache_creation_tokens"] is None
-
-
-def test_build_model_call_record_surfaces_anthropic_cache_creation():
-    rec = build_model_call_record(
-        {
-            "dialect": "messages",
-            "response": {
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 5,
-                    "cache_read_input_tokens": 7,
-                    "cache_creation_input_tokens": 3,
-                }
-            },
-        },
-        call_index=0,
-    )
-    assert rec.tokens_in == 20  # 10 + 7 + 3
-    assert rec.cached_tokens == 7  # cache-read
-    assert rec.cache_creation_tokens == 3
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):

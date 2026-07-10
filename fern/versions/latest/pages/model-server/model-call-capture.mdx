@@ -70,8 +70,7 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 contains a `call_index`, model server and API dialect, token and cache usage, latency, error details,
 tool calls, reasoning content, and the captured request and response. `call_index` reflects durable
 append order; it is not a causal or semantic ordering guarantee for concurrent calls. The request
-and response payloads remain the model-call evidence. The record does not infer turns, tool
-execution, subagent relationships, or other agent-level semantics.
+and response payloads remain the model-call evidence.
 
 Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
 Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
@@ -93,10 +92,12 @@ ng_model_call_capture = {
 response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
 data does not mix with an earlier attempt.
 
-The attachment is evaluation and observability side information. No training code consumes or
-depends on it; `NeMoGymResponse` and token-id and log-prob structures are unchanged.
+The attachment is additive: it does not replace or rewrite the existing response, reward,
+`NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.
 
 ## Limitations
 
-The model-server boundary does not provide tool execution, environment events, compaction events,
-semantic turns, or subagent structure. Those belong to the agent and rollout layers.
+The model-server boundary observes model HTTP requests and responses. It can record tool calls,
+reasoning, and tool results present in those payloads, but it does not observe the actual tool
+execution boundary, environment events, context compaction, semantic turns, or subagent structure.
+Those require instrumentation at the agent, tool, environment, or rollout layer.
