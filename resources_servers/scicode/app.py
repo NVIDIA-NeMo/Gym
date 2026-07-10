@@ -19,16 +19,16 @@ Runs the agent's accumulated per-sub-step Python solutions against each sub-step
 (targets loaded from test_data.h5) and returns a binary reward: 1.0 iff every sub-step passes.
 Per-sub-step counts are also returned so sub-step accuracy can be computed downstream.
 
-Designed to execute each sub-step via a Ray subprocess worker (instead of a Docker sandbox).
+Each sub-step is executed in a subprocess in this server's own process (instead of a
+Docker sandbox), so the subprocess inherits this server's interpreter and dependencies.
 """
 
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import ray
 from pydantic import ConfigDict
-from scicode_integration.runner import build_test_program, run_substep_remote, sanitize_test
+from scicode_integration.runner import build_test_program, run_substep, sanitize_test
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -124,8 +124,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             async with self._semaphore:
-                future = run_substep_remote.remote(program, self.config.timeout_secs)
-                result = await loop.run_in_executor(None, ray.get, future)
+                result = await loop.run_in_executor(None, run_substep, program, self.config.timeout_secs)
             return bool(result["passed"])
 
         step_results = list(await asyncio.gather(*[_run_substep(i) for i in scored]))

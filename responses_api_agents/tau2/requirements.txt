@@ -1,2 +1,6 @@
 -e nemo-gym[dev] @ ../../
-tau2[knowledge] @ git+https://github.com/bxyu-nvidia/tau2-bench@jk/bxyu-nemo-gym-stable-upstream-main-tau3
+tau2[knowledge] @ git+https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_stable
+# tau2 [knowledge] extra deps listed explicitly: the extra is not applied to the
+# `tau2[knowledge] @ git+URL` direct reference, so bm25/bm25_grep miss rank-bm25.
+rank-bm25>=0.2.2
+openai>=1.0.0
