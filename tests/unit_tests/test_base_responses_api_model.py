@@ -40,7 +40,6 @@ from nemo_gym.base_responses_api_model import (
     _record,
     aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
-    install_model_call_capture,
     make_capture_store,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
@@ -93,10 +92,12 @@ def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig
 
 
 def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
-    install_model_call_capture(
+    server_mock = MagicMock()
+    server_mock.config.name = model_server_name
+    SimpleResponsesAPIModel.install_model_call_capture(
+        server_mock,
         app,
         _capture_config(tmp_path),
-        model_server_name=model_server_name,
     )
 
 
@@ -447,7 +448,9 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     async def _cc() -> dict:
         return {"ok": True}
 
-    install_model_call_capture(app, ModelCallCaptureConfig())
+    mock_server = MagicMock()
+    mock_server.config.name = ""
+    SimpleResponsesAPIModel.install_model_call_capture(mock_server, app, ModelCallCaptureConfig())
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200

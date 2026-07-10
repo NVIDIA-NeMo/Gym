@@ -76,13 +76,30 @@ class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
 
 
+class ModelCallCaptureConfig(BaseModel):
+    """Run-wide model-call capture settings from Gym's global config."""
+
+    observability_enabled: bool = False
+    model_call_capture_dir: Optional[Path] = None
+
+    @model_validator(mode="after")
+    def validate_capture_dir(self) -> "ModelCallCaptureConfig":
+        if not self.observability_enabled:
+            return self
+        if self.model_call_capture_dir is None:
+            raise ValueError("model_call_capture_dir is required when observability_enabled=true")
+        if not self.model_call_capture_dir.is_absolute():
+            raise ValueError("model_call_capture_dir must be an absolute path")
+        return self
+
+
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(app, capture_config, model_server_name=self.config.name)
+        self.install_model_call_capture(app, capture_config)
 
         app.post("/v1/chat/completions")(self.chat_completions)
 
@@ -95,6 +112,22 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/messages")(self.messages)
 
         return app
+
+    def install_model_call_capture(self, app: Any, capture_config: ModelCallCaptureConfig) -> None:
+        """Install model-call capture middleware.
+
+        Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
+        regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
+        prefixed model call). When capture is enabled the middleware additionally records each observed
+        call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
+        unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
+        durable capture write).
+        """
+        app.add_middleware(
+            _CaptureMiddleware,
+            store=make_capture_store(capture_config),
+            model_server_name=self.config.name,
+        )
 
     @abstractmethod
     async def chat_completions(
@@ -138,23 +171,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
 
 # --- Capture configuration + rollout-keyed storage ---
-
-
-class ModelCallCaptureConfig(BaseModel):
-    """Run-wide model-call capture settings from Gym's global config."""
-
-    observability_enabled: bool = False
-    model_call_capture_dir: Optional[Path] = None
-
-    @model_validator(mode="after")
-    def validate_capture_dir(self) -> "ModelCallCaptureConfig":
-        if not self.observability_enabled:
-            return self
-        if self.model_call_capture_dir is None:
-            raise ValueError("model_call_capture_dir is required when observability_enabled=true")
-        if not self.model_call_capture_dir.is_absolute():
-            raise ValueError("model_call_capture_dir must be an absolute path")
-        return self
 
 
 def _validate_rollout_id(rollout_id: str) -> str:
@@ -494,25 +510,6 @@ class _CaptureMiddleware:
             logger.warning("Model-call capture finalization failed.", exc_info=True)
         finally:
             await _flush_deferred_response()
-
-
-def install_model_call_capture(
-    app: Any, config: ModelCallCaptureConfig, *, model_server_name: Optional[str] = None
-) -> None:
-    """Install model-call capture middleware.
-
-    Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
-    regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-    prefixed model call). When capture is enabled the middleware additionally records each observed
-    call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-    unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
-    durable capture write).
-    """
-    app.add_middleware(
-        _CaptureMiddleware,
-        store=make_capture_store(config),
-        model_server_name=model_server_name,
-    )
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
