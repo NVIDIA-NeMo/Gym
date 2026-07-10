@@ -2087,16 +2087,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # and /root/.local/share/opencode never gets created, as happens with
         # SWE-rebench-V2 Python images) cannot override the script's real exit
         # code under the outer `set -e`.
-        opencode_log_trap = (
-            "trap '_rc=$?; set +e; "
-            "mkdir -p /trajectories_mount/opencode_logs 2>/dev/null; "
-            "cp -r /root/.local/share/opencode /trajectories_mount/opencode_logs/xdg 2>/dev/null; "
-            "for d in /tmp/bench-*; do "
-            '[ -d "$d/data/log" ] && '
-            'cp -r "$d/data/log" "/trajectories_mount/opencode_logs/bench_$(basename "$d")" 2>/dev/null; '
-            "done; "
-            "exit $_rc' EXIT\n"
-        )
+        if self.config.debug:
+            opencode_log_trap = (
+                "trap '_rc=$?; set +e; "
+                "mkdir -p /trajectories_mount/opencode_logs 2>/dev/null; "
+                "cp -r /root/.local/share/opencode /trajectories_mount/opencode_logs/xdg 2>/dev/null; "
+                "for d in /tmp/bench-*; do "
+                '[ -d "$d/data/log" ] && '
+                'cp -r "$d/data/log" "/trajectories_mount/opencode_logs/bench_$(basename "$d")" 2>/dev/null; '
+                "done; "
+                "exit $_rc' EXIT\n"
+            )
+        else:
+            opencode_log_trap = ""
         with open(agent_script_path, "w") as f:
             f.write("#!/bin/bash\nset -e\n")
             f.write(opencode_log_trap)
