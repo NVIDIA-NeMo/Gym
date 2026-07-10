@@ -24,7 +24,6 @@ from omegaconf import OmegaConf
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallCaptureConfig,
-    build_model_call_record,
     install_model_call_capture,
     make_capture_store,
     read_model_call_records,
@@ -87,58 +86,6 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
 
     with pytest.raises(orjson.JSONDecodeError):
         store.read("rollout-1")
-
-
-def test_build_model_call_record_from_exchange():
-    exchange = {
-        "dialect": "responses",
-        "model_server": "srv",
-        "latency_ms": 18.4,
-        "request": {"input": "hi"},
-        "response": {
-            "model": "m",
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "total_tokens": 15,
-                "output_tokens_details": {"reasoning_tokens": 3},
-                "prompt_tokens_details": {"cached_tokens": 4},
-            },
-            "output": [
-                {"type": "reasoning", "summary": [{"text": "thinking..."}]},
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
-                {"type": "function_call", "call_id": "c1", "name": "calc", "arguments": '{"x": 1}'},
-            ],
-        },
-    }
-    rec = build_model_call_record(exchange, call_index=3)
-    assert rec.call_index == 3
-    assert rec.model_server == "srv" and rec.dialect == "responses"
-    assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
-    assert rec.cache_hit is True and rec.cached_tokens == 4
-    assert rec.reasoning_content == "thinking..."
-    assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
-    assert rec.latency_total_ms == 18.4
-    assert {
-        "call_index",
-        "model_server",
-        "dialect",
-        "status_code",
-        "tokens_in",
-        "tokens_out",
-        "tokens_reasoning",
-        "tokens_total",
-        "request",
-        "response",
-        "tool_calls",
-        "reasoning_content",
-        "cache_hit",
-        "cached_tokens",
-        "cache_creation_tokens",
-        "error_category",
-        "latency_total_ms",
-        "latency_ttft_ms",
-    } <= type(rec).model_json_schema()["properties"].keys()
 
 
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
