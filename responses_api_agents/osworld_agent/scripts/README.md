@@ -185,6 +185,12 @@ sampling seed unchanged when resuming. The runner also writes per-task
 and result metadata under `${RUN_DIR}/task-artifacts`. Set `TASK_ARTIFACTS=0`
 to disable this, or `TASK_ARTIFACT_ROOT=/shared/path` to move it.
 
+For adapter-parity debugging, add `FULL_MODEL_IO=1`. This writes the complete
+agent-facing request/response stream to `model-io-agent.jsonl`, the final VLLM
+transport payload/response stream to `model-io-transport.jsonl`, and a
+run-level VM command/response stream to `vm-exec.jsonl`. Full requests retain
+embedded screenshots, so the files are intentionally opt-in and may be large.
+
 ## Legacy remote-host helper
 
 `bringup_remote_host.sh` remains in the branch for historical deployments,

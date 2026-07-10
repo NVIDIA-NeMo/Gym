@@ -14,12 +14,48 @@ from __future__ import annotations
 
 import ast
 import base64
+import json
 import logging
+import os
 import re
+import time
 from typing import Any, Dict, List, Mapping, Tuple
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.native_agents")
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert parser evidence to JSON without changing rollout behavior."""
+
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _append_agent_io(event: Dict[str, Any]) -> None:
+    """Append parser evidence beside the agent model-I/O events."""
+
+    path = os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip()
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_jsonable(event), ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        LOG.exception("Failed to append OSWorld parser evidence to %s", path)
+
 
 INSTRUCTION_TEMPLATE = (
     "# Task Instruction:\n{instruction}\n\n"
@@ -525,6 +561,7 @@ class NemotronV3Agent:
         parsed_info: Dict[str, Any] = {}
 
         for attempt in range(self.parse_retries):
+            response: Any = None
             payload: Dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
@@ -549,9 +586,38 @@ class NemotronV3Agent:
                 if low_level.startswith("<Error>"):
                     raise ValueError(low_level)
                 _validate_python_actions(actions)
+                if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
+                    _append_agent_io(
+                        {
+                            "schema_version": 1,
+                            "event": "agent_parse",
+                            "timestamp_unix_ns": time.time_ns(),
+                            "pid": os.getpid(),
+                            "step": len(self.actions) + 1,
+                            "attempt": attempt + 1,
+                            "normalized_model_response": response,
+                            "parsed_low_level": low_level,
+                            "parsed_actions": actions,
+                            "parsed_info": parsed_info,
+                        }
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
+                    _append_agent_io(
+                        {
+                            "schema_version": 1,
+                            "event": "agent_parse_error",
+                            "timestamp_unix_ns": time.time_ns(),
+                            "pid": os.getpid(),
+                            "step": len(self.actions) + 1,
+                            "attempt": attempt + 1,
+                            "normalized_model_response": response,
+                            "error_type": type(exc).__name__,
+                            "error": repr(exc),
+                        }
+                    )
                 self.logger.warning(
                     "Nemotron response attempt %d/%d failed: %s",
                     attempt + 1,

@@ -525,6 +525,38 @@ truth. The adapter records it in `response.model`,
 `verifier_metadata.osworld_model_name`, and `run.json`; it warns and ignores a
 stale `policy_model_name` left in a copied `env.yaml`.
 
+### Full model-I/O evidence
+
+Set `FULL_MODEL_IO=1` on `run_multienv_osworld_agent.sh` to retain the exact
+model boundary in addition to the normal per-task artifacts:
+
+```bash
+FULL_MODEL_IO=1 RUN_DIR=results/omni-debug \
+  bash responses_api_agents/osworld_agent/scripts/run_omni_mini_local_vllm.sh
+```
+
+The run directory then contains:
+
+- `model-io-agent.jsonl`: the agent-facing payload, exact OpenAI request,
+  raw/normalized response, parser result or parser error, timing, and hashes;
+- `model-io-transport.jsonl`: the final payload sent by the VLLM adapter and
+  the raw vLLM response or transport error;
+- `vm-exec.jsonl`: controller commands and VM responses across the run.
+
+Every event has `schema_version`, an event name, call/step identifiers,
+nanosecond timestamps, and a process id. Embedded image data remains in the
+full request; a separate image index records encoded/decoded sizes and
+SHA-256 values for integrity checks. These files can be large and can contain
+screenshots or prompt content, so keep the option disabled for normal runs and
+apply the same access controls as the source task data.
+
+The three output paths can be overridden individually with
+`OSWORLD_MODEL_IO_LOG`, `OSWORLD_TRANSPORT_IO_LOG`, and
+`OSWORLD_VM_EXEC_LOG`. Setting either model-I/O path directly also enables
+that logger without `FULL_MODEL_IO=1`. When unset, the model and transport
+loggers do not serialize or hash payloads and do not change other agents or
+models.
+
 ## Recording rollout videos
 
 Set `OSWORLD_RECORD_VIDEO_DIR` before launching `ng_run` to capture an mp4

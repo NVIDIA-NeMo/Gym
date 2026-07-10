@@ -57,12 +57,41 @@ from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
+    _append_transport_io,
+    _transport_images,
 )
 
 
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+
+def test_transport_evidence_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-transport.jsonl"
+    monkeypatch.setenv("OSWORLD_TRANSPORT_IO_LOG", str(log_path))
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                {"type": "text", "text": "inspect"},
+            ],
+        }
+    ]
+
+    _append_transport_io(
+        {
+            "schema_version": 1,
+            "event": "transport_request",
+            "request_payload": {"messages": messages},
+            "embedded_images": _transport_images(messages),
+        }
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["request_payload"]["messages"] == messages
+    assert row["embedded_images"][0]["decoded_bytes"] == 3
 
 
 class FakeUUID:

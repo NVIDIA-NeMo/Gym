@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -284,6 +285,32 @@ def test_nemotron_agent_retries_invalid_python_action() -> None:
 
     assert calls == 2
     assert actions == ["pyautogui.click(960, 540)"]
+
+
+def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-agent.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    agent = NemotronV3Agent(model="policy", max_steps=2, parse_retries=2)
+    responses = [
+        {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(]\n```",
+            "reasoning_content": "Invalid first attempt.",
+        },
+        {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```",
+            "reasoning_content": "Valid retry.",
+        },
+    ]
+
+    agent.call_llm = lambda _payload, _model: responses.pop(0)  # type: ignore[method-assign]
+    _response, actions, _info = agent.predict("Click.", {"screenshot": b"fake-png"})
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert actions == ["pyautogui.click(960, 540)"]
+    assert [row["event"] for row in rows] == ["agent_parse_error", "agent_parse"]
+    assert rows[0]["attempt"] == 1
+    assert rows[1]["attempt"] == 2
+    assert rows[1]["parsed_actions"] == ["pyautogui.click(960, 540)"]
 
 
 def test_omni_mini_agent_sends_one_image_and_keeps_text_history() -> None:

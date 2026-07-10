@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
+import time
 from asyncio import Semaphore
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -51,6 +54,72 @@ from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NA
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
+
+
+def _jsonable(value: Any) -> Any:
+    """Return a JSON-compatible representation for model-I/O evidence."""
+
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _model_io_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Index embedded images without removing them from the full request log."""
+
+    images: List[Dict[str, Any]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if not isinstance(url, str):
+                continue
+            encoded = url.split(",", 1)[1] if url.startswith("data:") and "," in url else ""
+            try:
+                decoded = base64.b64decode(encoded, validate=False) if encoded else b""
+            except Exception:  # noqa: BLE001 - evidence logging must not break a rollout.
+                decoded = b""
+            images.append(
+                {
+                    "message_index": message_index,
+                    "part_index": part_index,
+                    "data_url_chars": len(url),
+                    "encoded_sha256": hashlib.sha256(encoded.encode("ascii", errors="ignore")).hexdigest(),
+                    "decoded_bytes": len(decoded),
+                    "decoded_sha256": hashlib.sha256(decoded).hexdigest(),
+                }
+            )
+    return images
+
+
+def _append_model_io(event: Dict[str, Any]) -> None:
+    """Append a complete model-I/O event when opt-in logging is enabled."""
+
+    path = os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip()
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        line = json.dumps(_jsonable(event), ensure_ascii=False, sort_keys=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        LOG.exception("Failed to append OSWorld model-I/O evidence to %s", path)
 
 
 def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) -> str:
@@ -226,8 +295,10 @@ def _build_messages_model_fn(
     from openai import OpenAI  # noqa: PLC0415
 
     client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+    call_index = 0
 
     def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Any:
+        nonlocal call_index
         create_kwargs: Dict[str, Any] = {
             "model": payload.get("model") or model_name,
             "messages": messages,
@@ -236,14 +307,89 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
-        resp = client.chat.completions.create(**create_kwargs)
+        model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
+        current_call = 0
+        started_ns = 0
+        if model_io_enabled:
+            call_index += 1
+            current_call = call_index
+            request_value = _jsonable(create_kwargs)
+            agent_payload = _jsonable(payload)
+            request_json = json.dumps(request_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            payload_json = json.dumps(agent_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            started_ns = time.time_ns()
+            _append_model_io(
+                {
+                    "schema_version": 1,
+                    "event": "model_request",
+                    "call_index": current_call,
+                    "timestamp_unix_ns": started_ns,
+                    "pid": os.getpid(),
+                    "base_url": base_url,
+                    "agent_payload": agent_payload,
+                    "agent_payload_sha256": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    "openai_request": request_value,
+                    "openai_request_sha256": hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+                    "embedded_images": _model_io_images(messages),
+                }
+            )
+        try:
+            resp = client.chat.completions.create(**create_kwargs)
+        except Exception as exc:
+            if model_io_enabled:
+                finished_ns = time.time_ns()
+                _append_model_io(
+                    {
+                        "schema_version": 1,
+                        "event": "model_error",
+                        "call_index": current_call,
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "pid": os.getpid(),
+                        "error_type": type(exc).__name__,
+                        "error": repr(exc),
+                    }
+                )
+            raise
         choice = resp.choices[0]
         if payload.get("_nemo_gym_require_stop") and choice.finish_reason not in {"stop", "tool_calls"}:
             raise ValueError(f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}")
-        return _normalize_chat_message(
-            choice.message,
-            structured=bool(payload.get("_nemo_gym_return_message")),
+        if not model_io_enabled:
+            return _normalize_chat_message(
+                choice.message,
+                structured=bool(payload.get("_nemo_gym_return_message")),
+            )
+
+        normalization_error = None
+        normalization_exc: Exception | None = None
+        normalized = None
+        try:
+            normalized = _normalize_chat_message(
+                choice.message,
+                structured=bool(payload.get("_nemo_gym_return_message")),
+            )
+        except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
+            normalization_exc = exc
+            normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
+        finished_ns = time.time_ns()
+        _append_model_io(
+            {
+                "schema_version": 1,
+                "event": "model_response",
+                "call_index": current_call,
+                "timestamp_unix_ns": finished_ns,
+                "elapsed_ns": finished_ns - started_ns,
+                "pid": os.getpid(),
+                "finish_reason": choice.finish_reason,
+                "raw_response": _jsonable(resp),
+                "raw_choice_message": _jsonable(choice.message),
+                "normalized_response": _jsonable(normalized),
+                "normalization_error": normalization_error,
+            }
         )
+        if normalization_exc is not None:
+            raise normalization_exc
+        return normalized
 
     return _call
 

@@ -8,6 +8,8 @@ boundary so the suite runs on a login node without OSWorld installed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
@@ -23,6 +25,8 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldAgentConfig,
     OSWorldRunRequest,
     OSWorldVerifyResponse,
+    _append_model_io,
+    _model_io_images,
     _normalize_chat_message,
     _resolve_policy_model_name,
 )
@@ -62,6 +66,44 @@ DEFAULT_RUN_RESULT: Dict[str, Any] = {
         },
     ],
 }
+
+
+def test_full_model_io_writer_keeps_payload_and_indexes_images(monkeypatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-agent.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    data_url = "data:image/png;base64,YWJj"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": "inspect this image"},
+            ],
+        }
+    ]
+    image_index = _model_io_images(messages)
+
+    _append_model_io(
+        {
+            "schema_version": 1,
+            "event": "model_request",
+            "openai_request": {"messages": messages},
+            "embedded_images": image_index,
+        }
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["openai_request"]["messages"] == messages
+    assert row["embedded_images"] == [
+        {
+            "message_index": 0,
+            "part_index": 0,
+            "data_url_chars": len(data_url),
+            "encoded_sha256": hashlib.sha256(b"YWJj").hexdigest(),
+            "decoded_bytes": 3,
+            "decoded_sha256": hashlib.sha256(b"abc").hexdigest(),
+        }
+    ]
 
 
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:

@@ -16,6 +16,10 @@ policy_model:
       # so the adapter-owned agent sees the same contract as the hosted API.
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
+      # Match internal-osworld-adapter-nano-omni: historical assistant turns
+      # retain <think>...</think> inside content instead of being split into
+      # reasoning/reasoning_content fields before the vLLM request.
+      preserve_reasoning_in_assistant_content: true
       replace_developer_role_with_system: false
       sequential_reasoning_allowed: true
       is_responses_native: false

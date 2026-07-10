@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import hashlib
 import json
+import logging
 import os
 from copy import deepcopy
-from time import time
+from time import time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 from uuid import uuid4
 
@@ -47,6 +49,74 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+
+
+LOG = logging.getLogger("nemo_gym.vllm_model")
+
+
+def _jsonable(value: Any) -> Any:
+    """Return a JSON-compatible representation for transport evidence."""
+
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Index embedded images while retaining the complete request payload."""
+
+    images: List[Dict[str, Any]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if not isinstance(url, str):
+                continue
+            encoded = url.split(",", 1)[1] if url.startswith("data:") and "," in url else ""
+            try:
+                decoded = base64.b64decode(encoded, validate=False) if encoded else b""
+            except Exception:  # noqa: BLE001 - evidence logging must not break a request.
+                decoded = b""
+            images.append(
+                {
+                    "message_index": message_index,
+                    "part_index": part_index,
+                    "data_url_chars": len(url),
+                    "encoded_sha256": hashlib.sha256(encoded.encode("ascii", errors="ignore")).hexdigest(),
+                    "decoded_bytes": len(decoded),
+                    "decoded_sha256": hashlib.sha256(decoded).hexdigest(),
+                }
+            )
+    return images
+
+
+def _append_transport_io(event: Dict[str, Any]) -> None:
+    """Append exact vLLM request/response evidence when explicitly enabled."""
+
+    path = os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip()
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_jsonable(event), ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        LOG.exception("Failed to append vLLM transport evidence to %s", path)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -119,6 +189,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+        self._transport_call_index = 0
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -447,7 +518,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
-
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
@@ -455,9 +525,47 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "content_filter"
                 return res
 
+        transport_io_enabled = bool(os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip())
+        call_index = 0
+        started_ns = 0
+        if transport_io_enabled:
+            self._transport_call_index += 1
+            call_index = self._transport_call_index
+            request_value = _jsonable(body_dict)
+            request_json = json.dumps(request_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            started_ns = time_ns()
+            _append_transport_io(
+                {
+                    "schema_version": 1,
+                    "event": "transport_request",
+                    "call_index": call_index,
+                    "timestamp_unix_ns": started_ns,
+                    "pid": os.getpid(),
+                    "configured_base_urls": self.config.base_url,
+                    "request_payload": request_value,
+                    "request_payload_sha256": hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+                    "embedded_images": _transport_images(body_dict.get("messages", [])),
+                }
+            )
+
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
+            if transport_io_enabled:
+                finished_ns = time_ns()
+                _append_transport_io(
+                    {
+                        "schema_version": 1,
+                        "event": "transport_error_response",
+                        "call_index": call_index,
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "pid": os.getpid(),
+                        "http_status": e.status,
+                        "raw_response_body": e.response_content.decode(errors="replace"),
+                        "error": repr(e),
+                    }
+                )
             """
             Example messages for out of context length:
 
@@ -480,6 +588,36 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
             else:
                 raise e
+        except Exception as e:
+            if transport_io_enabled:
+                finished_ns = time_ns()
+                _append_transport_io(
+                    {
+                        "schema_version": 1,
+                        "event": "transport_error",
+                        "call_index": call_index,
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "pid": os.getpid(),
+                        "error_type": type(e).__name__,
+                        "error": repr(e),
+                    }
+                )
+            raise
+
+        if transport_io_enabled:
+            finished_ns = time_ns()
+            _append_transport_io(
+                {
+                    "schema_version": 1,
+                    "event": "transport_response",
+                    "call_index": call_index,
+                    "timestamp_unix_ns": finished_ns,
+                    "elapsed_ns": finished_ns - started_ns,
+                    "pid": os.getpid(),
+                    "raw_response": deepcopy(chat_completion_dict),
+                }
+            )
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
