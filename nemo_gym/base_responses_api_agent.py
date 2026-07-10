@@ -34,7 +34,7 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
     apply_rollout_prefix,
-    rollout_id_from_run_body,
+    maybe_rollout_id_from_run_body,
 )
 
 
@@ -62,7 +62,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
         """Per-rollout capture id for a run-request (its task/rollout indices), or None."""
-        return rollout_id_from_run_body(body)
+        return maybe_rollout_id_from_run_body(body)
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
         """Resolve a model server URL with an optional rollout prefix."""

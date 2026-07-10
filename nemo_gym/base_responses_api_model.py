@@ -61,6 +61,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        install_model_call_capture(app, self.config)
 
         app.post("/v1/chat/completions")(self.chat_completions)
 
@@ -71,11 +72,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
         # model server directly.
         app.post("/v1/messages")(self.messages)
-
-        # Opt-in per-rollout model-call capture (off by default; enable via observability_enabled).
-        # An exchange-capturing middleware, independent of each server's handler signature; never
-        # alters the response.
-        install_model_call_capture(app, self.config)
 
         return app
 

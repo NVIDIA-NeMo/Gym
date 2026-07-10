@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym.model_call_capture import CaptureStore, aggregate_model_call_records, read_model_call_records
-from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
+from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, maybe_rollout_id_from_run_body
 
 
 logger = logging.getLogger(__name__)
@@ -603,18 +603,15 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
     """Remove stale per-rollout capture files for these records before a fresh (non-resume) run.
 
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
-    re-run would append onto the previous run's capture for the same id. Best-effort; run-scopes the
-    capture so each run's model-call evidence stays isolated.
+    re-run would append onto the previous run's capture for the same id. This run-scopes the capture
+    so each run's model-call evidence stays isolated.
     """
     if not capture_dirs:
         return
     for directory in capture_dirs:
-        try:
-            store = CaptureStore(directory)
-        except Exception:
-            continue
+        store = CaptureStore(directory)
         for record in records:
-            rollout_id = rollout_id_from_run_body(record)
+            rollout_id = maybe_rollout_id_from_run_body(record)
             if rollout_id:
                 store.path_for(rollout_id).unlink(missing_ok=True)
 
@@ -632,7 +629,7 @@ def merge_model_call_capture_into_record(
     """
     if not capture_dirs:
         return record
-    rollout_id = rollout_id_from_run_body(record)
+    rollout_id = maybe_rollout_id_from_run_body(record)
     if rollout_id is None:
         return record
     store = _store_for_rollout(rollout_id, capture_dirs)
