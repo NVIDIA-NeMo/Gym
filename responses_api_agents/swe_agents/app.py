@@ -1500,6 +1500,32 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _parse_replay_messages(problem_info: Dict[str, Any]) -> Optional[list]:
+    """Parse `problem_info["replay_messages"]` (JSON-encoded chat-completion
+    message list, or already-decoded list; metadata is typed Dict[str, str] so
+    the wire form is always a JSON string, but tests may pass a list directly).
+    """
+    raw = problem_info.get("replay_messages")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, list):
+        return raw
+    return None
+
+
+def _extract_replay_system_content(replay_messages_list: list) -> Optional[str]:
+    """First non-empty system-role message content in a chat-completion message list."""
+    for m in replay_messages_list:
+        if isinstance(m, dict) and m.get("role") == "system":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    return None
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1609,14 +1635,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         # persistent_dir (mounted as /trajectories_mount inside the apptainer) and
         # forward the path as positional arg #18 to run_infer.sh.
         replay_messages_mounted_path = ""
-        replay_messages_raw = self.config.problem_info.get("replay_messages")
-        if isinstance(replay_messages_raw, str):
-            try:
-                replay_messages_list = json.loads(replay_messages_raw)
-            except json.JSONDecodeError:
-                replay_messages_list = None
-        else:
-            replay_messages_list = replay_messages_raw
+        replay_messages_list = _parse_replay_messages(self.config.problem_info)
         if replay_messages_list:
             replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
             replay_messages_host_path.write_text(json.dumps(replay_messages_list))
@@ -1632,13 +1651,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             # YAML-level agent_prompt_overrides). The standard mount logic in
             # _build_apptainer_command bind-mounts this file at the container's
             # system_prompt.j2 path.
-            replay_system_content = None
-            for m in replay_messages_list:
-                if isinstance(m, dict) and m.get("role") == "system":
-                    c = m.get("content")
-                    if isinstance(c, str) and c.strip():
-                        replay_system_content = c
-                        break
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
             if replay_system_content:
                 sp_host_path = self.config.persistent_dir / "replay_system_prompt.j2"
                 sp_host_path.write_text(replay_system_content)
@@ -1974,6 +1987,36 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 llm_model_cfg[key] = self.config.inference_params[key]
         config_str = json.dumps({"llm": {"model": llm_model_cfg}})
 
+        # REPLAY_MESSAGES_PATH support: mirrors OpenHandsHarnessProcessor. When
+        # problem_info carries `replay_messages`, dump it to a file under
+        # persistent_dir (mounted as /trajectories_mount inside the apptainer)
+        # and forward the mounted path to run_infer.sh / bench/cli.ts as
+        # positional arg #13. The bench harness replays each recorded tool call
+        # for real against the fresh sandbox (via a scripted turn in the
+        # nemo-gym provider that feeds opencode's normal tool-execution path —
+        # same "swap the transport, keep the loop" design as live turns) before
+        # falling through to live model calls, so the container's filesystem
+        # state stays consistent with the replayed conversation.
+        #
+        # The replay's own system message is pinned as resolved_system_prompt_template
+        # UNCONDITIONALLY (overriding any agent_prompt_overrides selection), same
+        # rationale as OpenHands: it's the canonical source of truth for the
+        # recorded conversation, and the standard mount logic in
+        # _build_apptainer_command already bind-mounts resolved_system_prompt_template
+        # to /opencode_setup/opencode/system_prompt.txt for the opencode path.
+        replay_messages_mounted_path = ""
+        replay_messages_list = _parse_replay_messages(data_point)
+        if replay_messages_list:
+            replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
+            replay_messages_host_path.write_text(json.dumps(replay_messages_list))
+            replay_messages_mounted_path = f"{self.config.base_mounted_dir}/replay_messages.json"
+
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
+            if replay_system_content:
+                sp_host_path = self.config.persistent_dir / "replay_system_prompt.txt"
+                sp_host_path.write_text(replay_system_content)
+                self.config.resolved_system_prompt_template = str(sp_host_path)
+
         workspace_path = _resolve_opencode_workspace_path(data_point)
         user_message = _render_opencode_user_message(
             data_point,
@@ -2078,8 +2121,18 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"    {user_message_in_sif} "  # $11: pre-rendered user message file
         )
 
-        if self.config.resolved_system_prompt_template is not None:
-            agent_main_cmd += "    /opencode_setup/opencode/system_prompt.txt "  # $12: system override
+        # Positional args 12..13 of run_infer.sh. Empty = shell-side default.
+        # Emit up to the LAST non-empty slot so a trailing placeholder is only
+        # inserted when a later arg (REPLAY_MESSAGES_PATH at #13) needs it at
+        # the right shift index.
+        sp_set = self.config.resolved_system_prompt_template is not None
+        positional_args = [
+            "/opencode_setup/opencode/system_prompt.txt" if sp_set else "",  # 12 SYSTEM_PROMPT_PATH
+            replay_messages_mounted_path or "",  # 13 REPLAY_MESSAGES_PATH
+        ]
+        last_set = max((i for i, a in enumerate(positional_args) if a), default=-1)
+        for a in positional_args[: last_set + 1]:
+            agent_main_cmd += f"    {a} " if a else "    '' "
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
@@ -3339,8 +3392,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         Returns None for plain seed inputs (system + user only) — there is nothing
         to replay in that case. Returns a JSON-encoded `list[dict]` (chat-completion
         message format) when function_call / function_call_output items are present.
+
+        Supported for both `openhands` and `opencode` harnesses.
         """
-        if self.config.agent_framework != "openhands":
+        if self.config.agent_framework not in ("openhands", "opencode"):
             return None
         input_items = body.input if isinstance(body.input, list) else []
 
@@ -3367,14 +3422,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
-        # REPLAY_MESSAGES_PATH support (OpenHands harness only): when the request's
-        # input carries a prior agent trajectory (function_call / function_call_output
-        # items beyond the initial system+user messages), convert the partial
-        # Responses-format input to OpenAI chat-completion format here in the gym
-        # layer and surface it via problem_info["replay_messages"] (JSON-encoded
-        # because metadata is typed as Dict[str, str]). OpenHandsHarnessProcessor
-        # then writes it to a file and forwards the path to run_infer.sh as
-        # positional arg #18.
+        # REPLAY_MESSAGES_PATH support (openhands + opencode harnesses): when the
+        # request's input carries a prior agent trajectory (function_call /
+        # function_call_output items beyond the initial system+user messages),
+        # convert the partial Responses-format input to OpenAI chat-completion
+        # format here in the gym layer and surface it via
+        # problem_info["replay_messages"] (JSON-encoded because metadata is typed
+        # as Dict[str, str]). OpenHandsHarnessProcessor / OpenCodeHarnessProcessor
+        # then write it to a file and forward the path to run_infer.sh as a
+        # positional arg (openhands: #18; opencode: #13).
         replay_messages_json = self._maybe_build_replay_messages(body)
         if replay_messages_json is not None:
             problem_info = {**problem_info, "replay_messages": replay_messages_json}

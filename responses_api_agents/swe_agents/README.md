@@ -18,7 +18,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 - [Supported datasets and harnesses](#supported-datasets-and-harnesses)
 - [OpenHands integration](#openhands-integration)
 - [opencode integration](#opencode-integration)
-- [Replay rollouts (OpenHands)](#replay-rollouts-openhands)
+- [Replay rollouts](#replay-rollouts)
 - [Prompt and agent-class diversity](#prompt-and-agent-class-diversity)
 - [Tool-name diversity](#tool-name-diversity)
 - [Configuration reference](#configuration-reference)
@@ -297,21 +297,33 @@ There is **no explicit `finish` tool** in the opencode bench path — by design.
 
 ---
 
-## Replay rollouts (OpenHands)
+## Replay rollouts
 
-The OpenHands harness supports resuming a partial trajectory: the request's `body.input` can carry a prior agent run (system + user + zero or more `function_call` / `function_call_output` Responses-API items), and the agent will continue from that point instead of starting fresh. This is what powers training-time replay and trajectory branching.
+Both harnesses support resuming a partial trajectory: the request's `body.input` can carry a prior agent run (system + user + zero or more `function_call` / `function_call_output` Responses-API items), and the agent continues from that point instead of starting fresh. This is what powers training-time replay and trajectory branching.
 
-**How it's plumbed.** In `SWEBenchWrapper._setup_params`:
+**How it's plumbed (shared, gym-side).** In `SWEBenchWrapper._setup_params`:
 
-1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `VLLMConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
-2. `OpenHandsHarnessProcessor.get_run_command` writes the JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.
-3. The replay's own system message is extracted and written to `<persistent_dir>/replay_system_prompt.j2`, then pinned as `resolved_system_prompt_template` so the standard mount logic bind-mounts it over OpenHands' `system_prompt.j2`. This is **unconditional** — it overrides any `agent_prompt_overrides` selection. Reason: OpenHands' `replay_utils.messages_to_replay_events()` drops system messages, so without this the resumed run would render OpenHands' own `system_prompt.j2` and drift from the recorded conversation.
+1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `VLLMConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`). Supported for `agent_framework in ("openhands", "opencode")`.
+2. `_parse_replay_messages` / `_extract_replay_system_content` (module-level helpers, shared by both harness processors) decode that JSON and pull out the recorded system message.
 
-**Input/output split in the response.** When a replay prefix is present, `_inner_responses` echoes `body.input` back as the response's `input` verbatim and isolates only the genuinely new live-continuation messages as `output`. The boundary is found by matching tool-call ids: every replayed action's `call_id` appears in `body.input`, so the live continuation begins immediately after the last chat message that references one of those ids. Non-replay requests still use the original `split_responses_input_output_items` path.
+**Input/output split in the response.** When a replay prefix is present, `_inner_responses` echoes `body.input` back as the response's `input` verbatim and isolates only the genuinely new live-continuation messages as `output`. The boundary is found by matching tool-call ids: every replayed action's `call_id` appears in `body.input`, so the live continuation begins immediately after the last chat message that references one of those ids. Non-replay requests still use the original `split_responses_input_output_items` path. This logic is framework-agnostic — it works off `chat_completions_trajectory` (reconstructed from whichever harness's `llm_completions/*.json` dumps exist) and doesn't check `agent_framework`.
 
-**`body.model` is optional in replay mode.** Replay JSONLs intentionally omit `model` because the upstream `openai_model` proxy force-overrides to its configured backend. The wrapper coerces `body.model or ""` when writing `oh_config.toml`, and falls back to the agent's `model_server.name` when constructing `NeMoGymResponse.model`.
+**`body.model` is optional in replay mode.** Replay JSONLs intentionally omit `model` because the upstream `openai_model` proxy force-overrides to its configured backend. OpenHands coerces `body.model or ""` when writing `oh_config.toml`; opencode falls back to `default_model_name` resolved from the model server config. Both fall back to the agent's `model_server.name` when constructing `NeMoGymResponse.model`.
 
-Replay is not implemented for the `opencode` harness; `_maybe_build_replay_messages` short-circuits unless `agent_framework == "openhands"`.
+### OpenHands replay
+
+1. `OpenHandsHarnessProcessor.get_run_command` writes the replay JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.
+2. The replay's own system message is written to `<persistent_dir>/replay_system_prompt.j2`, then pinned as `resolved_system_prompt_template` so the standard mount logic bind-mounts it over OpenHands' `system_prompt.j2`. This is **unconditional** — it overrides any `agent_prompt_overrides` selection. Reason: OpenHands' `replay_utils.messages_to_replay_events()` drops system messages, so without this the resumed run would render OpenHands' own `system_prompt.j2` and drift from the recorded conversation.
+3. Inside OpenHands, `messages_to_replay_events()` converts each recorded assistant `tool_calls` message into an `Action` event and feeds it to `ReplayManager`, which the agent controller executes **against the real runtime** one action at a time — observations are regenerated fresh, not replayed from the recorded text — before falling through to normal LLM-driven steps once the recorded events are exhausted. System, tool, and subsequent user messages are skipped (see `temp/nv-OpenHands/evaluation/benchmarks/swe_bench/REPLAY_README.md`).
+
+### opencode replay
+
+1. `OpenCodeHarnessProcessor.get_run_command` writes the replay JSON to `<persistent_dir>/replay_messages.json` and forwards the mounted path as positional arg #13 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`, which forwards it to `bench/cli.ts` as `--replay-messages-file`. Positional arg #12 (`SYSTEM_PROMPT_PATH`) is emitted as an empty-string placeholder when unset so the shift index lands correctly.
+2. The replay's own system message is written to `<persistent_dir>/replay_system_prompt.txt` and pinned as `resolved_system_prompt_template`, same rationale and same unconditional-override behavior as OpenHands — reused via the shared `_extract_replay_system_content` helper. The existing mount logic in `_build_apptainer_command` already bind-mounts it to `/opencode_setup/opencode/system_prompt.txt` for the opencode path; no separate mount was needed.
+3. `bench/cli.ts` parses the replay file: the **first** `user` message's literal text becomes the initial prompt passed to `opencode run` (instead of the gym-rendered `user_message.txt` template); every subsequent `assistant` message becomes a scripted "replay turn" (system / tool / later-user messages are skipped, mirroring OpenHands' skip rules).
+4. **Tool calls are re-executed for real, not replayed from recorded text.** The `nemo-gym` provider (`NemoGymLanguageModel.doStream`) is replay-aware: for the first *K* model calls in the "main" session it synthesizes the same kind of single-shot `LanguageModelV3` stream it already builds for real responses (text / tool-call parts), but sourced from the scripted replay turn instead of a live HTTP call — no network request, no `llm_completions` dump written for these turns. Because opencode's real tool-execution machinery (`resolveTools()` in `session/prompt.ts`, driven by the AI SDK's `streamText`) is completely unmodified and still processes these synthesized `tool-call` stream parts, each replayed tool call actually runs against the fresh container's filesystem — this is required for correctness, since the final patch comes from `git diff` at the end and the live continuation needs the workspace to actually be in the state the recorded conversation implies. Recorded tool-call `id`s are preserved verbatim so they still match `body.input`'s `call_id`s for the input/output split above. Once the scripted turns are exhausted, `doStream` falls through unchanged to the normal live HTTP path, and opencode's own `runLoop` (which re-reads full session history every step) naturally continues the same single `session.prompt()` call into live generation — no changes needed to opencode's session/processor/HTTP layers.
+5. Because replay turns don't write `llm_completions` dumps, the **first** dump on disk is the first live call, whose `messages` already contain the full replay prefix (it's all in opencode's own session history by then) — so `get_openhands_trajectory_from_completions`'s `first_prefix_count` derivation (used by the input/output split above) needs no opencode-specific handling.
+6. Unlike OpenHands, opencode's bench path doesn't support tool-name diversification, so replay assumes the seed trajectory was itself produced by an opencode run (same tool names: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `apply_patch`, ...).
 
 ---
 
