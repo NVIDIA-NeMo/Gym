@@ -12,19 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Model server base classes and per-rollout model-call capture.
-
-Every Gym model server derives from ``SimpleResponsesAPIModel``, which wires the three model
-dialects (/v1/responses, /v1/chat/completions, /v1/messages) and installs the model-call capture
-middleware.
-
-Capture is opt-in, off by default. A pure-ASGI middleware records correlated /v1/responses,
-/v1/chat/completions, and /v1/messages exchanges -- including failed calls -- into a
-per-rollout CaptureStore, forwarding bytes downstream unchanged so it composes with
-streaming (SSE) responses. Best-effort; never alters the response. Correlation is
-carried by a /ng-rollout/<rollout_id>/v1/... base_url prefix, which is stripped before
-routing.
-"""
+"""Model server base classes and per-rollout model-call capture."""
 
 import fcntl
 import inspect
@@ -44,6 +32,11 @@ from pydantic import BaseModel, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -54,7 +47,6 @@ from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
-    maybe_rollout_id_from_run_body,
 )
 
 
@@ -174,6 +166,55 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
+
+
+# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
+# the capture middleware in base_responses_api_model.py strips this prefix before routing.
+ROLLOUT_PATH_PREFIX = "ng-rollout"
+
+
+def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+    """Return the model-server path prefix for a rollout, or an empty string when unavailable."""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
+
+
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+    """Append a rollout prefix to a model-server root URL.
+
+    ``base_url`` must be the server root, without an API-version suffix. SDKs can then append their
+    normal ``/v1/...`` path; the model server strips the rollout prefix before routing.
+    """
+    if not rollout_id:
+        return base_url
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
+
+
+def maybe_rollout_id_from_run_body(body: BaseModel | Dict[str, Any] | None) -> Optional[str]:
+    """Per-rollout model-call capture id from a run-request's task/rollout indices.
+
+    Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
+    rollout_collection ships to an agent's ``/run``. When a resume re-dispatch attempt is present
+    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured model calls
+    stay separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
+    key for backward compatibility.
+    """
+    if isinstance(body, BaseModel):
+        data = body.model_dump()
+    elif isinstance(body, Dict):
+        data = body
+    else:
+        return None
+    task = data.get(TASK_INDEX_KEY_NAME)
+    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
+    if task is None or rollout is None:
+        return None
+    rollout_id = f"{task}-{rollout}"
+    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
+    if attempt is not None:
+        attempt_index = int(attempt)
+        if attempt_index > 0:
+            rollout_id = f"{rollout_id}-a{attempt_index}"
+    return rollout_id
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
