@@ -19,8 +19,8 @@ keyed on `artifact_key`.
 from __future__ import annotations
 
 import asyncio
-import shutil
 import shlex
+import shutil
 from pathlib import Path
 from typing import Dict, Literal, Optional
 from urllib.parse import unquote, urlparse

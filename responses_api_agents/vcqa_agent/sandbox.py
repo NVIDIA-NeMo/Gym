@@ -209,9 +209,7 @@ class ApptainerDirectSandbox:
                 )
             self.scratch_dir.mkdir(parents=True, exist_ok=True)
             await _run_subprocess(
-                self._exec_cmd(
-                    f"mkdir -p {shlex.quote(self.scratch_path)} && touch {shlex.quote(self.todos_path)}"
-                ),
+                self._exec_cmd(f"mkdir -p {shlex.quote(self.scratch_path)} && touch {shlex.quote(self.todos_path)}"),
                 timeout_s=60,
             )
             self.started = True

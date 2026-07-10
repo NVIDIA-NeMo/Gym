@@ -62,7 +62,7 @@ def _make_config(**overrides) -> VcqaAgentConfig:
         container_image="docker://debian:bookworm-slim",
         artifact_url_prefix="https://example.invalid/vcqa-artifacts",
         judge_base_url="https://example.invalid/v1",
-        judge_api_key="dummy",
+        judge_api_key="dummy",  # pragma: allowlist secret
         judge_model_name="judge-model",
         max_turns=4,
     )
