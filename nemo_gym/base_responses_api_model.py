@@ -31,7 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -85,6 +85,9 @@ class ModelCallCaptureConfig(BaseModel):
 class ModelCallRecord(BaseModel):
     """Observability record derived from one captured model-server exchange."""
 
+    # Rollout ID
+    rollout_id: str
+
     # HTTP information
     route: str
 
@@ -107,12 +110,6 @@ class ModelCallRecord(BaseModel):
     raw_response: Optional[Dict[str, Any]]
 
 
-def _validate_rollout_id(rollout_id: str) -> str:
-    if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
-        raise ValueError(f"Invalid rollout id: {rollout_id!r}")
-    return rollout_id
-
-
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
@@ -126,7 +123,7 @@ class CaptureStore:
         return self._root
 
     def path_for(self, rollout_id: str) -> Path:
-        return self._root / f"{_validate_rollout_id(rollout_id)}.capture.jsonl"
+        return self._root / f"{rollout_id}.capture.jsonl"
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
@@ -166,27 +163,6 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
-
-
-# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
-# the capture middleware in base_responses_api_model.py strips this prefix before routing.
-ROLLOUT_PATH_PREFIX = "ng-rollout"
-
-
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
-    """Return the model-server path prefix for a rollout, or an empty string when unavailable."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
-
-
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-    """Append a rollout prefix to a model-server root URL.
-
-    ``base_url`` must be the server root, without an API-version suffix. SDKs can then append their
-    normal ``/v1/...`` path; the model server strips the rollout prefix before routing.
-    """
-    if not rollout_id:
-        return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Dict[str, Any] | None) -> Optional[str]:
@@ -235,9 +211,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         if self.capture_config.observability_enabled:
-            app.post("/v1/chat/completions")(self.chat_completions_with_model_capture)
-            app.post("/v1/responses")(self.responses)  # TODO
-            app.post("/v1/messages")(self.messages)  # TODO
+            # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
+            # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
+            app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
+                self.chat_completions_with_call_capture
+            )
+            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(
+                self.chat_completions_with_call_capture
+            )
+
+            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
+            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
+
+            app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
+            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
 
             self._store = CaptureStore(self.capture_config.model_call_capture_dir)
 
@@ -284,13 +271,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return await self.responses(body=params)
 
     # Model call capture methods
-    async def chat_completions_with_model_capture(
-        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    async def chat_completions_with_call_capture(
+        self, rollout_id: str, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
         if not self.capture_config.observability_enabled:
             return await self.chat_completions(body)
 
         mcr_dict = {
+            "rollout_id": rollout_id,
             "route": "/v1/chat/completions",
             "timestamp_start": perf_counter(),
             "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
@@ -317,6 +305,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             self._store.record(ModelCallRecord.model_validate(mcr_dict))
 
             raise e
+
+    async def responses_with_call_capture(
+        self, rollout_id: str, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        pass
+
+    async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
+        pass
 
 
 # --- Observability records derived from captured exchanges ---
