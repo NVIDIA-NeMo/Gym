@@ -81,6 +81,23 @@ class GymToolSpec(BaseModel):
     validate_input: bool = False
 
 
+class _RawToolEntry:
+    """Precomputed dispatch record for a dict/model-schema gym tool, built once at setup so the MCP
+    hot path (tools/list, tools/call) rebuilds nothing per request."""
+
+    __slots__ = ("spec", "fn", "model", "body_param", "validator", "inject_session", "is_coro", "tool")
+
+    def __init__(self, *, spec, fn, model, body_param, validator, inject_session, is_coro, tool):
+        self.spec = spec
+        self.fn = fn
+        self.model = model  # the Pydantic input model (model schema) or None (dict schema)
+        self.body_param = body_param  # name of the single non-session param (model schema) or None
+        self.validator = validator  # shallow validator (dict schema + validate=True) or None
+        self.inject_session = inject_session
+        self.is_coro = is_coro
+        self.tool = tool  # precomputed mcp.types.Tool advertised by tools/list
+
+
 def gym_tool(
     fn: Optional[Callable] = None,
     /,
@@ -220,6 +237,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _raw_dispatch: dict = PrivateAttr(default_factory=dict)
     _gym_tool_names: tuple = PrivateAttr(default=())
     _mcp_mounted: bool = PrivateAttr(default=False)
+    _cached_token_serializer: Any = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -308,11 +326,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
 
+        import mcp.types as types
+
+        # Precompute everything the MCP hot path would otherwise rebuild per request — the validator,
+        # the advertised inputSchema, and the types.Tool object — so tools/list and tools/call reuse
+        # them (mirrors the HTTP twin in _register_http_gym_tool, which already precomputes at setup).
         self._raw_dispatch = {}
         for spec, fn in gym_tools:
             if spec.input_schema is not None:
                 self._check_no_request_param(spec.name, fn)
-                self._raw_dispatch[spec.name] = (spec, fn)
+                self._raw_dispatch[spec.name] = self._build_raw_tool_entry(spec, fn, types)
 
         self.register_mcp_tools(mcp)
         self._install_mcp_list_handler(mcp)
@@ -436,17 +459,19 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         FastMCP's own listing only knows FastMCP-registered (typed/manual) tools and has no
         per-request filter; this handler appends dict/model-schema gym tools (schemas advertised
         verbatim) and applies the session token's ``allowed_tools`` claim when present.
+
+        NOTE: reaches into the MCP SDK private attr ``mcp._mcp_server`` (also in
+        ``_install_mcp_call_handler``; and ``mcp._tool_manager`` in ``_warn_on_transport_parity_gap``).
+        The ``mcp`` dependency is pinned to a tested range for this reason; the dual-registration test
+        suite drives the full JSON-RPC handshake so an SDK layout change fails loudly in CI.
         """
-        import mcp.types as types
 
         @mcp._mcp_server.list_tools()
         async def _gym_list_tools() -> list:
+            # Reuse the precomputed types.Tool objects (schemas were generated once at setup); only the
+            # per-session allowed_tools filter runs per request.
             tools = list(await mcp.list_tools())
-            for spec, _ in self._raw_dispatch.values():
-                schema = spec.input_schema
-                if isinstance(schema, type) and issubclass(schema, BaseModel):
-                    schema = schema.model_json_schema()
-                tools.append(types.Tool(name=spec.name, description=spec.description, inputSchema=schema))
+            tools.extend(entry.tool for entry in self._raw_dispatch.values())
             _, allowed = self._mcp_session_claims(required=False)
             if allowed is not None:
                 tools = [tool for tool in tools if tool.name in allowed]
@@ -472,39 +497,63 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             result = await self._call_raw_gym_tool(entry, arguments or {}, self.require_mcp_session_id)
             return self._to_call_tool_return(result)
 
-    async def _call_raw_gym_tool(
-        self,
-        entry: tuple[GymToolSpec, Callable],
-        arguments: dict,
-        resolve_session_id: Callable[[], str],
-    ) -> Any:
-        """Invoke a dict/model-schema gym tool with raw arguments; shared by both transports."""
-        spec, fn = entry
-        signature = inspect.signature(fn)
+    def _build_raw_tool_entry(self, spec: GymToolSpec, fn: Callable, types: Any) -> "_RawToolEntry":
+        """Precompute (once, at setup) everything a raw dict/model-schema tool call needs.
 
+        Hoists the per-request work out of the MCP hot path: the validated-instance model (model
+        schema) or the shallow JSON-schema validator (dict schema + validate=True), the advertised
+        inputSchema, the single body-param name, and the sync/async + session-injection flags.
+        """
+        signature = inspect.signature(fn)
         schema = spec.input_schema
+        body_param: Optional[str] = None
+        validator: Optional[type[BaseModel]] = None
         if isinstance(schema, type) and issubclass(schema, BaseModel):
-            instance = schema.model_validate(arguments)
+            input_schema = schema.model_json_schema()
             body_params = [p for p in signature.parameters if p != "session_id"]
             if len(body_params) != 1:
                 raise ValueError(
                     f"gym_tool {spec.name!r} with a model input_schema must take exactly one "
                     f"non-session parameter (the validated instance); got {body_params}."
                 )
-            kwargs: dict[str, Any] = {body_params[0]: instance}
+            body_param = body_params[0]
         else:
+            input_schema = schema
             if spec.validate_input:
-                self._model_from_json_schema(spec.name, schema).model_validate(arguments)
+                validator = self._model_from_json_schema(spec.name, schema)
+        return _RawToolEntry(
+            spec=spec,
+            fn=fn,
+            model=schema if body_param is not None else None,
+            body_param=body_param,
+            validator=validator,
+            inject_session="session_id" in signature.parameters,
+            is_coro=inspect.iscoroutinefunction(fn),
+            tool=types.Tool(name=spec.name, description=spec.description, inputSchema=input_schema),
+        )
+
+    async def _call_raw_gym_tool(
+        self,
+        entry: "_RawToolEntry",
+        arguments: dict,
+        resolve_session_id: Callable[[], str],
+    ) -> Any:
+        """Invoke a dict/model-schema gym tool with raw arguments; shared by both transports."""
+        if entry.model is not None:
+            kwargs: dict[str, Any] = {entry.body_param: entry.model.model_validate(arguments)}
+        else:
+            if entry.validator is not None:
+                entry.validator.model_validate(arguments)
             kwargs = dict(arguments)
             # The session id is never injectable from the model-facing payload.
             kwargs.pop("session_id", None)
 
-        if "session_id" in signature.parameters:
+        if entry.inject_session:
             kwargs["session_id"] = resolve_session_id()
 
-        if inspect.iscoroutinefunction(fn):
-            return await fn(**kwargs)
-        return await run_in_threadpool(fn, **kwargs)
+        if entry.is_coro:
+            return await entry.fn(**kwargs)
+        return await run_in_threadpool(entry.fn, **kwargs)
 
     @staticmethod
     def _to_call_tool_return(result: Any) -> Any:
@@ -763,7 +812,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         # Stateless signed token: the session-middleware secret is derived deterministically from the
         # server class + config name, so any worker can verify a token another worker signed. This needs
         # no per-worker token storage (it works with num_workers > 1, and there is nothing to evict).
-        return URLSafeSerializer(self.get_session_middleware_key(), salt=_MCP_TOKEN_SALT)
+        # Cached because the key is deterministic and this is on the per-tool-call path.
+        if self._cached_token_serializer is None:
+            self._cached_token_serializer = URLSafeSerializer(self.get_session_middleware_key(), salt=_MCP_TOKEN_SALT)
+        return self._cached_token_serializer
 
     def require_mcp_session_id(self) -> str:
         session_id, _ = self._mcp_session_claims(required=True)

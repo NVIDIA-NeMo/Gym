@@ -117,9 +117,12 @@ dependencies = [
     "fastapi",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
-    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
+    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2; upper bound tightened to <1.29 because
+    # base_resources_server.py re-registers the low-level tools/list and tools/call handlers via the
+    # SDK private attrs mcp._mcp_server / mcp._tool_manager, which are not covered by the SDK's public
+    # API stability. Bump the ceiling deliberately after the dual-registration test suite passes on it.
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
-    "mcp>=1.27,<2",
+    "mcp>=1.27,<1.29",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
