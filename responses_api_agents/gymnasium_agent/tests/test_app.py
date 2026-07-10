@@ -23,7 +23,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
-def _make_agent(max_steps=10):
+def _make_agent(max_steps=10, observability=True):
     config = GymnasiumAgentConfig(
         host="",
         port=0,
@@ -33,7 +33,9 @@ def _make_agent(max_steps=10):
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         max_steps=max_steps,
     )
-    return GymnasiumAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"observability_enabled": observability}
+    return GymnasiumAgent(config=config, server_client=server_client)
 
 
 def _model_response(text: str, input_toks=1, output_toks=1) -> dict:
@@ -158,6 +160,28 @@ class TestRun:
         assert urls.count("/step") == 1
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+
+    @pytest.mark.asyncio
+    async def test_no_rollout_prefix_when_observability_disabled(self):
+        agent = _make_agent(observability=False)
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/reset": [{"observation": "go", "info": {}}],
+                "/v1/responses": [_model_response("move A")],
+                "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.terminated is True
+        # Task indices are present, but capture is off -> the model call stays unprefixed.
+        assert [u for _s, u, _j in call_log if u.startswith("/v1/")] == ["/v1/responses"]
 
     @pytest.mark.asyncio
     async def test_multi_step_preserves_output_items_in_history(self):

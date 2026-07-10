@@ -34,7 +34,7 @@ from nemo_gym.base_responses_api_model import (
     make_capture_store,
     read_model_call_records,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -574,6 +574,58 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
 
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid") == "http://h:1/ng-rollout/rid/v1"
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
+
+
+def _make_base_agent(global_config):
+    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
+
+    class _Agent(SimpleResponsesAPIAgent):
+        async def responses(self, body=...):
+            raise NotImplementedError
+
+        async def run(self, body=...):
+            raise NotImplementedError
+
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = global_config
+    config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent")
+    return _Agent(config=config, server_client=server_client)
+
+
+def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+
+    enabled = _make_base_agent({"observability_enabled": True})
+    assert enabled.rollout_id_from_run(body) == "3-1"
+    assert enabled.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert enabled.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
+    assert enabled.url_path_for_run("/v1/responses", {}) == "/v1/responses"
+    assert enabled.base_url_for_run("http://h:1", {}) == "http://h:1"
+
+    disabled = _make_base_agent({"observability_enabled": False})
+    assert disabled.rollout_id_from_run(body) is None
+    assert disabled.url_path_for_run("/v1/responses", body) == "/v1/responses"
+    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1"
+
+    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
+
+
+def test_base_agent_url_path_for_request_propagates_inbound_prefix():
+    agent = _make_base_agent({})
+
+    prefixed = SimpleNamespace(path_params={"rollout_id": "7-0"})
+    assert agent.url_path_for_request("/v1/responses", prefixed) == "/ng-rollout/7-0/v1/responses"
+    assert agent.url_path_for_request("/v1/responses", SimpleNamespace(path_params={})) == "/v1/responses"
+    assert agent.url_path_for_request("/v1/responses", SimpleNamespace()) == "/v1/responses"
+    assert agent.url_path_for_request("/v1/responses", None) == "/v1/responses"
+
+
+def test_base_agent_registers_prefixed_self_call_route():
+    from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX
+
+    routes = {route.path for route in _make_base_agent({}).setup_webserver().routes}
+    assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses" in routes
+    assert "/v1/responses" in routes
 
 
 def _sse(event_type: str, data: dict) -> bytes:
