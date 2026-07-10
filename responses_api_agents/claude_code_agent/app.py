@@ -46,7 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import ROLLOUT_HEADER, apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
@@ -568,7 +568,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body, rollout_id=request.headers.get(ROLLOUT_HEADER))
+        return await self._create_response(body)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:

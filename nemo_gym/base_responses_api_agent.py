@@ -15,7 +15,7 @@
 from abc import abstractmethod
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -30,7 +30,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.server_utils import (
-    ROLLOUT_HEADER,
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
@@ -65,19 +64,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Per-rollout capture id for a run-request (its task/rollout indices), or None."""
         return rollout_id_from_run_body(body)
 
-    def resolve_model_base_url(self, model_server_name: str, request: Optional[Request] = None) -> str:
-        """Resolve a model server's base_url (``.../v1``) with the per-rollout capture prefix applied
-        when ``request`` carries a rollout id. Use instead of building base_url by hand."""
+    def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
+        """Resolve a model server URL with an optional rollout prefix."""
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
-        base_url = f"{self.server_client._build_server_base_url(server_config)}/v1"
-        rollout_id = request.headers.get(ROLLOUT_HEADER) if request is not None else None
-        return apply_rollout_prefix(base_url, rollout_id)
-
-    def rollout_call_kwargs(self, body: Any) -> dict[str, Any]:
-        """``server_client.post(...)`` kwargs that forward a run-request's rollout id to a self-called
-        ``/v1/responses`` (empty when there is no id). Spread with ``**``."""
-        rollout_id = self.rollout_id_from_run(body)
-        return {"headers": {ROLLOUT_HEADER: rollout_id}} if rollout_id else {}
+        base_url = self.server_client._build_server_base_url(server_config)
+        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.

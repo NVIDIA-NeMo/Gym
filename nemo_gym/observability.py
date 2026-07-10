@@ -14,12 +14,12 @@
 # limitations under the License.
 """Per-rollout model-call capture for model servers.
 
-Opt-in, off by default. A pure-ASGI middleware records every /v1/responses,
-/v1/chat/completions, and /v1/messages exchange -- including failed calls -- into a
+Opt-in, off by default. A pure-ASGI middleware records correlated /v1/responses,
+/v1/chat/completions, and /v1/messages exchanges -- including failed calls -- into a
 per-rollout CaptureStore, forwarding bytes downstream unchanged so it composes with
 streaming (SSE) responses. Best-effort; never alters the response. Correlation is
-OpenAI-compatible: callers set the x-nemo-gym-rollout-id header or use a
-/ng-rollout/<rollout_id>/v1/... base_url prefix, which is stripped before routing.
+carried by a /ng-rollout/<rollout_id>/v1/... base_url prefix, which is stripped before
+routing.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym.model_call_capture import CaptureStore, aggregate_model_call_records, read_model_call_records
-from nemo_gym.server_utils import ROLLOUT_HEADER, ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
+from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, rollout_id_from_run_body
 
 
 logger = logging.getLogger(__name__)
@@ -46,14 +46,16 @@ _OBSERVED_PATHS = {
     "/v1/messages": "messages",
 }
 
-
-def _scope_header(scope: dict[str, Any], name: str) -> Optional[str]:
-    """Read a request header (case-insensitive) from a raw ASGI scope."""
-    target = name.lower().encode("latin-1")
-    for key, value in scope.get("headers") or []:
-        if key.lower() == target:
-            return value.decode("latin-1")
-    return None
+_TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
+    "responses": {
+        b"event: response.completed": "complete",
+        b"event: response.incomplete": "incomplete",
+        b"event: response.failed": "error",
+        b"event: error": "error",
+    },
+    "chat": {b"data: [DONE]": "complete", b"event: error": "error"},
+    "messages": {b"event: message_stop": "complete", b"event: error": "error"},
+}
 
 
 def _headers_content_type(headers: list) -> bytes:
@@ -61,6 +63,30 @@ def _headers_content_type(headers: list) -> bytes:
         if key.lower() == b"content-type":
             return value
     return b""
+
+
+def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
+    blocks = re.split(rb"\r?\n\r?\n", bytes(buffer))
+    buffer[:] = blocks.pop()
+    terminal_lines = _TERMINAL_SSE_LINES[dialect]
+    for block in blocks:
+        lines = block.splitlines()
+        for line in lines:
+            field, separator, value = line.partition(b":")
+            normalized = field + b": " + value.lstrip() if separator else line
+            if normalized in terminal_lines:
+                return terminal_lines[normalized]
+        if dialect == "chat":
+            for line in lines:
+                if not line.startswith(b"data:"):
+                    continue
+                try:
+                    payload = json.loads(line[5:].lstrip())
+                except Exception:
+                    continue
+                if isinstance(payload, dict) and payload.get("error") is not None:
+                    return "error"
+    return None
 
 
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
@@ -123,7 +149,7 @@ def _classify_exception(exc: BaseException) -> str:
 def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
     """Parse an SSE byte stream into its JSON ``data:`` payloads (best-effort; non-JSON skipped)."""
     events: list[dict[str, Any]] = []
-    for block in raw.decode("utf-8", errors="replace").split("\n\n"):
+    for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
         data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
         if not data_lines:
             continue
@@ -304,12 +330,13 @@ class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
 
     Always strips an optional ``/ng-rollout/<id>`` path prefix before routing (used as the capture
-    key; an explicit header wins) so the prefix is a stable routing feature independent of capture.
+    key) so the prefix is a stable routing feature independent of capture.
     When ``store`` is set it buffers the request body and a copy of the response while forwarding both
     downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
-    the stream. Each SSE chunk is forwarded immediately and also appended to an in-memory buffer for
-    post-hoc reassembly, so a very long stream is held in memory until it completes. When ``store`` is
-    None (capture disabled) it strips the prefix and forwards only.
+    the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
+    after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
+    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
+    prefix and forwards only.
     """
 
     def __init__(self, app: Any, *, store: Optional[CaptureStore], config: Any) -> None:
@@ -335,12 +362,18 @@ class _CaptureMiddleware:
             await self._app(scope, receive, send)
             return
 
+        # Only explicitly correlated model calls are captured. An unprefixed call is forwarded
+        # unchanged rather than being mixed with unrelated calls under a shared fallback key.
+        if rollout_from_path is None:
+            await self._app(scope, receive, send)
+            return
+
         dialect = _OBSERVED_PATHS.get(path)
         if dialect is None:
             await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
             return
 
-        rollout_id = _scope_header(scope, ROLLOUT_HEADER) or rollout_from_path or "rollout"
+        rollout_id = rollout_from_path
         request_body = bytearray()
 
         async def _receive() -> dict[str, Any]:
@@ -349,10 +382,20 @@ class _CaptureMiddleware:
                 request_body.extend(message.get("body", b"") or b"")
             return message
 
-        state: dict[str, Any] = {"status": None, "streaming": False, "body": bytearray(), "ttft_ms": None}
+        state: dict[str, Any] = {
+            "status": None,
+            "streaming": False,
+            "body": bytearray(),
+            "ttft_ms": None,
+            "stream_error_category": None,
+        }
         start = time.perf_counter()
+        deferred_response_messages: list[dict[str, Any]] = []
+        sse_event_buffer = bytearray()
+        defer_response = False
 
         async def _send(message: dict[str, Any]) -> None:
+            nonlocal defer_response
             message_type = message.get("type")
             if message_type == "http.response.start":
                 state["status"] = message.get("status")
@@ -363,31 +406,52 @@ class _CaptureMiddleware:
                 if chunk and state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
+                if state["streaming"] and chunk and not defer_response:
+                    sse_event_buffer.extend(chunk)
+                    terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
+                    defer_response = terminal is not None
+                    state["stream_error_category"] = {
+                        "error": "upstream_error",
+                        "incomplete": "incomplete",
+                    }.get(terminal)
+                if defer_response or not message.get("more_body", False):
+                    deferred_response_messages.append(dict(message))
+                    return
             await send(message)  # forward unchanged -> streaming is preserved
+
+        async def _flush_deferred_response() -> None:
+            for message in deferred_response_messages:
+                await send(message)
 
         try:
             await self._app(scope, _receive, _send)
         except Exception as exc:
             # Offload the blocking write+fsync so it never stalls the event loop.
-            await asyncio.to_thread(
-                _record,
-                self._store,
-                dialect,
-                self._config,
-                bytes(request_body),
-                rollout_id=rollout_id,
-                response_body=None,
-                status_code=None,
-                error_category=_classify_exception(exc),
-                latency_ms=(time.perf_counter() - start) * 1000.0,
-                ttft_ms=state["ttft_ms"],
-            )
+            try:
+                await asyncio.to_thread(
+                    _record,
+                    self._store,
+                    dialect,
+                    self._config,
+                    bytes(request_body),
+                    rollout_id=rollout_id,
+                    response_body=None,
+                    status_code=None,
+                    error_category=_classify_exception(exc),
+                    latency_ms=(time.perf_counter() - start) * 1000.0,
+                    ttft_ms=state["ttft_ms"],
+                )
+            except Exception:
+                logger.warning("Model-call capture finalization failed.", exc_info=True)
+            finally:
+                await _flush_deferred_response()
             raise
 
         latency_ms = (time.perf_counter() - start) * 1000.0
         status = state["status"]
         body_bytes = bytes(state["body"])
         streaming = state["streaming"]
+        stream_error_category = state["stream_error_category"]
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
         store, config = self._store, self._config
@@ -395,12 +459,6 @@ class _CaptureMiddleware:
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
             # malformed body can never surface as an ASGI error after the response was already sent.
-            #
-            # Ordering: the response is forwarded before this fsynced write runs, so a call becomes
-            # durable slightly after its bytes reach the agent. The rollout merge re-reads the capture
-            # JSONL, and the agent -> orchestrator /run round-trip
-            # that precedes any merge dominates this sub-fsync window, so the final call is present in
-            # practice; num_calls is always recomputed from the durable file.
             response_body = None
             if body_bytes:
                 try:
@@ -410,6 +468,8 @@ class _CaptureMiddleware:
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None
+            if error_category is None and stream_error_category:
+                error_category = stream_error_category
             # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
             # doesn't silently count as a success with null tokens in reliability/cost sums.
             if error_category is None and body_bytes and response_body is None:
@@ -427,7 +487,12 @@ class _CaptureMiddleware:
                 ttft_ms=ttft_ms,
             )
 
-        await asyncio.to_thread(_parse_and_record)
+        try:
+            await asyncio.to_thread(_parse_and_record)
+        except Exception:
+            logger.warning("Model-call capture finalization failed.", exc_info=True)
+        finally:
+            await _flush_deferred_response()
 
 
 def install_model_call_capture(app: Any, config: Any) -> None:
@@ -437,7 +502,8 @@ def install_model_call_capture(app: Any, config: Any) -> None:
     regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
     prefixed model call). When capture is enabled the middleware additionally records each observed
     call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-    unchanged (streamed SSE bodies are forwarded as they arrive and also buffered for reassembly).
+    unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
+    durable capture write).
     """
     app.add_middleware(_CaptureMiddleware, store=make_capture_store(config), config=config)
 
@@ -482,10 +548,13 @@ def model_call_capture_dirs_from_config(global_config_dict: Any, env: Optional[d
         pass
 
     saw_enabled = False
+    saw_observability_setting = False
 
     def _walk(node: Any, key: Optional[str] = None, instance_key: Optional[str] = None) -> None:
-        nonlocal saw_enabled
+        nonlocal saw_enabled, saw_observability_setting
         if isinstance(node, dict):
+            if "observability_enabled" in node:
+                saw_observability_setting = True
             if node.get("observability_enabled"):
                 saw_enabled = True
                 # The producer (make_capture_store) keys its default dir off ``config.name`` -- the
@@ -508,7 +577,7 @@ def model_call_capture_dirs_from_config(global_config_dict: Any, env: Optional[d
     except Exception:
         logger.debug("Could not resolve capture dirs from the global config.", exc_info=True)
 
-    if not saw_enabled:
+    if not saw_enabled and (saw_observability_setting or not shared):
         return []
 
     seen: set[Path] = set()

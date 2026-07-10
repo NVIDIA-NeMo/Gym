@@ -134,13 +134,11 @@ def test_capture_records_model_calls(tmp_path):
     config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
     install_model_call_capture(app, config)
     client = TestClient(app)
-    headers = {"x-nemo-gym-rollout-id": "rollout-x"}
 
-    r1 = client.post("/v1/responses", json={"input": "solve it"}, headers=headers)
+    r1 = client.post("/ng-rollout/rollout-x/v1/responses", json={"input": "solve it"})
     r2 = client.post(
-        "/v1/responses",
+        "/ng-rollout/rollout-x/v1/responses",
         json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-        headers=headers,
     )
 
     assert r1.status_code == 200 and r2.status_code == 200
@@ -162,6 +160,85 @@ def test_capture_records_model_calls(tmp_path):
     assert agg["num_calls"] == 2
 
 
+def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
+    import asyncio
+
+    from nemo_gym.observability import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    durable_call_counts = []
+
+    async def app(_scope, receive, send):
+        await receive()
+        messages = [
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]},
+            {"type": "http.response.body", "body": b"event: message_", "more_body": True},
+            {
+                "type": "http.response.body",
+                "body": b'stop\ndata: {"type":"message_stop"}\n\n',
+                "more_body": True,
+            },
+            {"type": "http.response.body", "body": b"", "more_body": False},
+        ]
+        for message in messages:
+            await send(message)
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"hi"}', "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            durable_call_counts.append(len(store.read("fast-rollout")))
+
+    asyncio.run(
+        _CaptureMiddleware(app, store=store, config=SimpleNamespace(name="srv"))(
+            {
+                "type": "http",
+                "path": "/ng-rollout/fast-rollout/v1/messages",
+                "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert durable_call_counts == [0, 1, 1]
+
+
+def test_stream_error_events_are_terminal():
+    from nemo_gym.observability import _consume_terminal_sse_event
+
+    for dialect in ("responses", "messages"):
+        assert _consume_terminal_sse_event(bytearray(b'event: error\ndata: {"error":"boom"}\n\n'), dialect) == "error"
+    assert _consume_terminal_sse_event(bytearray(b"event: response.incomplete\n\n"), "responses") == "incomplete"
+    assert _consume_terminal_sse_event(bytearray(b'event:error\ndata:{"error":"boom"}\n\n'), "chat") == "error"
+    assert _consume_terminal_sse_event(bytearray(b'data: {"error":{"message":"boom"}}\n\n'), "chat") == "error"
+    assert _consume_terminal_sse_event(bytearray(b"data:[DONE]\n\n"), "chat") == "complete"
+
+
+def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/messages")
+    async def _messages() -> StreamingResponse:
+        return StreamingResponse(
+            iter([b'event: error\ndata: {"type":"error","error":{"message":"boom"}}\n\n']),
+            media_type="text/event-stream",
+        )
+
+    config = SimpleNamespace(observability_enabled=True, model_call_capture_dir=str(tmp_path), name="srv")
+    install_model_call_capture(app, config)
+
+    response = TestClient(app).post("/ng-rollout/r-error/v1/messages", json={"messages": []})
+
+    assert response.status_code == 200
+    calls = read_model_call_records(CaptureStore(tmp_path), "r-error")
+    assert len(calls) == 1 and calls[0].error_category == "upstream_error"
+
+
 def test_failed_call_is_captured_with_error_category(tmp_path):
     """A non-2xx model call is captured (replacing generic exception catching) with a
     normalized error_category + status_code on the ModelCallRecord."""
@@ -177,7 +254,7 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     install_model_call_capture(app, config)
     client = TestClient(app)
 
-    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-err"})
+    r = client.post("/ng-rollout/r-err/v1/responses", json={"input": "x"})
     assert r.status_code == 500  # response unchanged
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
@@ -199,7 +276,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     install_model_call_capture(app, config)
     client = TestClient(app, raise_server_exceptions=False)
 
-    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-raise"})
+    r = client.post("/ng-rollout/r-raise/v1/responses", json={"input": "x"})
     assert r.status_code == 500  # error propagated, response unchanged
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
@@ -209,9 +286,8 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
 
 
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
-    """A caller can attribute calls by a base_url path prefix (no header). The /v1/... route is
-    reached unchanged (prefix stripped), an explicit header still wins, and plain URLs are
-    unaffected."""
+    """A caller attributes calls through the model base URL. The prefix is stripped before routing,
+    while an ordinary unprefixed request remains unobserved."""
     app = FastAPI()
 
     @app.post("/v1/responses")
@@ -222,24 +298,16 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     install_model_call_capture(app, config)
     client = TestClient(app)
 
-    # Prefixed base_url: routes to /v1/responses AND correlates capture by the path id (no header).
+    # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
     r = client.post("/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"})
     assert r.status_code == 200 and r.json()["usage"]["total_tokens"] == 4
     calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
     assert len(calls) == 1 and calls[0].tokens_total == 4
 
-    # Explicit header wins when both are present.
-    r2 = client.post(
-        "/ng-rollout/path-id/v1/responses", json={"input": "hi"}, headers={"x-nemo-gym-rollout-id": "hdr-id"}
-    )
+    # Plain /v1 URL is routed normally but is not captured without an explicit rollout prefix.
+    r2 = client.post("/v1/responses", json={"input": "hi"})
     assert r2.status_code == 200
-    assert len(read_model_call_records(CaptureStore(tmp_path), "hdr-id")) == 1
-    assert read_model_call_records(CaptureStore(tmp_path), "path-id") == []
-
-    # Plain /v1 URL is unaffected (back-compat: capture falls back to the default key).
-    r3 = client.post("/v1/responses", json={"input": "hi"})
-    assert r3.status_code == 200
-    assert len(read_model_call_records(CaptureStore(tmp_path), "rollout")) == 1
+    assert read_model_call_records(CaptureStore(tmp_path), "rollout") == []
 
 
 def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
@@ -261,19 +329,16 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
 
 
 def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
-    """The shared agent-side builder works for every base_url shape agents use, and round-trips
-    with the model server's parser (producer <-> consumer agreement)."""
+    """The shared agent-side builder accepts a server root and round-trips with the parser."""
     from nemo_gym.observability import _ROLLOUT_PATH_RE
-    from nemo_gym.server_utils import apply_rollout_prefix
+    from nemo_gym.server_utils import apply_rollout_prefix, rollout_path_prefix
 
-    # Forgiving + uniform across the base_url shapes agents build today.
-    assert apply_rollout_prefix("http://h:1/v1", "r1") == "http://h:1/ng-rollout/r1/v1"
     assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
-    assert apply_rollout_prefix("http://h:1/v1", None) == "http://h:1/v1"  # no-op
-    assert apply_rollout_prefix("http://h:1/v1", "") == "http://h:1/v1"  # no-op
+    assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
+    assert rollout_path_prefix(None) == ""
 
     # Producer (agent) and consumer (server) agree: a prefixed call round-trips to the id + /v1 path.
-    client_path = apply_rollout_prefix("/v1", "task-7") + "/chat/completions"
+    client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
     match = _ROLLOUT_PATH_RE.match(client_path)
     assert match and match.group("rollout_id") == "task-7" and match.group("rest") == "/v1/chat/completions"
 
@@ -298,7 +363,7 @@ def test_rollout_id_from_run_body_reads_canonical_indices():
     assert rollout_id_from_run_body(body) == "5-2"
 
 
-# --- error classification + header parsing ---
+# --- error classification ---
 def test_classify_status_branches():
     from nemo_gym.observability import _classify_status
 
@@ -325,14 +390,6 @@ def test_classify_exception_branches():
     assert _classify_exception(_ReadTimeout()) == "timeout"  # name contains "timeout"
     assert _classify_exception(ConnectionError()) == "connection"  # name contains "conn"
     assert _classify_exception(ValueError("x")) == "exception"
-
-
-def test_scope_header_parsing():
-    from nemo_gym.observability import _scope_header
-
-    scope = {"headers": [(b"good", b"3"), (b"other", b"x")]}
-    assert _scope_header(scope, "good") == "3"
-    assert _scope_header(scope, "missing") is None
 
 
 # --- capture-store dir resolution + init failure ---
@@ -396,7 +453,7 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     install_model_call_capture(app, config)
     client = TestClient(app)
 
-    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "rnj"})
+    r = client.post("/ng-rollout/rnj/v1/responses", json={"input": "x"})
     assert r.status_code == 200 and r.text == "not json"  # response passed through unaltered
     records = CaptureStore(tmp_path).read("rnj")
     assert len(records) == 1 and records[0]["response"] is None  # non-JSON body -> None
@@ -483,29 +540,18 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
 
 
 # --- base-agent correlation helpers ---
-def test_base_agent_resolve_model_base_url_and_call_kwargs(monkeypatch):
+def test_base_agent_resolve_model_base_url(monkeypatch):
     import nemo_gym.base_responses_api_agent as ba
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 
     monkeypatch.setattr(ba, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
     fake_self = SimpleNamespace(
         server_client=SimpleNamespace(global_config_dict={}, _build_server_base_url=lambda _cfg: "http://h:1"),
-        rollout_id_from_run=lambda body: ba.rollout_id_from_run_body(body),
     )
 
-    with_id = SimpleResponsesAPIAgent.resolve_model_base_url(
-        fake_self, "m", SimpleNamespace(headers={"x-nemo-gym-rollout-id": "rid"})
-    )
+    with_id = SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", "rid")
     assert with_id == "http://h:1/ng-rollout/rid/v1"
     assert SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", None) == "http://h:1/v1"
-
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-
-    kwargs = SimpleResponsesAPIAgent.rollout_call_kwargs(
-        fake_self, {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 2}
-    )
-    assert kwargs == {"headers": {"x-nemo-gym-rollout-id": "5-2"}}
-    assert SimpleResponsesAPIAgent.rollout_call_kwargs(fake_self, {}) == {}
 
 
 def _sse(event_type: str, data: dict) -> bytes:
@@ -635,7 +681,7 @@ def test_reconstruct_chat_sse():
         },
         {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
     ]
-    raw = b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n"
+    raw = (b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n").replace(b"\n", b"\r\n")
     resp = _reconstruct_streamed_response(raw, "chat")
     msg = resp["choices"][0]["message"]
     assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
@@ -716,6 +762,8 @@ def test_model_call_capture_dirs_from_config_resolves_env_and_config(tmp_path):
     off = {"a": {"b": {"observability_enabled": False, "model_call_capture_dir": str(tmp_path / "nope")}}}
     assert model_call_capture_dirs_from_config(off, env={}) == []
     assert model_call_capture_dirs_from_config(off, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)}) == []
+    # A separate --no-serve collector has no model config; the explicit shared directory is enough.
+    assert model_call_capture_dirs_from_config({}, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": str(shared)}) == [shared]
 
 
 def _capture_exchange(dialect, model_server, usage, response):

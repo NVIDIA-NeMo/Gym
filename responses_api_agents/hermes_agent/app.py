@@ -25,7 +25,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
-from fastapi import Request
+from fastapi import FastAPI, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -47,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, get_response_json, raise_for_status, rollout_path_prefix
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -251,6 +251,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
+        return app
+
     async def responses(
         self,
         request: Request,
@@ -265,8 +270,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        # Per-rollout capture: the base resolver applies the URL prefix when run() set the header.
-        base_url = self.resolve_model_base_url(self.config.model_server.name, request)
+        # A prefixed self-call carries the rollout id into the model-server base URL.
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
+        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = str(self.config.model_server.name)
 
         agent = AIAgent(
@@ -374,8 +380,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
-            # Serialize the run body once; reused for seed + verify and for rollout correlation
-            # (rollout_call_kwargs accepts the dict, so the id is derived without re-dumping).
+            # Serialize once and reuse for seed, verification, and rollout correlation.
             body_dump = body.model_dump()
 
             seed_resp = await self.server_client.post(
@@ -387,13 +392,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            # Forward the rollout id to our own /v1/responses so responses() tags the model calls.
+            rollout_id = self.rollout_id_from_run(body_dump)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=f"{rollout_path_prefix(rollout_id)}/v1/responses",
                 json=body.responses_create_params,
                 cookies=cookies,
-                **self.rollout_call_kwargs(body_dump),
             )
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
