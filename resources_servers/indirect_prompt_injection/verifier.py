@@ -15,6 +15,8 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from nemo_gym.base_resources_server import normalize_tool_name
+
 
 # Maps verification_type to the key fields that must match exactly.
 STRICT_MATCH_KEYS: Dict[str, List[str]] = {
@@ -129,7 +131,9 @@ def extract_function_calls(output: List[Any]) -> List[Tuple[str, Dict[str, Any]]
         except (json.JSONDecodeError, TypeError):
             call_args = {}
 
-        calls.append((name, call_args))
+        # Normalize MCP-namespaced names (mcp__<server>__<tool>) to the bare tool vocabulary so
+        # MCP-driven rollouts score identically to HTTP-driven ones.
+        calls.append((normalize_tool_name(name), call_args))
     return calls
 
 

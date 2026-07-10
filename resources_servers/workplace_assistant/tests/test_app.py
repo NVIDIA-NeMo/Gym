@@ -1520,3 +1520,61 @@ class TestDualTransport:
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
             assert_transport_parity(app, client, EXPECTED_TOOLS)
         assert http_tool_names(app) == set(get_tools(TOOLKITS)["functions"])
+
+
+class TestMCPNamespacedScoring:
+    """MCP-driven rollouts (mcp__<server>__<tool> names) must score identically to HTTP ones."""
+
+    def test_namespaced_and_bare_trajectories_score_the_same(self) -> None:
+        import json
+
+        dataset = json.loads(open("resources_servers/workplace_assistant/data/example.jsonl").readline())
+        gt_calls = (
+            eval(dataset["ground_truth"]) if isinstance(dataset["ground_truth"], str) else dataset["ground_truth"]
+        )
+
+        def response_with(names):
+            return {
+                "id": "r",
+                "created_at": 0,
+                "model": "t",
+                "object": "response",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": n,
+                        "arguments": c["arguments"],
+                        "call_id": f"c{i}",
+                        "id": f"fc{i}",
+                        "status": "completed",
+                    }
+                    for i, (n, c) in enumerate(zip(names, gt_calls))
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        from fastapi.testclient import TestClient
+
+        config = WorkbenchResourcesServerConfig(host="", port=0, entrypoint="", name="workplace_assistant")
+        server = WorkbenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with TestClient(server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
+            bare = [c["name"] for c in gt_calls]
+            namespaced = [f"mcp__workplace_assistant__{n}" for n in bare]
+            rewards = []
+            for names in (bare, namespaced):
+                vr = client.post(
+                    "/verify",
+                    json={
+                        "id": dataset["id"],
+                        "responses_create_params": dataset["responses_create_params"],
+                        "ground_truth": dataset["ground_truth"],
+                        "category": dataset["category"],
+                        "environment_name": dataset["environment_name"],
+                        "response": response_with(names),
+                    },
+                )
+                assert vr.status_code == 200, vr.text
+                rewards.append(vr.json()["reward"])
+            assert rewards[0] == rewards[1] == 1.0, rewards

@@ -129,12 +129,16 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
         total_score = 0.0
 
-        # Convert list of ResponseFunctionToolCall objects into list of dictionaries
+        # Convert list of ResponseFunctionToolCall objects into list of dictionaries. Names are
+        # normalized so MCP-driven rollouts (recorded as mcp__<server>__<tool>) score identically
+        # to HTTP-driven ones (recorded bare).
         predicted_function_calls = []
 
         for message in response:
             if message.type == "function_call":
-                predicted_function_calls.append(message.model_dump())
+                call = message.model_dump()
+                call["name"] = self.normalize_tool_name(call["name"])
+                predicted_function_calls.append(call)
 
         predicted_chat_content = []
 

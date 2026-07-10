@@ -77,7 +77,7 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
 
         actual = []
         for output in reversed(body.response.output):
-            if output.type == "function_call" and output.name == "extract_synonym_values":
+            if output.type == "function_call" and self.normalize_tool_name(output.name) == "extract_synonym_values":
                 actual = json.loads(output.arguments)["synonym_values"]
                 break
 

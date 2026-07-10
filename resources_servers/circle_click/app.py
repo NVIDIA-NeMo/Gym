@@ -73,7 +73,7 @@ class CircleClickResourcesServer(SimpleResourcesServer):
         clicked_y = None
 
         for output_item in body.response.output:
-            if output_item.type == "function_call" and output_item.name == "click":
+            if output_item.type == "function_call" and self.normalize_tool_name(output_item.name) == "click":
                 try:
                     args = json.loads(output_item.arguments)
                     clicked_x = int(args["x"])

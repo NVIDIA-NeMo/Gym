@@ -1176,7 +1176,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         submit_final_result_called = False
         for output_item in reversed(body.response.output):
             if getattr(output_item, "type", None) == "function_call":
-                if getattr(output_item, "name", None) == "submit_final_result":
+                # Normalize so MCP-driven rollouts (mcp__<server>__<tool> names) score like HTTP ones.
+                if self.normalize_tool_name(getattr(output_item, "name", "") or "") == "submit_final_result":
                     submit_final_result_called = True
                     try:
                         args = json.loads(getattr(output_item, "arguments", "{}"))

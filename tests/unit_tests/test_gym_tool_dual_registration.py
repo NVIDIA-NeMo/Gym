@@ -632,3 +632,23 @@ class TestMCPErrorSurface:
             assert result["structuredContent"]["delivered"] is True
             # The text block is valid JSON of the same payload (SDK renders both).
             assert json.loads(result["content"][0]["text"])["delivered"] is True
+
+
+class TestNormalizeToolName:
+    """Verifier helper: MCP-namespaced and bare trajectory names map to one vocabulary."""
+
+    def test_module_function(self) -> None:
+        from nemo_gym.base_resources_server import normalize_tool_name
+
+        assert normalize_tool_name("email_reply_email") == "email_reply_email"  # bare passes through
+        assert normalize_tool_name("mcp__workplace_assistant__email_reply_email") == "email_reply_email"
+        # With server_name, only that server's prefix strips — robust to __ inside tool names.
+        assert normalize_tool_name("mcp__srv__tool__part", server_name="srv") == "tool__part"
+        assert normalize_tool_name("mcp__other__tool", server_name="srv") == "mcp__other__tool"
+        assert normalize_tool_name("mcp__broken") == "mcp__broken"  # no separator -> unchanged
+
+    def test_server_method_uses_own_name(self) -> None:
+        server = _make(_DualServer, name="dual_server")
+        assert server.normalize_tool_name("mcp__dual_server__bump") == "bump"
+        assert server.normalize_tool_name("bump") == "bump"
+        assert server.normalize_tool_name("mcp__other_server__bump") == "mcp__other_server__bump"
