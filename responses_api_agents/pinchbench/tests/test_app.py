@@ -42,12 +42,12 @@ def make_config(**over) -> PinchBenchAgentConfig:
         port=0,
         entrypoint="app.py",
         model_base_url="http://endpoint/v1",
-        model_api_key="sk-policy",
+        model_api_key="sk-policy",  # pragma: allowlist secret
         model_name="vendor/model",
         judge_model="judge/model",
         judge_base_url="http://endpoint/v1",
-        judge_api_key="sk-judge",
-        brave_api_key="brave-key",
+        judge_api_key="sk-judge",  # pragma: allowlist secret
+        brave_api_key="brave-key",  # pragma: allowlist secret
     )
     base.update(over)
     return PinchBenchAgentConfig(**base)
