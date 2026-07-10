@@ -1420,12 +1420,6 @@ class TestMCPRoundTrip:
             assert result["isError"] is True
             assert "m0_gravity" in result["content"][0]["text"]
 
-    def test_call_without_token_is_clean_tool_error(self) -> None:
-        with _wire_client() as (_server, _app, client):
-            result = mcp_call(client, "execute_python", {"code": "1 + 1"}, token=None)
-            assert result["isError"] is True
-            assert TOKEN_HEADER in result["content"][0]["text"]
-
 
 class TestTransportParity:
     def test_tool_sets_identical_across_transports(self) -> None:

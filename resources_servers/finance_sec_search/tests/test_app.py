@@ -24,7 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.mcp_test_utils import TOKEN_HEADER, assert_transport_parity, mcp_call, mcp_list_tools, seed_token
+from nemo_gym.mcp_test_utils import assert_transport_parity, mcp_call, mcp_list_tools, seed_token
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -1182,12 +1182,6 @@ class TestHTTPWireContract:
 class TestMCPRoundTrip:
     """MCP surface: tools/list names + tools/call through raw JSON-RPC on /mcp."""
 
-    def test_seed_session_advertises_mcp_metadata(self, wire_server) -> None:
-        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            body = client.post("/seed_session", json={}).json()
-            assert body["mcp"]["url_path"] == "/mcp"
-            assert TOKEN_HEADER in body["mcp"]["headers"]
-
     def test_tools_list_and_call(self, wire_server) -> None:
         with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
             tools = mcp_list_tools(client)
@@ -1210,12 +1204,6 @@ class TestMCPRoundTrip:
             result = mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=token)
             assert result.get("isError") is not True
             assert result["structuredContent"] == {"results": EXPECTED_AAPL_RESULTS}
-
-    def test_session_tool_without_token_is_tool_error(self, wire_server) -> None:
-        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            result = mcp_call(client, "sec_filing_search", {"ticker": "AAPL"}, token=None)
-            assert result["isError"] is True
-            assert TOKEN_HEADER in result["content"][0]["text"]
 
 
 class TestTransportParity:

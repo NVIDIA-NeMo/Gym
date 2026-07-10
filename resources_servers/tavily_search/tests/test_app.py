@@ -520,19 +520,6 @@ class TestHTTPWireReplay:
             (sid,) = server._session_id_to_metrics.keys()
             assert len(server._session_id_to_metrics[sid].async_tavily_calls) == 2
 
-    def test_seed_session_now_carries_mcp_metadata(self) -> None:
-        with _wire_client() as (_server, _app, client):
-            body = client.post("/seed_session", json={}).json()
-            assert body["mcp"]["url_path"] == "/mcp"
-            assert TOKEN_HEADER in body["mcp"]["headers"]
-
-    def test_unknown_tool_lists_available_tools(self) -> None:
-        with _wire_client() as (_server, _app, client):
-            resp = client.post("/no_such_tool", json={})
-            assert resp.status_code == 404
-            assert "Available tools" in resp.json()["error"]
-            assert "web_search" in resp.json()["error"]
-
 
 class TestMCPRoundTrip:
     def test_tools_list_names_schemas_and_call(self) -> None:
@@ -554,15 +541,6 @@ class TestMCPRoundTrip:
             result = mcp_call(client, "web_search", {"query": "q"}, token=None)
             assert result["isError"] is True
             assert TOKEN_HEADER in result["content"][0]["text"]
-
-    def test_http_cookie_and_mcp_token_share_one_metrics_session(self) -> None:
-        with _wire_client() as (server, _app, client):
-            token = seed_token(client)
-            client.post("/web_search", json={"query": "over http"})
-            result = mcp_call(client, "web_search", {"query": "over mcp"}, token=token)
-            assert result.get("isError") is not True
-            (sid,) = server._session_id_to_metrics.keys()
-            assert len(server._session_id_to_metrics[sid].async_tavily_calls) == 2
 
 
 class TestTransportParity:

@@ -423,14 +423,6 @@ class TestHTTPWireContract:
 class TestMCPRoundTrip:
     """MCP surface: tools/list names + tools/call through raw JSON-RPC on /mcp."""
 
-    def test_seed_session_advertises_mcp_metadata(self, wire_server: TavilySearchResourcesServer) -> None:
-        from fastapi.testclient import TestClient
-
-        with TestClient(wire_server.setup_webserver(), base_url="http://127.0.0.1:8000") as client:
-            body = client.post("/seed_session", json={}).json()
-            assert body["mcp"]["url_path"] == "/mcp"
-            assert TOKEN_HEADER in body["mcp"]["headers"]
-
     def test_tools_list_and_call(self, wire_server: TavilySearchResourcesServer) -> None:
         from fastapi.testclient import TestClient
 

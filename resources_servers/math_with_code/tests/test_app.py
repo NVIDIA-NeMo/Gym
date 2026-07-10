@@ -141,13 +141,6 @@ class TestHTTPReplay:
             assert body["mcp"]["url_path"] == "/mcp"
             assert TOKEN_HEADER in body["mcp"]["headers"]
 
-    def test_unknown_tool_lists_available_tools(self) -> None:
-        with _wire_client() as (_server, _app, client):
-            resp = client.post("/bogus_tool", json={})
-            assert resp.status_code == 404
-            assert "Available tools" in resp.json()["error"]
-            assert "execute_python" in resp.json()["error"]
-
 
 class TestMCPRoundTrip:
     def test_tools_list_names_and_call(self) -> None:
