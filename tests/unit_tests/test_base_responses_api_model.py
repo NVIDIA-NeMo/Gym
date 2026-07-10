@@ -12,32 +12,58 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import fcntl
+import multiprocessing as mp
+import threading
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import orjson
 import pytest
 from fastapi import Body, FastAPI
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 
+import nemo_gym.base_responses_api_agent as ba
+import nemo_gym.base_responses_api_model as obs
+from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
+    _ROLLOUT_PATH_RE,
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
     CaptureStore,
     ModelCallCaptureConfig,
+    ModelCallRecord,
     SimpleResponsesAPIModel,
+    _CaptureMiddleware,
+    _classify_exception,
+    _classify_status,
+    _consume_terminal_sse_event,
+    _reconstruct_streamed_response,
+    _record,
+    aggregate_model_call_records,
+    clear_model_call_captures_for_rollouts,
     install_model_call_capture,
     make_capture_store,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
     read_model_call_records,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import (
+    ServerClient,
+    apply_rollout_prefix,
+    maybe_rollout_id_from_run_body,
+    rollout_path_prefix,
+)
 
 
 class TestBaseResponsesAPIModel:
@@ -123,10 +149,6 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
 
 
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
-    import asyncio
-
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
-
     store = CaptureStore(tmp_path)
     durable_call_counts = []
 
@@ -169,8 +191,6 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
 
 
 def test_stream_error_events_are_terminal():
-    from nemo_gym.base_responses_api_model import _consume_terminal_sse_event
-
     for dialect in ("responses", "messages"):
         assert _consume_terminal_sse_event(bytearray(b'event: error\ndata: {"error":"boom"}\n\n'), dialect) == "error"
     assert _consume_terminal_sse_event(bytearray(b"event: response.incomplete\n\n"), "responses") == "incomplete"
@@ -180,8 +200,6 @@ def test_stream_error_events_are_terminal():
 
 
 def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
-    from fastapi.responses import StreamingResponse
-
     app = FastAPI()
 
     @app.post("/v1/messages")
@@ -203,7 +221,6 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
 def test_failed_call_is_captured_with_error_category(tmp_path):
     """A non-2xx model call is captured (replacing generic exception catching) with a
     normalized error_category + status_code on the ModelCallRecord."""
-    from fastapi.responses import JSONResponse
 
     app = FastAPI()
 
@@ -287,9 +304,6 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
 
 def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
     """The shared agent-side builder accepts a server root and round-trips with the parser."""
-    from nemo_gym.base_responses_api_model import _ROLLOUT_PATH_RE
-    from nemo_gym.server_utils import apply_rollout_prefix, rollout_path_prefix
-
     assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
     assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
     assert rollout_path_prefix(None) == ""
@@ -302,10 +316,6 @@ def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
 
 def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
-    from pydantic import BaseModel, ConfigDict
-
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -323,8 +333,6 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
 
 # --- error classification ---
 def test_classify_status_branches():
-    from nemo_gym.base_responses_api_model import _classify_status
-
     assert _classify_status(200) is None
     assert _classify_status(408) == "timeout"
     assert _classify_status(504) == "timeout"
@@ -337,10 +345,6 @@ def test_classify_status_branches():
 
 
 def test_classify_exception_branches():
-    import asyncio
-
-    from nemo_gym.base_responses_api_model import _classify_exception
-
     class _ReadTimeout(Exception):
         pass
 
@@ -356,8 +360,6 @@ def test_model_call_capture_keys_are_reserved_global_config():
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
-    from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
-
     assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
         ModelCallCaptureConfig(observability_enabled=True)
@@ -377,8 +379,6 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
-    import nemo_gym.base_responses_api_model as obs
-
     def _boom(_root):
         raise OSError("cannot create")
 
@@ -388,8 +388,6 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
 
 
 def test_record_swallows_store_failure():
-    from nemo_gym.base_responses_api_model import _record
-
     class _BadStore:
         def record(self, *args, **kwargs):
             raise RuntimeError("disk full")
@@ -409,8 +407,6 @@ def test_record_swallows_store_failure():
 
 
 def test_capture_records_non_json_response_as_none(tmp_path):
-    from fastapi.responses import PlainTextResponse
-
     app = FastAPI()
 
     @app.post("/v1/responses")
@@ -430,9 +426,6 @@ def test_capture_records_non_json_response_as_none(tmp_path):
 
 # --- base-agent correlation helpers ---
 def test_base_agent_resolve_model_base_url(monkeypatch):
-    import nemo_gym.base_responses_api_agent as ba
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-
     monkeypatch.setattr(ba, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
     fake_self = SimpleNamespace(
         server_client=SimpleNamespace(global_config_dict={}, _build_server_base_url=lambda _cfg: "http://h:1"),
@@ -450,7 +443,6 @@ def _sse(event_type: str, data: dict) -> bytes:
 def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
-    from fastapi.responses import StreamingResponse
 
     app = FastAPI()
 
@@ -543,8 +535,6 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
 
 
 def test_reconstruct_chat_sse():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-
     chunks = [
         {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
         {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
@@ -578,8 +568,6 @@ def test_reconstruct_chat_sse():
 
 
 def test_reconstruct_responses_sse_uses_terminal_envelope():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-
     raw = b"".join(
         _sse(c["type"], c)
         for c in [
@@ -603,8 +591,6 @@ def test_reconstruct_responses_sse_uses_terminal_envelope():
 
 
 def test_reconstruct_streamed_response_best_effort_none():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-
     assert _reconstruct_streamed_response(b"", "chat") is None  # no events
     assert _reconstruct_streamed_response(b"event: ping\ndata: not-json\n\n", "messages") is None  # unparseable
     assert _reconstruct_streamed_response(b"data: 123\n\n", "chat") is None  # non-dict JSON skipped
@@ -616,8 +602,6 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
-
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
     assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # first attempt -> bare
@@ -641,8 +625,6 @@ def _capture_exchange(dialect, model_server, usage, response):
 
 
 def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
-
     store = CaptureStore(tmp_path)
     store.record(
         "0-0",
@@ -667,8 +649,6 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
 
 
 def test_merge_capture_noop_without_capture(tmp_path):
-    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
-
     rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
     merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
     assert "ng_model_call_capture" not in rec
@@ -677,8 +657,6 @@ def test_merge_capture_noop_without_capture(tmp_path):
 
 
 def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
-    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
-
     store = CaptureStore(tmp_path)
     store.path_for("9-9").write_bytes(b"{not-json}\n")
     record = {"_ng_task_index": 9, "_ng_rollout_index": 9}
@@ -689,9 +667,6 @@ def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
 
 
 def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
-    import nemo_gym.base_responses_api_model as obs
-    from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
-
     store = CaptureStore(tmp_path)
     store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
     store.record("1-0", {"dialect": "chat", "request": {}, "response": {}})
@@ -713,8 +688,6 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
 
 
 def test_aggregate_model_call_records_sums_and_counts():
-    from nemo_gym.base_responses_api_model import ModelCallRecord, aggregate_model_call_records
-
     calls = [
         ModelCallRecord(call_index=0, tokens_in=10, tokens_out=5, tokens_total=15, latency_total_ms=2.0),
         ModelCallRecord(call_index=1, tokens_in=20, tokens_out=3, tokens_total=23, latency_total_ms=1.0),
@@ -749,8 +722,6 @@ def test_rollout_prefix_stripped_when_capture_disabled():
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
-    import threading
-
     store = CaptureStore(tmp_path)
 
     def _write(i: int) -> None:
@@ -767,9 +738,6 @@ def test_capture_store_concurrent_append_no_loss(tmp_path):
 
 
 def test_capture_store_read_waits_for_in_progress_append(tmp_path):
-    import fcntl
-    import threading
-
     store = CaptureStore(tmp_path)
     path = store.path_for("0-0")
     writer_ready = threading.Event()
@@ -821,7 +789,6 @@ def _cross_process_writer(root: str, base: int) -> None:
 def test_capture_store_cross_process_append_no_loss(tmp_path):
     # The threads-only test above exercises the in-process lock; this exercises fcntl.flock across
     # *processes* -- the num_workers>1 case the in-process lock cannot coordinate.
-    import multiprocessing as mp
 
     ctx = mp.get_context("fork")
     procs = [ctx.Process(target=_cross_process_writer, args=(str(tmp_path), b * 100)) for b in range(4)]
