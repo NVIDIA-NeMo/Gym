@@ -278,47 +278,12 @@ _OBSERVED_PATHS = {
     "/v1/messages": "messages",
 }
 
-_TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
-    "responses": {
-        b"event: response.completed": "complete",
-        b"event: response.incomplete": "incomplete",
-        b"event: response.failed": "error",
-        b"event: error": "error",
-    },
-    "chat": {b"data: [DONE]": "complete", b"event: error": "error"},
-    "messages": {b"event: message_stop": "complete", b"event: error": "error"},
-}
-
 
 def _headers_content_type(headers: list) -> bytes:
     for key, value in headers:
         if key.lower() == b"content-type":
             return value
     return b""
-
-
-def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
-    blocks = re.split(rb"\r?\n\r?\n", bytes(buffer))
-    buffer[:] = blocks.pop()
-    terminal_lines = _TERMINAL_SSE_LINES[dialect]
-    for block in blocks:
-        lines = block.splitlines()
-        for line in lines:
-            field, separator, value = line.partition(b":")
-            normalized = field + b": " + value.lstrip() if separator else line
-            if normalized in terminal_lines:
-                return terminal_lines[normalized]
-        if dialect == "chat":
-            for line in lines:
-                if not line.startswith(b"data:"):
-                    continue
-                try:
-                    payload = json.loads(line[5:].lstrip())
-                except Exception:
-                    continue
-                if isinstance(payload, dict) and payload.get("error") is not None:
-                    return "error"
-    return None
 
 
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
@@ -339,184 +304,6 @@ def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]
         return None
 
 
-def _classify_status(status_code: int) -> Optional[str]:
-    """Normalized error_category from an HTTP status (None when < 400)."""
-    if status_code < 400:
-        return None
-    if status_code in (408, 504):
-        return "timeout"
-    if status_code == 429:
-        return "rate_limit"
-    if status_code in (401, 403):
-        return "auth"
-    if status_code == 404:
-        return "not_found"
-    if status_code < 500:
-        return "client_error"
-    return "upstream_error"
-
-
-def _classify_exception(exc: BaseException) -> str:
-    """Normalized error_category for an exception raised while calling the model."""
-    if isinstance(exc, asyncio.TimeoutError):
-        return "timeout"
-    name = type(exc).__name__.lower()
-    if "timeout" in name:
-        return "timeout"
-    if "conn" in name:
-        return "connection"
-    return "exception"
-
-
-# --- SSE reconstruction: rebuild a final response object from a streamed body ---
-def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
-    """Parse an SSE byte stream into its JSON ``data:`` payloads (best-effort; non-JSON skipped)."""
-    events: list[dict[str, Any]] = []
-    for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
-        data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
-        if not data_lines:
-            continue
-        payload = "\n".join(data_lines)
-        if payload == "[DONE]":
-            continue
-        try:
-            parsed = json.loads(payload)
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
-
-
-def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a complete Anthropic Messages response from its streamed events."""
-    message: Optional[dict[str, Any]] = None
-    blocks: dict[int, dict[str, Any]] = {}
-    usage: dict[str, Any] = {}
-    tool_json: dict[int, str] = {}
-    for event in events:
-        etype = event.get("type")
-        if etype == "message_start":
-            msg = event.get("message") or {}
-            message = {k: msg.get(k) for k in ("id", "type", "role", "model", "stop_reason") if msg.get(k) is not None}
-            usage.update(msg.get("usage") or {})
-        elif etype == "content_block_start":
-            blocks[event.get("index", len(blocks))] = dict(event.get("content_block") or {})
-        elif etype == "content_block_delta":
-            idx = event.get("index", 0)
-            block = blocks.setdefault(idx, {})
-            delta = event.get("delta") or {}
-            dtype = delta.get("type")
-            if dtype == "text_delta":
-                block["type"] = block.get("type") or "text"
-                block["text"] = (block.get("text") or "") + (delta.get("text") or "")
-            elif dtype == "thinking_delta":
-                block["type"] = block.get("type") or "thinking"
-                block["thinking"] = (block.get("thinking") or "") + (delta.get("thinking") or "")
-            elif dtype == "input_json_delta":
-                tool_json[idx] = tool_json.get(idx, "") + (delta.get("partial_json") or "")
-        elif etype == "message_delta":
-            usage.update(event.get("usage") or {})
-            stop = (event.get("delta") or {}).get("stop_reason")
-            if message is not None and stop:
-                message["stop_reason"] = stop
-    if message is None and not blocks:
-        return None
-    content = []
-    for idx in sorted(blocks):
-        block = blocks[idx]
-        if block.get("type") == "tool_use" and idx in tool_json and not block.get("input"):
-            try:
-                block["input"] = json.loads(tool_json[idx]) if tool_json[idx] else {}
-            except Exception:
-                block["input"] = {"_raw": tool_json[idx]}
-        content.append(block)
-    result: dict[str, Any] = {**(message or {}), "type": "message", "content": content}
-    if usage:
-        result["usage"] = usage
-    return result
-
-
-def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a Chat Completions response from streamed chunks."""
-    content_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    tool_calls: dict[int, dict[str, Any]] = {}
-    usage: Optional[dict[str, Any]] = None
-    model: Optional[str] = None
-    role = "assistant"
-    finish_reason: Optional[str] = None
-    saw_choice = False
-    for chunk in events:
-        model = chunk.get("model") or model
-        if chunk.get("usage"):
-            usage = chunk["usage"]
-        for choice in chunk.get("choices") or []:
-            if not isinstance(choice, dict):
-                continue
-            saw_choice = True
-            delta = choice.get("delta") or {}
-            role = delta.get("role") or role
-            if delta.get("content"):
-                content_parts.append(delta["content"])
-            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-            if reasoning:
-                reasoning_parts.append(reasoning)
-            for tc in delta.get("tool_calls") or []:
-                slot = tool_calls.setdefault(
-                    tc.get("index", 0), {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
-                )
-                if tc.get("id"):
-                    slot["id"] = tc["id"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    slot["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["function"]["arguments"] += fn["arguments"]
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-    if not saw_choice:
-        return None
-    message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
-    if reasoning_parts:
-        message["reasoning_content"] = "".join(reasoning_parts)
-    if tool_calls:
-        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    result: dict[str, Any] = {
-        "object": "chat.completion",
-        "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-    }
-    if usage:
-        result["usage"] = usage
-    return result
-
-
-def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a Responses API response: the terminal envelope carries the full response object."""
-    for event in reversed(events):
-        if event.get("type") in ("response.completed", "response.incomplete", "response.failed") and isinstance(
-            event.get("response"), dict
-        ):
-            return event["response"]
-    for event in reversed(events):
-        if isinstance(event.get("response"), dict):
-            return event["response"]
-    return None
-
-
-def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[str, Any]]:
-    """Best-effort: reassemble a final response object from a streamed (SSE) body, by dialect."""
-    events = _parse_sse_events(raw)
-    if not events:
-        return None
-    if dialect == "messages":
-        return _reconstruct_anthropic_sse(events)
-    if dialect == "responses":
-        return _reconstruct_responses_sse(events)
-    return _reconstruct_chat_sse(events)
-
-
 def _record(
     store: CaptureStore,
     dialect: str,
@@ -531,22 +318,19 @@ def _record(
     ttft_ms: Optional[float] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
-    try:
-        store.record(
-            rollout_id,
-            {
-                "dialect": dialect,
-                "model_server": model_server_name,
-                "latency_ms": round(latency_ms, 2),
-                "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
-                "status_code": status_code,
-                "error_category": error_category,
-                "request": json.loads(request_bytes) if request_bytes else None,
-                "response": response_body,
-            },
-        )
-    except Exception:
-        logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
+    store.record(
+        rollout_id,
+        {
+            "dialect": dialect,
+            "model_server": model_server_name,
+            "latency_ms": round(latency_ms, 2),
+            "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
+            "status_code": status_code,
+            "error_category": error_category,
+            "request": json.loads(request_bytes) if request_bytes else None,
+            "response": response_body,
+        },
+    )
 
 
 class _CaptureMiddleware:
@@ -631,7 +415,7 @@ class _CaptureMiddleware:
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
                     sse_event_buffer.extend(chunk)
-                    terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
+                    terminal = None
                     defer_response = terminal is not None
                     state["stream_error_category"] = {
                         "error": "upstream_error",
@@ -648,7 +432,7 @@ class _CaptureMiddleware:
 
         try:
             await self._app(scope, _receive, _send)
-        except Exception as exc:
+        except Exception:
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -660,7 +444,7 @@ class _CaptureMiddleware:
                     rollout_id=rollout_id,
                     response_body=None,
                     status_code=None,
-                    error_category=_classify_exception(exc),
+                    error_category=None,
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
                 )
@@ -673,7 +457,6 @@ class _CaptureMiddleware:
         latency_ms = (time.perf_counter() - start) * 1000.0
         status = state["status"]
         body_bytes = bytes(state["body"])
-        streaming = state["streaming"]
         stream_error_category = state["stream_error_category"]
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
@@ -684,13 +467,8 @@ class _CaptureMiddleware:
             # malformed body can never surface as an ASGI error after the response was already sent.
             response_body = None
             if body_bytes:
-                try:
-                    response_body = (
-                        _reconstruct_streamed_response(body_bytes, dialect) if streaming else json.loads(body_bytes)
-                    )
-                except Exception:
-                    response_body = None
-            error_category = _classify_status(status) if status is not None else None
+                response_body = orjson.loads(body_bytes)
+            error_category = None
             if error_category is None and stream_error_category:
                 error_category = stream_error_category
             # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
