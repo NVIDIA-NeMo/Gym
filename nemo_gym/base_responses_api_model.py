@@ -321,15 +321,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             "route": "/v1/responses",
             "timestamp_start": perf_counter(),
             "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
-            "request": None,  # TODO
-            "raw_request": body.model_dump(),
+            "request": body,
+            "raw_request": None,
         }
 
         try:
-            response = await self.chat_completions(body)
-            mcr_dict["response"] = None  # TODO
+            response = await self._invoke_responses(request, body)
+            mcr_dict["response"] = response
             mcr_dict["error_response"] = None
-            mcr_dict["raw_response"] = response
+            mcr_dict["raw_response"] = None
 
             mcr_dict["timestamp_end"] = perf_counter()
             self._store.record(ModelCallRecord.model_validate(mcr_dict))
