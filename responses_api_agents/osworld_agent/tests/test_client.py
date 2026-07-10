@@ -834,7 +834,7 @@ def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missin
         env_class_path="fake.FakeEnv",
         agent_class_path="fake.FakePointerAgent",
         policy_base_url="https://inference-api.nvidia.com/v1",
-        policy_api_key="test-key",
+        policy_api_key="test-key",  # pragma: allowlist secret
         policy_model_name="azure/anthropic/claude-opus-4-7",
         sleep_after_execution=0,
         task_timeout=10,
@@ -842,7 +842,9 @@ def test_pointer_agent_runner_sets_optional_parallel_placeholder_when_key_missin
 
     assert result.reward == 1.0
     assert result.finished is True
-    assert osworld_client.os.environ["ANTHROPIC_API_KEY"] == "test-key"
+    assert (
+        osworld_client.os.environ["ANTHROPIC_API_KEY"] == "test-key"  # pragma: allowlist secret
+    )
     assert osworld_client.os.environ["ANTHROPIC_BASE_URL"] == "https://inference-api.nvidia.com"
     assert (
         osworld_client.os.environ["PARALLEL_API_KEY"]
@@ -885,7 +887,7 @@ def test_pointer_optional_parallel_patch_removes_web_tools(monkeypatch) -> None:
 
 
 def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")  # pragma: allowlist secret
     monkeypatch.setenv("POINTER_ANTHROPIC_MAX_RETRIES", "6")
     monkeypatch.setenv("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "45.5")
 
@@ -893,7 +895,7 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
         "https://inference-api.nvidia.com/",
         api_key="client-key",  # pragma: allowlist secret
     ) == {
-        "api_key": "client-key",
+        "api_key": "client-key",  # pragma: allowlist secret
         "base_url": "https://inference-api.nvidia.com",
         "max_retries": 6,
         "timeout": 45.5,
@@ -953,7 +955,7 @@ def test_pointer_env_evaluate_receives_eval_logger(monkeypatch, tmp_path) -> Non
         env_class_path="fake.FakePointerEnv",
         agent_class_path="fake.FakePointerAgent",
         policy_base_url="https://inference-api.nvidia.com/v1",
-        policy_api_key="test-key",
+        policy_api_key="test-key",  # pragma: allowlist secret
         policy_model_name="azure/anthropic/claude-opus-4-7",
         sleep_after_execution=0,
         task_timeout=10,
