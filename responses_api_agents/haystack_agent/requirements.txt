@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+haystack-ai==3.0.0.dev20260703074752
