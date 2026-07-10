@@ -287,6 +287,79 @@ def test_nemotron_agent_retries_invalid_python_action() -> None:
     assert actions == ["pyautogui.click(960, 540)"]
 
 
+def test_omni_agent_retries_invalid_python_with_feedback_and_lower_temperature(monkeypatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-agent.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    agent = NemotronOmniAgent(
+        model="policy",
+        max_steps=2,
+        parse_retries=2,
+        parse_error_feedback=True,
+        parse_retry_temperature=0.2,
+        pre_done_checklist=True,
+        temperature=0.6,
+    )
+    payloads: List[Dict[str, Any]] = []
+    responses = [
+        {
+            "content": "## Action:\nType a URL.\n## Code:\n```python\npyautogui.write(\"unterminated)\n```",
+            "reasoning_content": "The first response contains invalid Python.",
+        },
+        {
+            "content": "## Action:\nType a URL.\n## Code:\n```python\npyautogui.write('valid')\n```",
+            "reasoning_content": "Correct the string quoting.",
+        },
+    ]
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        return responses[len(payloads) - 1]
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _response, actions, _info = agent.predict("Type the URL.", {"screenshot": b"fake-png"})
+
+    assert actions == ["pyautogui.write('valid')"]
+    assert [payload["temperature"] for payload in payloads] == [0.6, 0.2]
+    retry_messages = payloads[1]["messages"]
+    assert [message["role"] for message in retry_messages[-2:]] == ["assistant", "user"]
+    assert "unterminated string literal" in retry_messages[-1]["content"]
+    assert "do not repeat the invalid code" in " ".join(retry_messages[-1]["content"].split())
+    image_parts = [
+        part
+        for message in retry_messages
+        for part in message.get("content", [])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert len(image_parts) == 1
+    first_user_text = payloads[0]["messages"][-1]["content"][-1]["text"]
+    assert "Before returning computer.terminate" in first_user_text
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["event"] == "agent_parse_error"
+    assert rows[0]["will_retry"] is True
+    assert rows[0]["retry_feedback_injected_next"] is True
+    assert rows[0]["retry_temperature_next"] == 0.2
+    assert rows[1]["event"] == "agent_parse"
+    assert rows[1]["parse_feedback_injected"] is True
+    assert rows[1]["pre_done_checklist_injected"] is True
+
+
+def test_omni_agent_warns_after_repeated_nontrivial_action() -> None:
+    agent = NemotronOmniAgent(
+        model="policy",
+        max_steps=10,
+        repeated_action_warning_threshold=3,
+        repeated_action_window=6,
+    )
+    agent.actions = ["Scroll the settings."] * 3
+    agent.cots = [{"code": "pyautogui.scroll(-3)"}] * 3
+
+    messages = agent._messages("Change the setting.", {"screenshot": b"fake-png"})
+    user_text = messages[-1]["content"][-1]["text"]
+
+    assert "same executable action appeared 3 times" in user_text
+    assert "choose a different verifiable action" in user_text
+
+
 def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))

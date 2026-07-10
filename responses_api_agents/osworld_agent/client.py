@@ -69,6 +69,7 @@ class RolloutResult:
     # Absolute path to the per-task log and artifact directory when
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
+    termination_reason: Optional[str] = None
 
 
 @dataclass
@@ -88,6 +89,7 @@ class _TaskArtifacts:
     runtime_handler: logging.FileHandler
     attached_loggers: List[tuple[logging.Logger, int]]
     started_at: str
+    identity: Dict[str, Any]
 
 
 # `ModelFn` takes (system_prompt, instruction, observation_history) and
@@ -109,6 +111,14 @@ def _is_terminal_action(action: Any) -> bool:
     if isinstance(action, str) and action in _TERMINAL_ACTIONS:
         return True
     return isinstance(action, dict) and action.get("action_type") in _TERMINAL_ACTIONS
+
+
+def _terminal_action_name(action: Any) -> Optional[str]:
+    if isinstance(action, str) and action in _TERMINAL_ACTIONS:
+        return action
+    if isinstance(action, dict) and action.get("action_type") in _TERMINAL_ACTIONS:
+        return str(action["action_type"])
+    return None
 
 
 def _flatten_actions(actions: Any) -> List[Any]:
@@ -250,6 +260,43 @@ def _patch_extension_name_aliases() -> None:
     wrapped._nemo_gym_alias_patch = True  # type: ignore[attr-defined]
     chrome_metrics.is_expected_installed_extensions = wrapped
     metrics_package.is_expected_installed_extensions = wrapped
+
+
+def _patch_pdf_image_evaluator_cleanup() -> None:
+    """Make corrupt PDFs score zero instead of failing during double cleanup.
+
+    Some OSWorld releases remove ``temp_pdf_comparison`` in both the exception
+    handler and ``finally`` block. The second removal raises FileNotFoundError,
+    masking an otherwise valid evaluator score of zero. Keep this adapter-side
+    compatibility shim narrow so unrelated missing-file failures still surface.
+    """
+
+    try:
+        from desktop_env.evaluators import metrics as metrics_package  # type: ignore
+        from desktop_env.evaluators.metrics import chrome as chrome_metrics  # type: ignore
+    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
+        return
+
+    current = getattr(chrome_metrics, "compare_pdf_images", None)
+    if current is None or getattr(current, "_nemo_gym_pdf_cleanup_patch", False):
+        return
+
+    def wrapped(*args: Any, **kwargs: Any) -> float:
+        try:
+            return float(current(*args, **kwargs))
+        except FileNotFoundError as exc:
+            missing_path = str(getattr(exc, "filename", "") or "")
+            if os.path.basename(missing_path) != "temp_pdf_comparison":
+                raise
+            LOG.warning(
+                "OSWorld compare_pdf_images repeated cleanup for %s; preserving its zero score",
+                missing_path,
+            )
+            return 0.0
+
+    wrapped._nemo_gym_pdf_cleanup_patch = True  # type: ignore[attr-defined]
+    chrome_metrics.compare_pdf_images = wrapped
+    metrics_package.compare_pdf_images = wrapped
 
 
 def _normalize_prompt_agent_computer_13_action(action: Any) -> Any:
@@ -577,6 +624,7 @@ def _setup_task_artifacts(
     task_config: Dict[str, Any],
     *,
     run_metadata: Dict[str, Any],
+    event_context: Optional[Mapping[str, Any]] = None,
 ) -> Optional[_TaskArtifacts]:
     """Create a log and artifact directory for one rollout.
 
@@ -639,6 +687,13 @@ def _setup_task_artifacts(
         task_logger.propagate = True
 
         started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        identity = {
+            "adapter": "gym",
+            "task_id": task_id,
+            "domain": domain,
+            **dict(event_context or {}),
+        }
+        identity = {key: value for key, value in identity.items() if value is not None and value != ""}
         trajectory_path = os.path.join(artifact_dir, "traj.jsonl")
         with open(trajectory_path, "w", encoding="utf-8"):
             pass
@@ -646,7 +701,7 @@ def _setup_task_artifacts(
         _write_json(
             os.path.join(artifact_dir, "run.json"),
             {
-                "task_id": task_id,
+                **identity,
                 "started_at": started_at,
                 "pid": os.getpid(),
                 **run_metadata,
@@ -661,6 +716,7 @@ def _setup_task_artifacts(
             runtime_handler=runtime_handler,
             attached_loggers=attached_loggers,
             started_at=started_at,
+            identity=identity,
         )
         task_logger.info("Created per-task artifact directory: %s", artifact_dir)
         return context
@@ -685,6 +741,9 @@ def _append_task_trajectory(
     if artifacts is None:
         return
     record = {
+        "schema_version": 2,
+        **artifacts.identity,
+        "event_id": uuid.uuid4().hex,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         **payload,
     }
@@ -715,12 +774,78 @@ def _save_task_screenshot(
         return None
 
 
+def _observation_identity(obs: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a compact join key for the screenshot without duplicating bytes."""
+
+    screenshot = obs.get("screenshot")
+    if not isinstance(screenshot, (bytes, bytearray)) or not screenshot:
+        return {"screenshot_bytes": 0, "screenshot_sha256": None}
+    screenshot_bytes = bytes(screenshot)
+    return {
+        "screenshot_bytes": len(screenshot_bytes),
+        "screenshot_sha256": hashlib.sha256(screenshot_bytes).hexdigest(),
+    }
+
+
 def _sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _evaluator_result_destinations(value: Any) -> List[str]:
+    """Collect evaluator result cache destinations from nested task specs."""
+
+    if isinstance(value, list):
+        destinations: List[str] = []
+        for item in value:
+            destinations.extend(_evaluator_result_destinations(item))
+        return destinations
+    if not isinstance(value, dict):
+        return []
+    destination = value.get("dest")
+    if isinstance(destination, str):
+        return [destination]
+    if isinstance(destination, list):
+        return [item for item in destination if isinstance(item, str)]
+    return []
+
+
+def _evaluator_result_artifacts(task_config: Mapping[str, Any], cache_dir: str) -> List[Dict[str, Any]]:
+    """Record compact result-file evidence after evaluation.
+
+    The evaluator cache remains on the execution host. Only destination,
+    existence, size, and a bounded-file hash enter the textual trajectory.
+    """
+
+    evaluator = task_config.get("evaluator")
+    if not isinstance(evaluator, dict):
+        return []
+    destinations = _evaluator_result_destinations(evaluator.get("result"))
+    if not destinations:
+        return []
+    hash_limit = int(os.environ.get("OSWORLD_EVALUATOR_HASH_MAX_BYTES", str(16 * 1024 * 1024)))
+    task_cache_dir = os.path.abspath(os.path.expanduser(os.path.join(cache_dir, _safe_task_id(dict(task_config)))))
+    records: List[Dict[str, Any]] = []
+    for destination in dict.fromkeys(destinations):
+        candidate = os.path.abspath(os.path.join(task_cache_dir, destination))
+        within_task_cache = os.path.commonpath([task_cache_dir, candidate]) == task_cache_dir
+        record: Dict[str, Any] = {
+            "destination": destination,
+            "cache_path": candidate,
+            "within_task_cache": within_task_cache,
+            "exists": within_task_cache and os.path.exists(candidate),
+            "is_file": within_task_cache and os.path.isfile(candidate),
+        }
+        if record["is_file"]:
+            size = os.path.getsize(candidate)
+            record["bytes"] = size
+            if size <= hash_limit:
+                record["sha256"] = _sha256_file(candidate)
+        records.append(record)
+    return records
 
 
 def _finalize_task_artifacts(
@@ -754,6 +879,7 @@ def _finalize_task_artifacts(
                 "finished": result.finished,
                 "mask_sample": result.mask_sample,
                 "error": result.error,
+                "termination_reason": result.termination_reason,
                 "step_count": len(result.steps),
                 "recording_path": recording_path,
             },
@@ -967,6 +1093,7 @@ def run_osworld_task(
     )
     event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
     _patch_extension_name_aliases()
+    _patch_pdf_image_evaluator_cleanup()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []
@@ -975,10 +1102,13 @@ def run_osworld_task(
     finished = False
     final_score = 0.0
     timed_out = False
+    agent_terminal_action: Optional[str] = None
+    evaluation_error: Optional[str] = None
     task_start = time.monotonic()
     recording_path: Optional[str] = None
     task_artifacts = _setup_task_artifacts(
         task_config,
+        event_context=event_context,
         run_metadata={
             "runner_name": runner_spec.name,
             "runner_kind": runner_spec.kind,
@@ -1302,7 +1432,7 @@ def run_osworld_task(
                 "step_num": 0,
                 "instruction": instruction,
                 "screenshot_file": initial_screenshot,
-                "screenshot_bytes": len(obs.get("screenshot") or b""),
+                **_observation_identity(obs),
             },
         )
 
@@ -1363,6 +1493,7 @@ def run_osworld_task(
                         "done": False,
                         "error": error,
                         "screenshot_file": screenshot_file,
+                        **_observation_identity(obs),
                     },
                 )
                 break
@@ -1395,6 +1526,7 @@ def run_osworld_task(
                         "done": False,
                         "info": {"agent": agent_step_info} if agent_step_info else {},
                         "screenshot_file": screenshot_file,
+                        **_observation_identity(obs),
                     },
                 )
                 continue
@@ -1405,6 +1537,9 @@ def run_osworld_task(
             if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
                 _current_step[0] = step_idx + 1
             for action in actions:
+                terminal_action = _terminal_action_name(action)
+                if terminal_action is not None:
+                    agent_terminal_action = terminal_action
                 task_logger.info("Step %d executing action: %r", step_idx + 1, action)
                 try:
                     obs, reward, done, info = env.step(action, sleep_after_execution)
@@ -1448,6 +1583,7 @@ def run_osworld_task(
                     "info": step_info,
                     "error": error,
                     "screenshot_file": screenshot_file,
+                    **_observation_identity(obs),
                 },
             )
             task_logger.info(
@@ -1466,16 +1602,36 @@ def run_osworld_task(
 
         # Let the VM settle before scoring, mirroring lib_run_single.py.
         time.sleep(2)
+        rollout_error_before_evaluation = error
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
             final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
         except Exception as exc:  # noqa: BLE001
-            error = f"env.evaluate() failed: {exc}"
+            evaluation_error = f"env.evaluate() failed: {exc}"
+            error = evaluation_error
             task_logger.exception("Evaluator failed")
             final_score = 0.0
+        try:
+            result_artifacts = _evaluator_result_artifacts(task_config, cache_dir)
+        except Exception:  # noqa: BLE001 - logging must not change evaluator behavior.
+            task_logger.exception("Failed to inventory evaluator result artifacts")
+            result_artifacts = []
+        evaluator = task_config.get("evaluator")
+        evaluator_func = evaluator.get("func") if isinstance(evaluator, dict) else None
         _append_task_trajectory(
             task_artifacts,
-            {"event": "evaluation", "score": final_score, "error": error},
+            {
+                "event": "evaluation",
+                "score": final_score,
+                "status": "error" if evaluation_error else "completed",
+                "evaluator_func": evaluator_func,
+                "agent_terminal_action": agent_terminal_action,
+                "agent_declared_success": agent_terminal_action == "DONE",
+                "rollout_error_before_evaluation": rollout_error_before_evaluation,
+                "evaluation_error": evaluation_error,
+                "result_artifacts": result_artifacts,
+                "error": error,
+            },
         )
         if pointer_agent is not None and hasattr(pointer_agent, "log_usage"):
             try:
@@ -1519,6 +1675,18 @@ def run_osworld_task(
     # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
     # or (c) loop exhausted max_steps without the model emitting DONE/FAIL.
     mask_sample = bool(error) or timed_out or not finished
+    if timed_out:
+        termination_reason = "timeout"
+    elif evaluation_error:
+        termination_reason = "evaluator_error"
+    elif error:
+        termination_reason = "rollout_error"
+    elif agent_terminal_action is not None:
+        termination_reason = f"agent_{agent_terminal_action.lower()}"
+    elif finished:
+        termination_reason = "environment_done"
+    else:
+        termination_reason = "max_steps"
 
     result = RolloutResult(
         reward=reward,
@@ -1528,6 +1696,7 @@ def run_osworld_task(
         finished=finished,
         mask_sample=mask_sample,
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
+        termination_reason=termination_reason,
     )
     _finalize_task_artifacts(
         task_artifacts,

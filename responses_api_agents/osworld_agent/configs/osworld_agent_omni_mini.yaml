@@ -20,3 +20,8 @@ osworld_simple_agent:
         max_text_history_length: 3
         thinking: true
         parse_retries: 5
+        parse_error_feedback: true
+        parse_retry_temperature: 0.2
+        pre_done_checklist: true
+        repeated_action_warning_threshold: 3
+        repeated_action_window: 12

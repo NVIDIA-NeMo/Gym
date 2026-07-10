@@ -60,8 +60,27 @@ TEMPERATURE="${TEMPERATURE:-1.0}"
 CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 MAX_STEPS="${MAX_STEPS:-}"
+TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
+TASK_PARITY_IDS_FILE="${TASK_PARITY_IDS_FILE:-}"
+TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-${RUN_DIR}/task-input-parity.json}"
 
 mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")"
+
+if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then
+    parity_cmd=(
+        "${PYTHON_BIN}"
+        "${SCRIPT_DIR}/check_task_input_parity.py"
+        "${TASK_PARITY_REFERENCE_INPUT}"
+        "${INPUT_JSONL}"
+        "--output"
+        "${TASK_PARITY_REPORT}"
+    )
+    if [[ -n "${TASK_PARITY_IDS_FILE}" ]]; then
+        parity_cmd+=("--task-ids" "${TASK_PARITY_IDS_FILE}")
+    fi
+    echo "--- OSWorld task-definition parity preflight ---"
+    "${parity_cmd[@]}"
+fi
 
 if [[ "${FULL_MODEL_IO}" == "1" ]]; then
     OSWORLD_MODEL_IO_LOG="$(gym_absolute_path "${OSWORLD_MODEL_IO_LOG:-${RUN_DIR}/model-io-agent.jsonl}")"
@@ -185,6 +204,9 @@ OSWORLD_RECORD_VIDEO_DIR=${OSWORLD_RECORD_VIDEO_DIR:-}
 OSWORLD_MODEL_IO_LOG=${OSWORLD_MODEL_IO_LOG:-}
 OSWORLD_TRANSPORT_IO_LOG=${OSWORLD_TRANSPORT_IO_LOG:-}
 OSWORLD_VM_EXEC_LOG=${OSWORLD_VM_EXEC_LOG:-}
+TASK_PARITY_REFERENCE_INPUT=${TASK_PARITY_REFERENCE_INPUT}
+TASK_PARITY_IDS_FILE=${TASK_PARITY_IDS_FILE}
+TASK_PARITY_REPORT=${TASK_PARITY_REPORT}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
 VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
@@ -218,6 +240,10 @@ if [[ "${FULL_MODEL_IO}" == "1" ]]; then
     echo "agent I/O:   ${OSWORLD_MODEL_IO_LOG}"
     echo "transport:   ${OSWORLD_TRANSPORT_IO_LOG}"
     echo "VM exec:     ${OSWORLD_VM_EXEC_LOG}"
+fi
+if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then
+    echo "parity ref:  ${TASK_PARITY_REFERENCE_INPUT}"
+    echo "parity report: ${TASK_PARITY_REPORT}"
 fi
 if [[ "${RECORD_VIDEO}" == "sample" ]]; then
     echo "video sample:${OSWORLD_RECORD_VIDEO_TASK_IDS_FILE} (${VIDEO_SAMPLE_COUNT}/${VIDEO_SAMPLE_PER}, seed=${VIDEO_SAMPLE_SEED})"

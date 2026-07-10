@@ -413,13 +413,24 @@ def test_task_artifacts_capture_logs_trajectory_screenshots_and_result(monkeypat
         for line in (artifact_dir / "traj.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [record["event"] for record in trajectory] == ["initial_state", "step", "evaluation"]
+    assert all(record["schema_version"] == 2 for record in trajectory)
+    assert all(record["task_id"] == "artifact-task" for record in trajectory)
+    assert all(record["domain"] == "chrome" for record in trajectory)
+    assert all(record["event_id"] for record in trajectory)
+    assert trajectory[0]["screenshot_sha256"]
     assert trajectory[1]["actions"] == ["DONE"]
     assert trajectory[1]["screenshot_file"] == "step_001.png"
+    assert trajectory[1]["screenshot_sha256"] == trajectory[0]["screenshot_sha256"]
+    assert trajectory[2]["status"] == "completed"
+    assert trajectory[2]["agent_terminal_action"] == "DONE"
+    assert trajectory[2]["agent_declared_success"] is True
+    assert trajectory[2]["evaluation_error"] is None
 
     result_payload = osworld_client.json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
     assert result_payload["reward"] == 1.0
     assert result_payload["score"] == 1.0
     assert result_payload["step_count"] == 1
+    assert result_payload["termination_reason"] == "agent_done"
     assert "Starting OSWorld rollout" in (artifact_dir / "worker.log").read_text(encoding="utf-8")
     assert "Starting OSWorld rollout" in (artifact_dir / "runtime.log").read_text(encoding="utf-8")
 
@@ -791,6 +802,85 @@ def test_extension_alias_patch_updates_both_metric_exports(monkeypatch) -> None:
         )
     ]
     assert metrics.is_expected_installed_extensions is chrome_metrics.is_expected_installed_extensions
+
+
+def test_pdf_evaluator_cleanup_patch_preserves_zero_score(monkeypatch) -> None:
+    desktop_env = ModuleType("desktop_env")
+    evaluators = ModuleType("desktop_env.evaluators")
+    metrics = ModuleType("desktop_env.evaluators.metrics")
+    chrome_metrics = ModuleType("desktop_env.evaluators.metrics.chrome")
+
+    def original(_actual: Any, _expected: Any) -> float:
+        raise FileNotFoundError(2, "missing", "cache/task/temp_pdf_comparison")
+
+    chrome_metrics.compare_pdf_images = original
+    metrics.compare_pdf_images = original
+    metrics.chrome = chrome_metrics
+    evaluators.metrics = metrics
+    desktop_env.evaluators = evaluators
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics", metrics)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics.chrome", chrome_metrics)
+
+    osworld_client._patch_pdf_image_evaluator_cleanup()
+    osworld_client._patch_pdf_image_evaluator_cleanup()
+
+    assert metrics.compare_pdf_images("actual.pdf", "gold.pdf") == 0.0
+    assert metrics.compare_pdf_images is chrome_metrics.compare_pdf_images
+
+
+def test_pdf_evaluator_cleanup_patch_reraises_unrelated_missing_file(monkeypatch) -> None:
+    desktop_env = ModuleType("desktop_env")
+    evaluators = ModuleType("desktop_env.evaluators")
+    metrics = ModuleType("desktop_env.evaluators.metrics")
+    chrome_metrics = ModuleType("desktop_env.evaluators.metrics.chrome")
+
+    def original(_actual: Any, _expected: Any) -> float:
+        raise FileNotFoundError(2, "missing", "cache/task/receipt.pdf")
+
+    chrome_metrics.compare_pdf_images = original
+    metrics.compare_pdf_images = original
+    metrics.chrome = chrome_metrics
+    evaluators.metrics = metrics
+    desktop_env.evaluators = evaluators
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics", metrics)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.metrics.chrome", chrome_metrics)
+
+    osworld_client._patch_pdf_image_evaluator_cleanup()
+
+    with pytest.raises(FileNotFoundError, match="receipt.pdf"):
+        metrics.compare_pdf_images("actual.pdf", "gold.pdf")
+
+
+def test_evaluator_result_artifacts_records_zero_byte_output(monkeypatch, tmp_path: Path) -> None:
+    task_id = "pdf-task"
+    task_cache = tmp_path / task_id
+    task_cache.mkdir()
+    (task_cache / "receipt.pdf").write_bytes(b"")
+    task = {
+        "id": task_id,
+        "evaluator": {
+            "func": "compare_pdf_images",
+            "result": {"type": "vm_file", "path": "/home/user/Desktop/receipt.pdf", "dest": "receipt.pdf"},
+        },
+    }
+
+    records = osworld_client._evaluator_result_artifacts(task, str(tmp_path))
+
+    assert records == [
+        {
+            "destination": "receipt.pdf",
+            "cache_path": str(task_cache / "receipt.pdf"),
+            "within_task_cache": True,
+            "exists": True,
+            "is_file": True,
+            "bytes": 0,
+            "sha256": osworld_client.hashlib.sha256(b"").hexdigest(),
+        }
+    ]
 
 
 def test_evaluator_gpu_visibility_is_restored(monkeypatch) -> None:

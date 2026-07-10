@@ -60,6 +60,17 @@ INSTRUCTION_TEMPLATE = (
     "Please generate the next move according to the screenshot, task instruction "
     "and previous steps (if provided).\n"
 )
+PARSE_RETRY_TEMPLATE = """Your previous response could not be executed because its Code section was invalid:
+{error}
+
+Return a corrected response for the same screenshot and task. Keep the required
+## Action / ## Code format, emit syntactically valid Python, and do not repeat
+the invalid code. Do not claim success merely because parsing failed."""
+PRE_DONE_CHECKLIST = """Before returning computer.terminate with status=success, re-read the exact task instruction and verify the current state:
+- the exact target app, page, slide, sheet, column, file, and setting scope are correct;
+- every negative constraint (for example, "do not" or "without") is satisfied;
+- any requested output file visibly exists and is non-empty.
+If any item is not verified, take one corrective or verification action instead of terminating."""
 STEP_TEMPLATE = "# Step {step_num}:\n"
 TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n## Code:\n```python\n{code}\n```\n"
 ASSISTANT_HISTORY_TEMPLATE_THINKING = (
@@ -440,6 +451,11 @@ class NemotronV3Agent:
         client_password: str = "password",  # pragma: allowlist secret
         thinking: bool = True,
         parse_retries: int = 5,
+        parse_error_feedback: bool = False,
+        parse_retry_temperature: float | None = None,
+        pre_done_checklist: bool = False,
+        repeated_action_warning_threshold: int = 0,
+        repeated_action_window: int = 12,
         log_context: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
@@ -464,6 +480,13 @@ class NemotronV3Agent:
         self.client_password = client_password
         self.thinking = thinking
         self.parse_retries = max(1, parse_retries)
+        self.parse_error_feedback = bool(parse_error_feedback)
+        self.parse_retry_temperature = (
+            None if parse_retry_temperature is None else max(0.0, float(parse_retry_temperature))
+        )
+        self.pre_done_checklist = bool(pre_done_checklist)
+        self.repeated_action_warning_threshold = max(0, int(repeated_action_warning_threshold))
+        self.repeated_action_window = max(1, int(repeated_action_window))
         self.log_context = {
             str(key): value for key, value in dict(log_context or {}).items() if value is not None and value != ""
         }
@@ -496,6 +519,62 @@ class NemotronV3Agent:
             action=cot.get("action", ""),
             code=cot.get("original_code", cot.get("code", "")),
         )
+
+    def _parse_retry_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        response: Any,
+        error: str,
+    ) -> List[Dict[str, Any]]:
+        """Add bounded parser feedback without duplicating the screenshot."""
+
+        content, _reasoning = _response_parts(response)
+        invalid_response = content[-8000:] if content else "<empty model response>"
+        return [
+            *messages,
+            {"role": "assistant", "content": invalid_response},
+            {"role": "user", "content": PARSE_RETRY_TEMPLATE.format(error=error[-2000:])},
+        ]
+
+    @staticmethod
+    def _is_trivial_repeat(code: str) -> bool:
+        compact = re.sub(r"\s+", "", code).lower()
+        return compact in {
+            "wait",
+            "pyautogui.sleep(0.5)",
+            "pyautogui.keydown('return')pyautogui.keyup('return')",
+            'pyautogui.keydown("return")pyautogui.keyup("return")',
+        }
+
+    def _repeated_action_guidance(self) -> str:
+        """Warn after a non-trivial executable action repeats in a short window."""
+
+        threshold = self.repeated_action_warning_threshold
+        if threshold <= 1 or not self.cots:
+            return ""
+        recent = self.cots[-self.repeated_action_window :]
+        signatures = [str(cot.get("code", "") or "").strip() for cot in recent]
+        current = signatures[-1]
+        if not current or current in {"DONE", "FAIL", "WAIT"} or self._is_trivial_repeat(current):
+            return ""
+        occurrences = sum(signature == current for signature in signatures)
+        if occurrences < threshold:
+            return ""
+        return (
+            "Recovery check: the same executable action appeared "
+            f"{occurrences} times in the last {len(signatures)} steps. Re-read the screenshot and task. "
+            "Do not repeat the same strategy unless the visible state is progressing; choose a different "
+            "verifiable action or terminate with failure if the task is genuinely impossible."
+        )
+
+    def _step_guidance(self) -> str:
+        guidance = []
+        repeated_action = self._repeated_action_guidance()
+        if repeated_action:
+            guidance.append(repeated_action)
+        if self.pre_done_checklist:
+            guidance.append(PRE_DONE_CHECKLIST)
+        return "\n\n".join(guidance)
 
     def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
@@ -564,6 +643,8 @@ class NemotronV3Agent:
 
     def predict(self, instruction: str, obs: Dict[str, Any], **_kwargs: Any) -> tuple[str, List[str], Dict[str, Any]]:
         messages = self._messages(instruction, obs)
+        request_messages = messages
+        repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
         parsed_info: Dict[str, Any] = {}
 
@@ -572,11 +653,23 @@ class NemotronV3Agent:
             step_number = len(self.actions) + 1
             parse_attempt = attempt + 1
             call_log_context = self._log_event_context(step=step_number, parse_attempt=parse_attempt)
+            call_log_context.update(
+                {
+                    "parse_feedback_injected": request_messages is not messages,
+                    "pre_done_checklist_injected": self.pre_done_checklist,
+                    "repeated_action_warning_injected": repeated_action_warning,
+                }
+            )
+            retry_temperature = (
+                max(0.2, self.temperature)
+                if self.parse_retry_temperature is None
+                else self.parse_retry_temperature
+            )
             payload: Dict[str, Any] = {
                 "model": self.model,
-                "messages": messages,
+                "messages": request_messages,
                 "max_tokens": self.max_tokens,
-                "temperature": self.temperature if attempt == 0 else max(0.2, self.temperature),
+                "temperature": self.temperature if attempt == 0 else retry_temperature,
                 "_nemo_gym_return_message": True,
                 "_nemo_gym_require_stop": True,
                 "_osworld_log_context": call_log_context,
@@ -617,6 +710,8 @@ class NemotronV3Agent:
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                will_retry = attempt + 1 < self.parse_retries
+                feedback_next = self.parse_error_feedback and will_retry
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -631,6 +726,9 @@ class NemotronV3Agent:
                             "normalized_model_response": response,
                             "error_type": type(exc).__name__,
                             "error": repr(exc),
+                            "will_retry": will_retry,
+                            "retry_feedback_injected_next": feedback_next,
+                            "retry_temperature_next": retry_temperature if will_retry else None,
                         }
                     )
                 self.logger.warning(
@@ -639,6 +737,8 @@ class NemotronV3Agent:
                     self.parse_retries,
                     exc,
                 )
+                if feedback_next:
+                    request_messages = self._parse_retry_messages(messages, response, last_error)
         else:
             return last_error, ["FAIL"], parsed_info
 
@@ -703,6 +803,9 @@ class NemotronOmniAgent(NemotronV3Agent):
 
         current_text = INSTRUCTION_TEMPLATE.format(instruction=instruction)
         current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
+        guidance = self._step_guidance()
+        if guidance:
+            current_text += f"\n{guidance}\n"
         return [
             {"role": "system", "content": system_prompt},
             {

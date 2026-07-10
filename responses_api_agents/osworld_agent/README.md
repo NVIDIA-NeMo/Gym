@@ -168,6 +168,17 @@ LIMIT=null NUM_ENVS=4 RESUME_FROM_CACHE=1 \
 bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
+For Internal/Gym parity runs, fail before launch if the materialized task
+instruction, setup order, or evaluator differs. The JSON report is retained in
+the run directory:
+
+```bash
+TASK_PARITY_REFERENCE_INPUT=/path/to/canonical.jsonl \
+TASK_PARITY_IDS_FILE=/path/to/task_ids.txt \
+INPUT_JSONL=/path/to/gym.jsonl \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
 ## Configuration
 
 `configs/osworld_agent.yaml` defines the base `osworld_simple_agent`. Model
@@ -193,6 +204,11 @@ overlays should be listed after the base config so their values win.
 Per-task `responses_create_params` override YAML sampling defaults. Explicit
 CLI overrides have the highest priority.
 
+The Nano Omni overlay additionally enables parser-error feedback at a lower
+retry temperature, a bounded repeated-action recovery hint, and an exact
+pre-DONE checklist. These controls live in `agent_kwargs`, so other runners and
+models retain their existing behavior.
+
 The response sets `mask_sample=true` when a timeout, evaluator error, or
 unfinished max-step rollout makes the reward unreliable.
 
@@ -209,7 +225,8 @@ are linked into the per-task cache before `env.reset()`.
 Every rollout receives a collision-safe `${domain}/${task_id}` directory with:
 
 - `worker.log` and `runtime.log`;
-- `traj.jsonl` with initial state, model/action steps, and evaluation;
+- `traj.jsonl` with task/run identity, observation hashes, model/action steps,
+  agent terminal status, evaluator stage, and compact result-file metadata;
 - `step_000.png`, `step_001.png`, and subsequent VM observations;
 - `vm-exec.jsonl` with controller commands and VM responses;
 - `task.json`, `run.json`, `result.json`, and `manifest.json`.
@@ -227,7 +244,9 @@ FULL_MODEL_IO=1 RUN_DIR=results/omni-diagnostic \
   bash responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh
 ```
 
-This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. Requests may
+This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. Parser events
+also state whether retry feedback, the pre-DONE checklist, or repeated-action
+recovery was injected. Requests may
 contain embedded screenshots and prompt content, so these logs can be large
 and sensitive. They are disabled by default.
 

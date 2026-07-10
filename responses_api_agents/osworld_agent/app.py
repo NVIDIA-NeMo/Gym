@@ -654,6 +654,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "error": result.error,
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
+        "termination_reason": result.termination_reason,
         "steps": [
             {
                 "step": s.step,
@@ -803,6 +804,7 @@ def _build_response(
     metadata["osworld_steps"] = result.get("steps", [])
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
     metadata["osworld_model_name"] = policy_model_name
+    metadata["osworld_termination_reason"] = result.get("termination_reason")
 
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,

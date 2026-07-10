@@ -145,6 +145,11 @@ def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config["runner_name"] == "omni_mini_agent"
     assert server_config["agent_kwargs"]["thinking"] is True
+    assert server_config["agent_kwargs"]["parse_error_feedback"] is True
+    assert server_config["agent_kwargs"]["parse_retry_temperature"] == 0.2
+    assert server_config["agent_kwargs"]["pre_done_checklist"] is True
+    assert server_config["agent_kwargs"]["repeated_action_warning_threshold"] == 3
+    assert server_config["agent_kwargs"]["repeated_action_window"] == 12
 
 
 @pytest.mark.parametrize(
