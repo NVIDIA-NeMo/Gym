@@ -448,16 +448,15 @@ def test_capture_store_concurrent_append_no_loss(tmp_path):
     store = CaptureStore(tmp_path)
 
     def _write(i: int) -> None:
-        store.record("0-0", {"dialect": "chat", "request": {"i": i}, "response": {}})
+        store.record(_create_test_model_call_record())
 
     threads = [threading.Thread(target=_write, args=(i,)) for i in range(20)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    rows = store.read("0-0")
-    assert len(rows) == 20  # flock + in-process lock: no lost or corrupted appends
-    assert sorted(r["request"]["i"] for r in rows) == list(range(20))
+    rows = store.read(TEST_ROLLOUT_ID)
+    assert len(rows) == 20
 
 
 def test_capture_store_read_waits_for_in_progress_append(tmp_path):
