@@ -26,6 +26,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
+from pytest import MonkeyPatch
 
 import nemo_gym.base_responses_api_agent as ba
 import nemo_gym.base_responses_api_model as obs
@@ -296,7 +297,7 @@ def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
 
 
-def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
+def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path: Path, monkeypatch: MonkeyPatch):
     with pytest.raises(ValueError, match="required"):
         ModelCallCaptureConfig(observability_enabled=True)
     with pytest.raises(ValueError, match="absolute"):
@@ -314,22 +315,20 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config(nested_config) == []
 
 
-def test_capture_records_non_json_response_as_none(tmp_path):
-    app = FastAPI()
+def test_capture_records_non_json_response_as_error(tmp_path: Path):
+    class MyTestSimpleResponsesAPIModel(TestSimpleResponsesAPIModel):
+        async def responses(self, body: dict = Body()) -> PlainTextResponse:
+            return PlainTextResponse("not json")
 
-    @app.post("/v1/responses")
-    async def _r(body: dict = Body()) -> PlainTextResponse:
-        return PlainTextResponse("not json")
+    app = _create_test_app_with_model_call_capture(tmp_path, MyTestSimpleResponsesAPIModel)
 
-    _install_capture(app, tmp_path)
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
-    r = client.post("/ng-rollout/rnj/v1/responses", json={"input": "x"})
-    assert r.status_code == 200 and r.text == "not json"  # response passed through unaltered
+    r = client.post("/v1/ng-rollout/rnj/responses", json={"input": "x"})
+    assert r.status_code == 500
     records = CaptureStore(tmp_path).read("rnj")
-    assert len(records) == 1 and records[0]["response"] is None  # non-JSON body -> None
-    # a 2xx whose body we couldn't parse is flagged, not silently counted as a clean success
-    assert records[0]["error_category"] == "capture_parse_error"
+    assert len(records) == 1 and records[0].response is None
+    assert records[0].error_response is not None
 
 
 # --- base-agent correlation helpers ---
