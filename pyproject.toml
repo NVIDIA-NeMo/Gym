@@ -518,7 +518,8 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "environments/*/prepare.py",
+    "environments/*",
+    "scripts/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
