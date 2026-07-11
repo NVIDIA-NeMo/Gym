@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """OSWorld runner registry.
 
-The Gym wrapper should preserve OSWorld's native agent/runner contracts where
+The Gym wrapper should preserve upstream OSWorld agent/runner contracts where
 possible. This registry keeps those contracts explicit: each runner declares
 which DesktopEnv class, action space, observation mode, and agent class it
 expects.
@@ -45,8 +45,8 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 _M3_AGENT = "mm_agents.m3.M3Agent"
-_NEMOTRON_V3_AGENT = "responses_api_agents.osworld_agent.native_agents.NemotronV3Agent"
-_OMNI_MINI_AGENT = "responses_api_agents.osworld_agent.native_agents.NemotronOmniAgent"
+_NEMOTRON_V3_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronV3Agent"
+_OMNI_MINI_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronOmniAgent"
 _QWEN3_OMNI_AGENT = "mm_agents.qwen3vl_agent.Qwen3VLAgent"
 
 

@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from responses_api_agents.osworld_agent.native_agents import (
+from responses_api_agents.osworld_agent.adapter_agents import (
     NemotronOmniAgent,
     NemotronV3Agent,
     normalize_python_code_newlines,
@@ -61,6 +61,85 @@ pyautogui.click(0.5, 0.25)
     assert commands == ["pyautogui.click(960, 270)"]
     assert info["thought"] == "The target is in the middle of the screen."
     assert info["original_code"] == "pyautogui.click(0.5, 0.25)"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_action", "expected_command"),
+    [
+        (
+            "## Action: Click the target.\n## Code:\n```python\npyautogui.click(0.5, 0.25)\n```",
+            "Click the target.",
+            "pyautogui.click(960, 270)",
+        ),
+        (
+            "## Action:\nClick the target.\n## Code: pyautogui.click(0.5, 0.25)",
+            "Click the target.",
+            "pyautogui.click(960, 270)",
+        ),
+        (
+            "## Action: Click the target.\n## Code: pyautogui.click(0.5, 0.25)\n"
+            "```python\npyautogui.click(0.5, 0.25)\n```",
+            "Click the target.",
+            "pyautogui.click(960, 270)",
+        ),
+    ],
+)
+def test_parse_nemotron_accepts_inline_and_multiline_sections(
+    content: str, expected_action: str, expected_command: str
+) -> None:
+    action, commands, _info = parse_nemotron_response(
+        {"content": content, "reasoning_content": "Choose the visible target."},
+        screen_size=(1920, 1080),
+        coordinate_type="relative",
+        thinking=True,
+    )
+
+    assert action == expected_action
+    assert commands == [expected_command]
+
+
+def test_parse_nemotron_accepts_explicit_code_without_descriptive_action() -> None:
+    action, commands, info = parse_nemotron_response(
+        {"content": "## Code: pyautogui.click(0.5, 0.25)"},
+        screen_size=(1920, 1080),
+        coordinate_type="relative",
+        thinking=True,
+    )
+
+    assert action == "Execute the provided code."
+    assert commands == ["pyautogui.click(960, 270)"]
+    assert info["action_inferred"] is True
+
+
+def test_parse_nemotron_accepts_inline_thought_when_reasoning_is_not_separate() -> None:
+    action, commands, info = parse_nemotron_response(
+        {
+            "content": (
+                "## Thought: The target is visible.\n"
+                "## Action: Click it.\n"
+                "## Code: pyautogui.click(0.5, 0.25)"
+            )
+        },
+        screen_size=(1920, 1080),
+        coordinate_type="relative",
+        thinking=False,
+    )
+
+    assert action == "Click it."
+    assert commands == ["pyautogui.click(960, 270)"]
+    assert info["thought"] == "The target is visible."
+
+
+def test_parse_nemotron_rejects_unlabelled_global_code_block() -> None:
+    action, commands, _info = parse_nemotron_response(
+        {"content": "Here is an example:\n```python\npyautogui.click(0.5, 0.25)\n```"},
+        screen_size=(1920, 1080),
+        coordinate_type="relative",
+        thinking=True,
+    )
+
+    assert action == "<Error>: no explicit ## Code section found"
+    assert commands == ["FAIL"]
 
 
 @pytest.mark.parametrize(

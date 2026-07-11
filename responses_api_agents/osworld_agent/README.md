@@ -5,9 +5,23 @@ This NeMo Gym responses API agent runs the
 request creates an OSWorld VM, drives a complete observation/action rollout,
 runs the task evaluator, and returns the score as a NeMo Gym response.
 
-The adapter supports Gym-built prompts as well as OSWorld-native agents. It
+The adapter supports Gym-built prompts as well as agents supplied by upstream
+OSWorld. It
 uses an unmodified, pinned OSWorld dependency and the upstream local Docker
 provider.
+
+### Agent ownership and terminology
+
+The module `adapter_agents.py` contains model-specific scaffolds owned by this
+Gym adapter: currently `NemotronV3Agent` and `NemotronOmniAgent`. They implement
+prompt construction, bounded history, response parsing, coordinate projection,
+and retry behavior around Gym's model transport. They are **not** the
+Internal/native OSWorld baseline and are **not** imported from upstream
+OSWorld's `mm_agents` package. Upstream-owned agents such as `PromptAgent`,
+`M3Agent`, `PointerAgent`, and `Qwen3VLAgent` remain identified explicitly in
+the runner table below. Upstream OSWorld does not currently define a Nano
+Omni-specific scaffold, so the Gym adapter supplies `NemotronOmniAgent` rather
+than pretending that another model's agent protocol is compatible.
 
 ## Requirements
 
@@ -78,6 +92,16 @@ Set `runner_name` in the agent config or pass an override to `ng_run`.
 | `nemotron_v3_agent` | Gym-owned Nemotron prompt, history, parser, and coordinate projection |
 | `omni_mini_agent` | Nemotron 3 Nano Omni with one current image and bounded text history |
 | `qwen3_omni_agent` | OSWorld Qwen3VL scaffold with Gym model transport |
+
+The adapter-owned Nemotron parser requires an explicit `## Code` section so it
+never executes an unrelated code block from prose. Within that boundary it
+accepts common equivalent model formats: `## Thought`, `## Action`, and
+`## Code` values may start on the heading line or the following line; Code may
+be fenced or unfenced. Thought and Action are descriptive metadata, so an
+explicit, syntactically valid Code section is not discarded merely because an
+Action description is absent. Python actions are still syntax-checked before
+OSWorld executes them, and terminal actions still require an explicit
+`success` or `failure` status.
 
 The available PromptAgent variants are:
 

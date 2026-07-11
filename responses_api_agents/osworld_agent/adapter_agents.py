@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Adapter-owned Nemotron OSWorld agents.
+"""Gym adapter-owned model scaffolds for OSWorld.
 
 The adapter owns model-specific prompting, history, parsing, and coordinate
 projection while OSWorld continues to own ``DesktopEnv`` and task evaluation.
 ``NemotronOmniAgent`` specializes the protocol for Nemotron 3 Nano Omni,
 which accepts one image per prompt.
+
+This module is intentionally named ``adapter_agents``: these classes are not
+the Internal/native OSWorld baseline and do not come from the upstream
+``mm_agents`` package. They are model-specific scaffolds implemented by the
+Gym adapter around an otherwise unmodified OSWorld environment.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import time
 from typing import Any, Dict, List, Mapping, Tuple
 
 
-LOG = logging.getLogger("nemo_gym.osworld_agent.native_agents")
+LOG = logging.getLogger("nemo_gym.osworld_agent.adapter_agents")
 
 
 def _jsonable(value: Any) -> Any:
@@ -137,7 +142,7 @@ short, verifiable action per turn. Every code block must be self-contained.
 Do not claim success until the visible UI confirms the requested final state.
 """.strip()
 
-_CODE_BLOCK_RE = re.compile(r"```(?:code|python)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_CODE_BLOCK_RE = re.compile(r"```(?:code|python|py|json)?[ \t]*\r?\n?(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _THINK_RE = re.compile(r"<think(?:ing)?>\s*(.*?)\s*</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 _PYAUTOGUI_CALL_RE = re.compile(
     r"pyautogui\.(click|rightClick|middleClick|doubleClick|tripleClick|moveTo|dragTo)\(([^()\n]*)\)"
@@ -256,6 +261,27 @@ def normalize_python_code_newlines(code: str) -> str:
     return "".join(output)
 
 
+def _extract_markdown_section(content: str, name: str) -> str | None:
+    """Return an explicit ``## <name>`` section in common model formats.
+
+    Both of these unambiguous forms are accepted::
+
+        ## Action:\nClick the target.
+        ## Action: Click the target.
+
+    The section remains bounded by the next level-two Markdown heading. Plain
+    prose labels such as ``Action:`` are deliberately not accepted, so parser
+    flexibility does not turn arbitrary response text into executable input.
+    """
+
+    match = re.search(
+        rf"^[ \t]*##[ \t]+{re.escape(name)}[ \t]*:?[ \t]*(?:\r?\n)?(.*?)(?=^[ \t]*##(?:[ \t]+|$)|\Z)",
+        content,
+        re.DOTALL | re.MULTILINE | re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
 def _literal_number(node: ast.AST) -> float | None:
     try:
         value = ast.literal_eval(node)
@@ -354,39 +380,32 @@ def parse_nemotron_response(
     content = normalize_response_content(content).lstrip()
     sections: Dict[str, Any] = {"thought": reasoning if thinking else ""}
     if not thinking:
-        thought_match = re.search(
-            r"^##\s*Thought\s*:?\s*[\n\r]+(.*?)(?=^##\s*Action\s*:|^##|\Z)",
-            content,
-            re.DOTALL | re.MULTILINE | re.IGNORECASE,
-        )
-        if thought_match:
-            sections["thought"] = thought_match.group(1).strip()
+        thought = _extract_markdown_section(content, "Thought")
+        if thought is not None:
+            sections["thought"] = thought
 
-    action_match = re.search(
-        r"^\s*##\s*Action\s*:?\s*[\n\r]+(.*?)(?=^\s*##|\Z)",
-        content,
-        re.DOTALL | re.MULTILINE | re.IGNORECASE,
-    )
-    action = action_match.group(1).strip() if action_match else ""
+    action = _extract_markdown_section(content, "Action") or ""
     sections["action"] = action
 
-    code_blocks = _CODE_BLOCK_RE.findall(content)
+    # Code is the execution authority. Require an explicit Code section, but
+    # accept its payload on the heading line, the following line, or in a
+    # supported Markdown fence. Never execute an unrelated global code block.
+    code_section = _extract_markdown_section(content, "Code")
+    if code_section is None:
+        error = "<Error>: no explicit ## Code section found"
+        return error, ["FAIL"], sections
+    code_blocks = _CODE_BLOCK_RE.findall(code_section)
     if code_blocks:
         raw_code = code_blocks[-1].strip()
     else:
-        # Some OpenAI-compatible deployments omit the fence while preserving
-        # the requested ``## Code`` section. Accept that narrow variant, but
-        # never fall back to executing arbitrary prose.
-        code_match = re.search(
-            r"^\s*##\s*Code\s*:?\s*[\n\r]+(.*?)(?=^\s*##|\Z)",
-            content,
-            re.DOTALL | re.MULTILINE | re.IGNORECASE,
-        )
-        if not code_match:
-            error = "<Error>: no Code section found"
+        if code_section.startswith("```"):
+            error = "<Error>: unsupported or unterminated Code fence"
             return error, ["FAIL"], sections
-        raw_code = code_match.group(1).strip()
+        raw_code = code_section
     original_code = normalize_python_code_newlines(raw_code).strip()
+    if not original_code:
+        error = "<Error>: the ## Code section is empty"
+        return error, ["FAIL"], sections
     if original_code != raw_code:
         sections["raw_code"] = raw_code
     sections["original_code"] = original_code
@@ -414,9 +433,16 @@ def parse_nemotron_response(
         coordinate_type=coordinate_type,
     )
     sections["code"] = projected
-    if not action or not projected:
-        error = "<Error>: response is missing an Action or Code section"
+    if not projected:
+        error = "<Error>: the ## Code section is empty"
         return error, ["FAIL"], sections
+    # Action and Thought are descriptive metadata; a missing description must
+    # not discard an explicit, validated Code section. Keep the inference
+    # visible in parser logs and textual history.
+    if not action:
+        action = "Execute the provided code."
+        sections["action"] = action
+        sections["action_inferred"] = True
     return action, [projected], sections
 
 

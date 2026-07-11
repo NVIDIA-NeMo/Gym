@@ -67,7 +67,7 @@ def test_nemotron_v3_runner_is_owned_by_the_gym_adapter() -> None:
     spec = resolve_runner_spec("nemotron_v3_agent")
 
     assert spec.kind == "nemotron_v3_agent"
-    assert spec.agent_class_path == "responses_api_agents.osworld_agent.native_agents.NemotronV3Agent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.adapter_agents.NemotronV3Agent"
     assert spec.action_space == "pyautogui"
     assert spec.observation_type == "screenshot"
     assert spec.agent_kwargs["coordinate_type"] == "relative"
@@ -78,7 +78,7 @@ def test_omni_mini_runner_uses_single_image_gym_adapter() -> None:
     spec = resolve_runner_spec("omni_mini_agent")
 
     assert spec.kind == "omni_mini_agent"
-    assert spec.agent_class_path == "responses_api_agents.osworld_agent.native_agents.NemotronOmniAgent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.adapter_agents.NemotronOmniAgent"
     assert spec.action_space == "pyautogui"
     assert spec.observation_type == "screenshot"
     assert spec.agent_kwargs["coordinate_type"] == "relative"
