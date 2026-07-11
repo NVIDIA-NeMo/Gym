@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Probe an Omni Mini vLLM endpoint, including its one-image chat path."""
+"""Probe a Nemotron 3 Nano Omni endpoint with the configured image history."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def main() -> int:
         "--image-count",
         type=int,
         choices=(1, 3),
-        default=1,
+        default=3,
         help="Use one current screenshot or the agent-equivalent three-turn/three-image history.",
     )
     parser.add_argument("--width", type=int, default=1920)

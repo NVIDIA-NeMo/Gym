@@ -7,6 +7,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh"
+OMNI_RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh"
 PREFLIGHT_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/preflight_osworld_run.py"
 
 
@@ -104,3 +105,32 @@ def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> Non
         "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
         in completed.stdout
     )
+
+
+def test_omni_runner_defaults_match_the_three_image_recipe(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    env = os.environ.copy()
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "PREFLIGHT": "0",
+            "RUN_DIR": str(run_dir),
+            "SERVER_VENV_ROOT": str(tmp_path / "server-venvs"),
+        }
+    )
+
+    subprocess.run(
+        ["bash", str(OMNI_RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    run_env = _read_run_env(run_dir / "run.env")
+    script = OMNI_RUN_SCRIPT.read_text(encoding="utf-8")
+    assert run_env["RUNNER_NAME"] == "nemotron_v3_nano_omni_agent"
+    assert run_env["MAX_OUTPUT_TOKENS"] == "4096"
+    assert 'OMNI_MINI_PREFLIGHT_IMAGE_COUNT="${OMNI_MINI_PREFLIGHT_IMAGE_COUNT:-3}"' in script
+    assert '--image-count "${OMNI_MINI_PREFLIGHT_IMAGE_COUNT}"' in script

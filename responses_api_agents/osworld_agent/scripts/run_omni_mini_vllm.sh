@@ -20,11 +20,13 @@ export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${vllm_host}"
 export no_proxy="${no_proxy:+${no_proxy},}${vllm_host}"
 
 PREFLIGHT="${PREFLIGHT:-1}"
+OMNI_MINI_PREFLIGHT_IMAGE_COUNT="${OMNI_MINI_PREFLIGHT_IMAGE_COUNT:-3}"
 if [[ "${PREFLIGHT}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
   python3 "${SCRIPT_DIR}/probe_omni_mini_vllm.py" \
     --base-url "${OMNI_MINI_VLLM_BASE_URL}" \
     --api-key "${OMNI_MINI_VLLM_API_KEY}" \
-    --model "${OMNI_MINI_VLLM_MODEL}"
+    --model "${OMNI_MINI_VLLM_MODEL}" \
+    --image-count "${OMNI_MINI_PREFLIGHT_IMAGE_COUNT}"
 fi
 
 export GYM_ROOT
@@ -34,7 +36,7 @@ export LIMIT="${LIMIT:-5}"
 export NUM_ENVS="${NUM_ENVS:-1}"
 export NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
 export RESUME_FROM_CACHE="${RESUME_FROM_CACHE:-0}"
-export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
+export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-4096}"
 export TEMPERATURE="${TEMPERATURE:-0.6}"
 export RECORD_VIDEO="${RECORD_VIDEO:-0}"
 export CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml,responses_api_models/vllm_model/configs/vllm_model_omni_mini.yaml}"
