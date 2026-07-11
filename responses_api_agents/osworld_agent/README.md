@@ -103,6 +103,15 @@ Action description is absent. Python actions are still syntax-checked before
 OSWorld executes them, and terminal actions still require an explicit
 `success` or `failure` status.
 
+When adding or upgrading a model, do not assume it serializes this protocol in
+the same way as an existing checkpoint. Capture representative lossless raw
+responses, including failures, then add focused parser regression cases before
+accepting a new layout. In particular, check heading placement, fenced versus
+unfenced Code, literal newline escaping, reasoning/content separation, tool
+calls, and terminal status syntax. Extend only explicit, unambiguous formats;
+do not make the parser recover executable code from arbitrary prose. Full
+model-I/O logging for this investigation is described below.
+
 The available PromptAgent variants are:
 
 - `prompt_agent_screenshot_pyautogui`

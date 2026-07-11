@@ -261,6 +261,13 @@ def normalize_python_code_newlines(code: str) -> str:
     return "".join(output)
 
 
+# Model output dialects can differ even when prompts request the same schema.
+# When onboarding or upgrading a model, capture its lossless raw response and
+# add a regression case for each newly observed, unambiguous section layout
+# before widening this parser. Keep ``## Code`` as the explicit execution
+# boundary: compatibility must never fall back to extracting code from
+# arbitrary prose or unrelated Markdown fences.
+
 def _extract_markdown_section(content: str, name: str) -> str | None:
     """Return an explicit ``## <name>`` section in common model formats.
 
