@@ -268,6 +268,7 @@ def normalize_python_code_newlines(code: str) -> str:
 # boundary: compatibility must never fall back to extracting code from
 # arbitrary prose or unrelated Markdown fences.
 
+
 def _extract_markdown_section(content: str, name: str) -> str | None:
     """Return an explicit ``## <name>`` section in common model formats.
 
