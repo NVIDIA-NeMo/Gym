@@ -87,23 +87,6 @@ class TestBaseResponsesAPIModel:
         model.setup_webserver()
 
 
-def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
-    return ModelCallCaptureConfig(
-        observability_enabled=enabled,
-        model_call_capture_dir=tmp_path if enabled else None,
-    )
-
-
-def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
-    server_mock = MagicMock()
-    server_mock.config.name = model_server_name
-    SimpleResponsesAPIModel.install_model_call_capture(
-        server_mock,
-        app,
-        _capture_config(tmp_path),
-    )
-
-
 def test_capture_store_preserves_valid_rollout_id(tmp_path):
     store = CaptureStore(tmp_path)
 
