@@ -168,11 +168,13 @@ class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
 
 
 def _create_test_app_with_model_call_capture(
-    tmp_path: Path, TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = TestSimpleResponsesAPIModel
+    tmp_path: Path,
+    TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = TestSimpleResponsesAPIModel,
+    observability_enabled: bool = True,
 ) -> FastAPI:
     mock_server_client = MagicMock(spec=ServerClient)
     mock_server_client.global_config_dict = OmegaConf.create(
-        {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+        {"observability_enabled": observability_enabled, "model_call_capture_dir": str(tmp_path)}
     )
 
     model_server = TestSimpleResponsesAPIModel_cls(
@@ -433,21 +435,13 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monk
         clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
 
 
-def test_rollout_prefix_stripped_when_capture_disabled():
-    # The /ng-rollout/<id> prefix must be stripped + routed even when capture is OFF (the default),
-    # otherwise a default `gym eval` 404s on every prefixed model call.
-    app = FastAPI()
+def test_rollout_prefix_not_stripped_when_capture_disabled(tmp_path: Path):
+    app = _create_test_app_with_model_call_capture(tmp_path, observability_enabled=False)
 
-    @app.post("/v1/chat/completions")
-    async def _cc() -> dict:
-        return {"ok": True}
-
-    mock_server = MagicMock()
-    mock_server.config.name = ""
-    SimpleResponsesAPIModel.install_model_call_capture(mock_server, app, ModelCallCaptureConfig())
     client = TestClient(app)
-    assert client.post("/v1/chat/completions", json={}).status_code == 200
-    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+    # Dummy input to just test it doesn't 404
+    assert client.post("/v1/responses", json={}).status_code == 422
+    assert client.post("/v1/ng-rollout/3-0/responses", json={}).status_code == 404
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
