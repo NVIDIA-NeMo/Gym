@@ -25,7 +25,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
-from fastapi import FastAPI, Request
+from fastapi import Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -47,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX, get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -251,11 +251,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
-        return app
-
     async def responses(
         self,
         request: Request,
@@ -390,10 +385,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path=f"{rollout_path_prefix(rollout_id)}/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )

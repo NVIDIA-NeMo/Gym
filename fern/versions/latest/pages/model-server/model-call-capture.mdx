@@ -42,6 +42,16 @@ the rollout prefix before routing.
 
 Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
 
+Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
+prefixes a downstream call from the run request's task/rollout indices (only when
+`observability_enabled` is true — otherwise URLs stay unprefixed), and
+`url_path_for_request(url_path, request)` carries an inbound prefixed self-call through to the
+model call. The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on
+every agent by default. SDK-based harnesses that configure a client once use
+`base_url_for_run(base_url, body)`, the base-URL counterpart with the same gating; harnesses that
+must thread the id through layers use `rollout_id_from_run(body)` +
+`resolve_model_base_url(name, rollout_id)` instead.
+
 The model servers and `rollout_collection` read the same path from the global config. If
 `gym env start` and `gym eval run --no-serve` are separate invocations, pass the same top-level
 capture settings to both. For separate pods or nodes, that absolute path must refer to a volume

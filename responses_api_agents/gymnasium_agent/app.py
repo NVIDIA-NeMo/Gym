@@ -30,7 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
@@ -74,8 +74,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         env_cookies = request.cookies
-        rollout_id = self.rollout_id_from_run(body)
-        model_url_path = f"{rollout_path_prefix(rollout_id)}/v1/responses"
+        model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(
             server_name=self.config.resources_server.name,

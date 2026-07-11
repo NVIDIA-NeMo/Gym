@@ -714,6 +714,8 @@ class TestApp:
 
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
+        # The rollout prefix is only applied when model-call capture is enabled.
+        mock_server_client.global_config_dict = {"observability_enabled": True}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
