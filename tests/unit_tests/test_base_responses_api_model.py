@@ -467,15 +467,20 @@ def test_capture_store_read_waits_for_in_progress_append(tmp_path):
     reader_done = threading.Event()
     rows = []
 
+    record = _create_test_model_call_record()
+    record.rollout_id = "0-0"
+
     def _write() -> None:
         with path.open("ab") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+            record_str = record.model_dump_json().encode() + b"\n"
             try:
-                handle.write(b'{"request":')
+                handle.write(record_str[: len(record_str) // 2])
                 handle.flush()
                 writer_ready.set()
                 assert finish_write.wait(timeout=5)
-                handle.write(b'{},"response":{}}\n')
+                handle.write(record_str[len(record_str) // 2 :])
                 handle.flush()
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -498,7 +503,7 @@ def test_capture_store_read_waits_for_in_progress_append(tmp_path):
 
     assert not writer.is_alive()
     assert not reader.is_alive()
-    assert rows == [{"request": {}, "response": {}}]
+    assert rows == [record]
 
 
 def _cross_process_writer(root: str, base: int) -> None:
