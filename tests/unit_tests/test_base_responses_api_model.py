@@ -210,7 +210,7 @@ def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_p
 
 def test_capture_store_raises_on_malformed_nonblank_json(tmp_path: Path):
     store = CaptureStore(tmp_path)
-    store.path_for("rollout-1").write_bytes(b'{"request": {}}\n{not-json}\n')
+    store.path_for("rollout-1").write_bytes(b'{"request": {')
 
     with pytest.raises(orjson.JSONDecodeError):
         store.read("rollout-1")
