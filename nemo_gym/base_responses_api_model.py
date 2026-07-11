@@ -23,7 +23,7 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import orjson
 from fastapi import Body, FastAPI, Request
@@ -148,11 +148,12 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def read(self, rollout_id: str) -> list[dict[str, Any]]:
+    def read(self, rollout_id: str) -> List[ModelCallRecord]:
         path = self.path_for(rollout_id)
         if not path.exists():
             return []
-        exchanges: list[dict[str, Any]] = []
+
+        exchanges: List[ModelCallRecord] = []
         # Stream line-by-line; a capture can be large (token-ids / logprobs).
         with self._lock:
             with path.open("rb") as handle:
@@ -162,7 +163,7 @@ class CaptureStore:
                         stripped = line.strip()
                         if not stripped:
                             continue
-                        exchanges.append(orjson.loads(stripped))
+                        exchanges.append(ModelCallRecord.model_validate(orjson.loads(stripped)))
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges

@@ -156,20 +156,23 @@ def _create_test_model_call_record() -> ModelCallRecord:
     )
 
 
-def _create_test_app_with_model_call_capture(tmp_path: Path) -> FastAPI:
+class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+    def chat_completions(self, body=...):
+        raise NotImplementedError
+
+    def responses(self, body=...):
+        raise NotImplementedError
+
+
+def _create_test_app_with_model_call_capture(
+    tmp_path: Path, TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = TestSimpleResponsesAPIModel
+) -> FastAPI:
     mock_server_client = MagicMock(spec=ServerClient)
     mock_server_client.global_config_dict = OmegaConf.create(
         {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
     )
 
-    class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
-        def chat_completions(self, body=...):
-            raise NotImplementedError
-
-        def responses(self, body=...):
-            raise NotImplementedError
-
-    model_server = TestSimpleResponsesAPIModel(
+    model_server = TestSimpleResponsesAPIModel_cls(
         config=BaseResponsesAPIModelConfig(
             host="",
             port=0,
@@ -208,24 +211,25 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path: Path):
         store.read("rollout-1")
 
 
-def test_raised_call_is_captured_then_reraised(tmp_path):
+def test_raised_call_is_captured_then_reraised(tmp_path: Path):
     """A model call that raises (not just a non-2xx) is captured with an exception category and the
     error is re-raised (response unchanged for the caller)."""
-    app = FastAPI()
 
-    @app.post("/v1/responses")
-    async def _boom(body: dict = Body()) -> dict:
-        raise RuntimeError("kaboom")
+    class MyTestSimpleResponsesAPIModel(TestSimpleResponsesAPIModel):
+        async def responses(self, body: dict = Body()) -> dict:
+            raise RuntimeError("kaboom")
 
-    _install_capture(app, tmp_path)
+    app = _create_test_app_with_model_call_capture(tmp_path, MyTestSimpleResponsesAPIModel)
+
     client = TestClient(app, raise_server_exceptions=False)
 
-    r = client.post("/ng-rollout/r-raise/v1/responses", json={"input": "x"})
+    r = client.post("/v1/ng-rollout/r-raise/responses", json={"input": "x"})
     assert r.status_code == 500  # error propagated, response unchanged
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
     assert len(calls) == 1
     assert calls[0].response is None
+    assert calls[0].error_response is not None and "RuntimeError" in calls[0].error_response
 
 
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
