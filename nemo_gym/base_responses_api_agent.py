@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import Body, FastAPI
 
@@ -23,7 +23,8 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -33,8 +34,6 @@ from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
-    apply_rollout_prefix,
-    maybe_rollout_id_from_run_body,
 )
 
 
@@ -60,15 +59,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
-    def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Per-rollout capture id for a run-request (its task/rollout indices), or None."""
-        return maybe_rollout_id_from_run_body(body)
+    def resolve_model_call_path(self, base_url_or_path: str, body: Any) -> str:
+        maybe_rollout_id = maybe_rollout_id_from_run_body(body)
+        if not maybe_rollout_id:
+            return base_url_or_path
 
-    def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model server URL with an optional rollout prefix."""
-        server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
-        base_url = self.server_client._build_server_base_url(server_config)
-        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
+        base_url_or_path = base_url_or_path.rstrip("/")
+        return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{maybe_rollout_id}"
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.

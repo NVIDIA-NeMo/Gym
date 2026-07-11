@@ -26,7 +26,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Mapping, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -59,13 +59,10 @@ from nemo_gym.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -770,52 +767,3 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
-
-
-# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
-# the capture middleware in base_responses_api_model.py strips this prefix before routing.
-ROLLOUT_PATH_PREFIX = "ng-rollout"
-
-
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
-    """Return the model-server path prefix for a rollout, or an empty string when unavailable."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
-
-
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-    """Append a rollout prefix to a model-server root URL.
-
-    ``base_url`` must be the server root, without an API-version suffix. SDKs can then append their
-    normal ``/v1/...`` path; the model server strips the rollout prefix before routing.
-    """
-    if not rollout_id:
-        return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
-
-
-def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
-    """Per-rollout model-call capture id from a run-request's task/rollout indices.
-
-    Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
-    rollout_collection ships to an agent's ``/run``. When a resume re-dispatch attempt is present
-    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured model calls
-    stay separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
-    key for backward compatibility.
-    """
-    if isinstance(body, BaseModel):
-        data = body.model_dump()
-    elif isinstance(body, Mapping):
-        data = body
-    else:
-        return None
-    task = data.get(TASK_INDEX_KEY_NAME)
-    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
-    if task is None or rollout is None:
-        return None
-    rollout_id = f"{task}-{rollout}"
-    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
-    if attempt is not None:
-        attempt_index = int(attempt)
-        if attempt_index > 0:
-            rollout_id = f"{rollout_id}-a{attempt_index}"
-    return rollout_id
