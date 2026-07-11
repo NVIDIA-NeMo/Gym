@@ -125,7 +125,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         return self._converter.chat_completion_to_response(
-            chat_completion_create_params=body, chat_completion=chat_completion_response
+            responses_create_params=body, chat_completion=chat_completion_response
         )
 
     async def _responses_native(
