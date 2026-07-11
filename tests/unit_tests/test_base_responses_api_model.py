@@ -48,6 +48,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -157,11 +158,11 @@ def _create_test_model_call_record() -> ModelCallRecord:
 
 
 class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
-    def chat_completions(self, body=...):
+    async def chat_completions(self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()):
         raise NotImplementedError
 
-    def responses(self, body=...):
-        raise NotImplementedError
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()):
+        return _create_test_model_call_record().response
 
 
 def _create_test_app_with_model_call_capture(
@@ -232,23 +233,24 @@ def test_raised_call_is_captured_then_reraised(tmp_path: Path):
     assert calls[0].error_response is not None and "RuntimeError" in calls[0].error_response
 
 
-def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
+def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path: Path):
     """A caller attributes calls through the model base URL. The prefix is stripped before routing,
     while an ordinary unprefixed request remains unobserved."""
-    app = FastAPI()
+    app = _create_test_app_with_model_call_capture(tmp_path)
 
-    @app.post("/v1/responses")
-    async def _responses(body: dict = Body()) -> dict:
-        return {"output": [], "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}
-
-    _install_capture(app, tmp_path)
     client = TestClient(app)
 
     # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
-    r = client.post("/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"})
-    assert r.status_code == 200 and r.json()["usage"]["total_tokens"] == 4
+    r = client.post("/v1/ng-rollout/task7-roll2/responses", json={"input": "hi"})
+    assert r.status_code == 200
     calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
-    assert len(calls) == 1 and calls[0].tokens_total == 4
+    assert len(calls) == 1
+
+    # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
+    r = client.post("/v1/responses/ng-rollout/task7-roll2/", json={"input": "hi"})
+    assert r.status_code == 200
+    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
+    assert len(calls) == 2
 
     # Plain /v1 URL is routed normally but is not captured without an explicit rollout prefix.
     r2 = client.post("/v1/responses", json={"input": "hi"})
@@ -256,21 +258,20 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     assert read_model_call_records(CaptureStore(tmp_path), "rollout") == []
 
 
-def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
-    """A prefixed but non-observed path (e.g. /v1/models) is still stripped and routed normally,
+def test_per_rollout_prefix_not_stripped_for_non_observed_paths_too(tmp_path: Path):
+    """A prefixed but non-observed path (e.g. /v1/models) is not stripped and not found,
     and is not captured (composes with arbitrary endpoints, not just the observed dialects)."""
-    app = FastAPI()
+    app = _create_test_app_with_model_call_capture(tmp_path)
 
     @app.get("/v1/models")
     async def _models() -> dict:
         return {"object": "list", "data": []}
 
-    _install_capture(app, tmp_path)
     client = TestClient(app)
 
-    r = client.get("/ng-rollout/abc/v1/models")
-    assert r.status_code == 200 and r.json()["object"] == "list"
-    assert CaptureStore(tmp_path).read("abc") == []  # non-observed path -> routed, not captured
+    r = client.get("/v1/ng-rollout/abc/models")
+    assert r.status_code == 404
+    assert CaptureStore(tmp_path).read("abc") == []
 
 
 def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
