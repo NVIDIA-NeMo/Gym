@@ -30,6 +30,7 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
     expect_shortened: bool,
 ) -> None:
     run_dir = tmp_path / "run"
+    server_venv_root = tmp_path / "server-venvs"
     env = os.environ.copy()
     env.update(
         {
@@ -37,6 +38,7 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
             "RUN_TAG": f"ray-path-test-{expect_shortened}",
             "RUN_DIR": str(run_dir),
             "RAY_TMPDIR": requested,
+            "SERVER_VENV_ROOT": str(server_venv_root),
         }
     )
 
@@ -51,6 +53,8 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
     run_env = _read_run_env(run_dir / "run.env")
 
     assert run_env["RAY_TMPDIR_REQUESTED"] == requested
+    assert run_env["SERVER_VENV_ROOT"] == str(server_venv_root)
+    assert f"++uv_venv_dir={server_venv_root}" in completed.stdout
     if expect_shortened:
         assert run_env["RAY_TMPDIR"].startswith("/tmp/ngray-")
         assert "RAY_TMPDIR is too long" in completed.stderr

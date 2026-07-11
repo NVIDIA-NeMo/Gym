@@ -63,6 +63,10 @@ MAX_STEPS="${MAX_STEPS:-}"
 TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
 TASK_PARITY_IDS_FILE="${TASK_PARITY_IDS_FILE:-}"
 TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-${RUN_DIR}/task-input-parity.json}"
+SERVER_VENV_ROOT="${SERVER_VENV_ROOT:-}"
+if [[ -n "${SERVER_VENV_ROOT}" ]]; then
+    SERVER_VENV_ROOT="$(gym_absolute_path "${SERVER_VENV_ROOT}")"
+fi
 
 # Ray appends a long session/sockets suffix to its temp root. Linux limits
 # AF_UNIX socket paths to 107 bytes, so a descriptive absolute run directory
@@ -85,6 +89,9 @@ fi
 export RAY_TMPDIR
 
 mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")" "${RAY_TMPDIR}"
+if [[ -n "${SERVER_VENV_ROOT}" ]]; then
+    mkdir -p "${SERVER_VENV_ROOT}"
+fi
 
 if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then
     parity_cmd=(
@@ -229,6 +236,7 @@ TASK_PARITY_IDS_FILE=${TASK_PARITY_IDS_FILE}
 TASK_PARITY_REPORT=${TASK_PARITY_REPORT}
 RAY_TMPDIR=${RAY_TMPDIR}
 RAY_TMPDIR_REQUESTED=${RAY_TMPDIR_REQUESTED}
+SERVER_VENV_ROOT=${SERVER_VENV_ROOT}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
 VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
@@ -247,6 +255,9 @@ echo "num envs:    ${NUM_ENVS}"
 echo "parallel:    ${NUM_SAMPLES_IN_PARALLEL}"
 echo "resume:      ${RESUME_FROM_CACHE}"
 echo "ray tmp:     ${RAY_TMPDIR}"
+if [[ -n "${SERVER_VENV_ROOT}" ]]; then
+    echo "server venv: ${SERVER_VENV_ROOT}"
+fi
 if [[ -n "${MAX_STEPS}" ]]; then
     echo "max steps:   ${MAX_STEPS}"
 fi
@@ -285,6 +296,10 @@ fi
 
 if [[ -n "${MAX_STEPS}" ]]; then
     ng_run_cmd+=("++osworld_simple_agent.responses_api_agents.osworld_agent.max_steps=${MAX_STEPS}")
+fi
+
+if [[ -n "${SERVER_VENV_ROOT}" ]]; then
+    ng_run_cmd+=("++uv_venv_dir=${SERVER_VENV_ROOT}")
 fi
 
 collect_cmd=(
