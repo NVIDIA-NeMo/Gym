@@ -52,8 +52,11 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -359,40 +362,31 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
-def _capture_exchange(dialect, model_server, usage, response):
-    return {
-        "dialect": dialect,
-        "model_server": model_server,
-        "latency_ms": 1.0,
-        "status_code": 200,
-        "error_category": None,
-        "request": {"input": "hi"},
-        "response": {"model": "m", "usage": usage, **response},
-    }
-
-
 def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     store = CaptureStore(tmp_path)
-    store.record(
-        "0-0",
-        _capture_exchange(
-            "responses",
-            "A",
-            {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-            {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]},
-        ),
+
+    record1 = _create_test_model_call_record()
+    record1.rollout_id = "0-0"
+    record1.response.usage = NeMoGymResponseUsage(
+        input_tokens=1,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=2),
+        output_tokens=3,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=4),
+        total_tokens=4,
     )
 
-    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
-    merge_model_call_capture_into_record(record, [tmp_path])
+    store.record(record1)
+
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"temperature": 0.95}}
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
 
     capture = record["ng_model_call_capture"]
     assert set(capture) == {"rollout_id", "metrics", "calls"}
     assert capture["rollout_id"] == "0-0"
     assert capture["metrics"]["num_calls"] == 1
-    assert capture["calls"][0]["tokens_in"] == 3
-    assert "request" not in capture["calls"][0] and "response" not in capture["calls"][0]
-    assert record["response"] == {"harness": "A"} and record["reward"] == 1.0
+    assert capture["calls"][0]["response"]["usage"]["output_tokens"] == 3
+    assert "request" in capture["calls"][0] and "response" in capture["calls"][0]
+    assert record["response"]["temperature"] == 0.95 and record["reward"] == 1.0
 
 
 def test_merge_capture_noop_without_capture(tmp_path):

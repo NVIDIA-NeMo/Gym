@@ -398,16 +398,7 @@ def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelC
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
     """Aggregate token and latency values from model-call records."""
 
-    def _sum(attr: str) -> Optional[float]:
-        values = [getattr(call, attr) for call in calls if getattr(call, attr) is not None]
-        return sum(values) if values else None
-
     return {
-        "tokens_in": _sum("tokens_in"),
-        "tokens_out": _sum("tokens_out"),
-        "tokens_reasoning": _sum("tokens_reasoning"),
-        "tokens_total": _sum("tokens_total"),
-        "latency_total_ms": _sum("latency_total_ms"),
         "num_calls": len(calls),
     }
 
@@ -467,19 +458,24 @@ def merge_model_call_capture_into_record(
     """
     if not capture_dirs:
         return record
+
     rollout_id = maybe_rollout_id_from_run_body(record)
     if rollout_id is None:
         return record
+
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         return record
+
     calls = read_model_call_records(store, rollout_id)
     if not calls:
         return record
+
     exclude = None if include_payloads else {"request", "response"}
     record["ng_model_call_capture"] = {
         "rollout_id": rollout_id,
         "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
+
     return record
