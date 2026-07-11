@@ -13,24 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from time import time
+
 import pytest
 
 from nemo_gym.openai_utils import (
+    NeMoGymContextBoundaryMessage,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymFunctionCallOutputWithAgentTelemetry,
+    NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseReasoningItem,
+    NeMoGymResponseFunctionToolCallWithAgentTelemetry,
+    NeMoGymResponseOutputMessageWithAgentTelemetry,
+    NeMoGymResponseReasoningItemWithAgentTelemetry,
+    NeMoGymToolExecutionError,
 )
 from nemo_gym.trajectory import (
-    TRAJECTORY_SCHEMA_VERSION,
     TrajectoryBuilder,
-    TrajectorySpanError,
+    agent_step_slices,
     reconstruct_model_input,
+    summed_usage,
     to_response_create_params,
-    to_response_output,
     usage_from_provider,
-    validate_trajectory,
 )
 
 
@@ -70,85 +75,121 @@ class TestUsageFromProvider:
         assert usage.total_tokens == 0
 
 
-class TestBuilderSteps:
-    def _build(self) -> TrajectoryBuilder:
-        builder = TrajectoryBuilder(agent="test_agent", source="unit_test")
-        builder.set_session_id("sess-1")
-        builder.add_user_message("fix the bug", timestamp="2026-07-09T00:00:00.000Z")
-        builder.start_agent_step(
-            response_id="msg_1",
-            request_id="req-1",
-            model="test-model",
-            timestamp="2026-07-09T00:00:01.000Z",
-            stop_reason="tool_use",
-            provider_usage=ANTHROPIC_USAGE,
-        )
-        builder.add_output_text("looking")
-        builder.add_tool_call("t1", "Bash", '{"command": "ls"}')
-        builder.add_tool_call("t2", "Read", '{"file_path": "/x"}')
-        builder.add_tool_result(
-            "t1",
-            "file.txt",
-            completed_at="2026-07-09T00:00:01.500Z",
-            extra={"interrupted": False},
-        )
-        builder.add_tool_result(
-            "t2",
-            "boom",
-            completed_at="2026-07-09T00:00:03.000Z",
-            error="tool_result flagged is_error",
-        )
-        builder.start_agent_step(
-            response_id="msg_2",
-            model="test-model",
-            timestamp="2026-07-09T00:00:04.000Z",
-            stop_reason="end_turn",
-            provider_usage={"input_tokens": 50, "output_tokens": 5},
-        )
-        builder.add_reasoning("hmm")
-        builder.add_output_text("fixed")
-        return builder
+def _two_step_builder() -> TrajectoryBuilder:
+    """Step 1: text + two parallel tool calls; step 2: reasoning + final answer."""
+    builder = TrajectoryBuilder(agent="test_agent", source="unit_test")
+    builder.set_session_id("sess-1")
+    builder.start_agent_step(
+        response_id="msg_1",
+        request_id="req-1",
+        model="test-model",
+        timestamp="2026-07-09T00:00:01.000Z",
+        stop_reason="tool_use",
+        provider_usage=ANTHROPIC_USAGE,
+    )
+    builder.add_output_text("looking")
+    builder.add_tool_call("t1", "Bash", '{"command": "ls"}')
+    builder.add_tool_call("t2", "Read", '{"file_path": "/x"}')
+    builder.add_tool_result("t1", "file.txt", completed_at="2026-07-09T00:00:01.500Z", extra={"interrupted": False})
+    builder.add_tool_result(
+        "t2", "boom", completed_at="2026-07-09T00:00:03.000Z", error="tool_result flagged is_error"
+    )
+    builder.start_agent_step(
+        response_id="msg_2",
+        model="test-model",
+        timestamp="2026-07-09T00:00:04.000Z",
+        stop_reason="end_turn",
+        provider_usage={"input_tokens": 50, "output_tokens": 5},
+    )
+    builder.add_reasoning("hmm")
+    builder.add_output_text("fixed")
+    return builder
 
-    def test_step_structure_uses_native_items(self) -> None:
-        trajectory = self._build().build()
-        assert [s.type for s in trajectory.steps] == ["user_message", "agent_step", "agent_step"]
-        user, step1, step2 = trajectory.steps
-        assert isinstance(user.items[0], NeMoGymEasyInputMessage)
-        assert user.items[0].content == "fix the bug"
-        assert [type(i) for i in step1.items] == [
-            NeMoGymResponseOutputMessage,
-            NeMoGymResponseFunctionToolCall,
-            NeMoGymResponseFunctionToolCall,
-            NeMoGymFunctionCallOutput,
-            NeMoGymFunctionCallOutput,
+
+class TestBuilder:
+    def test_output_is_tagged_native_items_in_execution_order(self) -> None:
+        output, _, _ = _two_step_builder().build()
+        assert [type(i) for i in output] == [
+            NeMoGymResponseOutputMessageWithAgentTelemetry,
+            NeMoGymResponseFunctionToolCallWithAgentTelemetry,  # issue order
+            NeMoGymResponseFunctionToolCallWithAgentTelemetry,
+            NeMoGymFunctionCallOutputWithAgentTelemetry,  # arrival order
+            NeMoGymFunctionCallOutputWithAgentTelemetry,
+            NeMoGymResponseReasoningItemWithAgentTelemetry,
+            NeMoGymResponseOutputMessageWithAgentTelemetry,
         ]
-        assert step1.items[0].content[0].text == "looking"
-        assert step1.items[3].output == "file.txt"
-        assert isinstance(step2.items[0], NeMoGymResponseReasoningItem)
-        assert step2.items[0].summary[0].text == "hmm"
-        assert (step1.agent_step_no, step2.agent_step_no) == (1, 2)
-        assert step1.stop_reason == "tool_use"
+        # every item carries its agent step tag — grouping without any copy
+        assert [i.agent_step_no for i in output] == [1, 1, 1, 1, 1, 2, 2]
+        assert output[0].content[0].text == "looking"
+        assert output[3].output == "file.txt"
+        assert output[5].summary[0].text == "hmm"
 
-    def test_generation_span_identity_and_raw_usage(self) -> None:
-        trajectory = self._build().build()
-        span = trajectory.steps[1].spans[0]
-        assert span.type == "generation"
-        assert span.response_id == "msg_1"
-        assert span.request_id == "req-1"
-        assert span.ended_at == "2026-07-09T00:00:01.000Z"
+    def test_tool_execution_rides_on_the_output_item(self) -> None:
+        output, _, _ = _two_step_builder().build()
+        out_t1, out_t2 = output[3], output[4]
+        assert out_t1.execution.started_at == "2026-07-09T00:00:01.000Z"
+        assert out_t1.execution.duration_ms == 500.0
+        assert out_t1.execution.error is None
+        assert out_t1.execution.extra == {"interrupted": False}
+        assert out_t2.execution.duration_ms == 2000.0
+        assert out_t2.execution.error.message == "tool_result flagged is_error"
+
+    def test_generations_carry_per_call_identity_and_usage(self) -> None:
+        _, generations, _ = _two_step_builder().build()
+        g1, g2 = generations
+        assert (g1.agent_step_no, g2.agent_step_no) == (1, 2)
+        assert g1.response_id == "msg_1"
+        assert g1.request_id == "req-1"
+        assert g1.stop_reason == "tool_use"
+        assert g2.stop_reason == "end_turn"
+        assert g1.usage.input_tokens == 100
+        assert g1.usage.input_tokens_details.cached_tokens == 60
         # raw provider usage preserved verbatim (incl. fields with no native slot)
-        assert span.extra["provider_usage"]["cache_creation_input_tokens"] == 10
+        assert g1.provider_usage["cache_creation_input_tokens"] == 10
 
-    def test_function_spans_have_independent_timing(self) -> None:
-        trajectory = self._build().build()
-        spans = [s for s in trajectory.steps[1].spans if s.type == "function"]
-        assert [s.call_id for s in spans] == ["t1", "t2"]
-        assert spans[0].started_at == "2026-07-09T00:00:01.000Z"
-        assert spans[0].duration_ms == 500.0
-        assert spans[0].error is None
-        assert spans[0].extra == {"interrupted": False}
-        assert spans[1].duration_ms == 2000.0
-        assert spans[1].error.message == "tool_result flagged is_error"
+    def test_same_response_id_continues_step_without_double_count(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_step(response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5})
+        builder.add_output_text("part 1")
+        builder.start_agent_step(
+            response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5}, stop_reason="end_turn"
+        )
+        builder.add_output_text("part 2")
+        output, generations, _ = builder.build()
+        assert len(generations) == 1
+        assert generations[0].stop_reason == "end_turn"
+        assert summed_usage(generations).input_tokens == 10
+        # text accumulated into one message item under the same tag
+        assert [b.text for b in output[0].content] == ["part 1", "part 2"]
+
+    def test_output_without_step_raises(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        with pytest.raises(ValueError):
+            builder.add_output_text("no step")
+
+    def test_mid_episode_user_message_is_plain_and_closes_the_step(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_step(response_id="m1")
+        builder.add_output_text("answer 1")
+        builder.add_user_message("follow-up")
+        builder.start_agent_step(response_id="m1")  # same provider id, but step was closed by the user turn
+        builder.add_output_text("answer 2")
+        output, generations, _ = builder.build()
+        assert type(output[1]) is NeMoGymEasyInputMessage  # untagged: not produced by a step
+        assert output[1].content == "follow-up"
+        assert [g.agent_step_no for g in generations] == [1, 2]
+        assert output[2].agent_step_no == 2
+
+    def test_no_timestamps_means_no_fabricated_timing(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_step(response_id="m1")
+        builder.add_tool_call("t1", "Bash", "{}")
+        builder.add_tool_result("t1", "ok")
+        output, _, _ = builder.build()
+        execution = output[-1].execution
+        assert execution.started_at is None
+        assert execution.completed_at is None
+        assert execution.duration_ms is None
 
     def test_explicit_started_at_overrides_registration(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
@@ -157,222 +198,180 @@ class TestBuilderSteps:
         builder.add_tool_result(
             "t1", "ok", started_at="2026-07-09T00:00:02.000Z", completed_at="2026-07-09T00:00:03.000Z"
         )
-        (span,) = [s for s in builder.steps[0].spans if s.type == "function"]
-        assert span.duration_ms == 1000.0
+        output, _, _ = builder.build()
+        assert output[-1].execution.duration_ms == 1000.0
 
-    def test_no_timestamps_means_no_fabricated_timing(self) -> None:
+    def test_orphan_result_with_no_step_counted_as_dropped(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.add_tool_result("orphan", "out")
+        output, _, telemetry = builder.build()
+        assert output == []
+        assert telemetry.dropped_records == {"orphan_tool_results": 1}
+
+    def test_unmatched_result_attaches_to_last_step(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_step(response_id="m1")
+        builder.add_tool_call("known", "Bash", "{}")
+        builder.add_tool_result("known", "ok")
+        builder.add_tool_result("orphan", "late")
+        output, _, telemetry = builder.build()
+        assert output[-1].call_id == "orphan"
+        assert output[-1].agent_step_no == 1
+        assert telemetry.dropped_records == {}
+
+    def test_error_can_be_structured(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.start_agent_step(response_id="m1")
         builder.add_tool_call("t1", "Bash", "{}")
-        builder.add_tool_result("t1", "ok")
-        (span,) = [s for s in builder.steps[0].spans if s.type == "function"]
-        assert span.started_at is None
-        assert span.ended_at is None
-        assert span.duration_ms is None
+        builder.add_tool_result("t1", "boom", error=NeMoGymToolExecutionError(message="timeout", data={"signal": 9}))
+        output, _, _ = builder.build()
+        assert output[-1].execution.error.data == {"signal": 9}
 
-    def test_usage_native_per_turn_and_totals(self) -> None:
-        trajectory = self._build().build()
-        step1 = trajectory.steps[1]
-        assert step1.usage.input_tokens == 100
-        assert step1.usage.input_tokens_details.cached_tokens == 60
-        assert trajectory.usage.input_tokens == 150
-        assert trajectory.usage.output_tokens == 25
-        assert trajectory.usage.total_tokens == 175
-        assert trajectory.usage.input_tokens_details.cached_tokens == 60
-
-    def test_same_response_id_continues_step_without_double_count(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5})
-        builder.add_output_text("part 1")
-        step = builder.start_agent_step(
-            response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5}, stop_reason="end_turn"
-        )
-        builder.add_output_text("part 2")
-        trajectory = builder.build()
-        assert len(trajectory.steps) == 1
-        assert step.agent_step_no == 1
-        assert step.stop_reason == "end_turn"
-        assert trajectory.usage.input_tokens == 10
-        # text accumulated into one native output message
-        assert [b.text for b in step.items[0].content] == ["part 1", "part 2"]
-
-    def test_different_response_id_starts_new_agent_step(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.start_agent_step(response_id="m2")
-        assert [s.agent_step_no for s in builder.steps] == [1, 2]
-
-    def test_output_without_agent_step_raises(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        with pytest.raises(ValueError):
-            builder.add_output_text("no turn")
-
-    def test_unmatched_result_attaches_to_last_agent_step(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_tool_result("orphan", "out")
-        step = builder.steps[0]
-        assert step.items[-1].call_id == "orphan"
-        assert step.spans[-1].call_id == "orphan"
-
-    def test_orphan_result_with_no_agent_step_counted_as_dropped(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.add_tool_result("orphan", "out")
-        trajectory = builder.build()
-        assert trajectory.steps == []
-        assert trajectory.dropped_records == {"orphan_tool_results": 1}
-
-    def test_dropped_and_session_and_totals(self) -> None:
+    def test_run_totals_and_session(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.set_session_id("sess-1")
         builder.set_session_id("sess-2")  # first one wins
         builder.count_dropped("sidechain")
-        builder.count_dropped("sidechain")
         builder.set_run_totals(
             num_agent_steps=3, duration_ms=42.0, total_cost_usd=0.5, provider_usage={"input_tokens": 1}
         )
-        trajectory = builder.build()
-        assert trajectory.session_id == "sess-1"
-        assert trajectory.dropped_records == {"sidechain": 2}
-        assert trajectory.num_agent_steps == 3
-        assert trajectory.duration_ms == 42.0
-        assert trajectory.total_cost_usd == 0.5
-        assert trajectory.provider_usage == {"input_tokens": 1}
+        _, _, telemetry = builder.build()
+        assert telemetry.agent == "a"
+        assert telemetry.source == "s"
+        assert telemetry.session_id == "sess-1"
+        assert telemetry.dropped_records == {"sidechain": 1}
+        assert telemetry.num_agent_steps == 3
+        assert telemetry.duration_ms == 42.0
+        assert telemetry.total_cost_usd == 0.5
+        assert telemetry.provider_usage == {"input_tokens": 1}
 
-    def test_error_can_be_span_error(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_tool_call("t1", "Bash", "{}")
-        builder.add_tool_result("t1", "boom", error=TrajectorySpanError(message="timeout", data={"signal": 9}))
-        (span,) = [s for s in builder.steps[0].spans if s.type == "function"]
-        assert span.error.data == {"signal": 9}
+    def test_summed_usage(self) -> None:
+        _, generations, _ = _two_step_builder().build()
+        totals = summed_usage(generations)
+        assert totals.input_tokens == 150
+        assert totals.output_tokens == 25
+        assert totals.total_tokens == 175
+        assert totals.input_tokens_details.cached_tokens == 60
+
+    def test_agent_step_slices(self) -> None:
+        output, _, _ = _two_step_builder().build()
+        slices = dict(agent_step_slices(output))
+        assert [len(items) for items in slices.values()] == [5, 2]
+        assert slices[2][0].summary[0].text == "hmm"
 
 
 class TestReconstruction:
-    def _trajectory(self):
+    def _episode(self):
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.add_user_message("q1")
         builder.start_agent_step(response_id="m1", model="test-model")
         builder.add_output_text("a1")
         builder.add_context_boundary(summary="summary of q1/a1")
         builder.add_user_message("q2")
         builder.start_agent_step(response_id="m2", model="test-model")
         builder.add_output_text("a2")
-        return builder.build()
+        output, generations, telemetry = builder.build()
+        base_input = [NeMoGymEasyInputMessage(role="user", content="q1")]
+        return output, base_input
 
-    def test_full_reconstruction_starts_at_boundary(self) -> None:
-        items = reconstruct_model_input(self._trajectory())
-        assert [getattr(i, "content", None) for i in items][:2] == ["summary of q1/a1", "q2"]
-        assert len(items) == 3  # boundary summary, q2, a2
+    def test_step_1_sees_base_input_only(self) -> None:
+        output, base = self._episode()
+        items = reconstruct_model_input(output, agent_step_no=1, base_input=base)
+        assert [i.content for i in items] == ["q1"]
 
-    def test_before_step_id_excludes_later_steps(self) -> None:
-        trajectory = self._trajectory()
-        # input visible to the model call at step 1 (agent step 1): just q1
-        items = reconstruct_model_input(trajectory, before_step_id=1)
-        assert len(items) == 1
-        assert items[0].content == "q1"
-        # input visible to the model call at step 4 (agent step 2): boundary summary + q2
-        items = reconstruct_model_input(trajectory, before_step_id=4)
-        assert [i.content for i in items] == ["summary of q1/a1", "q2"]
+    def test_post_boundary_step_sees_summary_not_base(self) -> None:
+        output, base = self._episode()
+        items = reconstruct_model_input(output, agent_step_no=2, base_input=base)
+        assert [getattr(i, "content", None) for i in items] == ["summary of q1/a1", "q2"]
+        assert isinstance(items[0], NeMoGymContextBoundaryMessage)
+
+    def test_full_reconstruction(self) -> None:
+        output, base = self._episode()
+        items = reconstruct_model_input(output, base_input=base)
+        assert len(items) == 3  # summary, q2, a2 — the boundary replaced q1 + a1
+        assert items[-1].content[0].text == "a2"
+
+    def test_no_boundary_prepends_base_input(self) -> None:
+        builder = TrajectoryBuilder(agent="a", source="s")
+        builder.start_agent_step(response_id="m1")
+        builder.add_output_text("a1")
+        builder.add_user_message("q2")
+        builder.start_agent_step(response_id="m2")
+        output, _, _ = builder.build()
+        base = [NeMoGymEasyInputMessage(role="user", content="q1")]
+        items = reconstruct_model_input(output, agent_step_no=2, base_input=base)
+        assert [getattr(i, "content", None) for i in items][0] == "q1"
+        assert len(items) == 3  # q1 + a1 + q2
 
     def test_to_response_create_params_is_native(self) -> None:
-        params = to_response_create_params(self._trajectory())
+        output, base = self._episode()
+        params = to_response_create_params(output, base_input=base, model="test-model")
         assert params.model == "test-model"
-        assert len(params.input) == 3
-        # round-trips through the strict native model
         assert type(params).model_validate(params.model_dump(mode="json")).model == "test-model"
 
 
-class TestToResponseOutput:
-    def test_reasoning_inlined_into_next_message(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_reasoning("let me reason")
-        builder.add_output_text("answer")
-        items = to_response_output(builder.build())
-        assert len(items) == 1
-        assert items[0].content[0].text == "<think>\nlet me reason\n</think>\n\nanswer"
+class TestContractRoundTrip:
+    """Telemetry must survive NeMoGymResponse validation — the whole point of putting it
+    on the contract: every server hop revalidates, and nothing may be stripped."""
 
-    def test_reasoning_kept_native_when_tag_disabled(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_reasoning("let me reason")
-        builder.add_output_text("answer")
-        items = to_response_output(builder.build(), reasoning_tag=None)
-        assert isinstance(items[0], NeMoGymResponseReasoningItem)
-        assert items[1].content[0].text == "answer"
+    def _response(self) -> NeMoGymResponse:
+        output, generations, telemetry = _two_step_builder().build()
+        return NeMoGymResponse(
+            id="resp_x",
+            created_at=int(time()),
+            model="test-model",
+            object="response",
+            output=output,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+            generations=generations,
+            agent_telemetry=telemetry,
+        )
 
-    def test_reasoning_buffer_spans_turns_and_clears(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_reasoning("think")
-        builder.start_agent_step(response_id="m2")
-        builder.add_output_text("msg1")
-        builder.start_agent_step(response_id="m3")
-        builder.add_output_text("msg2")
-        items = to_response_output(builder.build())
-        assert "<think>" in items[0].content[0].text
-        assert "<think>" not in items[1].content[0].text
+    def test_items_keep_telemetry_through_revalidation(self) -> None:
+        response = self._response()
+        revalidated = NeMoGymResponse.model_validate(response.model_dump(mode="json"))
+        assert [getattr(i, "agent_step_no", None) for i in revalidated.output] == [1, 1, 1, 1, 1, 2, 2]
+        assert revalidated.output[3].execution.duration_ms == 500.0
+        assert revalidated == response
 
-    def test_call_emitted_before_its_output_in_arrival_order(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_output_text("running")
-        builder.add_tool_call("t1", "Bash", "{}")
-        builder.add_tool_call("t2", "Read", "{}")
-        builder.add_tool_result("t2", "second issued, first done")
-        builder.add_tool_result("t1", "ok")
-        items = to_response_output(builder.build())
-        assert [(type(i).__name__, getattr(i, "call_id", None)) for i in items] == [
-            ("NeMoGymResponseOutputMessage", None),
-            ("NeMoGymResponseFunctionToolCall", "t2"),
-            ("NeMoGymFunctionCallOutput", "t2"),
-            ("NeMoGymResponseFunctionToolCall", "t1"),
-            ("NeMoGymFunctionCallOutput", "t1"),
-        ]
-        # the call item's id mirrors call_id in the flattened response shape
-        assert items[1].id == "t2"
+    def test_generations_and_telemetry_survive(self) -> None:
+        revalidated = NeMoGymResponse.model_validate(self._response().model_dump(mode="json"))
+        assert revalidated.generations[0].provider_usage["cache_creation_input_tokens"] == 10
+        assert revalidated.agent_telemetry.source == "unit_test"
+        assert revalidated.agent_telemetry.schema_version == "1.0"
 
-    def test_unresolved_call_omitted_and_orphan_output_kept(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_step(response_id="m1")
-        builder.add_tool_call("never-resolved", "Bash", "{}")
-        builder.add_tool_result("orphan", "out")  # attaches to the turn without a matching call
-        items = to_response_output(builder.build())
-        assert [type(i).__name__ for i in items] == ["NeMoGymFunctionCallOutput"]
-        assert items[0].call_id == "orphan"
+    def test_plain_payloads_stay_plain(self) -> None:
+        # A model-server response (no telemetry) must validate to the plain classes and
+        # keep generations/agent_telemetry as None.
+        plain = {
+            "id": "resp_y",
+            "created_at": 0,
+            "model": "m",
+            "object": "response",
+            "tool_choice": "auto",
+            "tools": [],
+            "parallel_tool_calls": True,
+            "output": [
+                {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c", "output": "ok"},
+            ],
+        }
+        response = NeMoGymResponse.model_validate(plain)
+        assert type(response.output[0]) is NeMoGymResponseFunctionToolCall
+        assert type(response.output[1]) is NeMoGymFunctionCallOutput
+        assert response.generations is None
+        assert response.agent_telemetry is None
 
-    def test_non_agent_steps_skipped(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.add_user_message("question")
-        builder.add_context_boundary(summary="summary")
-        builder.start_agent_step(response_id="m1")
-        builder.add_output_text("answer")
-        items = to_response_output(builder.build())
-        assert len(items) == 1
-        assert items[0].content[0].text == "answer"
+    def test_context_boundary_survives_and_plain_user_message_stays_plain(self) -> None:
+        boundary = NeMoGymContextBoundaryMessage(role="user", content="summary", context_boundary=True)
+        plain_user = {"role": "user", "content": "hi", "type": "message"}
+        response = self._response()
+        response.output = [boundary] + response.output
+        revalidated = NeMoGymResponse.model_validate(response.model_dump(mode="json"))
+        assert isinstance(revalidated.output[0], NeMoGymContextBoundaryMessage)
+        from pydantic import TypeAdapter
 
+        from nemo_gym.openai_utils import NeMoGymResponseInputItem
 
-class TestValidation:
-    def test_round_trip(self) -> None:
-        builder = TrajectoryBuilder(agent="a", source="s")
-        builder.add_user_message("hi", timestamp="2026-07-09T00:00:00.000Z")
-        builder.start_agent_step(response_id="m1", provider_usage=ANTHROPIC_USAGE)
-        builder.add_output_text("hello")
-        builder.add_reasoning("think")
-        builder.add_tool_call("t1", "Bash", "{}")
-        builder.add_tool_result("t1", "ok", extra={"code": 0})
-        trajectory = builder.build()
-
-        dumped = trajectory.model_dump(mode="json")
-        assert dumped["schema_version"] == TRAJECTORY_SCHEMA_VERSION
-        revalidated = validate_trajectory(dumped)
-        assert revalidated == trajectory
-        # native item types survive the round trip through the union
-        items = revalidated.steps[1].items
-        assert [type(i) for i in items] == [
-            NeMoGymResponseOutputMessage,
-            NeMoGymResponseReasoningItem,
-            NeMoGymResponseFunctionToolCall,
-            NeMoGymFunctionCallOutput,
-        ]
+        assert type(TypeAdapter(NeMoGymResponseInputItem).validate_python(plain_user)) is NeMoGymEasyInputMessage

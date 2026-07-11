@@ -42,7 +42,8 @@ Provider-specific mapping notes:
 import json
 from typing import Any, Optional
 
-from nemo_gym.trajectory import Trajectory, TrajectoryBuilder
+from nemo_gym.openai_utils import NeMoGymAgentTelemetry, NeMoGymGeneration, NeMoGymResponseInputItem
+from nemo_gym.trajectory import TrajectoryBuilder
 
 
 # toolUseResult payloads can embed entire file contents; only short scalars are kept as
@@ -90,13 +91,22 @@ def _curate_extra(tool_use_result: Any) -> Optional[dict[str, Any]]:
     return extra or None
 
 
-def build_trajectory(stream_events: list[dict], transcript_records: list[dict]) -> Trajectory:
-    """Build a standardized trajectory from Claude Code artifacts.
+def build_trajectory(
+    stream_events: list[dict], transcript_records: list[dict]
+) -> tuple[list[NeMoGymResponseInputItem], list[NeMoGymGeneration], NeMoGymAgentTelemetry]:
+    """Build an agent Response's items and telemetry from Claude Code artifacts.
 
+    Returns ``(output_items, generations, agent_telemetry)`` — the episode's native,
+    telemetry-tagged item list (destined for ``NeMoGymResponse.output``) plus the
+    per-generation records and run-level telemetry that ride on the Response itself.
     Prefers the on-disk transcript (timestamps, request ids, tool execution metadata);
     falls back to the stream-json stdout events. Run-level totals (`num_agent_steps`,
     `duration_ms`, `total_cost_usd`, provider usage) always come from the stream-json
     `result` event when present, since the transcript does not carry them.
+
+    The task's initial prompt is deliberately **not** emitted into the output — it
+    already lives in ``responses_create_params.input`` (pass it to reconstruction as
+    ``base_input``); only mid-episode user messages (later turns) are recorded.
     """
     has_transcript_messages = any(r.get("type") in ("assistant", "user") for r in transcript_records)
     if has_transcript_messages:
@@ -124,6 +134,7 @@ def _replay_records(builder: TrajectoryBuilder, records: list[dict]) -> None:
     record is a stream event plus timestamps/uuids/requestId/toolUseResult)."""
     # assistant record uuid -> timestamp, for sourceToolAssistantUUID-based start times.
     assistant_record_ts: dict[str, str] = {}
+    saw_assistant = False
 
     for record in records:
         rtype = record.get("type")
@@ -145,6 +156,7 @@ def _replay_records(builder: TrajectoryBuilder, records: list[dict]) -> None:
         content = message.get("content")
 
         if rtype == "assistant":
+            saw_assistant = True
             if isinstance(record.get("uuid"), str) and timestamp:
                 assistant_record_ts[record["uuid"]] = timestamp
             usage = message.get("usage") or {}
@@ -193,5 +205,7 @@ def _replay_records(builder: TrajectoryBuilder, records: list[dict]) -> None:
                 )
             if not tool_results:
                 text = _block_text(content)
-                if text:
+                # User text before any assistant record is the task's initial prompt,
+                # already recorded in responses_create_params.input — don't duplicate it.
+                if text and saw_assistant:
                     builder.add_user_message(text, timestamp=timestamp)

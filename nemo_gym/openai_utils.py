@@ -230,7 +230,76 @@ RESPONSES_TO_TRAIN = {
 }
 
 
+########################################
+# Agent telemetry (issue #1867)
+#
+# Agent servers run many model calls (agent steps) with tool executions between them and
+# return one flattened Response. These extensions let the Response itself carry the
+# execution structure — following the ForTraining pattern: item variants add telemetry
+# fields on the items, and the Response gains optional per-generation records. Model
+# servers never populate any of this; plain payloads validate to the plain classes.
+#
+# Terminology: an "agent step" is one model call plus the orchestration of its tool
+# calls (one agent-loop iteration; some providers call these "turns").
+########################################
+
+
+class NeMoGymToolExecutionError(BaseModel):
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
+
+class NeMoGymToolExecution(BaseModel):
+    """Execution telemetry for one tool call, carried on its function_call_output item."""
+
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ms: Optional[float] = None
+    error: Optional[NeMoGymToolExecutionError] = None
+    # Provider-specific execution metadata, verbatim (e.g. exit codes, sandbox flags).
+    extra: Optional[Dict[str, Any]] = None
+
+
+class NeMoGymAgentStepTagMixin(BaseModel):
+    # 1-based index of the agent step (model call) that produced/observed this item.
+    # Required on the telemetry variants so plain payloads deterministically validate to
+    # the plain classes in the item union.
+    agent_step_no: int
+
+
+class NeMoGymResponseOutputMessageWithAgentTelemetry(NeMoGymResponseOutputMessage, NeMoGymAgentStepTagMixin):
+    pass
+
+
+class NeMoGymResponseFunctionToolCallWithAgentTelemetry(NeMoGymResponseFunctionToolCall, NeMoGymAgentStepTagMixin):
+    pass
+
+
+class NeMoGymResponseReasoningItemWithAgentTelemetry(NeMoGymResponseReasoningItem, NeMoGymAgentStepTagMixin):
+    pass
+
+
+class NeMoGymFunctionCallOutputWithAgentTelemetry(NeMoGymFunctionCallOutput, NeMoGymAgentStepTagMixin):
+    execution: Optional[NeMoGymToolExecution] = None
+
+
+class NeMoGymContextBoundaryMessage(NeMoGymEasyInputMessage):
+    """A compaction marker: this (summary) message replaced all earlier context.
+
+    ``context_boundary`` is required so plain user messages validate to the plain class.
+    """
+
+    context_boundary: Literal[True]
+
+
 NeMoGymResponseInputItem = Union[
+    # Agent-telemetry variants first: their required fields (agent_step_no /
+    # context_boundary) make plain payloads fall through to the plain classes below.
+    NeMoGymResponseOutputMessageWithAgentTelemetry,
+    NeMoGymResponseFunctionToolCallWithAgentTelemetry,
+    NeMoGymFunctionCallOutputWithAgentTelemetry,
+    NeMoGymResponseReasoningItemWithAgentTelemetry,
+    NeMoGymContextBoundaryMessage,
     NeMoGymEasyInputMessage,
     NeMoGymMessage,
     NeMoGymResponseOutputMessage,
@@ -303,9 +372,55 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
 
+class NeMoGymGeneration(BaseModel):
+    """Per-agent-step telemetry: one record per model call inside an agent's Response.
+
+    Items in ``output`` reference their step via ``agent_step_no`` (on the
+    ``*WithAgentTelemetry`` item variants); this record carries what is
+    generation-shaped rather than item-shaped.
+    """
+
+    agent_step_no: int
+    model: Optional[str] = None
+    stop_reason: Optional[str] = None
+    # Provider identity of this model call (message id / HTTP request id).
+    response_id: Optional[str] = None
+    request_id: Optional[str] = None
+    ended_at: Optional[str] = None
+    # Native per-call token stats; the provider's raw usage dict is preserved verbatim so
+    # fields with no native slot (e.g. cache_creation_input_tokens) are never lost.
+    usage: Optional[NeMoGymResponseUsage] = None
+    provider_usage: Optional[Dict[str, Any]] = None
+
+
+class NeMoGymAgentTelemetry(BaseModel):
+    """Run-level agent telemetry carried on the Response (issue #1867)."""
+
+    schema_version: str = "1.0"
+    agent: Optional[str] = None
+    # Which artifact the telemetry was derived from (e.g. "transcript", "stream_json",
+    # "in_process") — fidelity is data, never a schema fork.
+    source: Optional[str] = None
+    session_id: Optional[str] = None
+    # Agent steps (model calls) as reported by the provider. Some providers call these
+    # "turns" (Claude Code's num_turns / --max-turns count model calls).
+    num_agent_steps: Optional[int] = None
+    duration_ms: Optional[float] = None
+    total_cost_usd: Optional[float] = None
+    # The provider's own end-of-run usage report, verbatim, for cross-checking.
+    provider_usage: Optional[Dict[str, Any]] = None
+    # Events seen but not represented (e.g. {"sidechain": 3}), so consumers can tell
+    # "nothing happened" from "events were dropped".
+    dropped_records: Dict[str, int] = {}
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # Agent telemetry: populated by agent servers (whose Response carries a whole
+    # episode), never by model servers (whose Response is a single generation).
+    generations: Optional[List[NeMoGymGeneration]] = None
+    agent_telemetry: Optional[NeMoGymAgentTelemetry] = None
 
 
 ########################################

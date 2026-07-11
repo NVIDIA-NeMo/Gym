@@ -1,0 +1,96 @@
+---
+title: "Trajectory Telemetry"
+description: "The agent's Response is the trajectory: agent-step structure, per-call token stats, and tool timing on the native contract"
+position: 4
+---
+
+Agent loops run many model calls (**agent steps**) with tool executions between them, but return one flattened `Response` — one item list, one summed usage. That is the right *composition interface* (agents serve the same `/v1/responses` contract as models), but it used to discard the execution structure: which items each model call produced, what each call cost, how long each tool ran. Trajectory telemetry records that structure **on the Response contract itself** — the `NeMoGymResponse` is the trajectory entity, and nothing is stored twice.
+
+<Info>
+Terminology: an **agent step** is one interaction with the environment through the model — a single LLM generation plus the orchestration of its tool calls and their outputs (one iteration of an agent loop; `max_steps` counts these). A **turn** is a full cycle of control, from user input until the agent hands control back, containing one or more agent steps. Some harnesses call agent steps "turns" (Claude Code's `num_turns` / `--max-turns` count model calls); the telemetry normalizes that to `num_agent_steps`.
+</Info>
+
+## Telemetry on the contract
+
+The extension follows the same pattern the `*ForTraining` item variants use for token IDs (`nemo_gym/openai_utils.py`):
+
+**On the items** — `response.output` is the episode's lossless, execution-ordered item list. Model-produced items are `*WithAgentTelemetry` variants carrying `agent_step_no` (which model call produced them); `function_call_output` items also carry `execution` — independent per-call timing, so parallel tool calls stay independently timed:
+
+```json
+{"type": "function_call_output", "agent_step_no": 1, "call_id": "toolu_…", "output": "…",
+ "execution": {"started_at": "…", "completed_at": "…", "duration_ms": 532.3,
+               "error": null, "extra": {"interrupted": false}}}
+```
+
+Reasoning is a native `reasoning` item, function calls appear in issue order with outputs in arrival order, unresolved calls are kept, mid-episode user messages are plain message items (turn boundaries), and a compaction summary is a `NeMoGymContextBoundaryMessage`. The task's initial prompt is not repeated — it stays in `responses_create_params.input`.
+
+**On the Response** — two optional fields that model servers never populate:
+
+```json
+"generations": [
+  {"agent_step_no": 1, "model": "…", "stop_reason": "tool_use",
+   "response_id": "msg_01…", "request_id": "req_…", "ended_at": "…",
+   "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 9000}, "…": "…"},
+   "provider_usage": {"cache_read_input_tokens": 9000, "cache_creation_input_tokens": 512, "…": "…"}}
+],
+"agent_telemetry": {"schema_version": "1.0", "agent": "claude_code_agent", "source": "transcript",
+                    "session_id": "…", "num_agent_steps": 2, "duration_ms": 8123.0,
+                    "total_cost_usd": 0.021, "dropped_records": {}}
+```
+
+`generations[]` carries what is generation-shaped: native per-call `NeMoGymResponseUsage` (cache detail included, deduplicated per API message), the provider's raw usage verbatim (so fields with no native slot are never lost), and provider identity per model call. `agent_telemetry` carries run-level facts: provenance (`source`), `num_agent_steps`, duration/cost, and `dropped_records` — counters for events seen but not represented (e.g. subagent sidechains), so "nothing happened" is distinguishable from "events were dropped".
+
+<Note>
+Because the telemetry rides the contract, it survives every hop — verify requests, resources servers, rollout rows — without any side-channel. Plain model-server payloads still validate to the plain item classes: the telemetry variants have required discriminating fields, so nothing changes for existing responses.
+</Note>
+
+## Reconstructing what each model call saw
+
+The output is append-only in execution order, so any step's exact model-visible input is derivable from the single stored copy:
+
+```python
+from nemo_gym.trajectory import reconstruct_model_input, to_response_create_params, agent_step_slices
+
+items = reconstruct_model_input(
+    response.output,
+    agent_step_no=3,
+    base_input=responses_create_params.input,   # the initial prompt lives only here
+)
+```
+
+This is compaction-aware: when a `NeMoGymContextBoundaryMessage` precedes the step, reconstruction restarts at its summary instead of prepending `base_input` — exactly what the post-compaction model call actually saw. `agent_step_slices()` iterates `(agent_step_no, items)` groups for per-step analysis.
+
+## Capture modes: same contract, two ways to produce it
+
+- **In-process loops** (a `responses()` loop the agent owns): drive `TrajectoryBuilder` as the loop executes — exact boundaries, real per-call usage, *measured* tool timing.
+- **Black-box harnesses** (external CLIs like Claude Code): an adapter reconstructs everything post-hoc from the harness's artifacts. The `claude_code_agent` is the reference adapter: it harvests the session transcript Claude Code writes under its ephemeral `CLAUDE_CONFIG_DIR/projects/` and parses it once.
+
+The `source` field labels provenance (`"transcript"`, `"stream_json"`, `"in_process"`). Telemetry a source cannot observe stays `null` — never approximated: the stream-json fallback carries no timestamps, so tool durations are `null` rather than guessed.
+
+<Note>
+For the Claude Code agent, capture is on by default (`capture_trajectory: true`). Set it to `false` to skip transcript harvesting; the response then carries no `generations`/`agent_telemetry`.
+</Note>
+
+## Adapting another harness
+
+Parse your harness's artifacts in execution order and drive the builder; it owns the shared semantics (agent-step numbering and tags, model-call deduplication by `response_id`, call/execution correlation, orphan handling):
+
+```python
+from nemo_gym.trajectory import TrajectoryBuilder
+
+builder = TrajectoryBuilder(agent="my_agent", source="in_process")
+builder.start_agent_step(response_id=..., request_id=..., model=..., provider_usage=...)
+builder.add_output_text("...")            # native message item, tagged
+builder.add_reasoning("...")              # native reasoning item, tagged
+builder.add_tool_call(call_id, name, arguments)
+builder.add_tool_result(call_id, output, started_at=..., completed_at=..., error=..., extra=...)
+builder.add_user_message("...")           # mid-episode turns only — never the initial prompt
+builder.add_context_boundary(summary="...")
+builder.set_run_totals(num_agent_steps=..., duration_ms=..., total_cost_usd=..., provider_usage=...)
+
+output_items, generations, agent_telemetry = builder.build()
+```
+
+<Warning>
+The trajectory is observability-only: it carries no token IDs or logprobs, and re-tokenizing its text does not reproduce the tokens the policy sampled (retokenization drift). For training, token capture belongs at the model server, joined via each generation's `response_id`/`request_id` — the items then upgrade to their `*ForTraining` variants in place.
+</Warning>

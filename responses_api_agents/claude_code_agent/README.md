@@ -197,66 +197,46 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 ## Trajectory capture
 
-Claude Code persists a complete session transcript — one JSON record per event, with timestamps, request ids, per-model-call token usage, and tool execution metadata — under `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl`. Since each rollout runs with an ephemeral `CLAUDE_CONFIG_DIR`, the agent harvests those artifacts just before cleanup and attaches a standardized, versioned trajectory to every `run()` result (and therefore to every rollout JSONL row). This addresses the standardized trajectory-telemetry requirements of [NVIDIA-NeMo/Gym#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867). When no transcript is available, the trajectory is built from the stream-json stdout events instead (`source: "stream_json"`), which carry the same message structure and token usage but no timestamps or request ids — missing telemetry is `null`, never fabricated.
+Claude Code persists a complete session transcript — one JSON record per event, with timestamps, request ids, per-model-call token usage, and tool execution metadata — under `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl`. Since each rollout runs with an ephemeral `CLAUDE_CONFIG_DIR`, the agent harvests those artifacts just before cleanup and parses them **once**. The result addresses [NVIDIA-NeMo/Gym#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867) with **the `NeMoGymResponse` itself as the trajectory entity** — telemetry rides on the contract, nothing is stored twice, and no sidecar object exists:
 
-Terminology: an **agent step** is one interaction with the environment through the model — one LLM generation plus the orchestration of its tool calls and their outputs (one iteration of an agent loop); a **turn** is a full cycle of control, from user input until the agent hands control back, containing one or more agent steps. Note Claude Code's `num_turns` / `--max-turns` count model calls, i.e. **agent steps** in this terminology; the trajectory records that value as `num_agent_steps`.
+- **On the items** (`response.output`, lossless and in execution order): model-produced items are `*WithAgentTelemetry` variants carrying `agent_step_no` — which model call produced them (the same extension pattern as the `*ForTraining` token-ID variants). `function_call_output` items additionally carry `execution` (`NeMoGymToolExecution`: independent `started_at`/`completed_at`/`duration_ms` per call, `error`, curated provider metadata). Reasoning is a native `reasoning` item, calls are in issue order with outputs in arrival order, unresolved calls are kept, mid-episode user messages are plain items, and a compaction summary is a `NeMoGymContextBoundaryMessage`. The task's initial prompt is *not* repeated — it stays in `responses_create_params.input`.
+- **On the Response**: `generations` — one `NeMoGymGeneration` per agent step with native per-call `usage` (cache detail included, deduplicated per API message), raw `provider_usage` verbatim, `model`, `stop_reason`, and provider identity (`response_id`/`request_id`); and `agent_telemetry` — run-level provenance (`source`, `session_id`), `num_agent_steps`, `duration_ms`, `total_cost_usd`, provider run totals, and `dropped_records` (events seen but not represented, e.g. subagent sidechains). Model servers leave both `None`.
 
-The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajectory`, `schema_version: "1.0"`, validated via `validate_trajectory()`); this server's `trajectory.py` is just the Claude Code adapter that parses the transcript and drives the shared `TrajectoryBuilder`. Content and token stats reuse Gym's native contracts; telemetry the Responses API doesn't standardize lives in spans modeled after the OpenAI Agents SDK tracing spans:
-
-- **`steps[*].items`** — native `NeMoGymResponseInputItem`s (`message`, `reasoning`, `function_call`, `function_call_output`), exactly the types Gym responses already use.
-- **`steps[*].usage`** — native `NeMoGymResponseUsage` per agent step (model call) (`input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`), deduplicated per API message (the transcript writes one record per content block, repeating the usage).
-- **`steps[*].spans`** — one `generation` span per agent step (model call) (`response_id`, `request_id`, raw provider usage verbatim in `extra.provider_usage`, so fields with no native slot like `cache_creation_input_tokens` are never lost) and one `function` span per tool call (`call_id`, `started_at`/`ended_at`/`duration_ms`, `error`, curated `toolUseResult` scalars in `extra`).
+Terminology: an **agent step** is one interaction with the environment through the model — one LLM generation plus the orchestration of its tool calls and their outputs; a **turn** is a full cycle of control back to the user, containing one or more agent steps. Claude Code's `num_turns`/`--max-turns` count model calls, i.e. **agent steps**; the telemetry records that as `num_agent_steps`.
 
 ```json
-{
-  "schema_version": "1.0",
-  "agent": "claude_code_agent",
-  "source": "transcript",
-  "session_id": "…",
-  "model": "claude-sonnet-4-6",
-  "num_agent_steps": 4,
-  "duration_ms": 8123.0,
-  "total_cost_usd": 0.021,
-  "provider_usage": {"input_tokens": 63, "cache_read_input_tokens": 18478, "output_tokens": 912},
-  "usage": {"input_tokens": 63, "input_tokens_details": {"cached_tokens": 18478}, "output_tokens": 912, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 975},
-  "dropped_records": {},
-  "steps": [
-    {"step_id": 0, "type": "user_message", "timestamp": "…",
-     "items": [{"type": "message", "role": "user", "content": "fix the bug"}]},
-    {
-      "step_id": 1, "type": "agent_step", "agent_step_no": 1, "timestamp": "…",
-      "model": "claude-sonnet-4-6", "stop_reason": "tool_use",
-      "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 9000}, "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 312},
-      "items": [
-        {"type": "reasoning", "id": "rs-1-0", "summary": [{"type": "summary_text", "text": "…"}]},
-        {"type": "message", "id": "msg-1-1", "role": "assistant", "content": [{"type": "output_text", "text": "…", "annotations": []}]},
-        {"type": "function_call", "call_id": "toolu_…", "name": "Bash", "arguments": "{\"command\": \"ls\"}"},
-        {"type": "function_call_output", "call_id": "toolu_…", "output": "…model-visible output…", "status": "completed"}
-      ],
-      "spans": [
-        {"type": "generation", "response_id": "msg_01…", "request_id": "req_…", "ended_at": "…",
-         "extra": {"provider_usage": {"input_tokens": 12, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 512, "output_tokens": 300}}},
-        {"type": "function", "call_id": "toolu_…", "started_at": "…", "ended_at": "…", "duration_ms": 532.3,
-         "error": null, "extra": {"interrupted": false}}
-      ]
-    }
-  ]
+"response": {
+  "id": "resp_…", "model": "claude-sonnet-4-6",
+  "output": [
+    {"type": "message", "agent_step_no": 1, "content": [{"type": "output_text", "text": "…"}], "…": "…"},
+    {"type": "function_call", "agent_step_no": 1, "call_id": "toolu_…", "name": "Bash", "…": "…"},
+    {"type": "function_call_output", "agent_step_no": 1, "call_id": "toolu_…", "output": "…",
+     "execution": {"started_at": "…", "completed_at": "…", "duration_ms": 532.3, "error": null, "extra": {"interrupted": false}}},
+    {"type": "message", "agent_step_no": 2, "…": "…"}
+  ],
+  "usage": {"input_tokens": 63, "input_tokens_details": {"cached_tokens": 18478}, "…": "…"},
+  "generations": [
+    {"agent_step_no": 1, "model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+     "response_id": "msg_01…", "request_id": "req_…", "ended_at": "…",
+     "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 9000}, "…": "…"},
+     "provider_usage": {"input_tokens": 12, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 512, "…": "…"}},
+    {"agent_step_no": 2, "stop_reason": "end_turn", "…": "…"}
+  ],
+  "agent_telemetry": {"schema_version": "1.0", "agent": "claude_code_agent", "source": "transcript",
+                      "session_id": "…", "num_agent_steps": 2, "duration_ms": 8123.0, "total_cost_usd": 0.021,
+                      "provider_usage": {"…": "…"}, "dropped_records": {}}
 }
 ```
 
 Semantics:
 
-- **Delta / append-only steps**: each step holds only the new items it introduced — a user message, or one complete agent step (one model call) with its output items and resulting `function_call_output`s. The model-visible input of a step is every item of every earlier step, starting from the most recent `context_boundary` step; `nemo_gym.trajectory.reconstruct_model_input()` resolves this, and `to_response_create_params()` packages it as a native `NeMoGymResponseCreateParamsNonStreaming`. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
-- **Compaction**: when Claude Code compacts its context, a `context_boundary` step is emitted whose items are the summary that replaced the prior history; post-compaction context = boundary items + later steps (reconstruction handles this automatically).
-- **Tool timing**: each `function` span records independent `started_at`/`completed_at`/`duration_ms` from the actual execution boundary (issuing assistant record → its tool-result record), so parallel tool calls keep independent timing.
-- **Failures**: tool errors surface as `error` on the `function` span (the model-visible output stays on the native item); on a rollout timeout the partial transcript written before the kill is still harvested.
-- **Subagents**: sidechain (subagent) records are out of scope for the schema and skipped, but counted in `dropped_records["sidechain"]` so consumers can tell "no subagents ran" from "subagent events were dropped".
+- **Reconstruction**: the model-visible input of agent step *k* is `responses_create_params.input + output[:first item tagged ≥ k]` — `nemo_gym.trajectory.reconstruct_model_input(output, agent_step_no=k, base_input=...)` resolves this, compaction-aware (a `NeMoGymContextBoundaryMessage` restarts the context at its summary). `agent_step_slices()` iterates per-step item groups.
+- **Telemetry survives every hop**: because it rides the contract, re-validating `NeMoGymResponse` anywhere (verify requests, resources servers, rollout rows) preserves it; plain model-server payloads still validate to the plain classes (the telemetry variants have required discriminating fields).
+- **Fallback**: with no transcript, everything is built from stream-json stdout (`source: "stream_json"`) — same structure, no timestamps/request ids; missing telemetry is `null`, never fabricated. On a timeout, the partial transcript surfaces as a partial response.
 
-Identity: `session_id` identifies the Claude Code session; task and rollout identity are recorded by Gym's rollout collection layer on the surrounding rollout row (the trajectory rides on the verify response); each model call is identified by the generation span's `request_id`/`response_id`, each tool call by `call_id`.
+**Response contract note**: `response.output` differs from this agent's pre-trajectory behavior: reasoning is a native item rather than `<think>` text, calls are in issue order rather than result-completion order, and unresolved calls are kept. Verifiers reading the final assistant message are unaffected.
 
-The trajectory is also the **single parse** of Claude Code's output: the `NeMoGymResponse.output` the verifier scores is derived from it via `nemo_gym.trajectory.to_response_output()` (which reproduces the flattened response conventions — `<think>`-tag inlining, calls paired with their outputs in arrival order), so the response and the telemetry can never drift apart. The scored response is derived from the stream-json stdout events; the attached telemetry prefers the transcript.
-
-To adapt another agent harness, parse its artifacts and drive `nemo_gym.trajectory.TrajectoryBuilder` (`add_user_message` / `start_agent_step` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_context_boundary` / `set_run_totals`); the builder owns agent-step numbering, model-call deduplication, call/observation correlation, orphan handling, and usage totals.
+To adapt another agent harness, parse its artifacts in execution order and drive `nemo_gym.trajectory.TrajectoryBuilder` (`start_agent_step` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_user_message` / `add_context_boundary` / `set_run_totals`); `build()` returns `(output_items, generations, agent_telemetry)` — everything needed to construct the Response. In-process loops (e.g. `simple_agent`) drive the same builder as the loop executes, with *measured* tool timing.
 
 ## Limitations
 

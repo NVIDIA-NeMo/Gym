@@ -13,125 +13,70 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Standardized trajectory telemetry built on Gym's native Responses API contracts.
+"""Agent trajectory support over Gym's native Responses contract (issue #1867).
 
-Terminology:
+The trajectory entity **is** the ``NeMoGymResponse``. Its ``output`` item list is the
+episode — lossless and in execution order — and the telemetry rides on the contract
+itself (see ``nemo_gym.openai_utils``), following the same pattern the ``*ForTraining``
+variants use for token IDs:
 
-- **Agent step**: one interaction with the environment through the model — a single LLM
-  generation (one model call) together with the orchestration of the tool calls it
-  issued and their outputs. In an agent loop (e.g. ``simple_agent.responses()``), one
-  loop iteration is one agent step; ``max_steps`` bounds them.
-- **Turn**: a full cycle of control — from the user handing input to the agent until the
-  agent hands control back (all tool calls orchestrated, outputs fed back through the
-  model). A turn contains one or more agent steps. Single-task Gym rollouts are
-  one-turn episodes; multi-turn environments (user simulators) have several, delimited
-  in the trajectory by ``user_message`` steps.
+- **On the items**: model-produced items are the ``*WithAgentTelemetry`` variants
+  carrying ``agent_step_no`` (which model call produced/observed them);
+  ``function_call_output`` items additionally carry ``execution``
+  (:class:`~nemo_gym.openai_utils.NeMoGymToolExecution`: independent per-call timing,
+  errors, provider execution metadata); a compaction summary is a
+  :class:`~nemo_gym.openai_utils.NeMoGymContextBoundaryMessage`.
+- **On the Response**: ``generations`` (one
+  :class:`~nemo_gym.openai_utils.NeMoGymGeneration` per agent step: native per-call
+  usage, provider identity, ``stop_reason``) and ``agent_telemetry`` (run-level:
+  provenance ``source``, ``session_id``, ``num_agent_steps``, duration/cost, verbatim
+  provider usage, ``dropped_records``). Model servers leave both ``None``.
 
-A :class:`Trajectory` is the standardized rollout record requested by issue #1867: it
-carries everything needed for cost estimation, debugging, and rollout analysis in one
-versioned, validatable artifact. Conversation content is represented with Gym's native
-Responses API types (``NeMoGymResponseInputItem``: messages, function calls, function
-call outputs, reasoning items) and per-step token stats with the native
-``NeMoGymResponseUsage`` — no parallel content schema to keep in sync.
+Terminology: an **agent step** is one interaction with the environment through the
+model — a single LLM generation plus the orchestration of its tool calls and their
+outputs (one agent-loop iteration; ``max_steps`` counts these). A **turn** is a full
+cycle of control, from user input until the agent hands control back, containing one or
+more agent steps; turns are derivable from ``role: "user"`` items in the output.
 
-Telemetry the Responses API does not standardize (tool execution timing, provider
-request/response identity, tool errors, raw provider usage) lives in
-:class:`TrajectorySpan` records, modeled after the OpenAI Agents SDK tracing spans
-(``generation_span`` / ``function_span`` with ``started_at`` / ``ended_at`` /
-``error``): spans decorate the native items via ``call_id`` / ``response_id`` instead
-of polluting them.
+Nothing is stored twice: the task's initial prompt lives only in
+``responses_create_params.input`` (pass it to :func:`reconstruct_model_input` as
+``base_input``), and per-step grouping is the ``agent_step_no`` tag rather than a copy
+of the items. Because the output is append-only in execution order, any step's exact
+model-visible input is derivable — compaction-aware — from the single stored copy.
 
-Reconstruction semantics (delta / append-only representation):
-
-- ``steps`` is ordered. Each entry holds only the *new* items it introduced: a user
-  message, or one complete agent step (one model call) with its output items and the
-  resulting ``function_call_output`` items.
-- The model-visible input of a step is every item of every earlier step, starting from
-  the most recent ``context_boundary`` step (compaction): the boundary's items are the
-  summary that replaced prior history. :func:`reconstruct_model_input` resolves this
-  into a native input list, and :func:`to_response_create_params` wraps it in a
-  ``NeMoGymResponseCreateParamsNonStreaming``.
-
-The contract is capture-agnostic: agents whose loop runs in-process can drive a
-:class:`TrajectoryBuilder` directly as the loop executes (exact boundaries, measured
-tool timing), while wrappers around black-box harnesses reconstruct the trajectory
-post-hoc from the harness's artifacts (see ``responses_api_agents/claude_code_agent/
-trajectory.py`` for a reference adapter). Both produce the same schema; fidelity
-differences surface as data, not schema forks: ``source`` labels provenance, optional
-telemetry a source cannot observe stays ``None`` (never fabricated), and
-``dropped_records`` counts events seen but not represented. Mandatory fields are
-non-optional on the models.
+Capture is contract-agnostic: in-process loops drive :class:`TrajectoryBuilder` as they
+execute (exact boundaries, measured tool timing); black-box harness wrappers reconstruct
+post-hoc from artifacts (see ``responses_api_agents/claude_code_agent/trajectory.py``).
+Fidelity differences surface as data — ``source`` labels provenance, unobservable
+telemetry stays ``None`` (never fabricated), ``dropped_records`` counts events seen but
+not represented.
 """
 
 from datetime import datetime
-from typing import Any, Literal, Optional, Union
-
-from pydantic import BaseModel, Field
+from typing import Any, Iterator, Optional, Union
 
 from nemo_gym.openai_utils import (
+    NeMoGymAgentTelemetry,
+    NeMoGymContextBoundaryMessage,
     NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
+    NeMoGymFunctionCallOutputWithAgentTelemetry,
+    NeMoGymGeneration,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseFunctionToolCallWithAgentTelemetry,
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputMessageWithAgentTelemetry,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
+    NeMoGymResponseReasoningItemWithAgentTelemetry,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NeMoGymToolExecution,
+    NeMoGymToolExecutionError,
 )
 
 
-TRAJECTORY_SCHEMA_VERSION = "1.0"
-
-
-class TrajectorySpanError(BaseModel):
-    message: str
-    data: Optional[dict[str, Any]] = None
-
-
-class TrajectorySpan(BaseModel):
-    """Execution telemetry for one model call ("generation") or one tool call ("function").
-
-    Spans reference the native items they decorate: function spans via ``call_id``
-    (matching a ``function_call`` / ``function_call_output`` item), generation spans via
-    ``response_id`` / ``request_id`` (provider message and HTTP request identity).
-    ``extra`` holds provider-specific metadata verbatim (e.g. raw usage with cache
-    creation stats, sandbox/tool execution details) so no information is dropped even
-    when it has no native field.
-    """
-
-    type: Literal["generation", "function"]
-    call_id: Optional[str] = None
-    response_id: Optional[str] = None
-    request_id: Optional[str] = None
-    started_at: Optional[str] = None
-    ended_at: Optional[str] = None
-    duration_ms: Optional[float] = None
-    error: Optional[TrajectorySpanError] = None
-    extra: Optional[dict[str, Any]] = None
-
-
-class TrajectoryStep(BaseModel):
-    step_id: int
-    type: Literal["user_message", "agent_step", "context_boundary"]
-    timestamp: Optional[str] = None
-    # Native Gym Responses items introduced by this step, in order. For an agent step:
-    # reasoning / message / function_call output items followed by the function_call_output
-    # items produced by its tool calls.
-    items: list[NeMoGymResponseInputItem] = Field(default_factory=list)
-    # agent_step only: 1-based counter over agent steps (model calls) and native per-call
-    # token stats.
-    agent_step_no: Optional[int] = None
-    model: Optional[str] = None
-    usage: Optional[NeMoGymResponseUsage] = None
-    stop_reason: Optional[str] = None
-    spans: list[TrajectorySpan] = Field(default_factory=list)
-
-
-def _zero_usage() -> NeMoGymResponseUsage:
+def zero_usage() -> NeMoGymResponseUsage:
     return NeMoGymResponseUsage(
         input_tokens=0,
         input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
@@ -141,40 +86,11 @@ def _zero_usage() -> NeMoGymResponseUsage:
     )
 
 
-class Trajectory(BaseModel):
-    schema_version: str = TRAJECTORY_SCHEMA_VERSION
-    agent: str
-    # Which artifact the trajectory was derived from (e.g. "transcript", "stream_json").
-    source: str
-    session_id: Optional[str] = None
-    model: Optional[str] = None
-    steps: list[TrajectoryStep] = Field(default_factory=list)
-    # Native run totals, summed over the per-agent-step usage.
-    usage: NeMoGymResponseUsage = Field(default_factory=_zero_usage)
-    # Number of agent steps (model calls) the provider reports for the run. Note some
-    # providers call this "turns" (Claude Code's num_turns / --max-turns count model
-    # calls, i.e. agent steps in Gym terminology).
-    num_agent_steps: Optional[int] = None
-    duration_ms: Optional[float] = None
-    total_cost_usd: Optional[float] = None
-    # The provider's own end-of-run usage report, verbatim, for cross-checking.
-    provider_usage: Optional[dict[str, Any]] = None
-    # Records the adapter saw but did not represent (e.g. {"sidechain": 3}), so consumers
-    # can tell "nothing happened" from "events were dropped".
-    dropped_records: dict[str, int] = Field(default_factory=dict)
-    extra: Optional[dict[str, Any]] = None
-
-
-def validate_trajectory(data: dict[str, Any]) -> Trajectory:
-    """Validate a serialized trajectory against the versioned schema."""
-    return Trajectory.model_validate(data)
-
-
 def usage_from_provider(raw: dict[str, Any]) -> NeMoGymResponseUsage:
     """Map a provider usage dict (Anthropic or OpenAI dialect) onto the native usage model.
 
-    Unreported detail counters default to 0 per the OpenAI contract; the raw dict should be
-    preserved verbatim on the generation span's ``extra`` so nothing is lost.
+    Unreported detail counters default to 0 per the OpenAI contract; the raw dict is
+    preserved verbatim on the agent-step record so nothing is lost.
     """
     input_tokens = int(raw.get("input_tokens") or 0)
     output_tokens = int(raw.get("output_tokens") or 0)
@@ -192,80 +108,83 @@ def usage_from_provider(raw: dict[str, Any]) -> NeMoGymResponseUsage:
     )
 
 
-def reconstruct_model_input(
-    trajectory: Trajectory, before_step_id: Optional[int] = None
-) -> list[NeMoGymResponseInputItem]:
-    """Resolve the delta representation into the model-visible input item list.
+def summed_usage(generations: list[NeMoGymGeneration]) -> NeMoGymResponseUsage:
+    """Sum the per-agent-step native usage into run totals."""
+    totals = zero_usage()
+    for generation in generations:
+        if generation.usage is None:
+            continue
+        totals.input_tokens += generation.usage.input_tokens
+        totals.output_tokens += generation.usage.output_tokens
+        totals.total_tokens += generation.usage.total_tokens
+        totals.input_tokens_details.cached_tokens += generation.usage.input_tokens_details.cached_tokens
+        totals.output_tokens_details.reasoning_tokens += generation.usage.output_tokens_details.reasoning_tokens
+    return totals
 
-    Returns the flattened items of every step before ``before_step_id`` (or all steps when
-    None), starting from the most recent ``context_boundary`` — i.e. exactly what the model
-    call at that step saw, including after compaction.
+
+def agent_step_slices(
+    output: list[NeMoGymResponseInputItem],
+) -> Iterator[tuple[int, list[NeMoGymResponseInputItem]]]:
+    """Yield ``(agent_step_no, items)`` for each agent step, from the items' tags."""
+    current_step: Optional[int] = None
+    current_items: list[NeMoGymResponseInputItem] = []
+    for item in output:
+        step = getattr(item, "agent_step_no", None)
+        if step is None:
+            continue
+        if step != current_step:
+            if current_step is not None:
+                yield current_step, current_items
+            current_step, current_items = step, []
+        current_items.append(item)
+    if current_step is not None:
+        yield current_step, current_items
+
+
+def reconstruct_model_input(
+    output: list[NeMoGymResponseInputItem],
+    agent_step_no: Optional[int] = None,
+    base_input: Optional[list[NeMoGymResponseInputItem]] = None,
+) -> list[NeMoGymResponseInputItem]:
+    """Resolve the model-visible input of an agent step from the output item list.
+
+    With ``agent_step_no`` set, returns what that step's model call saw:
+    ``base_input + output[:first item tagged with that step]`` — or, if a
+    ``NeMoGymContextBoundaryMessage`` precedes the step, the context restarts at that
+    boundary (its summary replaced everything earlier, including the base input). With
+    ``agent_step_no=None``, returns the full final context. ``base_input`` is the task's
+    original ``responses_create_params.input``, deliberately stored only there.
     """
-    steps = [s for s in trajectory.steps if before_step_id is None or s.step_id < before_step_id]
-    start = 0
-    for index, step in enumerate(steps):
-        if step.type == "context_boundary":
-            start = index
-    return [item for step in steps[start:] for item in step.items]
+    if agent_step_no is None:
+        end = len(output)
+    else:
+        # First item belonging to this step or a later one; a step that produced no
+        # items (e.g. the run ended mid-step) saw everything recorded before it.
+        end = next(
+            (i for i, item in enumerate(output) if (getattr(item, "agent_step_no", None) or 0) >= agent_step_no),
+            len(output),
+        )
+
+    boundary_index: Optional[int] = None
+    for index in range(end):
+        if isinstance(output[index], NeMoGymContextBoundaryMessage):
+            boundary_index = index
+    if boundary_index is not None:
+        return list(output[boundary_index:end])
+    return list(base_input or []) + list(output[:end])
 
 
 def to_response_create_params(
-    trajectory: Trajectory, before_step_id: Optional[int] = None
+    output: list[NeMoGymResponseInputItem],
+    agent_step_no: Optional[int] = None,
+    base_input: Optional[list[NeMoGymResponseInputItem]] = None,
+    model: Optional[str] = None,
 ) -> NeMoGymResponseCreateParamsNonStreaming:
     """Package a reconstructed model input as native Responses create params."""
     return NeMoGymResponseCreateParamsNonStreaming(
-        input=reconstruct_model_input(trajectory, before_step_id=before_step_id),
-        model=trajectory.model,
+        input=reconstruct_model_input(output, agent_step_no=agent_step_no, base_input=base_input),
+        model=model,
     )
-
-
-def to_response_output(
-    trajectory: Trajectory, reasoning_tag: Optional[str] = "think"
-) -> list[NeMoGymResponseInputItem]:
-    """Flatten a trajectory's agent steps into a ``NeMoGymResponse.output``-shaped item list.
-
-    This lets a harness parse its provider artifacts once (into a trajectory) and derive
-    the response the verifier scores from it. The flattening matches the conventions Gym
-    agents already use for episode outputs:
-
-    - With ``reasoning_tag`` set, reasoning items are inlined as ``<tag>…</tag>`` prefixed
-      to the next output message (pass ``None`` to keep native ``reasoning`` items).
-    - A ``function_call`` is emitted immediately before its ``function_call_output``, in
-      result-arrival order; calls whose result never arrived are omitted (they remain in
-      the trajectory), and orphan outputs are kept without a call.
-    """
-    items: list[NeMoGymResponseInputItem] = []
-    reasoning_buffer: list[str] = []
-    for step in trajectory.steps:
-        if step.type != "agent_step":
-            continue
-        calls = {i.call_id: i for i in step.items if isinstance(i, NeMoGymResponseFunctionToolCall)}
-        emitted_calls: set[str] = set()
-        for item in step.items:
-            if isinstance(item, NeMoGymResponseReasoningItem):
-                if reasoning_tag is None:
-                    items.append(item.model_copy(deep=True))
-                else:
-                    reasoning_buffer.extend(s.text for s in item.summary if s.text)
-            elif isinstance(item, NeMoGymResponseOutputMessage):
-                text = "".join(b.text for b in item.content if isinstance(b, NeMoGymResponseOutputText))
-                if reasoning_buffer:
-                    joined = "\n".join(reasoning_buffer)
-                    text = f"<{reasoning_tag}>\n{joined}\n</{reasoning_tag}>\n\n{text}"
-                    reasoning_buffer.clear()
-                items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{len(items)}",
-                        content=[NeMoGymResponseOutputText(annotations=[], text=text)],
-                    )
-                )
-            elif isinstance(item, NeMoGymFunctionCallOutput):
-                call = calls.get(item.call_id)
-                if call is not None and item.call_id not in emitted_calls:
-                    emitted_calls.add(item.call_id)
-                    items.append(call.model_copy(update={"id": call.call_id}))
-                items.append(item.model_copy(deep=True))
-    return items
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
@@ -278,47 +197,51 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 
 class TrajectoryBuilder:
-    """Incremental, agent-agnostic assembly of a :class:`Trajectory`.
+    """Incremental, agent-agnostic assembly of an agent's Response content and telemetry.
 
-    Adapters parse their provider's artifacts in order and call the ``add_*`` methods;
-    the builder owns the shared semantics — agent-step numbering, model-call
-    deduplication (``start_agent_step`` with the same ``response_id`` continues the
-    current step instead of double counting usage), tool call/observation correlation
-    with independent per-call timing, orphan handling, and usage totals.
+    Call the ``add_*`` methods in execution order (from an in-process loop, or from an
+    adapter replaying a black-box harness's artifacts). The builder appends the
+    telemetry-tagged native items to ``output`` and maintains the per-generation records
+    in lockstep: agent-step numbering, model-call deduplication (``start_agent_step``
+    with the current step's ``response_id`` continues it instead of double counting
+    usage), call/execution correlation with independent per-call timing, orphan
+    handling.
+
+    ``build()`` returns ``(output_items, generations, agent_telemetry)`` — everything an
+    agent server needs to construct its ``NeMoGymResponse``.
     """
 
     def __init__(self, agent: str, source: str) -> None:
-        self._trajectory = Trajectory(agent=agent, source=source)
-        # call_id -> (step_id that issued the call, its timestamp) for observation correlation.
+        self.output: list[NeMoGymResponseInputItem] = []
+        self.generations: list[NeMoGymGeneration] = []
+        self._telemetry = NeMoGymAgentTelemetry(agent=agent, source=source)
+        self._model: Optional[str] = None
+        # call_id -> (agent_step_no, issue timestamp) for execution timing correlation.
         self._pending_calls: dict[str, tuple[int, Optional[str]]] = {}
-        self._agent_step_count = 0
+        self._open = False  # whether items may still be appended to the last generation
 
-    @property
-    def steps(self) -> list[TrajectoryStep]:
-        return self._trajectory.steps
+    def _current_agent_step(self) -> NeMoGymGeneration:
+        if not self.generations or not self._open:
+            raise ValueError("no agent step in progress; call start_agent_step() first")
+        return self.generations[-1]
 
     def set_session_id(self, session_id: Optional[str]) -> None:
-        if self._trajectory.session_id is None and session_id:
-            self._trajectory.session_id = session_id
+        if self._telemetry.session_id is None and session_id:
+            self._telemetry.session_id = session_id
 
-    def add_user_message(self, content: str, timestamp: Optional[str] = None) -> TrajectoryStep:
-        step = TrajectoryStep(
-            step_id=len(self.steps),
-            type="user_message",
-            timestamp=timestamp,
-            items=[NeMoGymEasyInputMessage(role="user", content=content)],
-        )
-        self.steps.append(step)
-        return step
+    def add_user_message(self, content: str, timestamp: Optional[str] = None) -> None:
+        """Record a mid-episode user message (a turn boundary).
 
-    def add_context_boundary(self, summary: str = "", timestamp: Optional[str] = None) -> TrajectoryStep:
-        """Record a compaction: `summary` is the content that replaced the prior history."""
-        items: list[NeMoGymResponseInputItem] = []
-        if summary:
-            items.append(NeMoGymEasyInputMessage(role="user", content=summary))
-        step = TrajectoryStep(step_id=len(self.steps), type="context_boundary", timestamp=timestamp, items=items)
-        self.steps.append(step)
-        return step
+        The task's *initial* input must not be added here — it lives in
+        ``responses_create_params.input`` and is passed to reconstruction as ``base_input``.
+        """
+        self._open = False
+        self.output.append(NeMoGymEasyInputMessage(role="user", content=content))
+
+    def add_context_boundary(self, summary: str = "", timestamp: Optional[str] = None) -> None:
+        """Record a compaction: `summary` is the content that replaced all prior history."""
+        self._open = False
+        self.output.append(NeMoGymContextBoundaryMessage(role="user", content=summary, context_boundary=True))
 
     def start_agent_step(
         self,
@@ -328,84 +251,77 @@ class TrajectoryBuilder:
         timestamp: Optional[str] = None,
         stop_reason: Optional[str] = None,
         provider_usage: Optional[dict[str, Any]] = None,
-    ) -> TrajectoryStep:
+    ) -> NeMoGymGeneration:
         """Start (or continue) the agent step for one model call.
 
         Providers may emit one record per content block of the same API message; calling
-        this again with the current step's ``response_id`` returns that step so content
-        accumulates without double counting usage.
+        this again with the current step's ``response_id`` returns that generation so
+        content accumulates under its tag without double counting usage.
         """
-        current = self.steps[-1] if self.steps else None
-        if (
-            current is not None
-            and current.type == "agent_step"
-            and response_id is not None
-            and self._generation_span(current).response_id == response_id
-        ):
+        current = self.generations[-1] if self.generations else None
+        if current is not None and self._open and response_id is not None and current.response_id == response_id:
             if stop_reason:
                 current.stop_reason = stop_reason
             return current
 
-        self._agent_step_count += 1
-        span = TrajectorySpan(
-            type="generation",
+        generation = NeMoGymGeneration(
+            agent_step_no=len(self.generations) + 1,
+            model=model,
+            stop_reason=stop_reason,
             response_id=response_id,
             request_id=request_id,
             # A provider record is written when the message completes; the generation's
-            # start is not observable from artifacts, so only ended_at is set.
+            # start is not observable from artifacts, so only the completion time is kept.
             ended_at=timestamp,
-            extra={"provider_usage": provider_usage} if provider_usage else None,
-        )
-        step = TrajectoryStep(
-            step_id=len(self.steps),
-            type="agent_step",
-            timestamp=timestamp,
-            agent_step_no=self._agent_step_count,
-            model=model,
             usage=usage_from_provider(provider_usage) if provider_usage else None,
-            stop_reason=stop_reason,
-            spans=[span],
+            provider_usage=provider_usage,
         )
-        self.steps.append(step)
-        if model and self._trajectory.model is None:
-            self._trajectory.model = model
-        return step
-
-    def _generation_span(self, step: TrajectoryStep) -> TrajectorySpan:
-        return next(s for s in step.spans if s.type == "generation")
-
-    def _current_agent_step(self) -> TrajectoryStep:
-        current = self.steps[-1] if self.steps else None
-        if current is None or current.type != "agent_step":
-            raise ValueError("no agent step in progress; call start_agent_step() first")
-        return current
+        self.generations.append(generation)
+        self._open = True
+        if model and self._model is None:
+            self._model = model
+        return generation
 
     def add_output_text(self, text: str) -> None:
-        step = self._current_agent_step()
+        generation = self._current_agent_step()
         block = NeMoGymResponseOutputText(annotations=[], text=text)
-        last_item = step.items[-1] if step.items else None
-        if isinstance(last_item, NeMoGymResponseOutputMessage):
+        last_item = self.output[-1] if self.output else None
+        if (
+            isinstance(last_item, NeMoGymResponseOutputMessageWithAgentTelemetry)
+            and last_item.agent_step_no == generation.agent_step_no
+        ):
             last_item.content.append(block)
         else:
-            step.items.append(
-                NeMoGymResponseOutputMessage(id=f"msg-{step.step_id}-{len(step.items)}", content=[block])
+            self.output.append(
+                NeMoGymResponseOutputMessageWithAgentTelemetry(
+                    id=f"msg-{len(self.output)}",
+                    content=[block],
+                    agent_step_no=generation.agent_step_no,
+                )
             )
 
     def add_reasoning(self, text: str) -> None:
-        step = self._current_agent_step()
-        step.items.append(
-            NeMoGymResponseReasoningItem(
-                id=f"rs-{step.step_id}-{len(step.items)}",
+        generation = self._current_agent_step()
+        self.output.append(
+            NeMoGymResponseReasoningItemWithAgentTelemetry(
+                id=f"rs-{len(self.output)}",
                 summary=[NeMoGymSummary(text=text, type="summary_text")],
+                agent_step_no=generation.agent_step_no,
             )
         )
 
     def add_tool_call(self, call_id: str, name: str, arguments: str) -> None:
-        step = self._current_agent_step()
-        step.items.append(
-            NeMoGymResponseFunctionToolCall(call_id=call_id, name=name, arguments=arguments, status="completed")
+        generation = self._current_agent_step()
+        self.output.append(
+            NeMoGymResponseFunctionToolCallWithAgentTelemetry(
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+                status="completed",
+                agent_step_no=generation.agent_step_no,
+            )
         )
-        self._pending_calls[call_id] = (step.step_id, step.timestamp)
+        self._pending_calls[call_id] = (generation.agent_step_no, generation.ended_at)
 
     def add_tool_result(
         self,
@@ -413,24 +329,23 @@ class TrajectoryBuilder:
         output: str,
         completed_at: Optional[str] = None,
         started_at: Optional[str] = None,
-        error: Optional[Union[str, TrajectorySpanError]] = None,
+        error: Optional[Union[str, NeMoGymToolExecutionError]] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Attach a tool observation to the agent step that issued ``call_id``.
+        """Record a tool observation: a ``function_call_output`` item tagged with the
+        issuing agent step and carrying its execution telemetry.
 
-        ``started_at`` defaults to the issuing step's timestamp; passing it explicitly
-        (e.g. from a provider execution record) overrides that. Each result carries its
-        own timing, so parallel tool calls stay independently timed. Results that match
-        no known call attach to the latest agent step, or are counted as dropped when
-        there is none.
+        ``started_at`` defaults to the issuing step's completion timestamp; passing it
+        explicitly (e.g. from a provider execution record) overrides that. Each result
+        carries its own timing, so parallel tool calls stay independently timed. Results
+        with no matching call and no step to attach to are counted as dropped.
         """
-        step_id, registered_started = self._pending_calls.pop(call_id, (None, None))
-        if step_id is None:
-            step_id = next((s.step_id for s in reversed(self.steps) if s.type == "agent_step"), None)
-            if step_id is None:
+        step_no, registered_started = self._pending_calls.pop(call_id, (None, None))
+        if step_no is None:
+            if not self.generations:
                 self.count_dropped("orphan_tool_results")
                 return
-        step = self.steps[step_id]
+            step_no = self.generations[-1].agent_step_no
 
         started_at = started_at or registered_started
         duration_ms = None
@@ -438,23 +353,26 @@ class TrajectoryBuilder:
         if started_dt is not None and completed_dt is not None:
             duration_ms = (completed_dt - started_dt).total_seconds() * 1000.0
 
-        step.items.append(NeMoGymFunctionCallOutput(call_id=call_id, output=output, status="completed"))
         if isinstance(error, str):
-            error = TrajectorySpanError(message=error)
-        step.spans.append(
-            TrajectorySpan(
-                type="function",
+            error = NeMoGymToolExecutionError(message=error)
+        self.output.append(
+            NeMoGymFunctionCallOutputWithAgentTelemetry(
                 call_id=call_id,
-                started_at=started_at,
-                ended_at=completed_at,
-                duration_ms=duration_ms,
-                error=error,
-                extra=extra,
+                output=output,
+                status="completed",
+                agent_step_no=step_no,
+                execution=NeMoGymToolExecution(
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration_ms=duration_ms,
+                    error=error,
+                    extra=extra,
+                ),
             )
         )
 
     def count_dropped(self, kind: str) -> None:
-        self._trajectory.dropped_records[kind] = self._trajectory.dropped_records.get(kind, 0) + 1
+        self._telemetry.dropped_records[kind] = self._telemetry.dropped_records.get(kind, 0) + 1
 
     def set_run_totals(
         self,
@@ -464,23 +382,19 @@ class TrajectoryBuilder:
         provider_usage: Optional[dict[str, Any]] = None,
     ) -> None:
         if num_agent_steps is not None:
-            self._trajectory.num_agent_steps = int(num_agent_steps)
+            self._telemetry.num_agent_steps = int(num_agent_steps)
         if duration_ms is not None:
-            self._trajectory.duration_ms = float(duration_ms)
+            self._telemetry.duration_ms = float(duration_ms)
         if total_cost_usd is not None:
-            self._trajectory.total_cost_usd = float(total_cost_usd)
+            self._telemetry.total_cost_usd = float(total_cost_usd)
         if provider_usage is not None:
-            self._trajectory.provider_usage = provider_usage
+            self._telemetry.provider_usage = provider_usage
 
-    def build(self) -> Trajectory:
-        totals = _zero_usage()
-        for step in self.steps:
-            if step.usage is None:
-                continue
-            totals.input_tokens += step.usage.input_tokens
-            totals.output_tokens += step.usage.output_tokens
-            totals.total_tokens += step.usage.total_tokens
-            totals.input_tokens_details.cached_tokens += step.usage.input_tokens_details.cached_tokens
-            totals.output_tokens_details.reasoning_tokens += step.usage.output_tokens_details.reasoning_tokens
-        self._trajectory.usage = totals
-        return self._trajectory
+    @property
+    def model(self) -> Optional[str]:
+        return self._model
+
+    def build(
+        self,
+    ) -> tuple[list[NeMoGymResponseInputItem], list[NeMoGymGeneration], NeMoGymAgentTelemetry]:
+        return self.output, self.generations, self._telemetry

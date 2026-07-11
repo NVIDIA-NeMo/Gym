@@ -654,7 +654,8 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 10
         assert usage["output_tokens"] == 5
 
-    def test_thinking_prepended(self) -> None:
+    def test_thinking_is_a_native_reasoning_item(self) -> None:
+        # The content plane is lossless: reasoning is a native item, not <think> text.
         line = self._assistant(
             [
                 {"type": "thinking", "thinking": "let me reason"},
@@ -662,23 +663,17 @@ class TestParseStreamJson:
             ]
         )
         items, _ = parse_stream_json(line)
-        assert len(items) == 1
-        text = items[0].content[0].text
-        assert "<think>\nlet me reason\n</think>" in text
-        assert "answer" in text
+        assert [type(i).__name__ for i in items] == [
+            "NeMoGymResponseReasoningItemWithAgentTelemetry",
+            "NeMoGymResponseOutputMessageWithAgentTelemetry",
+        ]
+        assert items[0].summary[0].text == "let me reason"
+        assert items[1].content[0].text == "answer"
 
-    def test_thinking_without_text_not_emitted(self) -> None:
+    def test_thinking_without_text_is_kept(self) -> None:
         line = self._assistant([{"type": "thinking", "thinking": "just thinking"}])
         items, _ = parse_stream_json(line)
-        assert items == []
-
-    def test_thinking_cleared_after_message(self) -> None:
-        l1 = self._assistant([{"type": "thinking", "thinking": "think"}, {"type": "text", "text": "msg1"}])
-        l2 = self._assistant([{"type": "text", "text": "msg2"}])
-        items, _ = parse_stream_json(f"{l1}\n{l2}")
-        assert len(items) == 2
-        assert "<think>" in items[0].content[0].text
-        assert "<think>" not in items[1].content[0].text
+        assert [type(i).__name__ for i in items] == ["NeMoGymResponseReasoningItemWithAgentTelemetry"]
 
     def test_tool_call_and_result(self) -> None:
         assistant_line = self._assistant(
@@ -707,6 +702,34 @@ class TestParseStreamJson:
         assert isinstance(items[0], NeMoGymResponseOutputMessage)
         assert isinstance(items[1], NeMoGymResponseFunctionToolCall)
         assert isinstance(items[2], NeMoGymFunctionCallOutput)
+
+    def test_unresolved_call_is_kept(self) -> None:
+        # Lossless content plane: a call whose result never arrived stays in the record.
+        line = self._assistant([{"type": "tool_use", "id": "t9", "name": "Bash", "input": {}}])
+        items, _ = parse_stream_json(line)
+        assert [type(i).__name__ for i in items] == ["NeMoGymResponseFunctionToolCallWithAgentTelemetry"]
+
+    def test_parallel_calls_keep_issue_order(self) -> None:
+        assistant_line = self._assistant(
+            [
+                {"type": "tool_use", "id": "a", "name": "Bash", "input": {}},
+                {"type": "tool_use", "id": "b", "name": "Read", "input": {}},
+            ]
+        )
+        # b's result arrives first; calls stay in issue order, outputs in arrival order
+        items, _ = parse_stream_json(
+            f"{assistant_line}\n{self._user_tool_result('b', 'second issued')}\n"
+            f"{self._user_tool_result('a', 'first issued')}"
+        )
+        kinds = [(type(i).__name__, getattr(i, "call_id", None)) for i in items]
+        assert kinds == [
+            ("NeMoGymResponseFunctionToolCallWithAgentTelemetry", "a"),
+            ("NeMoGymResponseFunctionToolCallWithAgentTelemetry", "b"),
+            ("NeMoGymFunctionCallOutputWithAgentTelemetry", "b"),
+            ("NeMoGymFunctionCallOutputWithAgentTelemetry", "a"),
+        ]
+        # issue-order tags: both calls came from the same generation
+        assert all(i.agent_step_no == 1 for i in items)
 
     def test_malformed_lines_skipped(self) -> None:
         good = self._assistant([{"type": "text", "text": "ok"}])
@@ -758,23 +781,10 @@ class TestParseStreamJson:
 
 
 class TestTrajectoryCapture:
-    def _seed_and_verify_post(self):
-        async def _post(server_name, url_path, json=None, cookies=None, **kw):
-            if url_path == "/verify":
-                return _FakeHttpResp(
-                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
-                )
-            return _FakeHttpResp({})
-
-        return AsyncMock(side_effect=_post)
-
-    def _run(self, agent: ClaudeCodeAgent, run_claude_code: AsyncMock):
-        agent.server_client.post = self._seed_and_verify_post()
-        req = MagicMock()
-        req.cookies = {}
-        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+    def _create(self, agent: ClaudeCodeAgent, run_claude_code: AsyncMock):
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve it")
         with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
-            return asyncio.run(agent.run(req, body))
+            return asyncio.run(agent._create_response(body))
 
     def _stream_stdout(self) -> str:
         return "\n".join(
@@ -799,27 +809,37 @@ class TestTrajectoryCapture:
             ]
         )
 
-    def test_run_attaches_trajectory(self) -> None:
+    def test_response_carries_the_telemetry(self) -> None:
+        # The response IS the trajectory: items are telemetry-tagged and the Response
+        # carries generations + agent_telemetry on the contract itself.
         agent = _make_agent()
         run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", []))
 
-        result = self._run(agent, run_claude_code)
+        response = self._create(agent, run_claude_code)
 
-        trajectory = result.trajectory
-        assert trajectory["schema_version"] == "1.0"
-        assert trajectory["source"] == "stream_json"
-        assert trajectory["session_id"] == "sess-1"
-        assert trajectory["num_agent_steps"] == 1
-        assert trajectory["duration_ms"] == 1234.0
-        assert trajectory["total_cost_usd"] == 0.01
-        (step,) = trajectory["steps"]
-        assert step["type"] == "agent_step"
-        assert step["agent_step_no"] == 1
-        # content is a native Responses output message item
-        assert step["items"][0]["type"] == "message"
-        assert step["items"][0]["content"][0]["text"] == "done"
-        # per-call token stats are a native NeMoGymResponseUsage
-        assert step["usage"]["input_tokens_details"]["cached_tokens"] == 3
+        assert response.agent_telemetry.schema_version == "1.0"
+        assert response.agent_telemetry.source == "stream_json"
+        assert response.agent_telemetry.session_id == "sess-1"
+        assert response.agent_telemetry.num_agent_steps == 1
+        assert response.agent_telemetry.duration_ms == 1234.0
+        assert response.agent_telemetry.total_cost_usd == 0.01
+        (generation,) = response.generations
+        assert generation.agent_step_no == 1
+        assert generation.usage.input_tokens_details.cached_tokens == 3
+        assert response.output[0].agent_step_no == 1
+        assert response.usage.input_tokens == 10
+        assert response.usage.input_tokens_details.cached_tokens == 3
+
+    def test_telemetry_survives_response_revalidation(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", []))
+        response = self._create(agent, run_claude_code)
+
+        from nemo_gym.openai_utils import NeMoGymResponse
+
+        revalidated = NeMoGymResponse.model_validate(response.model_dump(mode="json"))
+        assert revalidated.agent_telemetry.session_id == "sess-1"
+        assert revalidated.output[0].agent_step_no == 1
 
     def test_transcript_preferred_over_stream(self) -> None:
         agent = _make_agent()
@@ -847,26 +867,26 @@ class TestTrajectoryCapture:
         ]
         run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", transcript))
 
-        result = self._run(agent, run_claude_code)
+        response = self._create(agent, run_claude_code)
 
-        trajectory = result.trajectory
-        assert trajectory["source"] == "transcript"
-        assert trajectory["session_id"] == "sess-t"
+        assert response.agent_telemetry.source == "transcript"
+        assert response.agent_telemetry.session_id == "sess-t"
         # run-level totals still come from the stream-json result event
-        assert trajectory["num_agent_steps"] == 1
-        assert trajectory["total_cost_usd"] == 0.01
-        assert [s["type"] for s in trajectory["steps"]] == ["user_message", "agent_step"]
-        # provider identity lives on the generation span
-        assert trajectory["steps"][1]["spans"][0]["request_id"] == "req-1"
-        assert trajectory["steps"][1]["timestamp"] == "2026-07-09T00:00:01.000Z"
+        assert response.agent_telemetry.num_agent_steps == 1
+        assert response.agent_telemetry.total_cost_usd == 0.01
+        (generation,) = response.generations
+        assert generation.request_id == "req-1"
+        assert generation.ended_at == "2026-07-09T00:00:01.000Z"
 
-    def test_capture_disabled_yields_none(self) -> None:
+    def test_capture_disabled_yields_plain_response(self) -> None:
         agent = _make_agent(capture_trajectory=False)
         run_claude_code = AsyncMock(return_value=(self._stream_stdout(), "claude-sonnet-4-6", []))
 
-        result = self._run(agent, run_claude_code)
+        response = self._create(agent, run_claude_code)
 
-        assert result.trajectory is None
+        assert response.generations is None
+        assert response.agent_telemetry is None
+        assert response.output  # content still parsed
 
     def test_run_claude_code_harvests_transcript_from_config_dir(self, tmp_path: Path) -> None:
         agent = _make_agent()

@@ -14,13 +14,15 @@
 # limitations under the License.
 
 from nemo_gym.openai_utils import (
+    NeMoGymContextBoundaryMessage,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseReasoningItem,
+    NeMoGymFunctionCallOutputWithAgentTelemetry,
+    NeMoGymResponseFunctionToolCallWithAgentTelemetry,
+    NeMoGymResponseOutputMessageWithAgentTelemetry,
+    NeMoGymResponseReasoningItemWithAgentTelemetry,
 )
-from nemo_gym.trajectory import TRAJECTORY_SCHEMA_VERSION, validate_trajectory
+from nemo_gym.trajectory import reconstruct_model_input, summed_usage
 from responses_api_agents.claude_code_agent.trajectory import build_trajectory, decode_jsonl
 
 
@@ -95,7 +97,7 @@ class TestTranscriptSource:
     def _transcript(self) -> list[dict]:
         return [
             {"type": "queue-operation", "operation": "enqueue"},  # non-message noise is skipped
-            _user_record("fix the bug"),
+            _user_record("fix the bug"),  # initial prompt: lives in create_params, not the content plane
             # One API message written as two records (text block, then two parallel tool_use
             # blocks) sharing the same message id and usage.
             _assistant_record("a1", "msg_1", [{"type": "text", "text": "looking"}], usage=USAGE),
@@ -127,114 +129,129 @@ class TestTranscriptSource:
             ),
         ]
 
-    def test_steps_and_native_items(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        assert trajectory.source == "transcript"
-        assert trajectory.session_id == SESSION
-        assert trajectory.model == "claude-sonnet-4-6"
-        assert [s.type for s in trajectory.steps] == ["user_message", "agent_step", "agent_step"]
-        user, step1, step2 = trajectory.steps
-        assert isinstance(user.items[0], NeMoGymEasyInputMessage)
-        assert user.items[0].content == "fix the bug"
-        # one agent step per API message: text + 2 tool calls + 2 tool outputs, all native items
-        assert [type(i) for i in step1.items] == [
-            NeMoGymResponseOutputMessage,
-            NeMoGymResponseFunctionToolCall,
-            NeMoGymResponseFunctionToolCall,
-            NeMoGymFunctionCallOutput,
-            NeMoGymFunctionCallOutput,
+    def test_output_is_native_lossless_and_tagged(self) -> None:
+        output, generations, telemetry = build_trajectory([], self._transcript())
+        assert telemetry.source == "transcript"
+        assert telemetry.session_id == SESSION
+        assert [type(i) for i in output] == [
+            NeMoGymResponseOutputMessageWithAgentTelemetry,  # "looking"
+            NeMoGymResponseFunctionToolCallWithAgentTelemetry,  # t1, issue order
+            NeMoGymResponseFunctionToolCallWithAgentTelemetry,  # t2
+            NeMoGymFunctionCallOutputWithAgentTelemetry,  # t1 result, arrival order
+            NeMoGymFunctionCallOutputWithAgentTelemetry,  # t2 result
+            NeMoGymResponseReasoningItemWithAgentTelemetry,  # native reasoning, not <think> text
+            NeMoGymResponseOutputMessageWithAgentTelemetry,  # "fixed"
         ]
-        assert step1.items[0].content[0].text == "looking"
-        assert step1.items[1].name == "Bash"
-        assert (step1.agent_step_no, step2.agent_step_no) == (1, 2)
-        assert step1.stop_reason == "tool_use"
-        assert isinstance(step2.items[0], NeMoGymResponseReasoningItem)
-        assert step2.items[0].summary[0].text == "hmm"
-        assert step2.items[1].content[0].text == "fixed"
+        assert [i.agent_step_no for i in output] == [1, 1, 1, 1, 1, 2, 2]
+        assert output[1].name == "Bash"
+        assert output[5].summary[0].text == "hmm"
+        assert output[6].content[0].text == "fixed"
 
-    def test_generation_span_identity(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        step1, step2 = trajectory.steps[1], trajectory.steps[2]
-        gen1 = step1.spans[0]
-        assert gen1.type == "generation"
-        assert gen1.response_id == "msg_1"
-        assert gen1.request_id == "req-1"
-        assert step2.spans[0].request_id == "req-2"
+    def test_initial_prompt_not_duplicated_into_output(self) -> None:
+        output, _, _ = build_trajectory([], self._transcript())
+        assert not any(type(i) is NeMoGymEasyInputMessage for i in output)
+
+    def test_mid_episode_user_message_is_recorded(self) -> None:
+        records = self._transcript() + [
+            _user_record("and now Berlin", ts="2026-07-09T00:01:00.000Z"),
+            _assistant_record("a3", "msg_3", [{"type": "text", "text": "on it"}], ts="2026-07-09T00:01:01.000Z"),
+        ]
+        output, generations, _ = build_trajectory([], records)
+        user_items = [i for i in output if type(i) is NeMoGymEasyInputMessage]
+        assert [i.content for i in user_items] == ["and now Berlin"]
+        assert output[output.index(user_items[0]) + 1].agent_step_no == generations[-1].agent_step_no
+
+    def test_generation_identity_and_dedupe(self) -> None:
+        _, generations, _ = build_trajectory([], self._transcript())
+        g1, g2 = generations
+        assert (g1.agent_step_no, g2.agent_step_no) == (1, 2)
+        assert g1.stop_reason == "tool_use"
+        assert g1.response_id == "msg_1"
+        assert g1.request_id == "req-1"
+        assert g2.request_id == "req-2"
 
     def test_usage_counted_once_per_message(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        step1 = trajectory.steps[1]
-        assert step1.usage.input_tokens == 100
-        assert step1.usage.output_tokens == 20
-        assert step1.usage.input_tokens_details.cached_tokens == 60
-        # fields with no native slot survive verbatim on the generation span
-        assert step1.spans[0].extra["provider_usage"]["cache_creation_input_tokens"] == 10
-        assert trajectory.usage.input_tokens == 150
-        assert trajectory.usage.output_tokens == 25
-        assert trajectory.usage.input_tokens_details.cached_tokens == 60
+        _, generations, _ = build_trajectory([], self._transcript())
+        g1 = generations[0]
+        assert g1.usage.input_tokens == 100
+        assert g1.usage.input_tokens_details.cached_tokens == 60
+        assert g1.provider_usage["cache_creation_input_tokens"] == 10
+        totals = summed_usage(generations)
+        assert totals.input_tokens == 150
+        assert totals.output_tokens == 25
 
-    def test_parallel_function_spans_have_independent_timing(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        spans = [s for s in trajectory.steps[1].spans if s.type == "function"]
-        assert [s.call_id for s in spans] == ["t1", "t2"]
-        assert spans[0].started_at == "2026-07-09T00:00:01.000Z"
-        assert spans[0].ended_at == "2026-07-09T00:00:01.500Z"
-        assert spans[0].duration_ms == 500.0
-        assert spans[1].duration_ms == 2000.0
+    def test_parallel_tool_executions_have_independent_timing(self) -> None:
+        output, _, _ = build_trajectory([], self._transcript())
+        out1, out2 = output[3], output[4]
+        assert (out1.call_id, out2.call_id) == ("t1", "t2")
+        assert out1.execution.started_at == "2026-07-09T00:00:01.000Z"
+        assert out1.execution.duration_ms == 500.0
+        assert out2.execution.duration_ms == 2000.0
 
-    def test_observation_error_and_curated_extra(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        spans = [s for s in trajectory.steps[1].spans if s.type == "function"]
-        assert spans[0].error is None
-        # short scalars kept, oversized strings and nested structures dropped
-        assert spans[0].extra == {"interrupted": False, "stdout": "file.txt"}
-        assert spans[1].error is not None
-        assert spans[1].extra is None
-        # model-visible output is on the native function_call_output item
-        outputs = {i.call_id: i.output for i in trajectory.steps[1].items if isinstance(i, NeMoGymFunctionCallOutput)}
+    def test_execution_error_and_curated_extra(self) -> None:
+        output, _, _ = build_trajectory([], self._transcript())
+        out1, out2 = output[3], output[4]
+        assert out1.execution.error is None
+        assert out1.execution.extra == {"interrupted": False, "stdout": "file.txt"}  # short scalars kept
+        assert out2.execution.error is not None
+        outputs = {i.call_id: i.output for i in output if isinstance(i, NeMoGymFunctionCallOutput)}
         assert outputs == {"t1": "file.txt", "t2": "boom"}
 
     def test_sidechain_records_skipped_and_counted(self) -> None:
         records = self._transcript() + [
             _assistant_record("a3", "msg_3", [{"type": "text", "text": "sub"}], isSidechain=True)
         ]
-        trajectory = build_trajectory([], records)
-        assert trajectory.dropped_records == {"sidechain": 1}
-        assert len([s for s in trajectory.steps if s.type == "agent_step"]) == 2
+        _, generations, telemetry = build_trajectory([], records)
+        assert telemetry.dropped_records == {"sidechain": 1}
+        assert len(generations) == 2
 
-    def test_compact_summary_becomes_context_boundary(self) -> None:
+    def test_compact_summary_becomes_boundary_with_summary_item(self) -> None:
         records = [
             _user_record("start"),
+            _assistant_record("a1", "msg_1", [{"type": "text", "text": "working"}]),
             _user_record("summary of history", ts="2026-07-09T00:01:00.000Z", isCompactSummary=True),
-            _assistant_record("a1", "msg_1", [{"type": "text", "text": "go on"}]),
+            _assistant_record("a2", "msg_2", [{"type": "text", "text": "go on"}], ts="2026-07-09T00:01:01.000Z"),
         ]
-        trajectory = build_trajectory([], records)
-        assert [s.type for s in trajectory.steps] == ["user_message", "context_boundary", "agent_step"]
-        assert trajectory.steps[1].items[0].content == "summary of history"
+        output, _, _ = build_trajectory([], records)
+        boundaries = [i for i in output if isinstance(i, NeMoGymContextBoundaryMessage)]
+        assert [b.content for b in boundaries] == ["summary of history"]
+        # post-boundary reconstruction starts at the summary, not the base input
+        items = reconstruct_model_input(
+            output, agent_step_no=2, base_input=[NeMoGymEasyInputMessage(role="user", content="start")]
+        )
+        assert getattr(items[0], "content", None) == "summary of history"
 
-    def test_unmatched_observation_attaches_to_last_agent_step(self) -> None:
-        records = [
-            _assistant_record("a1", "msg_1", [{"type": "text", "text": "hi"}]),
-            _tool_result_record("orphan", "out", "2026-07-09T00:00:02.000Z", source_uuid="missing"),
-        ]
-        trajectory = build_trajectory([], records)
-        assert trajectory.steps[0].spans[-1].call_id == "orphan"
-
-    def test_orphan_observation_with_no_agent_step_counted_as_dropped(self) -> None:
+    def test_orphan_observation_with_no_step_counted_as_dropped(self) -> None:
         records = [_tool_result_record("orphan", "out", "2026-07-09T00:00:02.000Z")]
-        trajectory = build_trajectory([], records)
-        assert trajectory.steps == []
-        assert trajectory.dropped_records == {"orphan_tool_results": 1}
+        output, _, telemetry = build_trajectory([], records)
+        assert output == []
+        assert telemetry.dropped_records == {"orphan_tool_results": 1}
 
     def test_meta_user_records_skipped(self) -> None:
-        trajectory = build_trajectory([], [_user_record("injected", isMeta=True)])
-        assert trajectory.steps == []
+        output, _, _ = build_trajectory([], [_user_record("injected", isMeta=True)])
+        assert output == []
 
-    def test_round_trip_validation(self) -> None:
-        trajectory = build_trajectory([], self._transcript())
-        dumped = trajectory.model_dump(mode="json")
-        assert dumped["schema_version"] == TRAJECTORY_SCHEMA_VERSION
-        assert validate_trajectory(dumped) == trajectory
+    def test_telemetry_round_trips_through_the_contract(self) -> None:
+        from time import time
+
+        from nemo_gym.openai_utils import NeMoGymResponse
+
+        output, generations, telemetry = build_trajectory([], self._transcript())
+        response = NeMoGymResponse(
+            id="r",
+            created_at=int(time()),
+            model="m",
+            object="response",
+            output=output,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+            generations=generations,
+            agent_telemetry=telemetry,
+        )
+        revalidated = NeMoGymResponse.model_validate(response.model_dump(mode="json"))
+        assert revalidated == response
+        assert revalidated.output[3].execution.duration_ms == 500.0
 
 
 class TestStreamJsonFallback:
@@ -265,30 +282,33 @@ class TestStreamJsonFallback:
         ]
 
     def test_fallback_used_when_no_transcript_messages(self) -> None:
-        trajectory = build_trajectory(self._events(), transcript_records=[{"type": "queue-operation"}])
-        assert trajectory.source == "stream_json"
-        assert trajectory.session_id == SESSION
-        assert [s.type for s in trajectory.steps] == ["agent_step", "context_boundary"]
+        output, _, telemetry = build_trajectory(self._events(), transcript_records=[{"type": "queue-operation"}])
+        assert telemetry.source == "stream_json"
+        assert telemetry.session_id == SESSION
+        assert [type(i).__name__ for i in output] == [
+            "NeMoGymResponseFunctionToolCallWithAgentTelemetry",
+            "NeMoGymFunctionCallOutputWithAgentTelemetry",
+            "NeMoGymContextBoundaryMessage",
+        ]
 
     def test_no_timestamps_means_no_fabricated_timing(self) -> None:
-        trajectory = build_trajectory(self._events(), [])
-        (span,) = [s for s in trajectory.steps[0].spans if s.type == "function"]
-        assert span.started_at is None
-        assert span.ended_at is None
-        assert span.duration_ms is None
+        output, _, _ = build_trajectory(self._events(), [])
+        execution = output[1].execution
+        assert execution.started_at is None
+        assert execution.duration_ms is None
 
     def test_result_event_totals(self) -> None:
-        trajectory = build_trajectory(self._events(), [])
-        assert trajectory.num_agent_steps == 3
-        assert trajectory.duration_ms == 42.0
-        assert trajectory.total_cost_usd == 0.5
-        assert trajectory.provider_usage == {"input_tokens": 10, "output_tokens": 2}
+        _, _, telemetry = build_trajectory(self._events(), [])
+        assert telemetry.num_agent_steps == 3  # Claude Code's num_turns, normalized
+        assert telemetry.duration_ms == 42.0
+        assert telemetry.total_cost_usd == 0.5
+        assert telemetry.provider_usage == {"input_tokens": 10, "output_tokens": 2}
 
     def test_empty_sources(self) -> None:
-        trajectory = build_trajectory([], [])
-        assert trajectory.source == "stream_json"
-        assert trajectory.steps == []
-        assert trajectory.usage.input_tokens == 0
+        output, generations, telemetry = build_trajectory([], [])
+        assert output == []
+        assert generations == []
+        assert telemetry.source == "stream_json"
 
 
 class TestDecodeJsonl:

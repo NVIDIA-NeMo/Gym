@@ -35,7 +35,9 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body,
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
+    NeMoGymAgentTelemetry,
     NeMoGymEasyInputMessage,
+    NeMoGymGeneration,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -46,7 +48,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
-from nemo_gym.trajectory import Trajectory, to_response_output
+from nemo_gym.trajectory import summed_usage
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 from responses_api_agents.claude_code_agent.trajectory import build_trajectory, decode_jsonl
 
@@ -54,38 +56,40 @@ from responses_api_agents.claude_code_agent.trajectory import build_trajectory, 
 LOG = logging.getLogger(__name__)
 
 
-def _usage_metadata(trajectory: Trajectory) -> dict:
-    """Derive the response usage metadata from a trajectory.
+def _usage_metadata(generations: list[NeMoGymGeneration], telemetry: NeMoGymAgentTelemetry) -> dict:
+    """Derive the response usage metadata from the agent telemetry.
 
     The provider's end-of-run report is the authoritative total when present (summing it
     with the per-step usage would double count); otherwise the per-agent-step sums are used.
     """
-    if trajectory.provider_usage:
+    if telemetry.provider_usage:
         metadata = {
-            "input_tokens": int(trajectory.provider_usage.get("input_tokens") or 0),
-            "output_tokens": int(trajectory.provider_usage.get("output_tokens") or 0),
-            "cached_tokens": int(trajectory.provider_usage.get("cache_read_input_tokens") or 0),
+            "input_tokens": int(telemetry.provider_usage.get("input_tokens") or 0),
+            "output_tokens": int(telemetry.provider_usage.get("output_tokens") or 0),
+            "cached_tokens": int(telemetry.provider_usage.get("cache_read_input_tokens") or 0),
         }
     else:
+        totals = summed_usage(generations)
         metadata = {
-            "input_tokens": trajectory.usage.input_tokens,
-            "output_tokens": trajectory.usage.output_tokens,
-            "cached_tokens": trajectory.usage.input_tokens_details.cached_tokens,
+            "input_tokens": totals.input_tokens,
+            "output_tokens": totals.output_tokens,
+            "cached_tokens": totals.input_tokens_details.cached_tokens,
         }
-    if trajectory.num_agent_steps is not None:
+    if telemetry.num_agent_steps is not None:
         # provider dialect: Claude Code reports agent steps as num_turns; keep the key
-        metadata["num_turns"] = trajectory.num_agent_steps
+        metadata["num_turns"] = telemetry.num_agent_steps
     return metadata
 
 
 def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
 
-    The stdout is parsed once into a trajectory and the response items are derived from
-    it, so the response and the trajectory telemetry can never drift apart.
+    One parse produces both the response's content plane (the native output item list)
+    and the telemetry overlay; this helper returns the content plane plus the usage
+    metadata derived from the overlay, so response and telemetry can never drift apart.
     """
-    trajectory = build_trajectory(decode_jsonl(stdout), [])
-    return to_response_output(trajectory), _usage_metadata(trajectory)
+    output_items, generations, telemetry = build_trajectory(decode_jsonl(stdout), [])
+    return output_items, _usage_metadata(generations, telemetry)
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -145,8 +149,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
     # When True, the session transcript Claude Code writes under the per-run CLAUDE_CONFIG_DIR
-    # is harvested before cleanup and attached to run() results as a standardized `trajectory`
-    # (see trajectory.py for the schema and reconstruction semantics).
+    # is harvested before cleanup and the response carries the agent telemetry on the contract
+    # itself (telemetry-tagged output items + `generations` + `agent_telemetry`).
     capture_trajectory: bool = True
 
 
@@ -158,9 +162,6 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
-    # Standardized trajectory (trajectory.ClaudeCodeTrajectory, serialized); None when
-    # capture is disabled or no artifacts were produced (e.g. hard timeout before startup).
-    trajectory: Optional[dict[str, Any]] = None
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
@@ -433,7 +434,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
-    ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]]]:
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -448,22 +449,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             mcp_config=mcp_config,
             skills_path=skills_path,
         )
-        # One parse for both artifacts: the response the verifier scores is derived from the
-        # stream-json trajectory; the attached telemetry prefers the richer transcript source.
-        stream_events = decode_jsonl(stdout)
-        stream_trajectory = build_trajectory(stream_events, [])
-        output_items = to_response_output(stream_trajectory)
-        usage = _usage_metadata(stream_trajectory)
-
-        trajectory: Optional[dict[str, Any]] = None
-        if self.config.capture_trajectory:
-            try:
-                telemetry = (
-                    build_trajectory(stream_events, transcript_records) if transcript_records else stream_trajectory
-                )
-                trajectory = telemetry.model_dump(mode="json")
-            except Exception as exc:
-                LOG.warning("failed to build trajectory: %s", exc)
+        # One parse: the response IS the trajectory. The build yields the telemetry-tagged
+        # output items plus the per-generation records and run telemetry that ride on the
+        # Response contract itself. The transcript is the preferred source (timestamps,
+        # request ids, tool metadata); stream-json stdout is the fallback.
+        generations: Optional[list[NeMoGymGeneration]] = None
+        telemetry: Optional[NeMoGymAgentTelemetry] = None
+        try:
+            output_items, built_generations, built_telemetry = build_trajectory(
+                decode_jsonl(stdout), transcript_records
+            )
+            usage = _usage_metadata(built_generations, built_telemetry)
+            if self.config.capture_trajectory:
+                generations, telemetry = built_generations, built_telemetry
+        except Exception as exc:
+            LOG.warning("failed to parse Claude Code artifacts: %s", exc)
+            output_items, usage = [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -483,7 +484,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        response = NeMoGymResponse(
+        return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -499,16 +500,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            generations=generations,
+            agent_telemetry=telemetry,
         )
-        return response, trajectory
 
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        response, _ = await self._create_response(body)
-        return response
+        return await self._create_response(body)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -532,7 +533,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                agent_resp, trajectory = await self._create_response(
+                agent_resp = await self._create_response(
                     body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
                 )
                 agent_resp_json = agent_resp.model_dump(mode="json")
@@ -556,7 +557,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally, "trajectory": trajectory}
+                verify_json | {"turns_used": turns, "finished_naturally": naturally}
             )
 
 
