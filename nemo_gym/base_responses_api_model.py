@@ -23,7 +23,7 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import orjson
 from fastapi import Body, FastAPI, Request
@@ -169,7 +169,7 @@ class CaptureStore:
         return exchanges
 
 
-def maybe_rollout_id_from_run_body(body: BaseModel | Dict[str, Any] | None) -> Optional[str]:
+def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
     """Per-rollout model-call capture id from a run-request's task/rollout indices.
 
     Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
@@ -180,7 +180,7 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Dict[str, Any] | None) -> O
     """
     if isinstance(body, BaseModel):
         data = body.model_dump()
-    elif isinstance(body, Dict):
+    elif isinstance(body, Mapping):
         data = body
     else:
         return None
