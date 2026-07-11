@@ -310,6 +310,8 @@ Both harnesses support resuming a partial trajectory: the request's `body.input`
 
 **`body.model` is optional in replay mode.** Replay JSONLs intentionally omit `model` because the upstream `openai_model` proxy force-overrides to its configured backend. OpenHands coerces `body.model or ""` when writing `oh_config.toml`; opencode falls back to `default_model_name` resolved from the model server config. Both fall back to the agent's `model_server.name` when constructing `NeMoGymResponse.model`.
 
+**`agent_max_turns` is shared between the replayed prefix and the live continuation, for both harnesses.** Neither `_setup_params` nor either `HarnessProcessor` inflates `agent_max_turns` based on how many turns are being replayed — a replayed turn consumes exactly one unit of iteration budget, the same as a live turn (OpenHands: `agent_controller.py`'s `IterationControlFlag.step()` runs before the replay-vs-live branch in `_step()`; opencode: `runLoop`'s `step++` runs before the replay-vs-live branch inside `doStream()`). If you set `agent_max_turns` to the same value the original run used, the resumed run will have little to no budget left for live continuation — pass a larger value (e.g. original turns used + desired continuation budget) when building a replay request.
+
 ### OpenHands replay
 
 1. `OpenHandsHarnessProcessor.get_run_command` writes the replay JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.

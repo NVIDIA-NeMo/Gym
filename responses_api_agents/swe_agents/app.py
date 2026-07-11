@@ -1922,6 +1922,45 @@ def _render_opencode_user_message(
 class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
+    def _opencode_at_config_commit(self, opencode_dir: Path) -> bool:
+        """Whether `opencode_dir`'s checkout already matches config.agent_framework_commit.
+
+        Unlike OpenHandsHarnessProcessor's equivalent check, this always fetches
+        first: `agent_framework_commit` is commonly a branch name (e.g. `sdd/dev`)
+        rather than a pinned SHA for opencode, so comparing against a possibly
+        stale local ref would silently miss commits pushed to that branch since
+        the last fetch — exactly the "already set up, so I never re-synced"
+        failure mode this check exists to prevent.
+        """
+        if not (opencode_dir / ".git").exists():
+            return False
+
+        target = self.config.agent_framework_commit
+
+        def _git(*args: str) -> Optional[str]:
+            try:
+                result = subprocess_run(
+                    ["git", "-C", str(opencode_dir), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+            except Exception:
+                return None
+
+        current_commit = _git("rev-parse", "HEAD")
+        if not current_commit:
+            return False
+
+        _git("fetch", "--all", "--tags", "--prune")
+        # Prefer the remote-tracking ref so a moving branch name resolves to
+        # what's actually on the remote, not a stale local branch tip.
+        resolved_target = _git("rev-parse", "--verify", f"origin/{target}^{{commit}}") or _git(
+            "rev-parse", "--verify", f"{target}^{{commit}}"
+        )
+        return bool(resolved_target) and resolved_target == current_commit
+
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_opencode_setup"
 
@@ -1930,15 +1969,23 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             bun_dir = setup_dir / "bun"
 
             opencode_bundle = opencode_dir / ".bench-build" / "opencode.js"
-            if (
+            already_built = (
                 (opencode_dir / "node_modules").exists()
                 and (bun_dir / "bin" / "bun").exists()
                 and opencode_bundle.exists()
-            ):
-                print(f"opencode already set up at {setup_dir}", flush=True)
+            )
+            if already_built and self._opencode_at_config_commit(opencode_dir):
+                print(f"opencode already set up at {setup_dir} (at config commit)", flush=True)
                 return setup_dir
 
-            print(f"Setting up opencode environment at {setup_dir}...", flush=True)
+            if already_built:
+                print(
+                    f"opencode at {setup_dir} does not match config commit "
+                    f"{self.config.agent_framework_commit}; re-syncing (bun install + rebuild)...",
+                    flush=True,
+                )
+            else:
+                print(f"Setting up opencode environment at {setup_dir}...", flush=True)
             setup_dir.mkdir(parents=True, exist_ok=True)
 
             script_fpath = self.parent_dir / "setup_scripts/opencode.sh"
