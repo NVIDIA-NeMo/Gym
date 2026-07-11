@@ -33,6 +33,10 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
 ) -> None:
     run_dir = tmp_path / "run"
     server_venv_root = tmp_path / "server-venvs"
+    uv_bin = tmp_path / "bin" / "uv"
+    uv_bin.parent.mkdir()
+    uv_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
     env = os.environ.copy()
     env.update(
         {
@@ -41,6 +45,7 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
             "RUN_DIR": str(run_dir),
             "RAY_TMPDIR": requested,
             "SERVER_VENV_ROOT": str(server_venv_root),
+            "UV_BIN": str(uv_bin),
         }
     )
 
@@ -56,7 +61,9 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
 
     assert run_env["RAY_TMPDIR_REQUESTED"] == requested
     assert run_env["SERVER_VENV_ROOT"] == str(server_venv_root)
+    assert run_env["UV_BIN"] == str(uv_bin)
     assert f"++uv_venv_dir={server_venv_root}" in completed.stdout
+    assert f"uv:          {uv_bin}" in completed.stdout
     if expect_shortened:
         assert run_env["RAY_TMPDIR"].startswith("/tmp/ngray-")
         assert "RAY_TMPDIR is too long" in completed.stderr

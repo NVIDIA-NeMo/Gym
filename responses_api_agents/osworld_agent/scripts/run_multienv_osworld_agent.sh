@@ -18,6 +18,36 @@ GYM_ROOT="${GYM_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 cd "${GYM_ROOT}"
 GYM_ROOT="$(pwd -P)"
 
+# ng_run launches component servers from non-interactive Ray subprocesses.
+# Those processes do not necessarily inherit shell startup files, so a user
+# install such as ~/.local/bin/uv can exist while the servers still fail with
+# `uv: command not found`. Resolve it once here and export its directory.
+requested_uv_bin="${UV_BIN:-}"
+resolved_uv_bin=""
+if [[ -n "${requested_uv_bin}" ]]; then
+    if [[ ! -x "${requested_uv_bin}" ]]; then
+        echo "UV_BIN is not executable: ${requested_uv_bin}" >&2
+        exit 2
+    fi
+    resolved_uv_bin="$(cd "$(dirname "${requested_uv_bin}")" && pwd)/$(basename "${requested_uv_bin}")"
+elif command -v uv >/dev/null 2>&1; then
+    resolved_uv_bin="$(command -v uv)"
+else
+    for candidate in "${HOME}/.local/bin/uv" "${HOME}/.cargo/bin/uv"; do
+        if [[ -x "${candidate}" ]]; then
+            resolved_uv_bin="${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -z "${resolved_uv_bin}" ]]; then
+    echo "uv is required but was not found; install it or set UV_BIN" >&2
+    exit 2
+fi
+UV_BIN="${resolved_uv_bin}"
+export UV_BIN
+export PATH="$(dirname "${UV_BIN}"):${PATH}"
+
 gym_absolute_path() {
     case "$1" in
         /*) printf '%s\n' "$1" ;;
@@ -238,6 +268,7 @@ TASK_PARITY_REPORT=${TASK_PARITY_REPORT}
 RAY_TMPDIR=${RAY_TMPDIR}
 RAY_TMPDIR_REQUESTED=${RAY_TMPDIR_REQUESTED}
 SERVER_VENV_ROOT=${SERVER_VENV_ROOT}
+UV_BIN=${UV_BIN}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
 VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
@@ -259,6 +290,7 @@ echo "ray tmp:     ${RAY_TMPDIR}"
 if [[ -n "${SERVER_VENV_ROOT}" ]]; then
     echo "server venv: ${SERVER_VENV_ROOT}"
 fi
+echo "uv:          ${UV_BIN}"
 if [[ -n "${MAX_STEPS}" ]]; then
     echo "max steps:   ${MAX_STEPS}"
 fi
