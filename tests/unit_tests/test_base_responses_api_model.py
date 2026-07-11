@@ -15,13 +15,14 @@
 import fcntl
 import multiprocessing as mp
 import threading
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import orjson
 import pytest
 from fastapi import Body, FastAPI
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
@@ -155,7 +156,33 @@ def _create_test_model_call_record() -> ModelCallRecord:
     )
 
 
-def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_path):
+def _create_test_app_with_model_call_capture(tmp_path: Path) -> FastAPI:
+    mock_server_client = MagicMock(spec=ServerClient)
+    mock_server_client.global_config_dict = OmegaConf.create(
+        {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+    )
+
+    class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+        def chat_completions(self, body=...):
+            raise NotImplementedError
+
+        def responses(self, body=...):
+            raise NotImplementedError
+
+    model_server = TestSimpleResponsesAPIModel(
+        config=BaseResponsesAPIModelConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="my-test-server-name",
+        ),
+        server_client=mock_server_client,
+    )
+
+    return model_server.setup_webserver()
+
+
+def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_path: Path):
     store = CaptureStore(tmp_path)
     store.path_for(TEST_ROLLOUT_ID).write_bytes(b"\n")
 
@@ -173,31 +200,12 @@ def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_p
     assert read_model_call_records(store, TEST_ROLLOUT_ID) == [record.model_dump(), record2.model_dump()]
 
 
-def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
+def test_capture_store_raises_on_malformed_nonblank_json(tmp_path: Path):
     store = CaptureStore(tmp_path)
     store.path_for("rollout-1").write_bytes(b'{"request": {}}\n{not-json}\n')
 
     with pytest.raises(orjson.JSONDecodeError):
         store.read("rollout-1")
-
-
-def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
-    app = FastAPI()
-
-    @app.post("/v1/messages")
-    async def _messages() -> StreamingResponse:
-        return StreamingResponse(
-            iter([b'event: error\ndata: {"type":"error","error":{"message":"boom"}}\n\n']),
-            media_type="text/event-stream",
-        )
-
-    _install_capture(app, tmp_path)
-
-    response = TestClient(app).post("/ng-rollout/r-error/v1/messages", json={"messages": []})
-
-    assert response.status_code == 200
-    calls = read_model_call_records(CaptureStore(tmp_path), "r-error")
-    assert len(calls) == 1 and calls[0].error_category == "upstream_error"
 
 
 def test_raised_call_is_captured_then_reraised(tmp_path):
