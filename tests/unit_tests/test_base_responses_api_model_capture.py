@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType
 
 import orjson
 import pytest
@@ -21,6 +21,7 @@ from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
+from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallCaptureConfig,
@@ -29,7 +30,7 @@ from nemo_gym.base_responses_api_model import (
     make_capture_store,
     read_model_call_records,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
@@ -304,27 +305,12 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     assert CaptureStore(tmp_path).read("abc") == []  # non-observed path -> routed, not captured
 
 
-def test_apply_rollout_prefix_is_uniform_and_round_trips_with_server_parser():
-    """The shared agent-side builder accepts a server root and round-trips with the parser."""
-    from nemo_gym.base_responses_api_model import _ROLLOUT_PATH_RE
-    from nemo_gym.server_utils import apply_rollout_prefix, rollout_path_prefix
-
-    assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
-    assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
-    assert rollout_path_prefix(None) == ""
-
-    # Producer (agent) and consumer (server) agree: a prefixed call round-trips to the id + /v1 path.
-    client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
-    match = _ROLLOUT_PATH_RE.match(client_path)
-    assert match and match.group("rollout_id") == "task-7" and match.group("rest") == "/v1/chat/completions"
-
-
 def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
     from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -526,18 +512,21 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
 
 
 # --- base-agent correlation helpers ---
-def test_base_agent_resolve_model_base_url(monkeypatch):
-    import nemo_gym.base_responses_api_agent as ba
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-
-    monkeypatch.setattr(ba, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
-    fake_self = SimpleNamespace(
-        server_client=SimpleNamespace(global_config_dict={}, _build_server_base_url=lambda _cfg: "http://h:1"),
+def test_base_agent_resolve_model_call_path():
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
     )
+    assert with_id == "http://my-test-url/v1"
 
-    with_id = SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", "rid")
-    assert with_id == "http://h:1/ng-rollout/rid/v1"
-    assert SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", None) == "http://h:1/v1"
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+    )
+    assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
+
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+    )
+    assert with_id == "/v1/responses/ng-rollout/2-4"
 
 
 def _sse(event_type: str, data: dict) -> bytes:
@@ -713,7 +702,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.server_utils import maybe_rollout_id_from_run_body
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
