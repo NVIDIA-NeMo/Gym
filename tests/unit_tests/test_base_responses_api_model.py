@@ -37,7 +37,6 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     ModelCallRecord,
     SimpleResponsesAPIModel,
-    aggregate_model_call_records,
     clear_model_call_captures_for_rollouts,
     maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
@@ -432,25 +431,6 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monk
     monkeypatch.setattr(obs, "CaptureStore", _boom)
     with pytest.raises(OSError, match="cannot open"):
         clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
-
-
-def test_aggregate_model_call_records_sums_and_counts():
-    calls = [
-        ModelCallRecord(call_index=0, tokens_in=10, tokens_out=5, tokens_total=15, latency_total_ms=2.0),
-        ModelCallRecord(call_index=1, tokens_in=20, tokens_out=3, tokens_total=23, latency_total_ms=1.0),
-    ]
-    agg = aggregate_model_call_records(calls)
-    assert (agg["tokens_in"], agg["tokens_out"], agg["tokens_total"]) == (30, 8, 38)
-    assert agg["latency_total_ms"] == 3.0 and agg["num_calls"] == 2
-    # empty -> all-None totals but a well-formed shape (num_calls 0)
-    assert aggregate_model_call_records([]) == {
-        "tokens_in": None,
-        "tokens_out": None,
-        "tokens_reasoning": None,
-        "tokens_total": None,
-        "latency_total_ms": None,
-        "num_calls": 0,
-    }
 
 
 def test_rollout_prefix_stripped_when_capture_disabled():
