@@ -6,7 +6,7 @@
 # This script prepares the required host tools:
 #
 #   1. apt install: docker.io + (recording stack) ffmpeg + xvfb + tigervnc-viewer
-#                   + git/curl/unzip
+#                   + git/curl/unzip + native-extension build prerequisites
 #   2. enable docker daemon + add $USER to docker group
 #   3. install uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 #   4. symlink uv into /usr/local/bin so ng_run's non-interactive `bash -c`
@@ -50,6 +50,9 @@ command -v unzip           >/dev/null || need_pkgs+=(unzip)
 command -v ffmpeg          >/dev/null || need_pkgs+=(ffmpeg)
 command -v Xvfb            >/dev/null || need_pkgs+=(xvfb)
 command -v xtigervncviewer >/dev/null || need_pkgs+=(tigervnc-viewer)
+command -v gcc             >/dev/null || need_pkgs+=(build-essential)
+python3 -c 'import pathlib, sysconfig; raise SystemExit(not pathlib.Path(sysconfig.get_path("include"), "Python.h").is_file())' \
+    >/dev/null 2>&1 || need_pkgs+=(python3-dev)
 if [ ${#need_pkgs[@]} -gt 0 ]; then
     echo "installing: ${need_pkgs[*]}"
     sudo apt-get update -y
@@ -124,6 +127,9 @@ command -v uv              >/dev/null && chk "uv"            "$(uv --version)"  
 command -v ffmpeg          >/dev/null && chk "ffmpeg"        "OK"                  ok || chk "ffmpeg"        "MISSING (recording disabled)" ok
 command -v Xvfb            >/dev/null && chk "Xvfb"          "OK"                  ok || chk "Xvfb"          "MISSING (recording disabled)" ok
 command -v xtigervncviewer >/dev/null && chk "tigervncviewer" "OK"                 ok || chk "tigervncviewer" "MISSING (recording disabled)" ok
+command -v gcc             >/dev/null && chk "native compiler" "gcc $(gcc -dumpfullversion -dumpversion)" ok || chk "native compiler" "MISSING" fail
+python3 -c 'import pathlib, sysconfig; raise SystemExit(not pathlib.Path(sysconfig.get_path("include"), "Python.h").is_file())' \
+    >/dev/null 2>&1 && chk "Python.h" "PRESENT" ok || chk "Python.h" "MISSING" fail
 echo
 echo "  $ok OK, $fail FAIL"
 

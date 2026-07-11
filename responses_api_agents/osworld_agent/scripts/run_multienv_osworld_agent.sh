@@ -64,7 +64,27 @@ TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
 TASK_PARITY_IDS_FILE="${TASK_PARITY_IDS_FILE:-}"
 TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-${RUN_DIR}/task-input-parity.json}"
 
-mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")"
+# Ray appends a long session/sockets suffix to its temp root. Linux limits
+# AF_UNIX socket paths to 107 bytes, so a descriptive absolute run directory
+# can otherwise fail before either Gym server starts. Keep an explicit short,
+# per-run temp root and replace only caller-provided values that cannot fit.
+RAY_TMPDIR_REQUESTED="${RAY_TMPDIR:-}"
+ray_run_key="$(printf '%s' "${RUN_TAG}" | sha256sum | cut -c1-12)"
+short_ray_tmpdir="/tmp/ngray-${ray_run_key}"
+if [[ -n "${RAY_TMPDIR_REQUESTED}" ]]; then
+    ray_socket_probe="${RAY_TMPDIR_REQUESTED%/}/ray/session_2099-12-31_23-59-59_999999_999999/sockets/plasma_store"
+    if (( ${#ray_socket_probe} > 107 )); then
+        echo "WARNING: RAY_TMPDIR is too long for Ray AF_UNIX sockets; using ${short_ray_tmpdir} instead of ${RAY_TMPDIR_REQUESTED}" >&2
+        RAY_TMPDIR="${short_ray_tmpdir}"
+    else
+        RAY_TMPDIR="${RAY_TMPDIR_REQUESTED}"
+    fi
+else
+    RAY_TMPDIR="${short_ray_tmpdir}"
+fi
+export RAY_TMPDIR
+
+mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")" "${RAY_TMPDIR}"
 
 if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then
     parity_cmd=(
@@ -207,6 +227,8 @@ OSWORLD_VM_EXEC_LOG=${OSWORLD_VM_EXEC_LOG:-}
 TASK_PARITY_REFERENCE_INPUT=${TASK_PARITY_REFERENCE_INPUT}
 TASK_PARITY_IDS_FILE=${TASK_PARITY_IDS_FILE}
 TASK_PARITY_REPORT=${TASK_PARITY_REPORT}
+RAY_TMPDIR=${RAY_TMPDIR}
+RAY_TMPDIR_REQUESTED=${RAY_TMPDIR_REQUESTED}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
 VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
@@ -224,6 +246,7 @@ echo "limit:       ${LIMIT}"
 echo "num envs:    ${NUM_ENVS}"
 echo "parallel:    ${NUM_SAMPLES_IN_PARALLEL}"
 echo "resume:      ${RESUME_FROM_CACHE}"
+echo "ray tmp:     ${RAY_TMPDIR}"
 if [[ -n "${MAX_STEPS}" ]]; then
     echo "max steps:   ${MAX_STEPS}"
 fi
