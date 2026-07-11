@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import orjson
@@ -34,13 +34,13 @@ from nemo_gym.base_responses_api_model import (
     make_capture_store,
     read_model_call_records,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
 
 
 class TestBaseResponsesAPIModel:
@@ -547,21 +547,33 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
 
 
 # --- base-agent correlation helpers ---
-def test_base_agent_resolve_model_call_path():
-    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
-    )
-    assert with_id == "http://my-test-url/v1"
+def test_leading_rollout_prefix_round_trips_with_server_parser():
+    from nemo_gym.base_responses_api_model import _ROLLOUT_PATH_RE
 
-    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
-    )
-    assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
+    assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
+    assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
+    assert rollout_path_prefix(None) == ""
 
-    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+    client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
+    match = _ROLLOUT_PATH_RE.match(client_path)
+    assert match is not None
+    assert match.group("rollout_id") == "task-7"
+    assert match.group("rest") == "/v1/chat/completions"
+
+
+def test_base_agent_resolve_model_base_url(monkeypatch):
+    import nemo_gym.base_responses_api_agent as base_agent
+
+    monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
+    agent = SimpleNamespace(
+        server_client=SimpleNamespace(
+            global_config_dict={},
+            _build_server_base_url=lambda _config: "http://h:1",
+        )
     )
-    assert with_id == "/v1/responses/ng-rollout/2-4"
+
+    assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid") == "http://h:1/ng-rollout/rid/v1"
+    assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
 
 
 def _sse(event_type: str, data: dict) -> bytes:
