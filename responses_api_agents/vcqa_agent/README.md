@@ -54,7 +54,8 @@ gym dataset download \
 
 `data/example.jsonl` is included as a schema example. The example rows use
 representative artifact keys and are not a substitute for the private dataset
-artifacts.
+artifacts. `data/example_rollouts.jsonl` contains five generated rollout rows
+with populated reward and judge fields for quick inspection.
 
 ## Input Schema
 
