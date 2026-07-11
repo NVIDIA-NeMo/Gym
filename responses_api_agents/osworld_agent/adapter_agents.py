@@ -687,9 +687,7 @@ class NemotronV3Agent:
                 }
             )
             retry_temperature = (
-                max(0.2, self.temperature)
-                if self.parse_retry_temperature is None
-                else self.parse_retry_temperature
+                max(0.2, self.temperature) if self.parse_retry_temperature is None else self.parse_retry_temperature
             )
             payload: Dict[str, Any] = {
                 "model": self.model,

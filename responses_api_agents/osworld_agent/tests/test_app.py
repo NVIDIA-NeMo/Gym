@@ -141,7 +141,7 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
     call = _build_messages_model_fn(
         base_url="http://policy/v1",
         model_name="policy",
-        api_key="test-key",
+        api_key="test-key",  # pragma: allowlist secret
         log_context={"run_id": "run-001", "adapter": "gym", "task_id": "task-001"},
     )
     messages = [{"role": "user", "content": [{"type": "text", "text": "inspect"}]}]

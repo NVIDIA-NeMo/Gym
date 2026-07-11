@@ -113,13 +113,7 @@ def test_parse_nemotron_accepts_explicit_code_without_descriptive_action() -> No
 
 def test_parse_nemotron_accepts_inline_thought_when_reasoning_is_not_separate() -> None:
     action, commands, info = parse_nemotron_response(
-        {
-            "content": (
-                "## Thought: The target is visible.\n"
-                "## Action: Click it.\n"
-                "## Code: pyautogui.click(0.5, 0.25)"
-            )
-        },
+        {"content": ("## Thought: The target is visible.\n## Action: Click it.\n## Code: pyautogui.click(0.5, 0.25)")},
         screen_size=(1920, 1080),
         coordinate_type="relative",
         thinking=False,
@@ -381,7 +375,7 @@ def test_omni_agent_retries_invalid_python_with_feedback_and_lower_temperature(m
     payloads: List[Dict[str, Any]] = []
     responses = [
         {
-            "content": "## Action:\nType a URL.\n## Code:\n```python\npyautogui.write(\"unterminated)\n```",
+            "content": '## Action:\nType a URL.\n## Code:\n```python\npyautogui.write("unterminated)\n```',
             "reasoning_content": "The first response contains invalid Python.",
         },
         {

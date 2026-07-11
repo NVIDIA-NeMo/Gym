@@ -115,8 +115,7 @@ def compare_inputs(
                 "left_sha256": _digest(left_task),
                 "right_sha256": _digest(right_task),
                 "field_differences": {
-                    field: {"left": left_task.get(field), "right": right_task.get(field)}
-                    for field in changed_fields
+                    field: {"left": left_task.get(field), "right": right_task.get(field)} for field in changed_fields
                 },
             }
         )
