@@ -20,7 +20,6 @@ convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
 import re
-from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -447,12 +446,12 @@ class ResponsesConverter(BaseModel):
 
     def chat_completion_to_response(
         self,
-        chat_completion_create_params: NeMoGymChatCompletionCreateParamsNonStreaming,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
         chat_completion: NeMoGymChatCompletion,
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
-        response_output = self._converter.postprocess_chat_response(choice)
+        response_output = self.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = None
@@ -474,30 +473,30 @@ class ResponsesConverter(BaseModel):
         # Chat Completion -> Response
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=chat_completion_create_params.model,
+            created_at=chat_completion.created,
+            model=responses_create_params.model,
             object="response",
             output=response_output_dicts,
-            tool_choice=chat_completion_create_params.tool_choice
-            if chat_completion_create_params.tool_choice is not None
+            tool_choice=responses_create_params.tool_choice
+            if responses_create_params.tool_choice is not None
             else "auto",
-            parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
-            tools=chat_completion_create_params.tools,
-            temperature=chat_completion_create_params.temperature,
-            top_p=chat_completion_create_params.top_p,
-            background=chat_completion_create_params.background,
-            max_output_tokens=chat_completion_create_params.max_output_tokens,
-            max_tool_calls=chat_completion_create_params.max_tool_calls,
-            previous_response_id=chat_completion_create_params.previous_response_id,
-            prompt=chat_completion_create_params.prompt,
-            reasoning=chat_completion_create_params.reasoning,
-            service_tier=chat_completion_create_params.service_tier,
-            text=chat_completion_create_params.text,
-            top_logprobs=chat_completion_create_params.top_logprobs,
-            truncation=chat_completion_create_params.truncation,
-            metadata=chat_completion_create_params.metadata,
-            instructions=chat_completion_create_params.instructions,
-            user=chat_completion_create_params.user,
+            parallel_tool_calls=responses_create_params.parallel_tool_calls,
+            tools=responses_create_params.tools,
+            temperature=responses_create_params.temperature,
+            top_p=responses_create_params.top_p,
+            background=responses_create_params.background,
+            max_output_tokens=responses_create_params.max_output_tokens,
+            max_tool_calls=responses_create_params.max_tool_calls,
+            previous_response_id=responses_create_params.previous_response_id,
+            prompt=responses_create_params.prompt,
+            reasoning=responses_create_params.reasoning,
+            service_tier=responses_create_params.service_tier,
+            text=responses_create_params.text,
+            top_logprobs=responses_create_params.top_logprobs,
+            truncation=responses_create_params.truncation,
+            metadata=responses_create_params.metadata,
+            instructions=responses_create_params.instructions,
+            user=responses_create_params.user,
             incomplete_details=incomplete_details,
             usage=usage,
         )
