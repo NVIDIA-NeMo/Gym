@@ -362,7 +362,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
-def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
+def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path: Path):
     store = CaptureStore(tmp_path)
 
     record1 = _create_test_model_call_record()
@@ -389,7 +389,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert record["response"]["temperature"] == 0.95 and record["reward"] == 1.0
 
 
-def test_merge_capture_noop_without_capture(tmp_path):
+def test_merge_capture_noop_without_capture(tmp_path: Path):
     rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
     merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
     assert "ng_model_call_capture" not in rec
@@ -397,7 +397,7 @@ def test_merge_capture_noop_without_capture(tmp_path):
     assert "ng_model_call_capture" not in rec
 
 
-def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
+def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path: Path):
     store = CaptureStore(tmp_path)
     store.path_for("9-9").write_bytes(b"{not-json}\n")
     record = {"_ng_task_index": 9, "_ng_rollout_index": 9}
@@ -407,10 +407,16 @@ def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
         merge_model_call_capture_into_record(record, [tmp_path])
 
 
-def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
+def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monkeypatch: MonkeyPatch):
     store = CaptureStore(tmp_path)
-    store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
-    store.record("1-0", {"dialect": "chat", "request": {}, "response": {}})
+
+    record1 = _create_test_model_call_record()
+    record1.rollout_id = "0-0"
+    store.record(record1)
+    record2 = _create_test_model_call_record()
+    record2.rollout_id = "1-0"
+    store.record(record2)
+
     assert store.read("0-0") and store.read("1-0")
 
     # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
