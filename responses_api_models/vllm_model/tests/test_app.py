@@ -821,7 +821,6 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
@@ -979,7 +978,6 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
@@ -1236,7 +1234,6 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
@@ -1381,7 +1378,6 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -1767,7 +1763,6 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
@@ -2226,7 +2221,6 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
@@ -2561,7 +2555,6 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
@@ -2700,7 +2693,6 @@ class TestVLLMConverter:
         ChatCompletion output -> Response output
         """
 
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
@@ -2731,7 +2723,6 @@ class TestVLLMConverter:
         assert main_content_none == "Just plain content here."
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -3025,7 +3016,6 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump()
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
