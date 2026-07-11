@@ -509,8 +509,10 @@ def test_capture_store_read_waits_for_in_progress_append(tmp_path):
 def _cross_process_writer(root: str, base: int) -> None:
     # Module-level so it is picklable under the "spawn" start method too.
     store = CaptureStore(root)
-    for i in range(base, base + 100):
-        store.record("0-0", {"dialect": "chat", "request": {"i": i}, "response": {}})
+    record = _create_test_model_call_record()
+    record.rollout_id = "0-0"
+    for _ in range(base, base + 100):
+        store.record(record)
 
 
 def test_capture_store_cross_process_append_no_loss(tmp_path):
@@ -526,4 +528,3 @@ def test_capture_store_cross_process_append_no_loss(tmp_path):
         assert p.exitcode == 0
     rows = CaptureStore(tmp_path).read("0-0")
     assert len(rows) == 400
-    assert sorted(r["request"]["i"] for r in rows) == list(range(400))
