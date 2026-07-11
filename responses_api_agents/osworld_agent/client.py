@@ -1192,7 +1192,7 @@ def run_osworld_task(
                 native_agent.reset(task_logger, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
                 native_agent.reset(task_logger)
-        elif runner_spec.kind in {"nemotron_v3_agent", "omni_mini_agent"}:
+        elif runner_spec.kind == "nemotron_v3_nano_omni_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
             if messages_model_fn is None:

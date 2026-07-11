@@ -20,8 +20,7 @@ RunnerKind = Literal[
     "prompt_agent",
     "pointer_agent",
     "m3_agent",
-    "nemotron_v3_agent",
-    "omni_mini_agent",
+    "nemotron_v3_nano_omni_agent",
     "qwen3_omni_agent",
 ]
 
@@ -45,8 +44,9 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 _M3_AGENT = "mm_agents.m3.M3Agent"
-_NEMOTRON_V3_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronV3Agent"
-_OMNI_MINI_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronOmniAgent"
+_NEMOTRON_V3_NANO_OMNI_AGENT = (
+    "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
+)
 _QWEN3_OMNI_AGENT = "mm_agents.qwen3vl_agent.Qwen3VLAgent"
 
 
@@ -132,26 +132,12 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
     ),
     # Nemotron's prompt, history, parser, and coordinate projection live in
     # the Gym adapter so the OSWorld dependency remains unmodified.
-    "nemotron_v3_agent": RunnerSpec(
-        name="nemotron_v3_agent",
-        kind="nemotron_v3_agent",
+    "nemotron_v3_nano_omni_agent": RunnerSpec(
+        name="nemotron_v3_nano_omni_agent",
+        kind="nemotron_v3_nano_omni_agent",
         action_space="pyautogui",
         observation_type="screenshot",
-        agent_class_path=_NEMOTRON_V3_AGENT,
-        agent_kwargs={
-            "coordinate_type": "relative",
-            "thinking": True,
-        },
-    ),
-    # Nemotron 3 Nano Omni uses the Nemotron GUI protocol but its hosted
-    # endpoint accepts at most one image per prompt. The Gym-owned scaffold
-    # keeps prior interactions as text and sends only the current screenshot.
-    "omni_mini_agent": RunnerSpec(
-        name="omni_mini_agent",
-        kind="omni_mini_agent",
-        action_space="pyautogui",
-        observation_type="screenshot",
-        agent_class_path=_OMNI_MINI_AGENT,
+        agent_class_path=_NEMOTRON_V3_NANO_OMNI_AGENT,
         agent_kwargs={
             "coordinate_type": "relative",
             "thinking": True,
@@ -159,8 +145,8 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
     ),
     # Upstream OSWorld contains Qwen3VLAgent. Gym owns its transport/retry
     # compatibility for Qwen3-Omni instead of carrying direct model HTTP calls
-    # in OSWorld. This runner is intentionally not used for Omni Mini because
-    # the two models have different prompts, output protocols, and image limits.
+    # in OSWorld. This runner is intentionally not used for Nemotron 3 Nano
+    # Omni because the models have different prompts and output protocols.
     "qwen3_omni_agent": RunnerSpec(
         name="qwen3_omni_agent",
         kind="qwen3_omni_agent",

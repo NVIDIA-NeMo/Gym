@@ -1,27 +1,23 @@
-# Nemotron 3 Nano Omni overlay. The Gym adapter sends one current screenshot,
-# retains bounded text-only history, and parses the model's ## Action/## Code
-# protocol. Select an OpenAI-compatible model transport in a separate config;
-# this overlay intentionally does not create a competing policy model.
+# Nemotron 3 Nano Omni overlay. The Gym adapter retains at most three images
+# (the current screenshot plus up to two historical screenshots) and compacts
+# older interactions into text. Select an OpenAI-compatible model transport in
+# a separate config; this overlay intentionally does not create a competing
+# policy model.
 
 osworld_simple_agent:
   responses_api_agents:
     osworld_agent:
-      runner_name: omni_mini_agent
+      runner_name: nemotron_v3_nano_omni_agent
       provider_name: docker
       max_steps: 100
       max_trajectory_length: 3
-      max_tokens: 8192
+      max_tokens: 4096
       temperature: 0.6
       top_p: 0.95
-      sleep_after_execution: 1.0
-      task_timeout: 3600
+      sleep_after_execution: 5.0
+      task_timeout: 7200
       agent_kwargs:
         coordinate_type: relative
-        max_text_history_length: 3
+        max_image_history_length: 3
         thinking: true
         parse_retries: 5
-        parse_error_feedback: true
-        parse_retry_temperature: 0.2
-        pre_done_checklist: true
-        repeated_action_warning_threshold: 3
-        repeated_action_window: 12

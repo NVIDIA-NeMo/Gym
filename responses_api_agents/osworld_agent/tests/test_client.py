@@ -643,7 +643,7 @@ def test_m3_agent_runner_uses_messages_endpoint_and_native_predict_loop(monkeypa
     assert Path(agent.api_log_dirs[0]).is_relative_to(tmp_path)
 
 
-def test_omni_mini_runner_uses_gym_messages_transport(monkeypatch) -> None:
+def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     calls: List[Dict[str, Any]] = []
 
@@ -654,7 +654,7 @@ def test_omni_mini_runner_uses_gym_messages_transport(monkeypatch) -> None:
     result = osworld_client.run_osworld_task(
         {"id": "task-omni-mini", "instruction": "Use the Nemotron Omni scaffold."},
         model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("Nemotron should use messages_model_fn")),
-        runner_name="omni_mini_agent",
+        runner_name="nemotron_v3_nano_omni_agent",
         env_class_path="fake.FakeEnv",
         agent_class_path="fake.FakeNemotronAgent",
         messages_model_fn=messages_model_fn,

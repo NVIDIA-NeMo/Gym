@@ -12,16 +12,14 @@ provider.
 
 ### Agent ownership and terminology
 
-The module `adapter_agents.py` contains model-specific scaffolds owned by this
-Gym adapter: currently `NemotronV3Agent` and `NemotronOmniAgent`. They implement
-prompt construction, bounded history, response parsing, coordinate projection,
-and retry behavior around Gym's model transport. They are **not** the
-Internal/native OSWorld baseline and are **not** imported from upstream
-OSWorld's `mm_agents` package. Upstream-owned agents such as `PromptAgent`,
-`M3Agent`, `PointerAgent`, and `Qwen3VLAgent` remain identified explicitly in
-the runner table below. Upstream OSWorld does not currently define a Nano
-Omni-specific scaffold, so the Gym adapter supplies `NemotronOmniAgent` rather
-than pretending that another model's agent protocol is compatible.
+The module `adapter_agents.py` contains the model-specific scaffold owned by
+this Gym adapter: `NemotronV3NanoOmniAgent`. It implements prompt construction,
+bounded image history with text compaction, response parsing, coordinate
+projection, and retry behavior around Gym's model transport. Upstream OSWorld
+does not currently define a Nemotron 3 Nano Omni scaffold, so the adapter
+provides this class while continuing to use OSWorld's unmodified environment
+and evaluator. Upstream-owned agents such as `PromptAgent`, `M3Agent`,
+`PointerAgent`, and `Qwen3VLAgent` remain identified explicitly below.
 
 ## Requirements
 
@@ -89,8 +87,7 @@ Set `runner_name` in the agent config or pass an override to `ng_run`.
 | `prompt_agent_*` | Explicit PromptAgent observation/action combinations |
 | `pointer_agent` | OSWorld PointerAgent planner/executor/verifier loop |
 | `m3_agent` | OSWorld MiniMax M3 prompt, parser, and Anthropic-compatible transport |
-| `nemotron_v3_agent` | Gym-owned Nemotron prompt, history, parser, and coordinate projection |
-| `omni_mini_agent` | Nemotron 3 Nano Omni with one current image and bounded text history |
+| `nemotron_v3_nano_omni_agent` | Nemotron 3 Nano Omni prompt, bounded image history, parser, and coordinate projection |
 | `qwen3_omni_agent` | OSWorld Qwen3VL scaffold with Gym model transport |
 
 The adapter-owned Nemotron parser requires an explicit `## Code` section so it
@@ -174,9 +171,12 @@ The runner script performs a real image request before starting Gym. It uses
 the committed five-task example by default. Override `INPUT_JSONL`, `LIMIT`,
 `NUM_ENVS`, `RUN_DIR`, or `RESUME_FROM_CACHE` for larger runs.
 
-Omni Mini sends only the current screenshot and keeps prior interactions as
-bounded text. Qwen3-Omni uses a different tool-call protocol and therefore has
-its own `configs/osworld_agent_qwen3_omni.yaml` overlay.
+The default overlay sends the current screenshot plus at most two historical
+screenshots and compacts older interactions into text. For an endpoint limited
+to one image per request, use the same class and set
+`agent_kwargs.max_image_history_length: 1`; no alternate agent class is
+required. Qwen3-Omni uses a different tool-call protocol and therefore has its
+own `configs/osworld_agent_qwen3_omni.yaml` overlay.
 
 ## Multi-environment runs
 
@@ -237,10 +237,10 @@ overlays should be listed after the base config so their values win.
 Per-task `responses_create_params` override YAML sampling defaults. Explicit
 CLI overrides have the highest priority.
 
-The Nano Omni overlay additionally enables parser-error feedback at a lower
-retry temperature, a bounded repeated-action recovery hint, and an exact
-pre-DONE checklist. These controls live in `agent_kwargs`, so other runners and
-models retain their existing behavior.
+The Nano Omni overlay uses the tested three-image window, a 4096-token response
+limit, a five-second post-action wait, and parser retries. Optional parser-error
+feedback, repeated-action guidance, and a pre-DONE checklist are available in
+`agent_kwargs` without requiring another agent class.
 
 The response sets `mask_sample=true` when a timeout, evaluator error, or
 unfinished max-step rollout makes the reward unreliable.

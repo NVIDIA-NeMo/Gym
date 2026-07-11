@@ -175,7 +175,7 @@ def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) 
 
     configured_name = str(global_config.get("policy_model_name") or "").strip()
     runtime_name = os.environ.get("OSWORLD_POLICY_MODEL_NAME", "").strip()
-    if not runtime_name and runner_name == "omni_mini_agent":
+    if not runtime_name and runner_name == "nemotron_v3_nano_omni_agent":
         runtime_name = os.environ.get("OMNI_MINI_VLLM_MODEL", "").strip()
     if runtime_name:
         if configured_name and configured_name != runtime_name:
@@ -560,7 +560,7 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
         reasoning = getattr(message, "reasoning_content", None) or model_extra.get("reasoning_content") or ""
         # Gym's external-vLLM proxy must return a schema-valid OpenAI message,
         # so it wraps vLLM's separate reasoning field in <think> tags. Recover
-        # that field here for NemotronV3Agent, matching a direct vLLM call.
+        # that field here for NemotronV3NanoOmniAgent, matching a direct vLLM call.
         if not reasoning:
             think_match = re.match(
                 r"^\s*<think(?:ing)?>\s*(.*?)\s*</think(?:ing)?>\s*",

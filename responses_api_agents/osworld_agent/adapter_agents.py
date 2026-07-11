@@ -4,13 +4,12 @@
 
 The adapter owns model-specific prompting, history, parsing, and coordinate
 projection while OSWorld continues to own ``DesktopEnv`` and task evaluation.
-``NemotronOmniAgent`` specializes the protocol for Nemotron 3 Nano Omni,
-which accepts one image per prompt.
+``NemotronV3NanoOmniAgent`` supports both image-history and single-image
+endpoints through configuration.
 
-This module is intentionally named ``adapter_agents``: these classes are not
-the Internal/native OSWorld baseline and do not come from the upstream
-``mm_agents`` package. They are model-specific scaffolds implemented by the
-Gym adapter around an otherwise unmodified OSWorld environment.
+This module is intentionally named ``adapter_agents`` because the model-specific
+scaffold is implemented by the Gym adapter rather than upstream OSWorld's
+``mm_agents`` package. OSWorld's environment and evaluator remain unmodified.
 """
 
 from __future__ import annotations
@@ -114,32 +113,6 @@ For each step, provide your response in this format:
 In the code section, the code should be either pyautogui code or one of the following functions wrapped in the code block:
 - {"name": "computer.wait", "description": "Make the computer wait for 20 seconds for installation, running code, etc.", "parameters": {"type": "object", "properties": {}, "required": []}}
 - {"name": "computer.terminate", "description": "Terminate the current task and report its completion status", "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["success", "failure"], "description": "The status of the task"}, "answer": {"type": "string", "description": "The answer of the task"}}, "required": ["status"]}}
-""".strip()
-
-OMNI_MINI_SYSTEM_PROMPT = """
-You are a GUI agent. You are given an instruction, a screenshot of the screen,
-and your previous interactions with the computer. You need to perform a series
-of actions to complete the task. The password of the computer is __PASSWORD__.
-
-For each step, provide your response in exactly this format:
-{thought}
-## Action:
-{a concise description of the next action}
-## Code:
-```python
-{code}
-```
-
-In the code section, return either pyautogui code or exactly one of the two
-function calls below. Use absolute pixel coordinates from the 1920x1080
-screenshot. Do not use pyautogui.screenshot() or image matching. Prefer one
-short, verifiable action per turn. Every code block must be self-contained.
-
-- Wait: {"name":"computer.wait","arguments":{}}
-- Finish: {"name":"computer.terminate","arguments":{"status":"success","answer":"optional answer"}}
-- Give up only when impossible: {"name":"computer.terminate","arguments":{"status":"failure","answer":"reason"}}
-
-Do not claim success until the visible UI confirms the requested final state.
 """.strip()
 
 _CODE_BLOCK_RE = re.compile(r"```(?:code|python|py|json)?[ \t]*\r?\n?(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -466,8 +439,8 @@ def _validate_python_actions(actions: List[str]) -> None:
             raise ValueError(f"Invalid Python action: {exc.msg} (line {exc.lineno}, offset {exc.offset})") from exc
 
 
-class NemotronV3Agent:
-    """Nemotron GUI scaffold with a Gym-injected model transport."""
+class NemotronV3NanoOmniAgent:
+    """Nemotron Nano Omni scaffold with a Gym-injected model transport."""
 
     def __init__(
         self,
@@ -496,9 +469,9 @@ class NemotronV3Agent:
         if coordinate_type not in {"relative", "absolute", "qwen25"}:
             raise ValueError(f"Unsupported coordinate_type: {coordinate_type}")
         if action_space != "pyautogui":
-            raise ValueError("NemotronV3Agent only supports pyautogui")
+            raise ValueError("NemotronV3NanoOmniAgent only supports pyautogui")
         if observation_type != "screenshot":
-            raise ValueError("NemotronV3Agent only supports screenshot observations")
+            raise ValueError("NemotronV3NanoOmniAgent only supports screenshot observations")
 
         self.model = model
         self.platform = platform
@@ -540,7 +513,7 @@ class NemotronV3Agent:
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
 
-        raise RuntimeError("NemotronV3Agent requires an injected Gym model transport")
+        raise RuntimeError("NemotronV3NanoOmniAgent requires an injected Gym model transport")
 
     def _log_event_context(self, *, step: int, parse_attempt: int) -> Dict[str, Any]:
         context = dict(self.log_context)
@@ -655,6 +628,9 @@ class NemotronV3Agent:
         if image_history == 0 and text_history:
             current_text += text_history + "\n"
         current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
+        guidance = self._step_guidance()
+        if guidance:
+            current_text += f"\n{guidance}\n"
         messages.append(
             {
                 "role": "user",
@@ -783,71 +759,3 @@ class NemotronV3Agent:
             parsed_info["code"] = "FAIL"
             return content, ["FAIL"], parsed_info
         return content, actions, parsed_info
-
-
-class NemotronOmniAgent(NemotronV3Agent):
-    """Nemotron 3 Nano Omni scaffold with single-image prompt semantics.
-
-    Nemotron 3 Nano Omni rejects a request containing more than one
-    image. Previous interactions are therefore rendered as bounded text in
-    the system message; the current user message is the only image-bearing
-    turn. This is deliberately separate from Qwen3-Omni's ``Qwen3VLAgent``:
-    Qwen uses a different ``<tool_call>`` protocol and image-history policy.
-    """
-
-    def __init__(
-        self,
-        *args: Any,
-        max_text_history_length: int | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self.system_prompt = OMNI_MINI_SYSTEM_PROMPT.replace("__PASSWORD__", self.client_password)
-        configured_length = (
-            self.max_image_history_length if max_text_history_length is None else max_text_history_length
-        )
-        self.max_text_history_length = max(0, int(configured_length))
-
-    @staticmethod
-    def _render_history_entry(cot: Dict[str, Any]) -> str:
-        parts = []
-        for label, key in (("Thought", "thought"), ("Action", "action"), ("Code", "code")):
-            value = str(cot.get(key, "") or "").strip()
-            if value:
-                parts.append(f"{label}: {value}")
-        return "\n".join(parts) or "No valid action was recorded."
-
-    def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
-        history = self.cots[-self.max_text_history_length :] if self.max_text_history_length else []
-        system_prompt = self.system_prompt
-        if history:
-            rendered = []
-            first_step = len(self.cots) - len(history) + 1
-            for step_num, cot in enumerate(history, first_step):
-                # Bound each record so a long reasoning trace cannot crowd the
-                # current screenshot and instruction out of the context.
-                entry = self._render_history_entry(cot)[-4000:]
-                rendered.append(f"Previous interaction {step_num}:\n{entry}")
-            system_prompt += (
-                "\n\nPrevious interactions (text only; the user message below contains "
-                "the sole current screenshot):\n" + "\n\n".join(rendered)
-            )
-
-        current_text = INSTRUCTION_TEMPLATE.format(instruction=instruction)
-        current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
-        guidance = self._step_guidance()
-        if guidance:
-            current_text += f"\n{guidance}\n"
-        return [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{_encode_image(obs['screenshot'])}"},
-                    },
-                    {"type": "text", "text": current_text},
-                ],
-            },
-        ]

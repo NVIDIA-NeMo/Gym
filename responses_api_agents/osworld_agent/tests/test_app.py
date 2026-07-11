@@ -181,7 +181,7 @@ def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplo
     with caplog.at_level("WARNING"):
         resolved = _resolve_policy_model_name(
             {"policy_model_name": "azure/anthropic/claude-opus-4-7"},
-            "omni_mini_agent",
+            "nemotron_v3_nano_omni_agent",
         )
 
     assert resolved == "nvidia/nemotron-3-nano-omni"

@@ -28,7 +28,7 @@ if [[ "${PREFLIGHT}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
 fi
 
 export GYM_ROOT
-export RUNNER_NAME="${RUNNER_NAME:-omni_mini_agent}"
+export RUNNER_NAME="${RUNNER_NAME:-nemotron_v3_nano_omni_agent}"
 export INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
 export LIMIT="${LIMIT:-5}"
 export NUM_ENVS="${NUM_ENVS:-1}"

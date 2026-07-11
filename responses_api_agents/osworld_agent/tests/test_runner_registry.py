@@ -63,22 +63,14 @@ def test_m3_agent_runner_uses_official_osworld_scaffold() -> None:
     assert spec.observation_type == "screenshot"
 
 
-def test_nemotron_v3_runner_is_owned_by_the_gym_adapter() -> None:
-    spec = resolve_runner_spec("nemotron_v3_agent")
+def test_nemotron_v3_nano_omni_runner_is_owned_by_the_gym_adapter() -> None:
+    spec = resolve_runner_spec("nemotron_v3_nano_omni_agent")
 
-    assert spec.kind == "nemotron_v3_agent"
-    assert spec.agent_class_path == "responses_api_agents.osworld_agent.adapter_agents.NemotronV3Agent"
-    assert spec.action_space == "pyautogui"
-    assert spec.observation_type == "screenshot"
-    assert spec.agent_kwargs["coordinate_type"] == "relative"
-    assert spec.agent_kwargs["thinking"] is True
-
-
-def test_omni_mini_runner_uses_single_image_gym_adapter() -> None:
-    spec = resolve_runner_spec("omni_mini_agent")
-
-    assert spec.kind == "omni_mini_agent"
-    assert spec.agent_class_path == "responses_api_agents.osworld_agent.adapter_agents.NemotronOmniAgent"
+    assert spec.kind == "nemotron_v3_nano_omni_agent"
+    assert (
+        spec.agent_class_path
+        == "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
+    )
     assert spec.action_space == "pyautogui"
     assert spec.observation_type == "screenshot"
     assert spec.agent_kwargs["coordinate_type"] == "relative"
@@ -115,8 +107,7 @@ def test_m3_config_overrides_the_osworld_server_config() -> None:
 @pytest.mark.parametrize(
     ("config_name", "runner_name", "max_steps", "max_tokens", "task_timeout"),
     [
-        ("osworld_agent_nemotron_v3.yaml", "nemotron_v3_agent", 100, 4096, 7200),
-        ("osworld_agent_omni_mini.yaml", "omni_mini_agent", 100, 8192, 3600),
+        ("osworld_agent_omni_mini.yaml", "nemotron_v3_nano_omni_agent", 100, 4096, 7200),
         ("osworld_agent_qwen3_omni.yaml", "qwen3_omni_agent", 100, 32768, 7200),
     ],
 )
@@ -143,13 +134,10 @@ def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
 
     assert "policy_model" not in config
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
-    assert server_config["runner_name"] == "omni_mini_agent"
+    assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
     assert server_config["agent_kwargs"]["thinking"] is True
-    assert server_config["agent_kwargs"]["parse_error_feedback"] is True
-    assert server_config["agent_kwargs"]["parse_retry_temperature"] == 0.2
-    assert server_config["agent_kwargs"]["pre_done_checklist"] is True
-    assert server_config["agent_kwargs"]["repeated_action_warning_threshold"] == 3
-    assert server_config["agent_kwargs"]["repeated_action_window"] == 12
+    assert server_config["agent_kwargs"]["max_image_history_length"] == 3
+    assert server_config["agent_kwargs"]["parse_retries"] == 5
 
 
 @pytest.mark.parametrize(

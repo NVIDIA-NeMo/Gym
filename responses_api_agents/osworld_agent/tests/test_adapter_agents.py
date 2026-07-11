@@ -10,8 +10,7 @@ from typing import Any, Dict, List
 import pytest
 
 from responses_api_agents.osworld_agent.adapter_agents import (
-    NemotronOmniAgent,
-    NemotronV3Agent,
+    NemotronV3NanoOmniAgent,
     normalize_python_code_newlines,
     normalize_response_content,
     parse_nemotron_response,
@@ -268,7 +267,7 @@ def test_parse_nemotron_response_repairs_structural_code_newlines() -> None:
 
 
 def test_nemotron_agent_routes_messages_and_compacts_old_images() -> None:
-    agent = NemotronV3Agent(
+    agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",
         max_steps=3,
         max_image_history_length=2,
@@ -321,7 +320,7 @@ def test_nemotron_agent_routes_messages_and_compacts_old_images() -> None:
 
 
 def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
-    agent = NemotronV3Agent(model="policy", max_steps=1)
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=1)
     agent.call_llm = lambda _payload, _model: {  # type: ignore[method-assign]
         "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
         "reasoning_content": "Try once.",
@@ -334,7 +333,7 @@ def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
 
 
 def test_nemotron_agent_retries_invalid_python_action() -> None:
-    agent = NemotronV3Agent(model="policy", max_steps=2, parse_retries=2)
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=2)
     responses = [
         {
             "content": ("## Action:\nClick.\n## Code:\n```python\npyautogui.click(]\n```"),
@@ -360,10 +359,10 @@ def test_nemotron_agent_retries_invalid_python_action() -> None:
     assert actions == ["pyautogui.click(960, 540)"]
 
 
-def test_omni_agent_retries_invalid_python_with_feedback_and_lower_temperature(monkeypatch, tmp_path) -> None:
+def test_nemotron_agent_retries_invalid_python_with_feedback_and_lower_temperature(monkeypatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
-    agent = NemotronOmniAgent(
+    agent = NemotronV3NanoOmniAgent(
         model="policy",
         max_steps=2,
         parse_retries=2,
@@ -416,10 +415,11 @@ def test_omni_agent_retries_invalid_python_with_feedback_and_lower_temperature(m
     assert rows[1]["pre_done_checklist_injected"] is True
 
 
-def test_omni_agent_warns_after_repeated_nontrivial_action() -> None:
-    agent = NemotronOmniAgent(
+def test_nemotron_agent_warns_after_repeated_nontrivial_action() -> None:
+    agent = NemotronV3NanoOmniAgent(
         model="policy",
         max_steps=10,
+        max_image_history_length=1,
         repeated_action_warning_threshold=3,
         repeated_action_window=6,
     )
@@ -436,7 +436,7 @@ def test_omni_agent_warns_after_repeated_nontrivial_action() -> None:
 def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
-    agent = NemotronV3Agent(
+    agent = NemotronV3NanoOmniAgent(
         model="policy",
         max_steps=2,
         parse_retries=2,
@@ -473,11 +473,11 @@ def test_nemotron_agent_logs_parse_error_and_success(monkeypatch, tmp_path) -> N
     assert rows[1]["parsed_actions"] == ["pyautogui.click(960, 540)"]
 
 
-def test_omni_mini_agent_sends_one_image_and_keeps_text_history() -> None:
-    agent = NemotronOmniAgent(
+def test_nemotron_agent_single_image_mode_keeps_text_history() -> None:
+    agent = NemotronV3NanoOmniAgent(
         model="nemotron-3-nano-omni",
         max_steps=3,
-        max_text_history_length=2,
+        max_image_history_length=1,
         max_tokens=8192,
         temperature=0.6,
         top_p=0.95,
@@ -504,7 +504,6 @@ def test_omni_mini_agent_sends_one_image_and_keeps_text_history() -> None:
     agent.call_llm = call_llm  # type: ignore[method-assign]
     obs = {"screenshot": b"fake-png"}
 
-    assert "absolute pixel coordinates from the 1920x1080" in agent.system_prompt
     assert agent.predict("Complete the task.", obs)[1] == ["pyautogui.click(960, 540)"]
     assert agent.predict("Complete the task.", obs)[1] == ["DONE"]
 
@@ -516,12 +515,13 @@ def test_omni_mini_agent_sends_one_image_and_keeps_text_history() -> None:
             if isinstance(part, dict) and part.get("type") == "image_url"
         ]
         assert len(image_parts) == 1
-    assert "Previous interactions (text only" in payloads[1]["messages"][0]["content"]
-    assert "Click settings." in payloads[1]["messages"][0]["content"]
+    second_user_text = payloads[1]["messages"][-1]["content"][-1]["text"]
+    assert "# Previous History Actions" in second_user_text
+    assert "Click settings." in second_user_text
 
 
 def test_nemotron_agent_sends_current_image_and_full_text_history() -> None:
-    agent = NemotronV3Agent(
+    agent = NemotronV3NanoOmniAgent(
         model="nemotron-3-nano-omni",
         max_steps=100,
         max_image_history_length=1,

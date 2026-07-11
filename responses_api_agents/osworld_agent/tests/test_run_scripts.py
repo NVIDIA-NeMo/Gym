@@ -100,4 +100,7 @@ def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> Non
     )
 
     assert '"preflight": "ok"' in completed.stdout
-    assert "responses_api_agents.osworld_agent.adapter_agents.NemotronOmniAgent" in completed.stdout
+    assert (
+        "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
+        in completed.stdout
+    )
