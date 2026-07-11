@@ -58,7 +58,7 @@ def _usage_metadata(trajectory: Trajectory) -> dict:
     """Derive the response usage metadata from a trajectory.
 
     The provider's end-of-run report is the authoritative total when present (summing it
-    with the per-turn usage would double count); otherwise the per-turn sums are used.
+    with the per-step usage would double count); otherwise the per-agent-step sums are used.
     """
     if trajectory.provider_usage:
         metadata = {
@@ -72,8 +72,9 @@ def _usage_metadata(trajectory: Trajectory) -> dict:
             "output_tokens": trajectory.usage.output_tokens,
             "cached_tokens": trajectory.usage.input_tokens_details.cached_tokens,
         }
-    if trajectory.num_turns is not None:
-        metadata["num_turns"] = trajectory.num_turns
+    if trajectory.num_agent_steps is not None:
+        # provider dialect: Claude Code reports agent steps as num_turns; keep the key
+        metadata["num_turns"] = trajectory.num_agent_steps
     return metadata
 
 

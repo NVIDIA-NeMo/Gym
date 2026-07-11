@@ -132,43 +132,43 @@ class TestTranscriptSource:
         assert trajectory.source == "transcript"
         assert trajectory.session_id == SESSION
         assert trajectory.model == "claude-sonnet-4-6"
-        assert [s.type for s in trajectory.steps] == ["user_message", "agent_turn", "agent_turn"]
-        user, turn1, turn2 = trajectory.steps
+        assert [s.type for s in trajectory.steps] == ["user_message", "agent_step", "agent_step"]
+        user, step1, step2 = trajectory.steps
         assert isinstance(user.items[0], NeMoGymEasyInputMessage)
         assert user.items[0].content == "fix the bug"
-        # one turn per API message: text + 2 tool calls + 2 tool outputs, all native items
-        assert [type(i) for i in turn1.items] == [
+        # one agent step per API message: text + 2 tool calls + 2 tool outputs, all native items
+        assert [type(i) for i in step1.items] == [
             NeMoGymResponseOutputMessage,
             NeMoGymResponseFunctionToolCall,
             NeMoGymResponseFunctionToolCall,
             NeMoGymFunctionCallOutput,
             NeMoGymFunctionCallOutput,
         ]
-        assert turn1.items[0].content[0].text == "looking"
-        assert turn1.items[1].name == "Bash"
-        assert (turn1.turn_no, turn2.turn_no) == (1, 2)
-        assert turn1.stop_reason == "tool_use"
-        assert isinstance(turn2.items[0], NeMoGymResponseReasoningItem)
-        assert turn2.items[0].summary[0].text == "hmm"
-        assert turn2.items[1].content[0].text == "fixed"
+        assert step1.items[0].content[0].text == "looking"
+        assert step1.items[1].name == "Bash"
+        assert (step1.agent_step_no, step2.agent_step_no) == (1, 2)
+        assert step1.stop_reason == "tool_use"
+        assert isinstance(step2.items[0], NeMoGymResponseReasoningItem)
+        assert step2.items[0].summary[0].text == "hmm"
+        assert step2.items[1].content[0].text == "fixed"
 
     def test_generation_span_identity(self) -> None:
         trajectory = build_trajectory([], self._transcript())
-        turn1, turn2 = trajectory.steps[1], trajectory.steps[2]
-        gen1 = turn1.spans[0]
+        step1, step2 = trajectory.steps[1], trajectory.steps[2]
+        gen1 = step1.spans[0]
         assert gen1.type == "generation"
         assert gen1.response_id == "msg_1"
         assert gen1.request_id == "req-1"
-        assert turn2.spans[0].request_id == "req-2"
+        assert step2.spans[0].request_id == "req-2"
 
     def test_usage_counted_once_per_message(self) -> None:
         trajectory = build_trajectory([], self._transcript())
-        turn1 = trajectory.steps[1]
-        assert turn1.usage.input_tokens == 100
-        assert turn1.usage.output_tokens == 20
-        assert turn1.usage.input_tokens_details.cached_tokens == 60
+        step1 = trajectory.steps[1]
+        assert step1.usage.input_tokens == 100
+        assert step1.usage.output_tokens == 20
+        assert step1.usage.input_tokens_details.cached_tokens == 60
         # fields with no native slot survive verbatim on the generation span
-        assert turn1.spans[0].extra["provider_usage"]["cache_creation_input_tokens"] == 10
+        assert step1.spans[0].extra["provider_usage"]["cache_creation_input_tokens"] == 10
         assert trajectory.usage.input_tokens == 150
         assert trajectory.usage.output_tokens == 25
         assert trajectory.usage.input_tokens_details.cached_tokens == 60
@@ -200,7 +200,7 @@ class TestTranscriptSource:
         ]
         trajectory = build_trajectory([], records)
         assert trajectory.dropped_records == {"sidechain": 1}
-        assert len([s for s in trajectory.steps if s.type == "agent_turn"]) == 2
+        assert len([s for s in trajectory.steps if s.type == "agent_step"]) == 2
 
     def test_compact_summary_becomes_context_boundary(self) -> None:
         records = [
@@ -209,10 +209,10 @@ class TestTranscriptSource:
             _assistant_record("a1", "msg_1", [{"type": "text", "text": "go on"}]),
         ]
         trajectory = build_trajectory([], records)
-        assert [s.type for s in trajectory.steps] == ["user_message", "context_boundary", "agent_turn"]
+        assert [s.type for s in trajectory.steps] == ["user_message", "context_boundary", "agent_step"]
         assert trajectory.steps[1].items[0].content == "summary of history"
 
-    def test_unmatched_observation_attaches_to_last_turn(self) -> None:
+    def test_unmatched_observation_attaches_to_last_agent_step(self) -> None:
         records = [
             _assistant_record("a1", "msg_1", [{"type": "text", "text": "hi"}]),
             _tool_result_record("orphan", "out", "2026-07-09T00:00:02.000Z", source_uuid="missing"),
@@ -220,7 +220,7 @@ class TestTranscriptSource:
         trajectory = build_trajectory([], records)
         assert trajectory.steps[0].spans[-1].call_id == "orphan"
 
-    def test_orphan_observation_with_no_turn_counted_as_dropped(self) -> None:
+    def test_orphan_observation_with_no_agent_step_counted_as_dropped(self) -> None:
         records = [_tool_result_record("orphan", "out", "2026-07-09T00:00:02.000Z")]
         trajectory = build_trajectory([], records)
         assert trajectory.steps == []
@@ -268,7 +268,7 @@ class TestStreamJsonFallback:
         trajectory = build_trajectory(self._events(), transcript_records=[{"type": "queue-operation"}])
         assert trajectory.source == "stream_json"
         assert trajectory.session_id == SESSION
-        assert [s.type for s in trajectory.steps] == ["agent_turn", "context_boundary"]
+        assert [s.type for s in trajectory.steps] == ["agent_step", "context_boundary"]
 
     def test_no_timestamps_means_no_fabricated_timing(self) -> None:
         trajectory = build_trajectory(self._events(), [])
@@ -279,7 +279,7 @@ class TestStreamJsonFallback:
 
     def test_result_event_totals(self) -> None:
         trajectory = build_trajectory(self._events(), [])
-        assert trajectory.num_turns == 3
+        assert trajectory.num_agent_steps == 3
         assert trajectory.duration_ms == 42.0
         assert trajectory.total_cost_usd == 0.5
         assert trajectory.provider_usage == {"input_tokens": 10, "output_tokens": 2}

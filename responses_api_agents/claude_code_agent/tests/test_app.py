@@ -809,12 +809,12 @@ class TestTrajectoryCapture:
         assert trajectory["schema_version"] == "1.0"
         assert trajectory["source"] == "stream_json"
         assert trajectory["session_id"] == "sess-1"
-        assert trajectory["num_turns"] == 1
+        assert trajectory["num_agent_steps"] == 1
         assert trajectory["duration_ms"] == 1234.0
         assert trajectory["total_cost_usd"] == 0.01
         (step,) = trajectory["steps"]
-        assert step["type"] == "agent_turn"
-        assert step["turn_no"] == 1
+        assert step["type"] == "agent_step"
+        assert step["agent_step_no"] == 1
         # content is a native Responses output message item
         assert step["items"][0]["type"] == "message"
         assert step["items"][0]["content"][0]["text"] == "done"
@@ -853,9 +853,9 @@ class TestTrajectoryCapture:
         assert trajectory["source"] == "transcript"
         assert trajectory["session_id"] == "sess-t"
         # run-level totals still come from the stream-json result event
-        assert trajectory["num_turns"] == 1
+        assert trajectory["num_agent_steps"] == 1
         assert trajectory["total_cost_usd"] == 0.01
-        assert [s["type"] for s in trajectory["steps"]] == ["user_message", "agent_turn"]
+        assert [s["type"] for s in trajectory["steps"]] == ["user_message", "agent_step"]
         # provider identity lives on the generation span
         assert trajectory["steps"][1]["spans"][0]["request_id"] == "req-1"
         assert trajectory["steps"][1]["timestamp"] == "2026-07-09T00:00:01.000Z"

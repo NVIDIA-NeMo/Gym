@@ -94,7 +94,7 @@ def build_trajectory(stream_events: list[dict], transcript_records: list[dict]) 
     """Build a standardized trajectory from Claude Code artifacts.
 
     Prefers the on-disk transcript (timestamps, request ids, tool execution metadata);
-    falls back to the stream-json stdout events. Run-level totals (`num_turns`,
+    falls back to the stream-json stdout events. Run-level totals (`num_agent_steps`,
     `duration_ms`, `total_cost_usd`, provider usage) always come from the stream-json
     `result` event when present, since the transcript does not carry them.
     """
@@ -111,7 +111,7 @@ def build_trajectory(stream_events: list[dict], transcript_records: list[dict]) 
             builder.set_session_id(event.get("session_id"))
         if event.get("type") == "result":
             builder.set_run_totals(
-                num_turns=event.get("num_turns"),
+                num_agent_steps=event.get("num_turns"),
                 duration_ms=event.get("duration_ms"),
                 total_cost_usd=event.get("total_cost_usd"),
                 provider_usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
@@ -149,8 +149,8 @@ def _replay_records(builder: TrajectoryBuilder, records: list[dict]) -> None:
                 assistant_record_ts[record["uuid"]] = timestamp
             usage = message.get("usage") or {}
             # The transcript writes one record per content block of the same API message
-            # (identical message id and usage); start_agent_turn dedupes on response_id.
-            step = builder.start_agent_turn(
+            # (identical message id and usage); start_agent_step dedupes on response_id.
+            step = builder.start_agent_step(
                 response_id=message.get("id"),
                 request_id=record.get("requestId"),
                 model=message.get("model"),

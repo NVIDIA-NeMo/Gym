@@ -75,7 +75,7 @@ class TestBuilderSteps:
         builder = TrajectoryBuilder(agent="test_agent", source="unit_test")
         builder.set_session_id("sess-1")
         builder.add_user_message("fix the bug", timestamp="2026-07-09T00:00:00.000Z")
-        builder.start_agent_turn(
+        builder.start_agent_step(
             response_id="msg_1",
             request_id="req-1",
             model="test-model",
@@ -98,7 +98,7 @@ class TestBuilderSteps:
             completed_at="2026-07-09T00:00:03.000Z",
             error="tool_result flagged is_error",
         )
-        builder.start_agent_turn(
+        builder.start_agent_step(
             response_id="msg_2",
             model="test-model",
             timestamp="2026-07-09T00:00:04.000Z",
@@ -111,23 +111,23 @@ class TestBuilderSteps:
 
     def test_step_structure_uses_native_items(self) -> None:
         trajectory = self._build().build()
-        assert [s.type for s in trajectory.steps] == ["user_message", "agent_turn", "agent_turn"]
-        user, turn1, turn2 = trajectory.steps
+        assert [s.type for s in trajectory.steps] == ["user_message", "agent_step", "agent_step"]
+        user, step1, step2 = trajectory.steps
         assert isinstance(user.items[0], NeMoGymEasyInputMessage)
         assert user.items[0].content == "fix the bug"
-        assert [type(i) for i in turn1.items] == [
+        assert [type(i) for i in step1.items] == [
             NeMoGymResponseOutputMessage,
             NeMoGymResponseFunctionToolCall,
             NeMoGymResponseFunctionToolCall,
             NeMoGymFunctionCallOutput,
             NeMoGymFunctionCallOutput,
         ]
-        assert turn1.items[0].content[0].text == "looking"
-        assert turn1.items[3].output == "file.txt"
-        assert isinstance(turn2.items[0], NeMoGymResponseReasoningItem)
-        assert turn2.items[0].summary[0].text == "hmm"
-        assert (turn1.turn_no, turn2.turn_no) == (1, 2)
-        assert turn1.stop_reason == "tool_use"
+        assert step1.items[0].content[0].text == "looking"
+        assert step1.items[3].output == "file.txt"
+        assert isinstance(step2.items[0], NeMoGymResponseReasoningItem)
+        assert step2.items[0].summary[0].text == "hmm"
+        assert (step1.agent_step_no, step2.agent_step_no) == (1, 2)
+        assert step1.stop_reason == "tool_use"
 
     def test_generation_span_identity_and_raw_usage(self) -> None:
         trajectory = self._build().build()
@@ -152,7 +152,7 @@ class TestBuilderSteps:
 
     def test_explicit_started_at_overrides_registration(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1", timestamp="2026-07-09T00:00:00.000Z")
+        builder.start_agent_step(response_id="m1", timestamp="2026-07-09T00:00:00.000Z")
         builder.add_tool_call("t1", "Bash", "{}")
         builder.add_tool_result(
             "t1", "ok", started_at="2026-07-09T00:00:02.000Z", completed_at="2026-07-09T00:00:03.000Z"
@@ -162,7 +162,7 @@ class TestBuilderSteps:
 
     def test_no_timestamps_means_no_fabricated_timing(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_tool_call("t1", "Bash", "{}")
         builder.add_tool_result("t1", "ok")
         (span,) = [s for s in builder.steps[0].spans if s.type == "function"]
@@ -172,50 +172,50 @@ class TestBuilderSteps:
 
     def test_usage_native_per_turn_and_totals(self) -> None:
         trajectory = self._build().build()
-        turn1 = trajectory.steps[1]
-        assert turn1.usage.input_tokens == 100
-        assert turn1.usage.input_tokens_details.cached_tokens == 60
+        step1 = trajectory.steps[1]
+        assert step1.usage.input_tokens == 100
+        assert step1.usage.input_tokens_details.cached_tokens == 60
         assert trajectory.usage.input_tokens == 150
         assert trajectory.usage.output_tokens == 25
         assert trajectory.usage.total_tokens == 175
         assert trajectory.usage.input_tokens_details.cached_tokens == 60
 
-    def test_same_response_id_continues_turn_without_double_count(self) -> None:
+    def test_same_response_id_continues_step_without_double_count(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5})
+        builder.start_agent_step(response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5})
         builder.add_output_text("part 1")
-        step = builder.start_agent_turn(
+        step = builder.start_agent_step(
             response_id="m1", provider_usage={"input_tokens": 10, "output_tokens": 5}, stop_reason="end_turn"
         )
         builder.add_output_text("part 2")
         trajectory = builder.build()
         assert len(trajectory.steps) == 1
-        assert step.turn_no == 1
+        assert step.agent_step_no == 1
         assert step.stop_reason == "end_turn"
         assert trajectory.usage.input_tokens == 10
         # text accumulated into one native output message
         assert [b.text for b in step.items[0].content] == ["part 1", "part 2"]
 
-    def test_different_response_id_starts_new_turn(self) -> None:
+    def test_different_response_id_starts_new_agent_step(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
-        builder.start_agent_turn(response_id="m2")
-        assert [s.turn_no for s in builder.steps] == [1, 2]
+        builder.start_agent_step(response_id="m1")
+        builder.start_agent_step(response_id="m2")
+        assert [s.agent_step_no for s in builder.steps] == [1, 2]
 
-    def test_output_without_turn_raises(self) -> None:
+    def test_output_without_agent_step_raises(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
         with pytest.raises(ValueError):
             builder.add_output_text("no turn")
 
-    def test_unmatched_result_attaches_to_last_turn(self) -> None:
+    def test_unmatched_result_attaches_to_last_agent_step(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_tool_result("orphan", "out")
         step = builder.steps[0]
         assert step.items[-1].call_id == "orphan"
         assert step.spans[-1].call_id == "orphan"
 
-    def test_orphan_result_with_no_turn_counted_as_dropped(self) -> None:
+    def test_orphan_result_with_no_agent_step_counted_as_dropped(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.add_tool_result("orphan", "out")
         trajectory = builder.build()
@@ -228,18 +228,20 @@ class TestBuilderSteps:
         builder.set_session_id("sess-2")  # first one wins
         builder.count_dropped("sidechain")
         builder.count_dropped("sidechain")
-        builder.set_run_totals(num_turns=3, duration_ms=42.0, total_cost_usd=0.5, provider_usage={"input_tokens": 1})
+        builder.set_run_totals(
+            num_agent_steps=3, duration_ms=42.0, total_cost_usd=0.5, provider_usage={"input_tokens": 1}
+        )
         trajectory = builder.build()
         assert trajectory.session_id == "sess-1"
         assert trajectory.dropped_records == {"sidechain": 2}
-        assert trajectory.num_turns == 3
+        assert trajectory.num_agent_steps == 3
         assert trajectory.duration_ms == 42.0
         assert trajectory.total_cost_usd == 0.5
         assert trajectory.provider_usage == {"input_tokens": 1}
 
     def test_error_can_be_span_error(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_tool_call("t1", "Bash", "{}")
         builder.add_tool_result("t1", "boom", error=TrajectorySpanError(message="timeout", data={"signal": 9}))
         (span,) = [s for s in builder.steps[0].spans if s.type == "function"]
@@ -250,11 +252,11 @@ class TestReconstruction:
     def _trajectory(self):
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.add_user_message("q1")
-        builder.start_agent_turn(response_id="m1", model="test-model")
+        builder.start_agent_step(response_id="m1", model="test-model")
         builder.add_output_text("a1")
         builder.add_context_boundary(summary="summary of q1/a1")
         builder.add_user_message("q2")
-        builder.start_agent_turn(response_id="m2", model="test-model")
+        builder.start_agent_step(response_id="m2", model="test-model")
         builder.add_output_text("a2")
         return builder.build()
 
@@ -265,11 +267,11 @@ class TestReconstruction:
 
     def test_before_step_id_excludes_later_steps(self) -> None:
         trajectory = self._trajectory()
-        # input visible to the model call at step 1 (turn 1): just q1
+        # input visible to the model call at step 1 (agent step 1): just q1
         items = reconstruct_model_input(trajectory, before_step_id=1)
         assert len(items) == 1
         assert items[0].content == "q1"
-        # input visible to the model call at step 4 (turn 2): boundary summary + q2
+        # input visible to the model call at step 4 (agent step 2): boundary summary + q2
         items = reconstruct_model_input(trajectory, before_step_id=4)
         assert [i.content for i in items] == ["summary of q1/a1", "q2"]
 
@@ -284,7 +286,7 @@ class TestReconstruction:
 class TestToResponseOutput:
     def test_reasoning_inlined_into_next_message(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_reasoning("let me reason")
         builder.add_output_text("answer")
         items = to_response_output(builder.build())
@@ -293,7 +295,7 @@ class TestToResponseOutput:
 
     def test_reasoning_kept_native_when_tag_disabled(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_reasoning("let me reason")
         builder.add_output_text("answer")
         items = to_response_output(builder.build(), reasoning_tag=None)
@@ -302,11 +304,11 @@ class TestToResponseOutput:
 
     def test_reasoning_buffer_spans_turns_and_clears(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_reasoning("think")
-        builder.start_agent_turn(response_id="m2")
+        builder.start_agent_step(response_id="m2")
         builder.add_output_text("msg1")
-        builder.start_agent_turn(response_id="m3")
+        builder.start_agent_step(response_id="m3")
         builder.add_output_text("msg2")
         items = to_response_output(builder.build())
         assert "<think>" in items[0].content[0].text
@@ -314,7 +316,7 @@ class TestToResponseOutput:
 
     def test_call_emitted_before_its_output_in_arrival_order(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_output_text("running")
         builder.add_tool_call("t1", "Bash", "{}")
         builder.add_tool_call("t2", "Read", "{}")
@@ -333,7 +335,7 @@ class TestToResponseOutput:
 
     def test_unresolved_call_omitted_and_orphan_output_kept(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_tool_call("never-resolved", "Bash", "{}")
         builder.add_tool_result("orphan", "out")  # attaches to the turn without a matching call
         items = to_response_output(builder.build())
@@ -344,7 +346,7 @@ class TestToResponseOutput:
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.add_user_message("question")
         builder.add_context_boundary(summary="summary")
-        builder.start_agent_turn(response_id="m1")
+        builder.start_agent_step(response_id="m1")
         builder.add_output_text("answer")
         items = to_response_output(builder.build())
         assert len(items) == 1
@@ -355,7 +357,7 @@ class TestValidation:
     def test_round_trip(self) -> None:
         builder = TrajectoryBuilder(agent="a", source="s")
         builder.add_user_message("hi", timestamp="2026-07-09T00:00:00.000Z")
-        builder.start_agent_turn(response_id="m1", provider_usage=ANTHROPIC_USAGE)
+        builder.start_agent_step(response_id="m1", provider_usage=ANTHROPIC_USAGE)
         builder.add_output_text("hello")
         builder.add_reasoning("think")
         builder.add_tool_call("t1", "Bash", "{}")

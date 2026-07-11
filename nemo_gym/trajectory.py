@@ -15,11 +15,23 @@
 
 """Standardized trajectory telemetry built on Gym's native Responses API contracts.
 
+Terminology:
+
+- **Agent step**: one interaction with the environment through the model — a single LLM
+  generation (one model call) together with the orchestration of the tool calls it
+  issued and their outputs. In an agent loop (e.g. ``simple_agent.responses()``), one
+  loop iteration is one agent step; ``max_steps`` bounds them.
+- **Turn**: a full cycle of control — from the user handing input to the agent until the
+  agent hands control back (all tool calls orchestrated, outputs fed back through the
+  model). A turn contains one or more agent steps. Single-task Gym rollouts are
+  one-turn episodes; multi-turn environments (user simulators) have several, delimited
+  in the trajectory by ``user_message`` steps.
+
 A :class:`Trajectory` is the standardized rollout record requested by issue #1867: it
 carries everything needed for cost estimation, debugging, and rollout analysis in one
 versioned, validatable artifact. Conversation content is represented with Gym's native
 Responses API types (``NeMoGymResponseInputItem``: messages, function calls, function
-call outputs, reasoning items) and per-model-call token stats with the native
+call outputs, reasoning items) and per-step token stats with the native
 ``NeMoGymResponseUsage`` — no parallel content schema to keep in sync.
 
 Telemetry the Responses API does not standardize (tool execution timing, provider
@@ -31,8 +43,8 @@ of polluting them.
 
 Reconstruction semantics (delta / append-only representation):
 
-- ``steps`` is ordered. Each step holds only the *new* items it introduced: a user
-  message, or one complete agent turn (one model call) with its output items and the
+- ``steps`` is ordered. Each entry holds only the *new* items it introduced: a user
+  message, or one complete agent step (one model call) with its output items and the
   resulting ``function_call_output`` items.
 - The model-visible input of a step is every item of every earlier step, starting from
   the most recent ``context_boundary`` step (compaction): the boundary's items are the
@@ -40,10 +52,15 @@ Reconstruction semantics (delta / append-only representation):
   into a native input list, and :func:`to_response_create_params` wraps it in a
   ``NeMoGymResponseCreateParamsNonStreaming``.
 
-Agent harnesses should not build these models by hand — parse provider artifacts and
-drive a :class:`TrajectoryBuilder` (see ``responses_api_agents/claude_code_agent/
-trajectory.py`` for a reference adapter). Mandatory fields are non-optional on the
-models; optional telemetry a source cannot provide stays ``None`` — never fabricated.
+The contract is capture-agnostic: agents whose loop runs in-process can drive a
+:class:`TrajectoryBuilder` directly as the loop executes (exact boundaries, measured
+tool timing), while wrappers around black-box harnesses reconstruct the trajectory
+post-hoc from the harness's artifacts (see ``responses_api_agents/claude_code_agent/
+trajectory.py`` for a reference adapter). Both produce the same schema; fidelity
+differences surface as data, not schema forks: ``source`` labels provenance, optional
+telemetry a source cannot observe stays ``None`` (never fabricated), and
+``dropped_records`` counts events seen but not represented. Mandatory fields are
+non-optional on the models.
 """
 
 from datetime import datetime
@@ -99,14 +116,15 @@ class TrajectorySpan(BaseModel):
 
 class TrajectoryStep(BaseModel):
     step_id: int
-    type: Literal["user_message", "agent_turn", "context_boundary"]
+    type: Literal["user_message", "agent_step", "context_boundary"]
     timestamp: Optional[str] = None
-    # Native Gym Responses items introduced by this step, in order. For an agent turn:
+    # Native Gym Responses items introduced by this step, in order. For an agent step:
     # reasoning / message / function_call output items followed by the function_call_output
     # items produced by its tool calls.
     items: list[NeMoGymResponseInputItem] = Field(default_factory=list)
-    # agent_turn only: 1-based model-call counter and native per-call token stats.
-    turn_no: Optional[int] = None
+    # agent_step only: 1-based counter over agent steps (model calls) and native per-call
+    # token stats.
+    agent_step_no: Optional[int] = None
     model: Optional[str] = None
     usage: Optional[NeMoGymResponseUsage] = None
     stop_reason: Optional[str] = None
@@ -131,9 +149,12 @@ class Trajectory(BaseModel):
     session_id: Optional[str] = None
     model: Optional[str] = None
     steps: list[TrajectoryStep] = Field(default_factory=list)
-    # Native run totals, summed over the per-turn usage.
+    # Native run totals, summed over the per-agent-step usage.
     usage: NeMoGymResponseUsage = Field(default_factory=_zero_usage)
-    num_turns: Optional[int] = None
+    # Number of agent steps (model calls) the provider reports for the run. Note some
+    # providers call this "turns" (Claude Code's num_turns / --max-turns count model
+    # calls, i.e. agent steps in Gym terminology).
+    num_agent_steps: Optional[int] = None
     duration_ms: Optional[float] = None
     total_cost_usd: Optional[float] = None
     # The provider's own end-of-run usage report, verbatim, for cross-checking.
@@ -201,7 +222,7 @@ def to_response_create_params(
 def to_response_output(
     trajectory: Trajectory, reasoning_tag: Optional[str] = "think"
 ) -> list[NeMoGymResponseInputItem]:
-    """Flatten a trajectory's agent turns into a ``NeMoGymResponse.output``-shaped item list.
+    """Flatten a trajectory's agent steps into a ``NeMoGymResponse.output``-shaped item list.
 
     This lets a harness parse its provider artifacts once (into a trajectory) and derive
     the response the verifier scores from it. The flattening matches the conventions Gym
@@ -216,7 +237,7 @@ def to_response_output(
     items: list[NeMoGymResponseInputItem] = []
     reasoning_buffer: list[str] = []
     for step in trajectory.steps:
-        if step.type != "agent_turn":
+        if step.type != "agent_step":
             continue
         calls = {i.call_id: i for i in step.items if isinstance(i, NeMoGymResponseFunctionToolCall)}
         emitted_calls: set[str] = set()
@@ -260,17 +281,17 @@ class TrajectoryBuilder:
     """Incremental, agent-agnostic assembly of a :class:`Trajectory`.
 
     Adapters parse their provider's artifacts in order and call the ``add_*`` methods;
-    the builder owns the shared semantics — turn numbering, model-call deduplication
-    (``start_agent_turn`` with the same ``response_id`` continues the current turn
-    instead of double counting usage), tool call/observation correlation with
-    independent per-call timing, orphan handling, and usage totals.
+    the builder owns the shared semantics — agent-step numbering, model-call
+    deduplication (``start_agent_step`` with the same ``response_id`` continues the
+    current step instead of double counting usage), tool call/observation correlation
+    with independent per-call timing, orphan handling, and usage totals.
     """
 
     def __init__(self, agent: str, source: str) -> None:
         self._trajectory = Trajectory(agent=agent, source=source)
         # call_id -> (step_id that issued the call, its timestamp) for observation correlation.
         self._pending_calls: dict[str, tuple[int, Optional[str]]] = {}
-        self._turn_count = 0
+        self._agent_step_count = 0
 
     @property
     def steps(self) -> list[TrajectoryStep]:
@@ -299,7 +320,7 @@ class TrajectoryBuilder:
         self.steps.append(step)
         return step
 
-    def start_agent_turn(
+    def start_agent_step(
         self,
         response_id: Optional[str] = None,
         request_id: Optional[str] = None,
@@ -308,16 +329,16 @@ class TrajectoryBuilder:
         stop_reason: Optional[str] = None,
         provider_usage: Optional[dict[str, Any]] = None,
     ) -> TrajectoryStep:
-        """Start (or continue) the step for one model call.
+        """Start (or continue) the agent step for one model call.
 
         Providers may emit one record per content block of the same API message; calling
-        this again with the current turn's ``response_id`` returns that step so content
+        this again with the current step's ``response_id`` returns that step so content
         accumulates without double counting usage.
         """
         current = self.steps[-1] if self.steps else None
         if (
             current is not None
-            and current.type == "agent_turn"
+            and current.type == "agent_step"
             and response_id is not None
             and self._generation_span(current).response_id == response_id
         ):
@@ -325,7 +346,7 @@ class TrajectoryBuilder:
                 current.stop_reason = stop_reason
             return current
 
-        self._turn_count += 1
+        self._agent_step_count += 1
         span = TrajectorySpan(
             type="generation",
             response_id=response_id,
@@ -337,9 +358,9 @@ class TrajectoryBuilder:
         )
         step = TrajectoryStep(
             step_id=len(self.steps),
-            type="agent_turn",
+            type="agent_step",
             timestamp=timestamp,
-            turn_no=self._turn_count,
+            agent_step_no=self._agent_step_count,
             model=model,
             usage=usage_from_provider(provider_usage) if provider_usage else None,
             stop_reason=stop_reason,
@@ -353,14 +374,14 @@ class TrajectoryBuilder:
     def _generation_span(self, step: TrajectoryStep) -> TrajectorySpan:
         return next(s for s in step.spans if s.type == "generation")
 
-    def _current_turn(self) -> TrajectoryStep:
+    def _current_agent_step(self) -> TrajectoryStep:
         current = self.steps[-1] if self.steps else None
-        if current is None or current.type != "agent_turn":
-            raise ValueError("no agent turn in progress; call start_agent_turn() first")
+        if current is None or current.type != "agent_step":
+            raise ValueError("no agent step in progress; call start_agent_step() first")
         return current
 
     def add_output_text(self, text: str) -> None:
-        step = self._current_turn()
+        step = self._current_agent_step()
         block = NeMoGymResponseOutputText(annotations=[], text=text)
         last_item = step.items[-1] if step.items else None
         if isinstance(last_item, NeMoGymResponseOutputMessage):
@@ -371,7 +392,7 @@ class TrajectoryBuilder:
             )
 
     def add_reasoning(self, text: str) -> None:
-        step = self._current_turn()
+        step = self._current_agent_step()
         step.items.append(
             NeMoGymResponseReasoningItem(
                 id=f"rs-{step.step_id}-{len(step.items)}",
@@ -380,7 +401,7 @@ class TrajectoryBuilder:
         )
 
     def add_tool_call(self, call_id: str, name: str, arguments: str) -> None:
-        step = self._current_turn()
+        step = self._current_agent_step()
         step.items.append(
             NeMoGymResponseFunctionToolCall(call_id=call_id, name=name, arguments=arguments, status="completed")
         )
@@ -395,17 +416,17 @@ class TrajectoryBuilder:
         error: Optional[Union[str, TrajectorySpanError]] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Attach a tool observation to the turn that issued ``call_id``.
+        """Attach a tool observation to the agent step that issued ``call_id``.
 
-        ``started_at`` defaults to the issuing turn's timestamp; passing it explicitly
+        ``started_at`` defaults to the issuing step's timestamp; passing it explicitly
         (e.g. from a provider execution record) overrides that. Each result carries its
         own timing, so parallel tool calls stay independently timed. Results that match
-        no known call attach to the latest agent turn, or are counted as dropped when
+        no known call attach to the latest agent step, or are counted as dropped when
         there is none.
         """
         step_id, registered_started = self._pending_calls.pop(call_id, (None, None))
         if step_id is None:
-            step_id = next((s.step_id for s in reversed(self.steps) if s.type == "agent_turn"), None)
+            step_id = next((s.step_id for s in reversed(self.steps) if s.type == "agent_step"), None)
             if step_id is None:
                 self.count_dropped("orphan_tool_results")
                 return
@@ -437,13 +458,13 @@ class TrajectoryBuilder:
 
     def set_run_totals(
         self,
-        num_turns: Optional[int] = None,
+        num_agent_steps: Optional[int] = None,
         duration_ms: Optional[float] = None,
         total_cost_usd: Optional[float] = None,
         provider_usage: Optional[dict[str, Any]] = None,
     ) -> None:
-        if num_turns is not None:
-            self._trajectory.num_turns = int(num_turns)
+        if num_agent_steps is not None:
+            self._trajectory.num_agent_steps = int(num_agent_steps)
         if duration_ms is not None:
             self._trajectory.duration_ms = float(duration_ms)
         if total_cost_usd is not None:

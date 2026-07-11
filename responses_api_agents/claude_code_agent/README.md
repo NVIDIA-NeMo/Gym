@@ -199,11 +199,13 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 Claude Code persists a complete session transcript — one JSON record per event, with timestamps, request ids, per-model-call token usage, and tool execution metadata — under `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl`. Since each rollout runs with an ephemeral `CLAUDE_CONFIG_DIR`, the agent harvests those artifacts just before cleanup and attaches a standardized, versioned trajectory to every `run()` result (and therefore to every rollout JSONL row). This addresses the standardized trajectory-telemetry requirements of [NVIDIA-NeMo/Gym#1867](https://github.com/NVIDIA-NeMo/Gym/issues/1867). When no transcript is available, the trajectory is built from the stream-json stdout events instead (`source: "stream_json"`), which carry the same message structure and token usage but no timestamps or request ids — missing telemetry is `null`, never fabricated.
 
+Terminology: an **agent step** is one interaction with the environment through the model — one LLM generation plus the orchestration of its tool calls and their outputs (one iteration of an agent loop); a **turn** is a full cycle of control, from user input until the agent hands control back, containing one or more agent steps. Note Claude Code's `num_turns` / `--max-turns` count model calls, i.e. **agent steps** in this terminology; the trajectory records that value as `num_agent_steps`.
+
 The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajectory`, `schema_version: "1.0"`, validated via `validate_trajectory()`); this server's `trajectory.py` is just the Claude Code adapter that parses the transcript and drives the shared `TrajectoryBuilder`. Content and token stats reuse Gym's native contracts; telemetry the Responses API doesn't standardize lives in spans modeled after the OpenAI Agents SDK tracing spans:
 
 - **`steps[*].items`** — native `NeMoGymResponseInputItem`s (`message`, `reasoning`, `function_call`, `function_call_output`), exactly the types Gym responses already use.
-- **`steps[*].usage`** — native `NeMoGymResponseUsage` per model call (`input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`), deduplicated per API message (the transcript writes one record per content block, repeating the usage).
-- **`steps[*].spans`** — one `generation` span per model call (`response_id`, `request_id`, raw provider usage verbatim in `extra.provider_usage`, so fields with no native slot like `cache_creation_input_tokens` are never lost) and one `function` span per tool call (`call_id`, `started_at`/`ended_at`/`duration_ms`, `error`, curated `toolUseResult` scalars in `extra`).
+- **`steps[*].usage`** — native `NeMoGymResponseUsage` per agent step (model call) (`input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`), deduplicated per API message (the transcript writes one record per content block, repeating the usage).
+- **`steps[*].spans`** — one `generation` span per agent step (model call) (`response_id`, `request_id`, raw provider usage verbatim in `extra.provider_usage`, so fields with no native slot like `cache_creation_input_tokens` are never lost) and one `function` span per tool call (`call_id`, `started_at`/`ended_at`/`duration_ms`, `error`, curated `toolUseResult` scalars in `extra`).
 
 ```json
 {
@@ -212,7 +214,7 @@ The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajecto
   "source": "transcript",
   "session_id": "…",
   "model": "claude-sonnet-4-6",
-  "num_turns": 4,
+  "num_agent_steps": 4,
   "duration_ms": 8123.0,
   "total_cost_usd": 0.021,
   "provider_usage": {"input_tokens": 63, "cache_read_input_tokens": 18478, "output_tokens": 912},
@@ -222,7 +224,7 @@ The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajecto
     {"step_id": 0, "type": "user_message", "timestamp": "…",
      "items": [{"type": "message", "role": "user", "content": "fix the bug"}]},
     {
-      "step_id": 1, "type": "agent_turn", "turn_no": 1, "timestamp": "…",
+      "step_id": 1, "type": "agent_step", "agent_step_no": 1, "timestamp": "…",
       "model": "claude-sonnet-4-6", "stop_reason": "tool_use",
       "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 9000}, "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 312},
       "items": [
@@ -244,7 +246,7 @@ The schema is **agent-generic** and lives in `nemo_gym/trajectory.py` (`Trajecto
 
 Semantics:
 
-- **Delta / append-only steps**: each step holds only the new items it introduced — a user message, or one complete agent turn (one model call) with its output items and resulting `function_call_output`s. The model-visible input of a step is every item of every earlier step, starting from the most recent `context_boundary` step; `nemo_gym.trajectory.reconstruct_model_input()` resolves this, and `to_response_create_params()` packages it as a native `NeMoGymResponseCreateParamsNonStreaming`. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
+- **Delta / append-only steps**: each step holds only the new items it introduced — a user message, or one complete agent step (one model call) with its output items and resulting `function_call_output`s. The model-visible input of a step is every item of every earlier step, starting from the most recent `context_boundary` step; `nemo_gym.trajectory.reconstruct_model_input()` resolves this, and `to_response_create_params()` packages it as a native `NeMoGymResponseCreateParamsNonStreaming`. Full request payloads are never re-materialized per turn, so the artifact stays linear in conversation size.
 - **Compaction**: when Claude Code compacts its context, a `context_boundary` step is emitted whose items are the summary that replaced the prior history; post-compaction context = boundary items + later steps (reconstruction handles this automatically).
 - **Tool timing**: each `function` span records independent `started_at`/`completed_at`/`duration_ms` from the actual execution boundary (issuing assistant record → its tool-result record), so parallel tool calls keep independent timing.
 - **Failures**: tool errors surface as `error` on the `function` span (the model-visible output stays on the native item); on a rollout timeout the partial transcript written before the kill is still harvested.
@@ -254,7 +256,7 @@ Identity: `session_id` identifies the Claude Code session; task and rollout iden
 
 The trajectory is also the **single parse** of Claude Code's output: the `NeMoGymResponse.output` the verifier scores is derived from it via `nemo_gym.trajectory.to_response_output()` (which reproduces the flattened response conventions — `<think>`-tag inlining, calls paired with their outputs in arrival order), so the response and the telemetry can never drift apart. The scored response is derived from the stream-json stdout events; the attached telemetry prefers the transcript.
 
-To adapt another agent harness, parse its artifacts and drive `nemo_gym.trajectory.TrajectoryBuilder` (`add_user_message` / `start_agent_turn` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_context_boundary` / `set_run_totals`); the builder owns turn numbering, model-call deduplication, call/observation correlation, orphan handling, and usage totals.
+To adapt another agent harness, parse its artifacts and drive `nemo_gym.trajectory.TrajectoryBuilder` (`add_user_message` / `start_agent_step` / `add_output_text` / `add_reasoning` / `add_tool_call` / `add_tool_result` / `add_context_boundary` / `set_run_totals`); the builder owns agent-step numbering, model-call deduplication, call/observation correlation, orphan handling, and usage totals.
 
 ## Limitations
 
