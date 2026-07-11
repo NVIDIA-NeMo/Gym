@@ -35,6 +35,7 @@ export RUN_DIR
 OUTPUT_JSONL="${OUTPUT_JSONL:-${RUN_DIR}/rollouts.jsonl}"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 LIMIT="${LIMIT:-4}"
+EXPECTED_INPUT_ROWS="${EXPECTED_INPUT_ROWS:-}"
 NUM_ENVS="${NUM_ENVS:-4}"
 NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
 RESUME_FROM_CACHE="${RESUME_FROM_CACHE:-0}"
@@ -331,6 +332,22 @@ echo
 if [[ "${DRY_RUN}" == "1" ]]; then
     exit 0
 fi
+
+preflight_cmd=(
+    "${PYTHON_BIN}"
+    "${SCRIPT_DIR}/preflight_osworld_run.py"
+    "--config-paths"
+    "${CONFIG_PATHS}"
+    "--input-jsonl"
+    "${INPUT_JSONL}"
+)
+if [[ -n "${EXPECTED_INPUT_ROWS}" ]]; then
+    preflight_cmd+=("--expected-rows" "${EXPECTED_INPUT_ROWS}")
+fi
+
+echo
+echo "--- OSWorld runtime preflight ---"
+"${preflight_cmd[@]}"
 
 wait_for_servers_ready() {
     local expected_line="${EXPECTED_SERVERS} servers found (${EXPECTED_SERVERS} healthy, 0 unhealthy)"
