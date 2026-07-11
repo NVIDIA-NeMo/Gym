@@ -16,7 +16,7 @@ import fcntl
 import multiprocessing as mp
 import threading
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType
 from unittest.mock import MagicMock
 
 import orjson
@@ -28,7 +28,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
 
-import nemo_gym.base_responses_api_agent as ba
 import nemo_gym.base_responses_api_model as obs
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -332,15 +331,21 @@ def test_capture_records_non_json_response_as_error(tmp_path: Path):
 
 
 # --- base-agent correlation helpers ---
-def test_base_agent_resolve_model_base_url(monkeypatch):
-    monkeypatch.setattr(ba, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
-    fake_self = SimpleNamespace(
-        server_client=SimpleNamespace(global_config_dict={}, _build_server_base_url=lambda _cfg: "http://h:1"),
+def test_base_agent_resolve_model_call_path():
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
     )
+    assert with_id == "http://my-test-url/v1"
 
-    with_id = SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", "rid")
-    assert with_id == "http://h:1/ng-rollout/rid/v1"
-    assert SimpleResponsesAPIAgent.resolve_model_base_url(fake_self, "m", None) == "http://h:1/v1"
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+    )
+    assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
+
+    with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+        None, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+    )
+    assert with_id == "/v1/responses/ng-rollout/2-4"
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
