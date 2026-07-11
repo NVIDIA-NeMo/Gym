@@ -199,13 +199,13 @@ def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_p
 
     store.record(record)
 
-    assert store.read(TEST_ROLLOUT_ID) == [record.model_dump()]
+    assert store.read(TEST_ROLLOUT_ID) == [record]
 
     record2 = record.model_copy(deep=True)
     record2.request.input[0].content[0]["text"] = "second"
 
     store.record(record2)
-    assert read_model_call_records(store, TEST_ROLLOUT_ID) == [record.model_dump(), record2.model_dump()]
+    assert read_model_call_records(store, TEST_ROLLOUT_ID) == [record, record2]
 
 
 def test_capture_store_raises_on_malformed_nonblank_json(tmp_path: Path):
