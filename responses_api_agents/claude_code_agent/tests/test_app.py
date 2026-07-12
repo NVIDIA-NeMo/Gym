@@ -102,6 +102,24 @@ class TestSanity:
         assert agent.sem._value == 4
 
 
+class TestResolveBaseUrl:
+    def test_v1_suffix_stripped(self) -> None:
+        agent = _make_agent(anthropic_base_url="https://inference-api.nvidia.com/v1")
+        assert agent._resolve_base_url() == "https://inference-api.nvidia.com"
+
+    def test_v1_with_trailing_slash_stripped(self) -> None:
+        agent = _make_agent(anthropic_base_url="https://host.example/v1/")
+        assert agent._resolve_base_url() == "https://host.example"
+
+    def test_plain_url_and_trailing_slash_normalized(self) -> None:
+        agent = _make_agent(anthropic_base_url="https://host.example/")
+        assert agent._resolve_base_url() == "https://host.example"
+
+    def test_null_base_url_stays_empty(self) -> None:
+        agent = _make_agent(anthropic_base_url=None)
+        assert agent._resolve_base_url() == ""
+
+
 class TestBuildCommand:
     def test_default_passes_bare(self) -> None:
         agent = _make_agent()

@@ -186,7 +186,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 self.config.model_server.name,
             )
             return self.server_client._build_server_base_url(cfg)
-        return self.config.anthropic_base_url or ""
+        base_url = (self.config.anthropic_base_url or "").rstrip("/")
+        if base_url.endswith("/v1"):
+            # Claude Code appends /v1/messages itself; a copy-pasted OpenAI-style URL ending
+            # in /v1 would otherwise hit <host>/v1/v1/messages and fail with a misleading
+            # "issue with the selected model" error.
+            base_url = base_url[: -len("/v1")].rstrip("/")
+            LOG.warning("anthropic_base_url ends with /v1; stripping it and using %s", base_url)
+        return base_url
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
