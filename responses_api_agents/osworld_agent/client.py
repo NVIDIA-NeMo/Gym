@@ -44,6 +44,10 @@ LOG = logging.getLogger("nemo_gym.osworld_agent.client")
 _TERMINAL_ACTIONS = {"DONE", "FAIL"}
 
 
+class _EvaluatorScoreZero(BaseException):
+    """Control signal for declarative evaluator setup that proves a zero score."""
+
+
 @dataclass
 class StepRecord:
     step: int
@@ -225,6 +229,139 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
     for name in os.listdir(source_dir):
         linked += int(_link_if_present(os.path.join(source_dir, name), os.path.join(task_cache_dir, name)))
     return linked
+
+
+def _patch_setup_execute_contract() -> None:
+    """Support optional return-code policies used by newer OSWorld tasks.
+
+    The pinned upstream method remains untouched for existing tasks. The
+    compatibility path runs only when a task explicitly supplies
+    ``expected_returncodes`` or ``on_nonzero``.
+    """
+
+    try:
+        from desktop_env.controllers import setup as setup_module  # type: ignore
+    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
+        return
+
+    controller_class = setup_module.SetupController
+    current = controller_class._execute_setup
+    if getattr(current, "_nemo_gym_returncode_contract", False):
+        return
+    try:
+        parameters = inspect.signature(current).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if {"expected_returncodes", "on_nonzero"}.issubset(parameters):
+        return
+
+    requests = setup_module.requests
+
+    def execute_setup(
+        self: Any,
+        command: List[str] | str,
+        stdout: str = "",
+        stderr: str = "",
+        shell: bool = False,
+        until: Optional[Dict[str, Any]] = None,
+        expected_returncodes: List[int] | int | None = None,
+        on_nonzero: str | None = None,
+    ) -> Any:
+        if expected_returncodes is None and on_nonzero is None:
+            return current(self, command, stdout=stdout, stderr=stderr, shell=shell, until=until)
+        if not command:
+            raise RuntimeError("Empty setup command")
+        if expected_returncodes is None:
+            expected_returncodes = [int(until["returncode"])] if until and "returncode" in until else [0]
+        elif isinstance(expected_returncodes, int):
+            expected_returncodes = [expected_returncodes]
+        allowed = {int(code) for code in expected_returncodes}
+        if not allowed:
+            raise ValueError("expected_returncodes must not be empty")
+        if on_nonzero not in {None, "score_zero"}:
+            raise ValueError(f"unsupported on_nonzero policy: {on_nonzero!r}")
+
+        replacements = {
+            "{CLIENT_PASSWORD}": self.client_password,
+            "{SCREEN_WIDTH_HALF}": str(self.screen_width // 2),
+            "{SCREEN_HEIGHT_HALF}": str(self.screen_height // 2),
+            "{SCREEN_WIDTH}": str(self.screen_width),
+            "{SCREEN_HEIGHT}": str(self.screen_height),
+        }
+        rendered = [command] if isinstance(command, str) else list(command)
+        for index, item in enumerate(rendered):
+            for old, new in replacements.items():
+                item = item.replace(old, new)
+            rendered[index] = item
+        rendered_command: List[str] | str = rendered[0] if isinstance(command, str) else rendered
+        payload = json.dumps({"command": rendered_command, "shell": shell})
+        headers = {"Content-Type": "application/json"}
+        until = until or {}
+        failures = 0
+
+        while True:
+            result = None
+            try:
+                response = requests.post(
+                    self.http_server + "/setup/execute",
+                    headers=headers,
+                    data=payload,
+                    timeout=130,
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    if "returncode" not in result:
+                        raise RuntimeError("setup response omitted returncode")
+                    if stdout:
+                        with open(os.path.join(self.cache_dir, stdout), "w", encoding="utf-8") as handle:
+                            handle.write(result.get("output", ""))
+                    if stderr:
+                        with open(os.path.join(self.cache_dir, stderr), "w", encoding="utf-8") as handle:
+                            handle.write(result.get("error", ""))
+                else:
+                    failures += 1
+            except requests.exceptions.RequestException:
+                failures += 1
+            if failures >= 5:
+                raise RuntimeError(f"setup command failed after five request attempts: {rendered_command!r}")
+            if result is None:
+                continue
+
+            returncode = int(result["returncode"])
+            command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
+            if returncode not in allowed:
+                if on_nonzero == "score_zero" and returncode not in {126, 127}:
+                    raise _EvaluatorScoreZero(
+                        f"evaluator command established score zero with return code {returncode}: {command_text}"
+                    )
+                raise RuntimeError(
+                    f"setup command returned {returncode}; expected {sorted(allowed)}: {command_text}; "
+                    f"stdout={result.get('output', '')!r}; stderr={result.get('error', '')!r}"
+                )
+            if (
+                not until
+                or ("returncode" in until and returncode == int(until["returncode"]))
+                or ("stdout" in until and str(until["stdout"]) in result.get("output", ""))
+                or ("stderr" in until and str(until["stderr"]) in result.get("error", ""))
+            ):
+                return result
+            time.sleep(0.3)
+
+    execute_setup._nemo_gym_returncode_contract = True  # type: ignore[attr-defined]
+    controller_class._execute_setup = execute_setup
+
+
+def _configure_docker_port_lock_timeout(timeout: float) -> None:
+    """Set the pinned upstream Docker provider's global allocation lock wait."""
+
+    if timeout <= 0:
+        raise ValueError("docker_port_lock_timeout must be positive")
+    try:
+        from desktop_env.providers.docker import provider as docker_provider  # type: ignore
+    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
+        return
+    if hasattr(docker_provider, "LOCK_TIMEOUT"):
+        docker_provider.LOCK_TIMEOUT = float(timeout)
 
 
 def _patch_extension_name_aliases() -> None:
@@ -998,9 +1135,13 @@ def _evaluate_osworld_env(
             params = inspect.signature(evaluate).parameters
         except (TypeError, ValueError):
             params = {}
-        if not params:
-            return float(evaluate())
-        return float(evaluate(eval_logger))
+        try:
+            if not params:
+                return float(evaluate())
+            return float(evaluate(eval_logger))
+        except _EvaluatorScoreZero as exc:
+            eval_logger.info("OSWorld evaluator setup established score zero: %s", exc)
+            return 0.0
     finally:
         if disable_gpu:
             if easyocr_module is not None and original_easyocr_reader is not None:
@@ -1029,6 +1170,7 @@ def run_osworld_task(
     mem_limit_mb: int = 0,
     step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
     task_timeout: int = 1800,  # wall-clock cap on the whole rollout
+    docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
     action_space: Optional[str] = None,
     observation_type: Optional[str] = None,
@@ -1080,6 +1222,9 @@ def run_osworld_task(
         agent_kwargs=agent_kwargs,
     )
     env_cls = load_attr(runner_spec.env_class_path)
+    _patch_setup_execute_contract()
+    if provider_name == "docker":
+        _configure_docker_port_lock_timeout(docker_port_lock_timeout)
     instruction = task_config.get("instruction", "")
     event_context = dict(log_context or {})
     event_context.update(
@@ -1102,6 +1247,7 @@ def run_osworld_task(
     finished = False
     final_score = 0.0
     timed_out = False
+    setup_score_zero = False
     agent_terminal_action: Optional[str] = None
     evaluation_error: Optional[str] = None
     task_start = time.monotonic()
@@ -1639,6 +1785,16 @@ def run_osworld_task(
             except Exception:  # noqa: BLE001 - usage logging should not fail the rollout.
                 LOG.exception("PointerAgent.log_usage() failed")
 
+    except _EvaluatorScoreZero as exc:
+        setup_score_zero = True
+        finished = True
+        final_score = 0.0
+        error = None
+        task_logger.info("OSWorld setup established score zero before evaluation: %s", exc)
+        _append_task_trajectory(
+            task_artifacts,
+            {"event": "evaluation", "score": 0.0, "status": "completed", "reason": "setup_score_zero"},
+        )
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
@@ -1677,6 +1833,8 @@ def run_osworld_task(
     mask_sample = bool(error) or timed_out or not finished
     if timed_out:
         termination_reason = "timeout"
+    elif setup_score_zero:
+        termination_reason = "setup_score_zero"
     elif evaluation_error:
         termination_reason = "evaluator_error"
     elif error:

@@ -569,6 +569,7 @@ class TestApp:
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
         assert positional_args[1]["evaluator_disable_gpu"] is True
+        assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["log_context"] == {
             "run_id": "run-001",
             "adapter": "gym",

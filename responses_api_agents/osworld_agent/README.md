@@ -235,6 +235,7 @@ overlays should be listed after the base config so their values win.
 | `temperature`, `top_p` | `1.0`, `null` | Default sampling values |
 | `runner_name` | `gym_pyautogui` | Runner contract selected from the registry |
 | `task_timeout` | `1800` | Whole-rollout wall-clock limit in seconds |
+| `docker_port_lock_timeout` | `300.0` | Maximum wait for concurrent Docker VM port allocation |
 | `evaluator_disable_gpu` | `true` | Run EasyOCR evaluation on CPU |
 | `reward_mode` | `binary` | `binary` or raw OSWorld partial scores |
 
@@ -255,6 +256,18 @@ model-specific and do not change defaults for other runners.
 
 The response sets `mask_sample=true` when a timeout, evaluator error, or
 unfinished max-step rollout makes the reward unreliable.
+
+Task setup commands may optionally declare `expected_returncodes` and
+`on_nonzero: score_zero`. These fields express evaluator/setup semantics rather
+than model behavior: an allowed return code continues normally, while
+`score_zero` records a valid evaluator score of zero instead of masking the
+rollout as a harness failure. Tasks that omit both fields continue through the
+pinned upstream setup implementation unchanged.
+
+The Docker port-allocation lock wait is configurable because concurrent VM
+startup can legitimately take longer than the pinned upstream default. Raising
+the wait changes only infrastructure failure handling; it does not change
+observations, actions, prompts, or evaluator scoring.
 
 ### Pre-staged task files
 

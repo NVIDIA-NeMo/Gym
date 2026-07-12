@@ -199,6 +199,11 @@ class FakePointerEnv(FakeEnv):
         return 1.0 if self.actions else 0.0
 
 
+class FakeSetupScoreZeroEnv(FakeEnv):
+    def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
+        raise osworld_client._EvaluatorScoreZero("declared zero")
+
+
 def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakeEnv.instances.clear()
     FakePromptAgent.call_llm_responses.clear()
@@ -213,6 +218,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
             return FakeEnv
         if import_path == "fake.FakePointerEnv":
             return FakePointerEnv
+        if import_path == "fake.FakeSetupScoreZeroEnv":
+            return FakeSetupScoreZeroEnv
         if import_path == "fake.FakePromptAgent":
             return FakePromptAgent
         if import_path == "fake.FakePointerAgent":
@@ -337,6 +344,25 @@ def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:
     assert result.score == 0.4
     assert result.reward == 0.4
     assert result.finished is True
+
+
+def test_setup_score_zero_returns_valid_unmasked_zero(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "setup-zero", "instruction": "This task is already known to score zero."},
+        model_fn=lambda _system, _instruction, _history: pytest.fail("model must not run"),
+        env_class_path="fake.FakeSetupScoreZeroEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.score == 0.0
+    assert result.reward == 0.0
+    assert result.finished is True
+    assert result.mask_sample is False
+    assert result.error is None
+    assert result.termination_reason == "setup_score_zero"
 
 
 def test_recording_can_be_limited_to_selected_task_ids(monkeypatch, tmp_path: Path) -> None:
@@ -764,6 +790,125 @@ def test_stage_setup_cache_supports_flat_spreadsheet_download_cache(monkeypatch,
     assert linked == 1
     assert destination.is_symlink()
     assert destination.read_bytes() == b"xlsx"
+
+
+def _install_fake_setup_module(monkeypatch, result: Dict[str, Any]):
+    desktop_env = ModuleType("desktop_env")
+    controllers = ModuleType("desktop_env.controllers")
+    setup_module = ModuleType("desktop_env.controllers.setup")
+    original_calls: List[Dict[str, Any]] = []
+    post_calls: List[Dict[str, Any]] = []
+
+    class SetupController:
+        def __init__(self, cache_dir: str) -> None:
+            self.client_password = "password"  # pragma: allowlist secret
+            self.screen_width = 1920
+            self.screen_height = 1080
+            self.http_server = "http://vm"
+            self.cache_dir = cache_dir
+
+        def _execute_setup(
+            self,
+            command,
+            stdout="",
+            stderr="",
+            shell=False,
+            until=None,
+        ):
+            original_calls.append(
+                {
+                    "command": command,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "shell": shell,
+                    "until": until,
+                }
+            )
+            return "upstream"
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return dict(result)
+
+    def post(url, **kwargs):
+        post_calls.append({"url": url, **kwargs})
+        return Response()
+
+    setup_module.SetupController = SetupController
+    setup_module.requests = SimpleNamespace(
+        post=post,
+        exceptions=SimpleNamespace(RequestException=RuntimeError),
+    )
+    controllers.setup = setup_module
+    desktop_env.controllers = controllers
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.controllers", controllers)
+    monkeypatch.setitem(sys.modules, "desktop_env.controllers.setup", setup_module)
+    return SetupController, original_calls, post_calls
+
+
+def test_setup_returncode_contract_is_opt_in_and_accepts_declared_codes(monkeypatch, tmp_path: Path) -> None:
+    controller_class, original_calls, post_calls = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 2, "output": "expected", "error": ""},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    assert controller._execute_setup(["legacy"]) == "upstream"
+    assert len(original_calls) == 1
+    result = controller._execute_setup(
+        ["tool", "{SCREEN_WIDTH_HALF}"],
+        expected_returncodes=[0, 2],
+    )
+
+    assert result["returncode"] == 2
+    assert len(post_calls) == 1
+    assert '"960"' in post_calls[0]["data"]
+
+
+def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, tmp_path: Path) -> None:
+    controller_class, _, _ = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 3, "output": "not present", "error": ""},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    with pytest.raises(osworld_client._EvaluatorScoreZero, match="return code 3"):
+        controller._execute_setup(["check"], on_nonzero="score_zero")
+
+    class Evaluator:
+        def evaluate(self):
+            raise osworld_client._EvaluatorScoreZero("expected zero")
+
+    assert osworld_client._evaluate_osworld_env(
+        Evaluator(),
+        osworld_client.logging.getLogger("test-evaluator"),
+        disable_gpu=False,
+    ) == pytest.approx(0.0)
+
+
+def test_docker_port_lock_timeout_is_configurable(monkeypatch) -> None:
+    desktop_env = ModuleType("desktop_env")
+    providers = ModuleType("desktop_env.providers")
+    docker_package = ModuleType("desktop_env.providers.docker")
+    provider = ModuleType("desktop_env.providers.docker.provider")
+    provider.LOCK_TIMEOUT = 10
+    docker_package.provider = provider
+    providers.docker = docker_package
+    desktop_env.providers = providers
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.providers", providers)
+    monkeypatch.setitem(sys.modules, "desktop_env.providers.docker", docker_package)
+    monkeypatch.setitem(sys.modules, "desktop_env.providers.docker.provider", provider)
+
+    osworld_client._configure_docker_port_lock_timeout(45.0)
+    assert provider.LOCK_TIMEOUT == 45.0
+    with pytest.raises(ValueError, match="must be positive"):
+        osworld_client._configure_docker_port_lock_timeout(0)
 
 
 def test_extension_alias_patch_updates_both_metric_exports(monkeypatch) -> None:
