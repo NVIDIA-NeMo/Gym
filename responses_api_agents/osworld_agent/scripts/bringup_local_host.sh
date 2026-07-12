@@ -167,11 +167,7 @@ cat <<EOF
       Ubuntu.qcow2.zip — torn file. Recipe (12 GB compressed, ~5 min on a
       fast link):
 
-      mkdir -p docker_vm_data && cd docker_vm_data
-      curl -fL --retry 3 -O \\
-        https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
-      unzip Ubuntu.qcow2.zip && rm Ubuntu.qcow2.zip
-      cd ..
+      bash responses_api_agents/osworld_agent/scripts/prepare_osworld_vm.sh
 
   Then run servers + rollouts:
   -----------------------------------------------------------------------------

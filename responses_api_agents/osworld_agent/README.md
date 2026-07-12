@@ -37,6 +37,12 @@ The optional host helper installs Docker, `uv`, and the video-recording tools:
 bash responses_api_agents/osworld_agent/scripts/bringup_local_host.sh
 ```
 
+For a non-mutating audit of an existing host, run:
+
+```bash
+bash responses_api_agents/osworld_agent/scripts/check_host_prerequisites.sh
+```
+
 ## Quickstart
 
 From the Gym repository root:
@@ -63,18 +69,16 @@ ng_collect_rollouts \
 ```
 
 The first run downloads the OSWorld container and VM image. When running more
-than one environment concurrently, pre-stage the VM image to avoid concurrent
-workers racing on the same download:
+than one environment concurrently, pre-stage and verify the VM image to avoid
+concurrent workers racing on the same download:
 
 ```bash
-mkdir -p docker_vm_data
-cd docker_vm_data
-curl -fL --retry 3 -O \
-  https://huggingface.co/datasets/xlangai/ubuntu_osworld/resolve/main/Ubuntu.qcow2.zip
-unzip Ubuntu.qcow2.zip
-rm Ubuntu.qcow2.zip
-cd ..
+bash responses_api_agents/osworld_agent/scripts/prepare_osworld_vm.sh
 ```
+
+The downloader resumes interrupted transfers and verifies the extracted VM by
+size and SHA-256. Override `VM_DIR`, `VM_URL`, `VM_SHA256`, or
+`VM_SIZE_BYTES` only when intentionally selecting another upstream image.
 
 ## Runners
 
@@ -242,6 +246,13 @@ limit, a five-second post-action wait, and parser retries. Optional parser-error
 feedback, repeated-action guidance, and a pre-DONE checklist are available in
 `agent_kwargs` without requiring another agent class.
 
+Its `temperature=0.6` and `top_p=0.95` values follow NVIDIA's thinking-mode
+recommendation in the
+[checkpoint model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/blob/24e67ea000b7c2837fc8f9488aa2008524fac8ba/README.md#model-parameters).
+The 4096-token output limit is the tested OSWorld agent setting rather than the
+model card's longer general-purpose reasoning budget; these values are
+model-specific and do not change defaults for other runners.
+
 The response sets `mask_sample=true` when a timeout, evaluator error, or
 unfinished max-step rollout makes the reward unreliable.
 
@@ -251,6 +262,18 @@ Large task inputs can be prepared outside each rollout. Set one of
 `OSWORLD_SETUP_CACHE_DIR`, `OW_SETUP_CACHE_DIR`,
 `SPREADSHEETBENCH_SETUP_CACHE_DIR`, or `PPTC_SETUP_CACHE_DIR`; matching files
 are linked into the per-task cache before `env.reset()`.
+
+The pre-staged cache may be empty. Missing task files follow OSWorld's normal
+download path and are cached on demand; prewarming affects speed and resilience
+to transient download failures, not task semantics.
+
+### Binary and raw OSWorld metrics
+
+OSWorld aggregate metrics report both `osworld/binary_success_rate` and
+`osworld/raw_reward_rate`. Binary success counts only evaluator scores of 1.0;
+raw reward preserves fractional evaluator credit. Both rates use the same
+completed-rollout denominator and are reported regardless of `reward_mode`,
+which continues to control the training reward returned by each rollout.
 
 ## Logs and artifacts
 

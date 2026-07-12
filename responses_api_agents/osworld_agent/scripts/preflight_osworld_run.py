@@ -79,9 +79,7 @@ def _validate_agent_classes(configs: list[dict[str, Any]]) -> list[str]:
 
 def _validate_docker_lock(configs: list[dict[str, Any]]) -> None:
     uses_docker = any(
-        key == "provider_name" and value == "docker"
-        for config in configs
-        for key, value in _walk(config)
+        key == "provider_name" and value == "docker" for config in configs for key, value in _walk(config)
     )
     if not uses_docker:
         return

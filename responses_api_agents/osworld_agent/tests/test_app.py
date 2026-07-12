@@ -464,6 +464,38 @@ class TestApp:
     def test_sanity(self) -> None:
         OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
 
+    def test_metrics_report_binary_and_raw_osworld_scores(self) -> None:
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        tasks = [
+            [
+                {"reward": 1.0, "verifier_metadata": {"osworld_score": 1.0}},
+                {"reward": 0.0, "verifier_metadata": {"osworld_score": 0.5}},
+            ],
+            [
+                {
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "verifier_metadata": {"osworld_score": 0.25},
+                }
+            ],
+        ]
+
+        metrics = agent.compute_metrics(tasks)
+
+        assert metrics["osworld/scored_rollout_count"] == 3
+        assert metrics["osworld/masked_rollout_count"] == 1
+        assert metrics["osworld/binary_success_count"] == 1
+        assert metrics["osworld/binary_success_rate"] == pytest.approx(100.0 / 3.0)
+        assert metrics["osworld/raw_reward_sum"] == pytest.approx(1.75)
+        assert metrics["osworld/raw_reward_rate"] == pytest.approx(175.0 / 3.0)
+
+        key_metrics = agent.get_key_metrics({"mean/reward": 1.0, **metrics})
+        assert key_metrics == {
+            "mean/reward": 1.0,
+            "osworld/binary_success_rate": pytest.approx(100.0 / 3.0),
+            "osworld/raw_reward_rate": pytest.approx(175.0 / 3.0),
+        }
+
     async def test_responses_not_implemented(self) -> None:
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
         with pytest.raises(NotImplementedError):

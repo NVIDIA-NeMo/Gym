@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import subprocess
 from pathlib import Path
@@ -9,6 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh"
 OMNI_RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh"
 PREFLIGHT_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/preflight_osworld_run.py"
+HOST_CHECK_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/check_host_prerequisites.sh"
+VM_PREPARE_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/prepare_osworld_vm.sh"
 
 
 def _read_run_env(path: Path) -> dict[str, str]:
@@ -72,17 +77,14 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
         assert completed.stderr == ""
 
     socket_probe = (
-        f"{run_env['RAY_TMPDIR'].rstrip('/')}/ray/"
-        "session_2099-12-31_23-59-59_999999_999999/sockets/plasma_store"
+        f"{run_env['RAY_TMPDIR'].rstrip('/')}/ray/session_2099-12-31_23-59-59_999999_999999/sockets/plasma_store"
     )
     assert len(socket_probe) <= 107
 
 
 def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> None:
     input_path = tmp_path / "input.jsonl"
-    input_path.write_text(
-        '{"verifier_metadata":{"task_id":"task-1","osworld_task":{"id":"task-1"}}}\n'
-    )
+    input_path.write_text('{"verifier_metadata":{"task_id":"task-1","osworld_task":{"id":"task-1"}}}\n')
     configs = ",".join(
         [
             "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
@@ -108,10 +110,7 @@ def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> Non
     )
 
     assert '"preflight": "ok"' in completed.stdout
-    assert (
-        "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
-        in completed.stdout
-    )
+    assert "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent" in completed.stdout
 
 
 def test_omni_runner_defaults_match_the_three_image_recipe(tmp_path: Path) -> None:
@@ -123,6 +122,9 @@ def test_omni_runner_defaults_match_the_three_image_recipe(tmp_path: Path) -> No
             "PREFLIGHT": "0",
             "RUN_DIR": str(run_dir),
             "SERVER_VENV_ROOT": str(tmp_path / "server-venvs"),
+            # GitHub Actions defines RUNNER_NAME for its own worker. Pin the
+            # adapter runner so this test exercises the public script default.
+            "RUNNER_NAME": "nemotron_v3_nano_omni_agent",
         }
     )
 
@@ -141,3 +143,15 @@ def test_omni_runner_defaults_match_the_three_image_recipe(tmp_path: Path) -> No
     assert run_env["MAX_OUTPUT_TOKENS"] == "4096"
     assert 'OMNI_MINI_PREFLIGHT_IMAGE_COUNT="${OMNI_MINI_PREFLIGHT_IMAGE_COUNT:-3}"' in script
     assert '--image-count "${OMNI_MINI_PREFLIGHT_IMAGE_COUNT}"' in script
+
+
+@pytest.mark.parametrize("script", [HOST_CHECK_SCRIPT, VM_PREPARE_SCRIPT])
+def test_public_host_setup_scripts_are_syntax_valid_and_portable(script: Path) -> None:
+    subprocess.run(["bash", "-n", str(script)], check=True)
+
+
+def test_vm_prepare_script_pins_the_verified_image_identity() -> None:
+    text = VM_PREPARE_SCRIPT.read_text(encoding="utf-8")
+    assert "6bf667a852b3c307f61d9f09c42559351f45e0607e428b4997becf534cf4d313" in text  # pragma: allowlist secret
+    assert "24460197888" in text
+    assert "--continue-at -" in text

@@ -67,10 +67,7 @@ def test_nemotron_v3_nano_omni_runner_is_owned_by_the_gym_adapter() -> None:
     spec = resolve_runner_spec("nemotron_v3_nano_omni_agent")
 
     assert spec.kind == "nemotron_v3_nano_omni_agent"
-    assert (
-        spec.agent_class_path
-        == "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
-    )
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
     assert spec.action_space == "pyautogui"
     assert spec.observation_type == "screenshot"
     assert spec.agent_kwargs["coordinate_type"] == "relative"

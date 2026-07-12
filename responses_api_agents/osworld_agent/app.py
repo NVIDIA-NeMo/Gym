@@ -677,6 +677,42 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
 
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Report binary completion and raw OSWorld evaluator reward together."""
+
+        rollouts = [rollout for task in tasks for rollout in task]
+        raw_scores: List[float] = []
+        masked_count = 0
+        for rollout in rollouts:
+            metadata = rollout.get("verifier_metadata")
+            if not isinstance(metadata, Mapping):
+                metadata = {}
+            score = metadata.get("osworld_score", rollout.get("reward", 0.0))
+            try:
+                raw_scores.append(float(score or 0.0))
+            except (TypeError, ValueError):
+                raw_scores.append(0.0)
+            masked_count += int(bool(rollout.get("mask_sample", False)))
+
+        count = len(raw_scores)
+        binary_successes = sum(score >= 1.0 for score in raw_scores)
+        raw_reward = sum(raw_scores)
+        return {
+            "osworld/scored_rollout_count": count,
+            "osworld/masked_rollout_count": masked_count,
+            "osworld/binary_success_count": binary_successes,
+            "osworld/binary_success_rate": 100.0 * binary_successes / count if count else 0.0,
+            "osworld/raw_reward_sum": raw_reward,
+            "osworld/raw_reward_rate": 100.0 * raw_reward / count if count else 0.0,
+        }
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        metrics = super().get_key_metrics(agent_metrics)
+        for key in ("osworld/binary_success_rate", "osworld/raw_reward_rate"):
+            if key in agent_metrics:
+                metrics[key] = agent_metrics[key]
+        return metrics
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         # OSWorld's loop runs sync inside Ray; we do not expose a stand-alone
         # /v1/responses endpoint for this agent.

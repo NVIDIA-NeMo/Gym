@@ -44,9 +44,7 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 _M3_AGENT = "mm_agents.m3.M3Agent"
-_NEMOTRON_V3_NANO_OMNI_AGENT = (
-    "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
-)
+_NEMOTRON_V3_NANO_OMNI_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
 _QWEN3_OMNI_AGENT = "mm_agents.qwen3vl_agent.Qwen3VLAgent"
 
 
