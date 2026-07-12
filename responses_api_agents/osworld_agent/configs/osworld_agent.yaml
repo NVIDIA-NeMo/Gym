@@ -56,5 +56,6 @@ osworld_simple_agent:
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
       task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
+      docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention

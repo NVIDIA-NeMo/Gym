@@ -214,6 +214,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
     task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
     runner_name: str = DEFAULT_RUNNER_NAME
@@ -767,6 +768,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "mem_limit_mb": self.config.mem_limit_mb,
                 "step_timeout": self.config.step_timeout,
                 "task_timeout": self.config.task_timeout,
+                "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
                 "reward_mode": self.config.reward_mode,
                 "base_url": base_url,
