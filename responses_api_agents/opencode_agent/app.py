@@ -224,11 +224,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return root
 
     def _repo_dir(self, fallback: Path) -> Path:
+        """Return the configured persistent repository or the temporary fallback."""
         if not self.config.repo_dir:
             return fallback
         root = Path(self.config.repo_dir).expanduser()
         if not root.is_absolute():
             root = Path.cwd() / root
+        root.mkdir(parents=True, exist_ok=True)
         return root
 
     def _write_opencode_config(self, work_dir: Path) -> None:
