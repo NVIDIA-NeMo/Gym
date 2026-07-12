@@ -119,7 +119,7 @@ class _DualServer(SimpleResourcesServer):
         return {"session_id": session_id, "counter": counter}
 
     @gym_tool
-    async def locate(self, point: Point) -> LocateResponse:
+    async def locate(self, point: Point, note: str = "") -> LocateResponse:
         """Report the type the nested param actually arrived as."""
         return LocateResponse(param_type=type(point).__name__, x=getattr(point, "x", -1))
 
@@ -424,6 +424,22 @@ class TestContractLongTail:
 
         gym_tool(bump, name="bump", input_schema={"type": "object"}, owner=server)
         with pytest.raises(ValueError, match="Duplicate gym_tool name"):
+            server.setup_webserver()
+
+    def test_single_model_parameter_tool_is_rejected(self) -> None:
+        """A typed tool whose only parameter is a Pydantic model is ambiguous (nested vs flat
+        argument shape) and must be rejected at startup with a pointer to input_schema=."""
+
+        class _Wrapped(SimpleResourcesServer):
+            @gym_tool
+            async def repeat(self, session_id: str, body: RepeatBody) -> str:
+                return body.label * body.count
+
+            async def verify(self, body: BaseVerifyRequest):
+                pass
+
+        server = _make(_Wrapped, name="wrapped")
+        with pytest.raises(ValueError, match="input_schema=RepeatBody"):
             server.setup_webserver()
 
     def test_reserved_runtime_tool_name_rejected(self) -> None:
