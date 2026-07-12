@@ -1527,8 +1527,10 @@ class TestMCPNamespacedScoring:
 
     def test_namespaced_and_bare_trajectories_score_the_same(self) -> None:
         import json
+        from pathlib import Path
 
-        dataset = json.loads(open("resources_servers/workplace_assistant/data/example.jsonl").readline())
+        example_path = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        dataset = json.loads(example_path.read_text().splitlines()[0])
         gt_calls = (
             eval(dataset["ground_truth"]) if isinstance(dataset["ground_truth"], str) else dataset["ground_truth"]
         )
