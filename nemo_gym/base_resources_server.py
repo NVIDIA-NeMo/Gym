@@ -321,7 +321,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         tools.extend((func.__gym_tool__, func) for func in self._dynamic_gym_tools)
 
         seen: set[str] = set()
-        for spec, _ in tools:
+        for spec, fn in tools:
             if spec.name in RESERVED_MCP_TOOL_NAMES:
                 raise ValueError(
                     f"@gym_tool method {spec.name!r} collides with a reserved endpoint name "
@@ -330,6 +330,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             if spec.name in seen:
                 raise ValueError(f"Duplicate gym_tool name {spec.name!r}; tool names must be unique per server.")
             seen.add(spec.name)
+            if spec.input_schema is None:
+                # Validated here (the one chokepoint every registration path crosses) so a subclass
+                # that overrides register_mcp_tools without super() cannot bypass the check.
+                self._check_no_single_model_param(spec.name, fn)
         return tools
 
     def _setup_mcp(self, app: FastAPI, gym_tools: list[tuple[GymToolSpec, Callable]]) -> None:
@@ -429,17 +433,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         hints = get_type_hints(method, include_extras=True)
         inject_session = "session_id" in signature.parameters
 
-        visible = [p for p in signature.parameters if p != "session_id"]
-        if len(visible) == 1:
-            annotation = hints.get(visible[0], signature.parameters[visible[0]].annotation)
-            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-                raise ValueError(
-                    f"@gym_tool {name!r}: the only parameter, {visible[0]!r}, is a Pydantic model, so it is "
-                    f"unclear what callers should send — one nested argument ({{{visible[0]!r}: {{...}}}}) or "
-                    f"the model's fields directly. For fields-directly (the usual intent), keep the same "
-                    f"function and declare it as @gym_tool(input_schema={annotation.__name__}). If you really "
-                    "want one nested argument, add a second parameter so the shape is unambiguous."
-                )
+        self._check_no_single_model_param(name, method)
 
         if inspect.iscoroutinefunction(method):
 
@@ -484,6 +478,26 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                     f"@gym_tool method {name!r} must not take a 'request' parameter; there is no FastAPI "
                     "Request on the MCP path. Declare a 'session_id: str' parameter to access the Gym session."
                 )
+
+    def _check_no_single_model_param(self, name: str, method: Callable) -> None:
+        """Reject the ambiguous typed-tool shape: exactly one non-session param that is a model."""
+        signature = inspect.signature(method)
+        try:
+            hints = get_type_hints(method)
+        except Exception:
+            hints = {}
+        visible = [p for p in signature.parameters if p != "session_id"]
+        if len(visible) != 1:
+            return
+        annotation = hints.get(visible[0], signature.parameters[visible[0]].annotation)
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            raise ValueError(
+                f"@gym_tool {name!r}: the only parameter, {visible[0]!r}, is a Pydantic model, so it is "
+                f"unclear what callers should send — one nested argument ({{{visible[0]!r}: {{...}}}}) or "
+                f"the model's fields directly. For fields-directly (the usual intent), keep the same "
+                f"function and declare it as @gym_tool(input_schema={annotation.__name__}). If you really "
+                "want one nested argument, add a second parameter so the shape is unambiguous."
+            )
 
     # --------------------------------------------------------------------------------------------
     # MCP low-level handlers: session-aware tools/list, raw-argument tools/call

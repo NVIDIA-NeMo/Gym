@@ -442,6 +442,26 @@ class TestContractLongTail:
         with pytest.raises(ValueError, match="input_schema=RepeatBody"):
             server.setup_webserver()
 
+    def test_single_model_parameter_rejected_even_when_register_mcp_tools_is_overridden(self) -> None:
+        """The rejection lives in the collection chokepoint, so a subclass that overrides
+        register_mcp_tools without calling super() cannot slip an ambiguous tool past it and
+        end up with a silently HTTP-only, nested-body route (the bypass a verifier found)."""
+
+        class _Bypassing(SimpleResourcesServer):
+            def register_mcp_tools(self, mcp):
+                pass  # deliberately does not call super()
+
+            @gym_tool
+            async def repeat(self, session_id: str, body: RepeatBody) -> str:
+                return body.label * body.count
+
+            async def verify(self, body: BaseVerifyRequest):
+                pass
+
+        server = _make(_Bypassing, name="bypassing")
+        with pytest.raises(ValueError, match="input_schema=RepeatBody"):
+            server.setup_webserver()
+
     def test_reserved_runtime_tool_name_rejected(self) -> None:
         server = _make(_DualServer)
 
