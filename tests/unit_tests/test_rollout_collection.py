@@ -24,6 +24,7 @@ import yaml
 
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
@@ -36,7 +37,17 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    loads_jsonl_line,
 )
+
+
+class TestLoadsJsonlLine:
+    def test_parses_valid_line(self) -> None:
+        assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
+
+    def test_malformed_line_raises_config_error_with_location(self) -> None:
+        with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
+            loads_jsonl_line("{not json", "f.jsonl", 3)
 
 
 class TestGetMaxRolloutAttempts:
@@ -174,6 +185,17 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(ValueError, match="mutually exclusive"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_preprocess_rows_missing_input_raises_config_error(self, tmp_path: Path) -> None:
+        """A non-existent input file fails with a clean ConfigPathNotFoundError, not a raw FileNotFoundError."""
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "does_not_exist.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        with pytest.raises(ConfigPathNotFoundError, match="does_not_exist.jsonl.*--input"):
             RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
@@ -481,6 +503,16 @@ class TestRolloutCollection:
                 output_jsonl_fpath=str(tmp_path / "out.jsonl"),
                 num_repeats={"alpha": bad_value},
             )
+
+    def test_num_repeats_null_coerces_to_one(self, tmp_path: Path) -> None:
+        # `--num-repeats null` (None) restores the pre-#1356 default of 1.
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=None,
+        )
+        assert config.num_repeats == 1
 
     def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
         """An agent listed in the dict that never appears in input rows warns (likely typo)."""

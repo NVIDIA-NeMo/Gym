@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -42,13 +43,19 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
+    NeMoGymFunctionToolParam,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
+    Reasoning,
     TokenIDLogProbMixin,
 )
 
@@ -301,6 +308,39 @@ class ResponsesConverter(BaseModel):
         state.tool_calls_buffer.append(tool_call)
 
     # =======================================================
+    # Chat Completion create params to Response create params
+    # =======================================================
+
+    def _chat_completion_to_responses_tools(
+        self, chat_completions_tools: List[NeMoGymChatCompletionToolParam]
+    ) -> List[NeMoGymFunctionToolParam]:
+        return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
+
+    def chat_completion_to_responses_create_params(
+        self,
+        chat_completion_create_params: NeMoGymChatCompletionCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(
+            input=self.chat_completions_messages_to_responses_items(chat_completion_create_params.messages),
+            max_output_tokens=chat_completion_create_params.max_completion_tokens,
+            metadata=chat_completion_create_params.metadata,
+            model=chat_completion_create_params.model,
+            parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
+            reasoning=Reasoning(reasoning_effort=chat_completion_create_params.reasoning_effort),
+            service_tier=chat_completion_create_params.service_tier,
+            store=chat_completion_create_params.store,
+            temperature=chat_completion_create_params.temperature,
+            tool_choice=chat_completion_create_params.tool_choice
+            if chat_completion_create_params.tool_choice is not None
+            else "auto",
+            tools=self._chat_completion_to_responses_tools(chat_completion_create_params.tools),
+            top_logprobs=chat_completion_create_params.top_logprobs,
+            top_p=chat_completion_create_params.top_p,
+            user=chat_completion_create_params.user,
+            stream=chat_completion_create_params.stream,
+        )
+
+    # =======================================================
     # Chat Completion to Response
     # =======================================================
 
@@ -403,6 +443,63 @@ class ResponsesConverter(BaseModel):
                 raise NotImplementedError(f"Unrecognized role: {role}!")
 
         return output_items
+
+    def chat_completion_to_response(
+        self,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+        chat_completion: NeMoGymChatCompletion,
+    ) -> NeMoGymResponse:
+        choice = chat_completion.choices[0]
+
+        response_output = self.postprocess_chat_response(choice)
+        response_output_dicts = [item.model_dump() for item in response_output]
+
+        usage = None
+        if chat_completion.usage:
+            usage = NeMoGymResponseUsage(
+                input_tokens=chat_completion.usage.prompt_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=chat_completion.usage.completion_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=chat_completion.usage.prompt_tokens + chat_completion.usage.completion_tokens,
+            )
+
+        incomplete_details = None
+        if choice.finish_reason == "length":
+            incomplete_details = {"reason": "max_output_tokens"}
+        elif choice.finish_reason == "content_filter":
+            incomplete_details = {"reason": "content_filter"}
+
+        # Chat Completion -> Response
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=chat_completion.created,
+            model=responses_create_params.model,
+            object="response",
+            output=response_output_dicts,
+            tool_choice=responses_create_params.tool_choice
+            if responses_create_params.tool_choice is not None
+            else "auto",
+            parallel_tool_calls=responses_create_params.parallel_tool_calls,
+            tools=responses_create_params.tools,
+            temperature=responses_create_params.temperature,
+            top_p=responses_create_params.top_p,
+            background=responses_create_params.background,
+            max_output_tokens=responses_create_params.max_output_tokens,
+            max_tool_calls=responses_create_params.max_tool_calls,
+            previous_response_id=responses_create_params.previous_response_id,
+            prompt=responses_create_params.prompt,
+            reasoning=responses_create_params.reasoning,
+            service_tier=responses_create_params.service_tier,
+            text=responses_create_params.text,
+            top_logprobs=responses_create_params.top_logprobs,
+            truncation=responses_create_params.truncation,
+            metadata=responses_create_params.metadata,
+            instructions=responses_create_params.instructions,
+            user=responses_create_params.user,
+            incomplete_details=incomplete_details,
+            usage=usage,
+        )
 
 
 def split_responses_input_output_items(

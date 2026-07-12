@@ -18,6 +18,7 @@ import rich
 from rich.table import Table
 
 from nemo_gym.agent_registry import discover_agents
+from nemo_gym.cli.utils import print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
@@ -74,4 +75,4 @@ def list_agents() -> None:
             ", ".join(sorted(entry.variants)) or "—",
             entry.description or "",
         )
-    rich.print(table)
+    print_rich_table(table)
