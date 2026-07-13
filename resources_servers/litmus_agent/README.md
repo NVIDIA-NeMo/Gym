@@ -5,7 +5,9 @@
 `litmus_agent` is a **domain-agnostic** answer verifier. It is the generic
 generalization of the `rdkit_chemistry` scorer: the scoring path never depended
 on chemistry, so this server keeps only that path and drops everything
-RDKit-specific.
+RDKit-specific. It supersedes `rdkit_chemistry` (now deprecated); legacy
+chemistry rows port over via the `property_type` → `answer_type` back-compat
+mapping described below.
 
 It does three things:
 
@@ -151,16 +153,21 @@ See `data/example.jsonl` for concrete examples.
 
 ## Example Usage
 
+Start the server (pure-verifier direct rows need no sandbox provider or API key):
+
 ```bash
-config_paths="resources_servers/litmus_agent/configs/litmus_agent.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+gym env start \
+    --model-type openai_model \
+    --resources-server litmus_agent
+```
 
-ng_run "+config_paths=[${config_paths}]"
+Collect rollouts and score them:
 
-ng_collect_rollouts \
-    +agent_name=litmus_agent_agent \
-    +input_jsonl_fpath=resources_servers/litmus_agent/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/litmus_agent/data/example_rollouts.jsonl
+```bash
+gym eval run --no-serve \
+    --agent litmus_agent_agent \
+    --input resources_servers/litmus_agent/data/example.jsonl \
+    --output resources_servers/litmus_agent/data/example_rollouts.jsonl
 ```
 
 ## Sandbox-backed code-execution tool
