@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import hashlib
+import random
 import json
 import os
 from copy import deepcopy
@@ -78,6 +80,27 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
 
+    # Assign new sessions to the endpoint with the least cumulative served
+    # tokens instead of round-robin by arrival order. With heavy-tailed rollout
+    # lengths, count-balanced assignment leaves engines with unequal token
+    # loads; least-loaded assignment smooths that using the usage stats every
+    # response already carries. Per-process state: each gym server process
+    # balances the sessions it owns.
+    least_loaded_routing: bool = False
+    # Optional: length-ordering JSON (labels keyed by SHA-256 of the first
+    # user-message content, value_absolute = observed mean output tokens).
+    # When set, new sessions book their PREDICTED cost as provisional load
+    # instead of the running average — a monster session then reserves its
+    # true weight up front rather than looking like an average one until its
+    # first turn reports.
+    predicted_cost_json: Optional[str] = None
+    # Power-of-two-choices placement: sample two random endpoints and take the
+    # less loaded (load + pending). Nearly all of least-loaded's balancing
+    # power, but randomization prevents multiple server processes with similar
+    # load views from herding onto the same argmin engine simultaneously.
+    # Takes precedence over full least_loaded argmin when both are set.
+    two_choice_routing: bool = False
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
@@ -112,8 +135,80 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        # Least-loaded routing state: cumulative served tokens per endpoint and
+        # session -> endpoint index, updated from response usage stats.
+        self._client_loads: List[float] = [0.0] * len(self._clients)
+        self._client_sessions: List[int] = [0] * len(self._clients)
+        # Provisional (assigned-but-unreported) load per endpoint: loads only
+        # move when responses complete, so a burst of new sessions would all
+        # see the same argmin and herd onto one engine. Each assignment books
+        # an estimated cost immediately; the estimate is released when the
+        # session's first usage report arrives.
+        self._client_pending: List[float] = [0.0] * len(self._clients)
+        self._session_provisional: Dict[str, float] = dict()
+        self._avg_session_cost: float = 256.0  # running mean, updated from usage
+        self._cost_samples: int = 0
+        self._session_id_to_client_idx: Dict[str, int] = dict()
+        self._predicted_costs: Dict[str, float] = dict()
+        if self.config.predicted_cost_json:
+            labels = json.loads(open(self.config.predicted_cost_json).read())["labels"]
+            self._predicted_costs = {
+                key: float(entry.get("value_absolute", 0.0))
+                for key, entry in labels.items()
+            }
+            print(
+                f"[least_loaded_routing] {len(self._predicted_costs)} predicted "
+                f"session costs loaded from {self.config.predicted_cost_json}"
+            )
 
         self._converter = self.get_converter()
+
+    def _predict_session_cost(self, body_dict: Optional[Dict]) -> float:
+        """Predicted total output tokens for a new session, from its first
+        user-message content; falls back to the running average."""
+        if self._predicted_costs and body_dict:
+            # chat-completions style carries "messages"; responses style "input"
+            for message in body_dict.get("messages") or body_dict.get("input") or []:
+                if message.get("role") == "user":
+                    content = message.get("content")
+                    if isinstance(content, list):
+                        content = "".join(
+                            p.get("text", "") for p in content if isinstance(p, dict)
+                        )
+                    if isinstance(content, str) and content:
+                        key = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                        cost = self._predicted_costs.get(key)
+                        if cost:
+                            return cost
+                    break
+        return self._avg_session_cost
+
+        self._converter = self.get_converter()
+
+    def _record_client_load(self, session_id: str, usage) -> None:
+        idx = self._session_id_to_client_idx.get(session_id)
+        if idx is None or not usage:
+            return
+        if not isinstance(usage, dict):
+            usage = {
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+            }
+        # Decode dominates per-token cost; count prefill at a discount (much of
+        # it is prefix-cache hits for multi-turn sessions).
+        completion = usage.get("completion_tokens") or 0
+        prompt = usage.get("prompt_tokens") or 0
+        cost = completion + prompt / 16.0
+        self._client_loads[idx] += cost
+        # First actual for this session releases its provisional booking and
+        # feeds the running cost estimate used for future bookings.
+        est = self._session_provisional.pop(session_id, None)
+        if est is not None:
+            self._client_pending[idx] = max(0.0, self._client_pending[idx] - est)
+            self._cost_samples += 1
+            self._avg_session_cost += (cost - self._avg_session_cost) / min(
+                self._cost_samples, 256
+            )
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -201,7 +296,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
 
-        client = self._resolve_client(request)
+        client = self._resolve_client(request, body_dict)
         response_dict = await client.create_response(**body_dict)
 
         return NeMoGymResponse.model_validate(response_dict)
@@ -438,7 +533,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
-        client = self._resolve_client(request)
+        client = self._resolve_client(request, body_dict)
 
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
@@ -456,6 +551,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 request_id=request_id,
                 **body_dict,
             )
+            if self.config.least_loaded_routing or self.config.two_choice_routing:
+                self._record_client_load(
+                    request.session[SESSION_ID_KEY], chat_completion_dict.get("usage")
+                )
         except ClientResponseError as e:
             """
             Example messages for out of context length:
@@ -583,13 +682,49 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
-    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+    def _resolve_client(
+        self, request: Request, body_dict: Optional[Dict] = None
+    ) -> NeMoGymAsyncOpenAI:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
+            if self.config.two_choice_routing and len(self._clients) > 1:
+                # Power of two choices: the better of two random endpoints.
+                # Load-informed like least-loaded, but randomization prevents
+                # concurrent schedulers from herding onto a shared argmin.
+                candidates = random.sample(range(len(self._clients)), 2)
+                client_idx = min(
+                    candidates,
+                    key=lambda i: (
+                        self._client_loads[i] + self._client_pending[i],
+                        self._client_sessions[i],
+                    ),
+                )
+            elif self.config.least_loaded_routing or self.config.two_choice_routing:
+                # Pin the new session to the endpoint with the least cumulative
+                # served tokens. Ties break by fewest assigned sessions (NOT
+                # lowest index): before any usage stats exist all loads are 0,
+                # and index-tiebreak would herd the entire opening wave onto
+                # engine 0 — observed as a >300s stall killing that engine.
+                # With the session-count tiebreak, cold start degrades to
+                # round-robin and converges to load-based as stats arrive.
+                client_idx = min(
+                    range(len(self._clients)),
+                    key=lambda i: (
+                        self._client_loads[i] + self._client_pending[i],
+                        self._client_sessions[i],
+                    ),
+                )
+            else:
+                client_idx = len(self._session_id_to_client) % len(self._clients)
+            if self.config.least_loaded_routing or self.config.two_choice_routing:
+                # Book the session's predicted cost immediately so concurrent
+                # assignments in the same burst see each other's placements.
+                self._client_sessions[client_idx] += 1
+                est = self._predict_session_cost(body_dict)
+                self._client_pending[client_idx] += est
+                self._session_provisional[session_id] = est
+            self._session_id_to_client[session_id] = self._clients[client_idx]
+            self._session_id_to_client_idx[session_id] = client_idx
         client = self._session_id_to_client[session_id]
 
         return client
