@@ -38,6 +38,7 @@ import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from uuid import uuid4
 
 import orjson
 from fastapi import Body, FastAPI, Request
@@ -45,7 +46,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -388,11 +389,19 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
 class ModelCallRecord(BaseModel):
     """Observability record derived from one captured model-server exchange."""
 
+    # Unique server-generated identity for each persisted call.
+    model_call_id: Optional[str] = None
+
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
-    model_server: Optional[str] = None
+    model_ref: Optional[ModelServerRef] = None
     dialect: Optional[str] = None
     status_code: Optional[int] = None
+
+    # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
+    # for external trace correlation; durations use the monotonic latency fields below.
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
 
     # Token accounting. tokens_reasoning is OpenAI/Responses-only
     # (sourced from *_tokens_details.reasoning_tokens); Anthropic does not expose it, so it is null
@@ -431,10 +440,13 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     cache_hit, cached_tokens = _cache_signal(response.get("usage"))
     tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
     return ModelCallRecord(
+        model_call_id=exchange.get("model_call_id"),
         call_index=call_index,
-        model_server=exchange.get("model_server"),
+        model_ref=exchange.get("model_ref"),
         dialect=exchange.get("dialect"),
         status_code=exchange.get("status_code"),
+        started_at=exchange.get("started_at"),
+        completed_at=exchange.get("completed_at"),
         request=exchange.get("request"),
         response=response or None,
         tool_calls=tool_calls,
@@ -732,6 +744,9 @@ def _record(
     request_bytes: bytes,
     *,
     rollout_id: str,
+    model_call_id: str,
+    started_at: float,
+    completed_at: float,
     response_body: Any,
     status_code: Optional[int],
     error_category: Optional[str],
@@ -743,8 +758,13 @@ def _record(
         store.record(
             rollout_id,
             {
+                "model_call_id": model_call_id,
                 "dialect": dialect,
-                "model_server": model_server_name,
+                "model_ref": (
+                    {"type": "responses_api_models", "name": model_server_name} if model_server_name else None
+                ),
+                "started_at": started_at,
+                "completed_at": completed_at,
                 "latency_ms": round(latency_ms, 2),
                 "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
                 "status_code": status_code,
@@ -805,6 +825,7 @@ class _CaptureMiddleware:
             return
 
         rollout_id = rollout_from_path
+        model_call_id = uuid4().hex
         request_body = bytearray()
 
         async def _receive() -> dict[str, Any]:
@@ -820,6 +841,7 @@ class _CaptureMiddleware:
             "ttft_ms": None,
             "stream_error_category": None,
         }
+        started_at = time.time()
         start = time.perf_counter()
         deferred_response_messages: list[dict[str, Any]] = []
         sse_event_buffer = bytearray()
@@ -857,6 +879,7 @@ class _CaptureMiddleware:
         try:
             await self._app(scope, _receive, _send)
         except Exception as exc:
+            completed_at = time.time()
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -866,6 +889,9 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     rollout_id=rollout_id,
+                    model_call_id=model_call_id,
+                    started_at=started_at,
+                    completed_at=completed_at,
                     response_body=None,
                     status_code=None,
                     error_category=_classify_exception(exc),
@@ -878,6 +904,7 @@ class _CaptureMiddleware:
                 await _flush_deferred_response()
             raise
 
+        completed_at = time.time()
         latency_ms = (time.perf_counter() - start) * 1000.0
         status = state["status"]
         body_bytes = bytes(state["body"])
@@ -911,6 +938,9 @@ class _CaptureMiddleware:
                 model_server_name,
                 request_bytes,
                 rollout_id=rollout_id,
+                model_call_id=model_call_id,
+                started_at=started_at,
+                completed_at=completed_at,
                 response_body=response_body,
                 status_code=status,
                 error_category=error_category,

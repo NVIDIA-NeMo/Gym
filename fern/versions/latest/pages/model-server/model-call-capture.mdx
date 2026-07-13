@@ -56,8 +56,8 @@ The model servers and `rollout_collection` read the same path from the global co
 `gym env start` and `gym eval run --no-serve` are separate invocations, pass the same top-level
 capture settings to both. For separate pods or nodes, that absolute path must refer to a volume
 mounted in every producer and the collector. Multiple model servers may append to the same rollout
-file; records retain their `model_server`, and POSIX advisory file locking serializes writers when the
-shared filesystem supports it.
+file; records retain their typed `model_ref`, and POSIX advisory file locking serializes writers
+when the shared filesystem supports it.
 
 Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id.
 Concurrent collection jobs with overlapping indices must use separate capture directories.
@@ -77,10 +77,14 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
-contains a `call_index`, model server and API dialect, token and cache usage, latency, error details,
-tool calls, reasoning content, and the captured request and response. `call_index` reflects durable
-append order; it is not a causal or semantic ordering guarantee for concurrent calls. The request
-and response payloads remain the model-call evidence.
+contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
+`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
+calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
+before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
+returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
+trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
+order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls. The
+request and response payloads remain the model-call evidence.
 
 Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
 Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,

@@ -167,7 +167,8 @@ class TestApp:
         calls = read_model_call_records(CaptureStore(tmp_path), "openai-test")
         assert len(calls) == 1
         assert calls[0].dialect == "responses"
-        assert calls[0].model_server == "test_model_server"
+        assert calls[0].model_ref is not None
+        assert calls[0].model_ref.name == "test_model_server"
         assert calls[0].request == {"input": "hello"}
         assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
 

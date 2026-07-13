@@ -127,8 +127,11 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
 
 def test_build_model_call_record_from_exchange():
     exchange = {
+        "model_call_id": "call-1",
         "dialect": "responses",
-        "model_server": "srv",
+        "model_ref": {"type": "responses_api_models", "name": "srv"},
+        "started_at": 100.0,
+        "completed_at": 100.02,
         "latency_ms": 18.4,
         "request": {"input": "hi"},
         "response": {
@@ -148,18 +151,24 @@ def test_build_model_call_record_from_exchange():
         },
     }
     rec = build_model_call_record(exchange, call_index=3)
+    assert rec.model_call_id == "call-1"
     assert rec.call_index == 3
-    assert rec.model_server == "srv" and rec.dialect == "responses"
+    assert rec.model_ref is not None and rec.model_ref.name == "srv"
+    assert rec.dialect == "responses"
+    assert rec.started_at == 100.0 and rec.completed_at == 100.02
     assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
     assert rec.cache_hit is True and rec.cached_tokens == 4
     assert rec.reasoning_content == "thinking..."
     assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
     assert rec.latency_total_ms == 18.4
     assert {
+        "model_call_id",
         "call_index",
-        "model_server",
+        "model_ref",
         "dialect",
         "status_code",
+        "started_at",
+        "completed_at",
         "tokens_in",
         "tokens_out",
         "tokens_reasoning",
@@ -274,6 +283,11 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
     assert len(calls) == 1
+    assert calls[0].model_call_id
+    assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
+    assert calls[0].started_at is not None
+    assert calls[0].completed_at is not None
+    assert calls[0].started_at <= calls[0].completed_at
     assert calls[0].error_category == "upstream_error"
     assert calls[0].status_code == 500
 
@@ -295,6 +309,11 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
 
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
     assert len(calls) == 1
+    assert calls[0].model_call_id
+    assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
+    assert calls[0].started_at is not None
+    assert calls[0].completed_at is not None
+    assert calls[0].started_at <= calls[0].completed_at
     assert calls[0].error_category == "exception" and calls[0].response is None
     assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
 
@@ -314,8 +333,23 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
     r = client.post("/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"})
     assert r.status_code == 200 and r.json()["usage"]["total_tokens"] == 4
-    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
-    assert len(calls) == 1 and calls[0].tokens_total == 4
+    r_repeat = client.post("/ng-rollout/task7-roll2/v1/responses", json={"input": "again"})
+    assert r_repeat.status_code == 200
+
+    store = CaptureStore(tmp_path)
+    exchanges = store.read("task7-roll2")
+    assert len(exchanges) == 2
+    assert exchanges[0]["model_ref"] == {"type": "responses_api_models", "name": "srv"}
+    assert "model_server" not in exchanges[0]
+
+    calls = read_model_call_records(store, "task7-roll2")
+    assert len(calls) == 2 and all(call.tokens_total == 4 for call in calls)
+    assert len({call.model_call_id for call in calls}) == 2
+    assert calls[0].model_call_id
+    assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
+    assert calls[0].started_at is not None
+    assert calls[0].completed_at is not None
+    assert calls[0].started_at <= calls[0].completed_at
 
     # Plain /v1 URL is routed normally but is not captured without an explicit rollout prefix.
     r2 = client.post("/v1/responses", json={"input": "hi"})
@@ -441,6 +475,9 @@ def test_record_swallows_store_failure():
         "srv",
         b"{}",
         rollout_id="r",
+        model_call_id="call-1",
+        started_at=100.0,
+        completed_at=100.01,
         response_body={},
         status_code=200,
         error_category=None,
@@ -719,6 +756,10 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     calls = read_model_call_records(CaptureStore(tmp_path), "3-0")
     assert len(calls) == 1
     call = calls[0]
+    assert call.model_call_id
+    assert call.model_ref is not None and call.model_ref.name == "srv"
+    assert call.started_at is not None and call.completed_at is not None
+    assert call.started_at <= call.completed_at
     assert call.dialect == "messages"
     assert call.tokens_in == 17 and call.tokens_out == 7  # 10 + cache_read 5 + cache_creation 2; output from delta
     assert call.cached_tokens == 5 and call.cache_creation_tokens == 2
@@ -815,8 +856,11 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 def _capture_exchange(dialect, model_server, usage, response):
     return {
+        "model_call_id": f"call-{model_server}",
         "dialect": dialect,
-        "model_server": model_server,
+        "model_ref": {"type": "responses_api_models", "name": model_server},
+        "started_at": 100.0,
+        "completed_at": 100.01,
         "latency_ms": 1.0,
         "status_code": 200,
         "error_category": None,
@@ -846,8 +890,12 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert set(capture) == {"rollout_id", "metrics", "calls"}
     assert capture["rollout_id"] == "0-0"
     assert capture["metrics"]["num_calls"] == 1
-    assert capture["calls"][0]["tokens_in"] == 3
-    assert "request" not in capture["calls"][0] and "response" not in capture["calls"][0]
+    attached_call = capture["calls"][0]
+    assert attached_call["model_call_id"] == "call-A"
+    assert attached_call["model_ref"] == {"type": "responses_api_models", "name": "A"}
+    assert attached_call["started_at"] == 100.0 and attached_call["completed_at"] == 100.01
+    assert attached_call["tokens_in"] == 3
+    assert "request" not in attached_call and "response" not in attached_call
     assert record["response"] == {"harness": "A"} and record["reward"] == 1.0
 
 
