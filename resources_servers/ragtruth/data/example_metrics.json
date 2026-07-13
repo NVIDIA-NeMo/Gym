@@ -1,0 +1,31 @@
+{
+  "n": 3,
+  "mean_reward": 1.0,
+  "parse_fail_rate": 0.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "by_task_type": {
+    "Data2txt": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "accuracy": 1.0,
+      "count": 1
+    },
+    "QA": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "accuracy": 1.0,
+      "count": 1
+    },
+    "Summary": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "accuracy": 1.0,
+      "count": 1
+    }
+  }
+}

@@ -60,9 +60,6 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 LOG = logging.getLogger(__name__)
 
-_THINK_PAIR_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_ORPHAN_CLOSE_RE = re.compile(r".*</think>\s*", re.DOTALL | re.IGNORECASE)
-_THINK_ORPHAN_OPEN_RE = re.compile(r"<think>\s*", re.IGNORECASE)
 _FENCE_WHOLE_RE = re.compile(
     r"^```(?:json)?\s*\r?\n?(.*)\r?\n?```\s*$",
     re.DOTALL | re.IGNORECASE,
@@ -76,15 +73,30 @@ _FENCE_INNER_RE = re.compile(
 # ── Response parsing (adapted from byob_ragtruth.py) ──────────────────────
 
 
-def _strip_think(text: str) -> str:
+def _make_think_res(tag: str) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
+    """Compile the three regexes needed to strip a thinking-model tag pair."""
+    t = re.escape(tag)
+    pair = re.compile(rf"<{t}>.*?</{t}>", re.DOTALL | re.IGNORECASE)
+    orphan_close = re.compile(rf".*</{t}>\s*", re.DOTALL | re.IGNORECASE)
+    orphan_open = re.compile(rf"<{t}>\s*", re.IGNORECASE)
+    return pair, orphan_close, orphan_open
+
+
+_DEFAULT_THINK_REGEXES = _make_think_res("think")
+
+
+def _strip_think(text: str, tag: str = "think") -> str:
     if not text:
         return ""
-    # Remove paired <think>…</think> blocks, then handle stray tags from thinking
-    # models: a lone </think> (reasoning emitted with no opening tag) drops
-    # everything up to and including it; a lone <think> is dropped on its own.
-    cleaned = _THINK_PAIR_RE.sub("", text)
-    cleaned = _THINK_ORPHAN_CLOSE_RE.sub("", cleaned)
-    cleaned = _THINK_ORPHAN_OPEN_RE.sub("", cleaned)
+    pair, orphan_close, orphan_open = (
+        _DEFAULT_THINK_REGEXES if tag == "think" else _make_think_res(tag)
+    )
+    # Remove paired <tag>…</tag> blocks, then handle stray tags from thinking
+    # models: a lone </tag> (reasoning emitted with no opening tag) drops
+    # everything up to and including it; a lone <tag> is dropped on its own.
+    cleaned = pair.sub("", text)
+    cleaned = orphan_close.sub("", cleaned)
+    cleaned = orphan_open.sub("", cleaned)
     return cleaned.strip()
 
 
@@ -103,8 +115,8 @@ def _strip_json_fence(text: str) -> str:
     return s
 
 
-def _parse_response(raw: str) -> dict | None:
-    cleaned = _strip_json_fence(_strip_think(raw))
+def _parse_response(raw: str, think_tag: str = "think") -> dict | None:
+    cleaned = _strip_json_fence(_strip_think(raw, tag=think_tag))
     if not cleaned:
         return None
     try:
@@ -154,6 +166,9 @@ def _f1(tp: int, fp: int, fn: int) -> Dict[str, float]:
 
 class RagtruthResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "ragtruth"
+    # Tag name for stripping thinking-model reasoning blocks (e.g. "think" for
+    # <think>…</think>, "reasoning" for <reasoning>…</reasoning>).
+    think_tag: str = "think"
 
 
 class RagtruthRunRequest(BaseRunRequest):
@@ -188,7 +203,7 @@ class RagtruthResourcesServer(SimpleResourcesServer):
         return super().setup_webserver()
 
     async def verify(self, body: RagtruthVerifyRequest) -> RagtruthVerifyResponse:
-        parsed = _parse_response(_response_text(body.response))
+        parsed = _parse_response(_response_text(body.response), think_tag=self.config.think_tag)
         parse_fail = parsed is None
         pred_halu = _has_hallucination(parsed)
         is_halu = bool(body.is_halu)
