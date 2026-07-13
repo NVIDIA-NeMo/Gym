@@ -126,6 +126,14 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Path to the dataset for SWE-bench evaluation",
     )
+    refine_verify_feedback_chars: int = Field(
+        default=8000,
+        ge=0,
+        description=(
+            "Maximum number of trailing verifier-log characters exposed as "
+            "verify_feedback for a subsequent refinement round."
+        ),
+    )
 
     verify_golden_patch: bool = Field(
         default=False,
@@ -616,7 +624,7 @@ python /root/parsing_script.py /root/stdout.log /root/stderr.log /root/output.js
 # Move outputs to the mounted directory
 mkdir -p /trajectories_mount/eval_results
 cp /root/output.json /trajectories_mount/eval_results/output.json
-# Also surface raw test logs to host so the refine agent can feed failures back.
+# Preserve raw logs so a later refinement round can inspect test failures.
 cp /root/stdout.log /trajectories_mount/eval_results/stdout.log 2>/dev/null || true
 cp /root/stderr.log /trajectories_mount/eval_results/stderr.log 2>/dev/null || true
 """
@@ -1294,6 +1302,39 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
     with metrics_fpath.open("w") as f:
         json.dump(existing_dict | update_dict, f)
+
+
+def _read_verify_feedback(report_file: Path, max_chars: int) -> str:
+    """Read the verifier output retained beside the final report.
+
+    The eval artifact collector stores the output as ``test_output.txt``.
+    ``test_output.log`` remains a fallback for harnesses that expose the
+    original bind-mounted filename directly. Other harnesses retain separate
+    stdout/stderr logs, which are combined only when neither test-output file
+    exists.
+    """
+    if max_chars <= 0:
+        return ""
+
+    report_dir = Path(report_file).parent
+    for filename in ("test_output.txt", "test_output.log"):
+        try:
+            test_output = (report_dir / filename).read_text(errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return ""
+        return test_output[-max_chars:]
+
+    chunks = []
+    for filename in ("stdout.log", "stderr.log"):
+        try:
+            text = (report_dir / filename).read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            chunks.append(f"--- {filename} ---\n{text}")
+    return "\n\n".join(chunks)[-max_chars:]
 
 
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
@@ -2104,8 +2145,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         maybe_report_file = await runner_ray_remote.remote(params.model_dump())
         metrics_to_update = dict()
         # Raw verify output (failing-test log tail) surfaced for the multi-turn
-        # refine agent to feed into the next attempt. Only populated when the
-        # attempt did not resolve; harness-agnostic (the bind-mounted test log).
+        # refine agent to feed into the next round. Only populated when the
+        # round did not resolve; harness-agnostic (the bind-mounted test log).
         # Must stay a str (NeMoGymResponse.metadata is dict[str, str]); "" = none.
         verify_feedback: str = ""
 
@@ -2119,23 +2160,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             resolved = report[params.instance_id]["resolved"]
             metrics_to_update["resolved"] = resolved
             if not resolved:
-                # Raw test failure output, harness-agnostic. Each harness writes the
-                # raw test stdout/stderr next to its report file under a different
-                # name: R2E-Gym -> test_output.txt (run_local_evaluation.py),
-                # SWE-rebench -> test_output.log, NVInternal -> stdout.log/stderr.log.
-                # Read whichever exist (report dir = maybe_report_file.parent),
-                # concatenate, tail-bounded.
-                feedback_max_chars = 8000
-                eval_dir = Path(maybe_report_file).parent
-                chunks: list[str] = []
-                for fname in ("test_output.txt", "test_output.log", "stdout.log", "stderr.log"):
-                    try:
-                        text = (eval_dir / fname).read_text(errors="replace").strip()
-                    except OSError:
-                        continue
-                    if text:
-                        chunks.append(f"--- {fname} ---\n{text}")
-                verify_feedback = "\n\n".join(chunks)[-feedback_max_chars:]
+                verify_feedback = _read_verify_feedback(
+                    Path(maybe_report_file), params.refine_verify_feedback_chars
+                )
         else:
             metrics_to_update["resolved"] = False
 

@@ -47,6 +47,7 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _read_verify_feedback,
     runner_ray_remote,
     update_metrics,
 )
@@ -214,6 +215,7 @@ class TestSWEBenchWrapperConfig:
         assert config.command_exec_timeout == 5 * 60
         assert config.concurrency == 256
         assert config.dataset_path is None
+        assert config.refine_verify_feedback_chars == 8000
         assert config.agent_prompt_overrides is None
         assert config.agent_prompt_override_random is False
         assert config.openhands_should_log is False
@@ -385,6 +387,38 @@ class TestUpdateMetrics:
             assert result == {"a": 1, "d": 5}
             assert "b" not in result
             assert "c" not in result
+
+
+class TestReadVerifyFeedback:
+    def test_reads_collected_txt_output_tail(self, tmp_path: Path) -> None:
+        report_file = tmp_path / "report.json"
+        (tmp_path / "test_output.txt").write_text("0123456789")
+
+        assert _read_verify_feedback(report_file, max_chars=4) == "6789"
+
+    def test_falls_back_to_bind_mounted_log(self, tmp_path: Path) -> None:
+        report_file = tmp_path / "report.json"
+        (tmp_path / "test_output.log").write_text("fallback output")
+
+        assert _read_verify_feedback(report_file, max_chars=100) == "fallback output"
+
+    def test_prefers_collected_txt_and_honors_disabled_feedback(self, tmp_path: Path) -> None:
+        report_file = tmp_path / "report.json"
+        (tmp_path / "test_output.txt").write_text("collected")
+        (tmp_path / "test_output.log").write_text("bind mounted")
+
+        assert _read_verify_feedback(report_file, max_chars=100) == "collected"
+        assert _read_verify_feedback(report_file, max_chars=0) == ""
+
+    def test_combines_separate_stdout_and_stderr_fallbacks(self, tmp_path: Path) -> None:
+        report_file = tmp_path / "report.json"
+        (tmp_path / "stdout.log").write_text("test output")
+        (tmp_path / "stderr.log").write_text("test failure")
+
+        feedback = _read_verify_feedback(report_file, max_chars=100)
+
+        assert "--- stdout.log ---\ntest output" in feedback
+        assert "--- stderr.log ---\ntest failure" in feedback
 
 
 ########################################
