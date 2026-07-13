@@ -15,8 +15,7 @@
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import TCPConnector
-from pytest import LogCaptureFixture, MonkeyPatch, raises
+from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -32,7 +31,7 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     SimpleServer,
-    _TCPKeepAliveConnector,
+    _make_keepalive_socket_factory,
     initialize_ray,
 )
 
@@ -40,6 +39,13 @@ from nemo_gym.server_utils import (
 _TCP_KEEPALIVE_TEST_IDLE = 42
 _TCP_KEEPALIVE_TEST_INTERVAL = 7
 _TCP_KEEPALIVE_TEST_PROBES = 2
+_TEST_ADDR_INFO = (
+    socket.AF_INET,
+    socket.SOCK_STREAM,
+    socket.IPPROTO_TCP,
+    "",
+    ("203.0.113.1", 443),
+)
 
 
 class TestServerUtils:
@@ -237,29 +243,23 @@ class TestServerUtils:
         ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
         ray_get_runtime_context_mock.assert_called_once()
 
-    async def test_TCPKeepAliveConnector_sets_keepalive_sockopts(self, monkeypatch: MonkeyPatch) -> None:
-        mock_socket = MagicMock()
-        mock_transport = MagicMock()
-        mock_transport.get_extra_info.return_value = mock_socket
-        mock_protocol = MagicMock()
+    def test_keepalive_socket_factory_sets_keepalive_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
 
-        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
-        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
-
-        connector = _TCPKeepAliveConnector(
-            tcp_keepalive_idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
-            tcp_keepalive_interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
-            tcp_keepalive_probes=_TCP_KEEPALIVE_TEST_PROBES,
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
+            interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
+            probes=_TCP_KEEPALIVE_TEST_PROBES,
         )
-        try:
-            transport, protocol = await connector._wrap_create_connection()
-        finally:
-            await connector.close()
+        result = factory(_TEST_ADDR_INFO)
 
-        assert transport is mock_transport
-        assert protocol is mock_protocol
-        mock_transport.get_extra_info.assert_called_once_with("socket")
-        mock_socket.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        assert result is mock_sock
+        socket_ctor_mock.assert_called_once_with(
+            family=_TEST_ADDR_INFO[0], type=_TEST_ADDR_INFO[1], proto=_TEST_ADDR_INFO[2]
+        )
+        mock_sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for opt_name, opt_value in (
             ("TCP_KEEPIDLE", _TCP_KEEPALIVE_TEST_IDLE),
             ("TCP_KEEPINTVL", _TCP_KEEPALIVE_TEST_INTERVAL),
@@ -267,58 +267,23 @@ class TestServerUtils:
         ):
             opt = getattr(socket, opt_name, None)
             if opt is not None:
-                mock_socket.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+                mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
 
-    async def test_TCPKeepAliveConnector_skips_missing_platform_sockopts(self, monkeypatch: MonkeyPatch) -> None:
-        mock_socket = MagicMock()
-        mock_transport = MagicMock()
-        mock_transport.get_extra_info.return_value = mock_socket
-        mock_protocol = MagicMock()
-
-        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
-        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
+    def test_keepalive_socket_factory_skips_missing_platform_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
         for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
             monkeypatch.delattr(socket, opt_name, raising=False)
 
-        connector = _TCPKeepAliveConnector(
-            tcp_keepalive_idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
-            tcp_keepalive_interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
-            tcp_keepalive_probes=_TCP_KEEPALIVE_TEST_PROBES,
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
+            interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
+            probes=_TCP_KEEPALIVE_TEST_PROBES,
         )
-        try:
-            await connector._wrap_create_connection()
-        finally:
-            await connector.close()
+        factory(_TEST_ADDR_INFO)
 
-        mock_socket.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-
-    async def test_TCPKeepAliveConnector_degrades_when_no_socket(
-        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
-    ) -> None:
-        mock_transport = MagicMock()
-        mock_transport.get_extra_info.return_value = None
-        mock_protocol = MagicMock()
-
-        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
-        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
-
-        connector = _TCPKeepAliveConnector(
-            tcp_keepalive_idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
-            tcp_keepalive_interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
-            tcp_keepalive_probes=_TCP_KEEPALIVE_TEST_PROBES,
-        )
-        try:
-            with caplog.at_level("WARNING", logger=nemo_gym.server_utils.__name__):
-                transport1, protocol1 = await connector._wrap_create_connection()
-                transport2, protocol2 = await connector._wrap_create_connection()
-        finally:
-            await connector.close()
-
-        assert (transport1, protocol1) == (mock_transport, mock_protocol)
-        assert (transport2, protocol2) == (mock_transport, mock_protocol)
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1
-        assert "TCP keepalive will not be applied" in warnings[0].message
+        mock_sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
@@ -326,29 +291,22 @@ class TestServerUtils:
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
 
-    async def test_TCPKeepAliveConnector_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
-        mock_socket = MagicMock()
-        mock_transport = MagicMock()
-        mock_transport.get_extra_info.return_value = mock_socket
-        mock_protocol = MagicMock()
-
-        super_wrap_mock = AsyncMock(return_value=(mock_transport, mock_protocol))
-        monkeypatch.setattr(TCPConnector, "_wrap_create_connection", super_wrap_mock)
+    def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
 
         cfg = GlobalAIOHTTPAsyncClientConfig(
             global_aiohttp_tcp_keepalive_idle_seconds=123,
             global_aiohttp_tcp_keepalive_interval_seconds=45,
             global_aiohttp_tcp_keepalive_probes=6,
         )
-        connector = _TCPKeepAliveConnector(
-            tcp_keepalive_idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-            tcp_keepalive_interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-            tcp_keepalive_probes=cfg.global_aiohttp_tcp_keepalive_probes,
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            probes=cfg.global_aiohttp_tcp_keepalive_probes,
         )
-        try:
-            await connector._wrap_create_connection()
-        finally:
-            await connector.close()
+        factory(_TEST_ADDR_INFO)
 
         for opt_name, opt_value in (
             ("TCP_KEEPIDLE", 123),
@@ -357,7 +315,7 @@ class TestServerUtils:
         ):
             opt = getattr(socket, opt_name, None)
             if opt is not None:
-                mock_socket.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+                mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
 
     def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)

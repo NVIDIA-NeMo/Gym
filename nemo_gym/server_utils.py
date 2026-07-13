@@ -75,8 +75,6 @@ from nemo_gym.profiling import Profiler
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
-_LOGGER = getLogger(__name__)
-
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
@@ -116,42 +114,26 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
-class _TCPKeepAliveConnector(TCPConnector):
-    def __init__(
-        self,
-        *args,
-        tcp_keepalive_idle_seconds: int,
-        tcp_keepalive_interval_seconds: int,
-        tcp_keepalive_probes: int,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self._tcp_keepalive_idle_seconds = tcp_keepalive_idle_seconds
-        self._tcp_keepalive_interval_seconds = tcp_keepalive_interval_seconds
-        self._tcp_keepalive_probes = tcp_keepalive_probes
-        self._warned_missing_socket: bool = False
-
-    async def _wrap_create_connection(self, *args, **kwargs):
-        transport, protocol = await super()._wrap_create_connection(*args, **kwargs)
-        sock = transport.get_extra_info("socket")
-        if sock is None:
-            if not self._warned_missing_socket:
-                _LOGGER.warning(
-                    "_TCPKeepAliveConnector: transport exposes no underlying socket; "
-                    "TCP keepalive will not be applied for connections on this transport."
-                )
-                self._warned_missing_socket = True
-            return transport, protocol
+def _make_keepalive_socket_factory(
+    idle_seconds: int,
+    interval_seconds: int,
+    probes: int,
+):
+    def factory(addr_info) -> socket.socket:
+        family, type_, proto, _canonname, _sockaddr = addr_info
+        sock = socket.socket(family=family, type=type_, proto=proto)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for opt_name, opt_value in (
-            ("TCP_KEEPIDLE", self._tcp_keepalive_idle_seconds),
-            ("TCP_KEEPINTVL", self._tcp_keepalive_interval_seconds),
-            ("TCP_KEEPCNT", self._tcp_keepalive_probes),
+            ("TCP_KEEPIDLE", idle_seconds),
+            ("TCP_KEEPINTVL", interval_seconds),
+            ("TCP_KEEPCNT", probes),
         ):
             opt = getattr(socket, opt_name, None)
             if opt is not None:
                 sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
-        return transport, protocol
+        return sock
+
+    return factory
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
@@ -161,13 +143,15 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
-        connector=_TCPKeepAliveConnector(
+        connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
-            tcp_keepalive_idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-            tcp_keepalive_interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-            tcp_keepalive_probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            socket_factory=_make_keepalive_socket_factory(
+                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            ),
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
