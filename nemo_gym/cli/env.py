@@ -953,7 +953,7 @@ def list_environments() -> None:
         return
 
     table = Table(title=f"Available environments in NeMo Gym ({len(environments)})")
-    table.add_column("Environment")
+    table.add_column("Name")
     table.add_column("Domain")
     table.add_column("Description")
     for name, environment in environments.items():

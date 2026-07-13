@@ -20,17 +20,18 @@ environment's short ``<name>`` to its config so it can be enumerated by name —
 ``gym list environments``. Resolving a name to a config path for *running* is handled by the CLI's
 generic ``--environment`` asset selector, so this module is intentionally discovery-only.
 
-Discovery only reads config files; it never resolves interpolations or starts servers, so it is
-safe to call even when secrets/API keys referenced by a config are not set in the environment.
+Discovery only reads config files and never starts servers. Its ``domain``/``description`` metadata is
+read via the shared :func:`~nemo_gym.discovery.read_config_metadata` reader (the same one benchmark
+listing uses), which tolerates unset secrets/API keys referenced by a config, so discovery is safe to
+call even when those are not set in the environment.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
-
-from omegaconf import OmegaConf
+from typing import Dict, Optional
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.discovery import read_config_metadata
 
 
 ENVIRONMENTS_DIR = PARENT_DIR / "environments"
@@ -48,37 +49,6 @@ class EnvironmentEntry:
     domain: Optional[str] = None
 
 
-def _read_metadata(config_path: Path) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort ``(description, domain)`` from the config's resources_servers entry.
-
-    Reads without resolving interpolations or missing values so a config that references an unset
-    key (e.g. an API key) still yields metadata instead of raising.
-    """
-    try:
-        container = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)
-    except Exception:
-        return None, None
-
-    if not isinstance(container, dict):
-        return None, None
-
-    for top_level_value in container.values():
-        if not isinstance(top_level_value, dict):
-            continue
-        resources_servers = top_level_value.get("resources_servers")
-        if not isinstance(resources_servers, dict):
-            continue
-        for server_config in resources_servers.values():
-            if isinstance(server_config, dict):
-                description = server_config.get("description")
-                domain = server_config.get("domain")
-                return (
-                    description if isinstance(description, str) else None,
-                    domain if isinstance(domain, str) else None,
-                )
-    return None, None
-
-
 def discover_environments(environments_dir: Path = ENVIRONMENTS_DIR) -> Dict[str, EnvironmentEntry]:
     """Map environment name -> :class:`EnvironmentEntry` for every ``<name>/config.yaml``.
 
@@ -93,7 +63,7 @@ def discover_environments(environments_dir: Path = ENVIRONMENTS_DIR) -> Dict[str
         if not (child.is_dir() and config_path.is_file()):
             continue
 
-        description, domain = _read_metadata(config_path)
+        domain, description = read_config_metadata(config_path)
         environments[child.name] = EnvironmentEntry(
             name=child.name,
             config_path=config_path,

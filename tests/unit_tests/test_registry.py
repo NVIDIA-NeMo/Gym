@@ -88,8 +88,9 @@ class TestDiscoverEnvironments:
             assert entry.description is None
             assert entry.domain is None
 
-    def test_metadata_does_not_resolve_interpolations(self, tmp_path: Path) -> None:
-        # A config referencing an unset interpolation must still be discoverable (no resolution).
+    def test_metadata_tolerates_unset_interpolations(self, tmp_path: Path) -> None:
+        # A config referencing an unset interpolation must still be discoverable: the shared metadata
+        # reader reads the inline `domain` from the raw config and tolerates the unresolved value.
         envs_dir = tmp_path / "environments"
         _make_env(
             envs_dir,
