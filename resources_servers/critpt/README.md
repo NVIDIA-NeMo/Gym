@@ -88,6 +88,38 @@ curl -s http://127.0.0.1:$PORT/status
 On HPC: bind is `127.0.0.1` on the compute node — curl from the same host, or
 `ssh <node> "curl ..."`.
 
+## Replay recovery
+
+`resources_servers.critpt.replay` is a scoring-only recovery tool for CritPt runs that fail
+after hitting Artificial Analysis rate limits. The live server writes model submissions before
+shipping a full 70-submission batch to AA. If AA rejects the batch because quota is exhausted,
+replay can later read those cached submissions, skip anything already scored, and send only the
+unscored full batches back to AA without rerunning model inference.
+
+Replay requires the live server to persist its cache. Set `CRITPT_CACHE_DIR` before starting
+the server:
+
+```bash
+export CRITPT_CACHE_DIR=results/critpt_cache
+```
+
+When set, each server launch persists `submissions.jsonl`, successful `aa_responses.jsonl`
+records, and `partial_metrics.json` under its own `<timestamp>-<pid>-<rand>` subdirectory of
+`CRITPT_CACHE_DIR`, so independent runs never share (and pollute) each other's cache. The exact
+path is logged at startup (`CritPt cache for this run: ...`). After the AA quota resets, point
+replay at that run's subdirectory:
+
+```bash
+RUN_DIR="$CRITPT_CACHE_DIR/20260707-110622-48213-1a2b3c4d"  # from the server startup log
+ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" <!-- pragma: allowlist secret --> \
+  python -m resources_servers.critpt.replay --cache-dir "$RUN_DIR"
+```
+
+Set `unique_cache_per_run: false` on the resources server config to write directly into
+`CRITPT_CACHE_DIR` instead (e.g. to resume a specific prior run's directory).
+
+For the full benchmark workflow, see [`benchmarks/critpt/README.md`](../../benchmarks/critpt/README.md).
+
 ## Running servers
 
 ```bash
@@ -100,7 +132,7 @@ gym env start --benchmark critpt --model-type openai_model
 has one opt-in config knob:
 
 - `fire_after: int` — fire the batch after this many real submissions arrive, then pad
-  up to `batch_size` (70) with empty dummies for the missing problem_ids (drawn from the
+  up to `batch_size` (70) with empty padding submissions for the missing problem_ids (drawn from the
   hardcoded canonical CritPt problem list, `Challenge_<N>_main` for `N` in 1..70)
 
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
@@ -122,7 +154,7 @@ gym eval run --no-serve \
 ```
 
 What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
-arrive -> server fires the batch after the 5th, pads with 65 empty dummies -> real AA
+arrive -> server fires the batch after the 5th, pads with 65 empty padding slots -> real AA
 call -> aggregate distributed to the 5 real rollouts.
 
 ## Tests

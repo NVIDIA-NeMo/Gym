@@ -1,10 +1,8 @@
-{% set language = instance.repo_language | default('python') %}
+{% set language = instance.repo_language | default('') %}
 I've uploaded a {{ language }} repository in the directory {{ workspace_path }}.
 
 <issue>
 {{ instance.problem_statement }}
 </issue>
 
-Fix this issue by modifying non-test files only.
-
-Start by reading the relevant test files to understand the expected behavior, then trace into the source code to locate and fix the defect.
+Fix this issue by modifying non-test files only in {{ workspace_path }}.
