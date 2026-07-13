@@ -31,6 +31,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    canonical_agent_ref,
     row_agent_key,
 )
 
@@ -225,6 +226,14 @@ class RewardProfiler:
             # agent_name is a temporary column used for aggregations below; it holds the
             # agent identity string (server name, or URL for external agents)
             agent_key = row_agent_key(row)
+            if agent_key is None:
+                # pandas groupby silently drops None keys, which would exclude these rollouts
+                # from agent-level metrics with no error — fail loudly instead.
+                raise ValueError(
+                    f"Rollout row (task_index={row.get(TASK_INDEX_KEY_NAME)}, "
+                    f"rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}) carries no usable agent_ref "
+                    "(neither 'name' nor 'url'); cannot attribute it to an agent for profiling."
+                )
             agent_key_to_ref.setdefault(agent_key, row.get(AGENT_REF_KEY_NAME) or {})
             numeric_result = {
                 "agent_name": agent_key,
@@ -274,10 +283,9 @@ class RewardProfiler:
         for agent_metrics in agent_level_metrics:
             agent_key = agent_metrics.pop("agent_name")
             agent_ref = agent_key_to_ref.get(agent_key) or {}
-            # Round-trip the ref shape: url-form for external agents, name-form otherwise
-            agent_metrics[AGENT_REF_KEY_NAME] = (
-                {"url": agent_ref["url"]} if agent_ref.get("url") else {"name": agent_key}
-            )
+            # Emit the ref in the same identity the rows were grouped under (name-first,
+            # matching row_agent_key), url-form only for purely external refs.
+            agent_metrics[AGENT_REF_KEY_NAME] = canonical_agent_ref(agent_ref, agent_key)
 
         return group_level_metrics, agent_level_metrics
 

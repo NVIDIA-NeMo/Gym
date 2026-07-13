@@ -16,6 +16,7 @@ import asyncio
 import json
 from asyncio import Future
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse
@@ -1300,31 +1301,33 @@ def _mock_global_client(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock
 _URL_ROW = {
     AGENT_REF_KEY_NAME: {"url": "http://localhost:9000"},
     "responses_create_params": {"input": []},
-    # Deliberate trust-boundary pin: the full row, answer key included, ships to the external agent
+    # Intentional (issue #1305): the full row — including the answer key in verifier_metadata —
+    # is sent to the external agent; this test locks that behavior in
     "verifier_metadata": {"expected_answer": "the-answer-key"},
 }
 
 
 class TestExternalAgentDispatch:
     async def test_success_posts_row_with_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps({"reward": 1.0})))
+        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps({"reward": 1.0, "response": {}})))
         client = _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=123.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=123.0)
 
-        assert result == {"reward": 1.0}
+        assert result == {"reward": 1.0, "response": {}}
         assert client.request.call_count == 1
         args, kwargs = client.request.call_args
         assert args == ("POST", "http://localhost:9000/run")
         assert orjson.loads(kwargs["data"]) == _URL_ROW
         assert kwargs["headers"] == {"Content-Type": "application/json"}
         assert kwargs["timeout"].total == 123.0
+        assert kwargs["allow_redirects"] is False
 
     async def test_connect_error_bounded_retries_then_failure_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused")))
         client = _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert client.request.call_count == 3
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
@@ -1332,20 +1335,23 @@ class TestExternalAgentDispatch:
 
     async def test_server_disconnected_retry_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(
-            side_effect=[ServerDisconnectedError(), _FakeAiohttpResponse(200, orjson.dumps({"reward": 0.5}))]
+            side_effect=[
+                ServerDisconnectedError(),
+                _FakeAiohttpResponse(200, orjson.dumps({"reward": 0.5, "response": {}})),
+            ]
         )
         client = _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert client.request.call_count == 2
-        assert result == {"reward": 0.5}
+        assert result == {"reward": 0.5, "response": {}}
 
     async def test_timeout_fails_once_without_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(side_effect=asyncio.TimeoutError())
         client = _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert client.request.call_count == 1
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
@@ -1355,7 +1361,7 @@ class TestExternalAgentDispatch:
         request_mock = AsyncMock(return_value=_FakeAiohttpResponse(500, b"kaboom"))
         _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
         assert "HTTP 500" in result["error"] and "kaboom" in result["error"]
@@ -1364,7 +1370,7 @@ class TestExternalAgentDispatch:
         request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, b"[1, 2]"))
         _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
         assert "expected a JSON object" in result["error"]
@@ -1373,7 +1379,7 @@ class TestExternalAgentDispatch:
         request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, b"not json"))
         _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
         assert "not valid JSON" in result["error"]
@@ -1382,7 +1388,7 @@ class TestExternalAgentDispatch:
         request_mock = AsyncMock(side_effect=RuntimeError("surprise"))
         client = _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert client.request.call_count == 1
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
@@ -1408,13 +1414,15 @@ class TestExternalAgentDispatch:
         request_mock = AsyncMock(return_value=FailingReadResponse())
         _mock_global_client(monkeypatch, request_mock)
 
-        result = await _post_external_agent_run(dict(_URL_ROW), timeout_secs=5.0)
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
 
         assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
         assert "reading the response body failed" in result["error"]
 
     async def test_run_examples_mixed_named_and_url_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        url_request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps({"reward": 1.0})))
+        url_request_mock = AsyncMock(
+            return_value=_FakeAiohttpResponse(200, orjson.dumps({"reward": 1.0, "response": {}}))
+        )
         url_client = _mock_global_client(monkeypatch, url_request_mock)
 
         named_response = MagicMock()
@@ -1440,7 +1448,7 @@ class TestExternalAgentDispatch:
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "named_agent"}, "responses_create_params": {"input": []}},
-            dict(_URL_ROW),
+            deepcopy(_URL_ROW),
         ]
         results_by_agent: dict = {}
         for future in MockHelper().run_examples(rows):
@@ -1450,7 +1458,7 @@ class TestExternalAgentDispatch:
         # Named rows present → ServerClient constructed exactly once; each row took its own path
         assert setup_calls == [1]
         assert results_by_agent["named_agent"] == {"reward": 0.25}
-        assert results_by_agent["http://localhost:9000"] == {"reward": 1.0}
+        assert results_by_agent["http://localhost:9000"] == {"reward": 1.0, "response": {}}
         assert mock_server_client.post.call_args.kwargs["server_name"] == "named_agent"
         assert url_client.request.call_count == 1
 
@@ -1502,6 +1510,8 @@ class TestExternalAggregateMetrics:
     def test_agent_metric_label(self) -> None:
         assert _agent_metric_label({"url": "http://localhost:9000"}) == "localhost_9000"
         assert _agent_metric_label({"name": "my_agent"}) == "my_agent"
+        # Two agents behind one gateway must keep distinct labels
+        assert _agent_metric_label({"url": "http://gw:9000/agentA"}) == "gw_9000_agentA"
 
     async def test_call_aggregate_metrics_pure_url_never_builds_server_client(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1513,7 +1523,7 @@ class TestExternalAggregateMetrics:
             def setup_server_client(self, *args, **kwargs):
                 raise AssertionError("pure agent_url runs must not construct a ServerClient")
 
-        rows = [dict(_URL_ROW)]
+        rows = [deepcopy(_URL_ROW)]
         results = [{"reward": 1.0, "response": {"usage": {"total_tokens": 3}}}]
         metrics_fpath = await NoServerClientHelper()._call_aggregate_metrics(
             results, rows, tmp_path / "rollouts.jsonl"
@@ -1548,7 +1558,7 @@ class TestExternalAggregateMetrics:
             def setup_server_client(self, *args, **kwargs):
                 return mock_server_client
 
-        rows = [dict(_URL_ROW), {AGENT_REF_KEY_NAME: {"name": "named_agent"}}]
+        rows = [deepcopy(_URL_ROW), {AGENT_REF_KEY_NAME: {"name": "named_agent"}}]
         results = [{"reward": 1.0, "response": {}}, {"reward": 0.0, "response": {}}]
         metrics_fpath = await MockHelper()._call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
 
@@ -1566,7 +1576,7 @@ class _ExternalAgentASGIAdapter:
         self._client = TestClient(app, raise_server_exceptions=False)
         self.timeouts: list = []
 
-    async def request(self, method: str, url: str, data=None, headers=None, timeout=None):
+    async def request(self, method: str, url: str, data=None, headers=None, timeout=None, allow_redirects=True):
         self.timeouts.append(timeout)
         response = self._client.request(method, urlparse(url).path, content=data, headers=headers or {})
         return _FakeAiohttpResponse(response.status_code, response.content)
@@ -1624,7 +1634,7 @@ class TestAgentUrlRunFromConfig:
         assert all(r["reward"] == 1.0 for r in results)
         assert all(r[AGENT_REF_KEY_NAME] == {"url": "http://localhost:9000"} for r in results)
 
-        # Trust-boundary pin: the external agent received the full row, answer key included
+        # Intentional (issue #1305): the external agent received the full row, answer key included
         assert all(r["verifier_metadata"] == {"answer": "42"} for r in received_rows)
         # Config → request timeout plumbing: every /run call carried agent_run_timeout_secs
         run_timeouts = adapter.timeouts[:3]
@@ -1635,8 +1645,8 @@ class TestAgentUrlRunFromConfig:
         out = capsys.readouterr().out
         # The external agent app defines no /aggregate_metrics route → graceful skip
         assert "does not implement /aggregate_metrics" in out
-        # num_samples_in_parallel unset → the per-host connection-cap warning fires
-        assert "connections per host" in out
+        # num_samples_in_parallel unset → concurrency is capped at the per-host connection limit
+        assert "Capping concurrency at 1024" in out
         assert json.loads((tmp_path / "rollouts_aggregate_metrics.json").read_text()) == []
 
     async def test_failures_route_to_sidecar_not_main_jsonl(
@@ -1660,8 +1670,8 @@ class TestAgentUrlRunFromConfig:
         assert sidecar[0][NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
         assert "HTTP 500" in sidecar[0]["error"]
         assert sidecar[0][AGENT_REF_KEY_NAME] == {"url": "http://localhost:9000"}
-        # Bounded num_samples_in_parallel (<= per-host cap) → no connection-cap warning
-        assert "connections per host" not in capsys.readouterr().out
+        # Bounded num_samples_in_parallel (<= per-host cap) → no capping needed
+        assert "Capping concurrency at" not in capsys.readouterr().out
 
 
 class TestAgentUrlResume:
@@ -1772,7 +1782,7 @@ class TestExternalAggregateCoverageGaps:
         request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps(_AGG_BODY)))
         _mock_global_client(monkeypatch, request_mock)
 
-        rows = [dict(_URL_ROW), {"responses_create_params": {"input": []}}]  # second row: no agent_ref at all
+        rows = [deepcopy(_URL_ROW), {"responses_create_params": {"input": []}}]  # second row: no agent_ref at all
         results = [{"reward": 1.0, "response": {}}, {"reward": 0.0, "response": {}}]
         metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
             results, rows, tmp_path / "rollouts.jsonl"
@@ -1793,7 +1803,129 @@ class TestExternalAggregateCoverageGaps:
         monkeypatch.setattr(nemo_gym.rollout_collection, "set_global_aiohttp_client", set_global_mock)
 
         await RolloutCollectionHelper()._call_aggregate_metrics(
-            [{"reward": 1.0, "response": {}}], [dict(_URL_ROW)], tmp_path / "rollouts.jsonl"
+            [{"reward": 1.0, "response": {}}], [deepcopy(_URL_ROW)], tmp_path / "rollouts.jsonl"
         )
 
         set_global_mock.assert_not_called()
+
+
+class TestPrReviewFixes:
+    """Regression tests for the findings confirmed by the team PR review."""
+
+    _REQUIRED = {"input_jsonl_fpath": "in.jsonl", "output_jsonl_fpath": "out.jsonl"}
+
+    @pytest.mark.parametrize("bad_url", ["http://h:9000?token=abc", "http://h:9000#frag"])
+    def test_agent_url_with_query_or_fragment_rejected(self, bad_url: str) -> None:
+        with pytest.raises(ValidationError, match="query string or fragment"):
+            RolloutCollectionConfig(agent_url=bad_url, **self._REQUIRED)
+
+    async def test_response_missing_required_keys_becomes_failure_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps({"reward": 1.0})))
+        _mock_global_client(monkeypatch, request_mock)
+
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
+
+        assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
+        assert "missing required key(s) ['response']" in result["error"]
+
+    async def test_sentinel_failure_response_is_exempt_from_shape_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An external agent reporting its own failure via the sentinel contract carries no reward
+        body = {NG_FAILURE_CLASS_KEY: "agent_side_oom", "error": "sandbox died"}
+        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps(body)))
+        _mock_global_client(monkeypatch, request_mock)
+
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
+
+        assert result == body
+
+    async def test_aggregate_payload_excludes_failure_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps(_AGG_BODY)))
+        client = _mock_global_client(monkeypatch, request_mock)
+
+        rows = [deepcopy(_URL_ROW), deepcopy(_URL_ROW)]
+        results = [
+            {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}},
+            {NG_FAILURE_CLASS_KEY: EXTERNAL_AGENT_FAILURE_CLASS, "error": "boom"},
+        ]
+        await RolloutCollectionHelper()._call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        payload = orjson.loads(client.request.call_args.kwargs["data"])
+        assert len(payload["verify_responses"]) == 1
+        assert NG_FAILURE_CLASS_KEY not in payload["verify_responses"][0]
+
+    async def test_aggregate_skipped_when_only_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        request_mock = AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps(_AGG_BODY)))
+        client = _mock_global_client(monkeypatch, request_mock)
+
+        rows = [deepcopy(_URL_ROW)]
+        results = [{NG_FAILURE_CLASS_KEY: EXTERNAL_AGENT_FAILURE_CLASS, "error": "boom"}]
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            results, rows, tmp_path / "rollouts.jsonl"
+        )
+
+        assert metrics_fpath is None
+        client.request.assert_not_called()
+        assert "No successful rollouts to aggregate" in capsys.readouterr().out
+
+    async def test_resume_without_agent_url_rejects_frozen_url_rows(self, tmp_path: Path) -> None:
+        output_fpath = tmp_path / "rollouts.jsonl"
+        output_fpath.write_text("")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "unused.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=True,
+            upload_rollouts_to_wandb=False,
+        )
+        materialized = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "named_agent"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            },
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"url": "http://old-host:1111"},
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            },
+        ]
+        with config.materialized_jsonl_fpath.open("wb") as f:
+            for row in materialized:
+                f.write(orjson.dumps(row) + b"\n")
+
+        with pytest.raises(ValueError, match=r"\+agent_url was not provided"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+    async def test_aggregate_both_key_ref_groups_and_labels_by_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both-key refs are rejected at preprocess, but shard aggregation and hand-built
+        # artifacts bypass preprocessing — grouping, dispatch, and the emitted ref must all
+        # follow row_agent_key's name-first precedence.
+        url_client = _mock_global_client(monkeypatch, AsyncMock())
+
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={}, group_level_metrics=[])
+        named_response = AsyncMock()
+        named_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        named_response.status = 200
+        named_response.raise_for_status = MagicMock()
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=named_response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent", "url": "http://sneaky:1"}}]
+        results = [{"reward": 1.0, "response": {}}]
+        metrics_fpath = await MockHelper()._call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        entries = json.loads(metrics_fpath.read_text())
+        assert entries[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        assert mock_server_client.post.call_args.kwargs["server_name"] == "my_agent"
+        url_client.request.assert_not_called()

@@ -137,6 +137,19 @@ def row_agent_key(row: dict) -> Optional[str]:
     return agent_ref.get("name") or agent_ref.get("url")
 
 
+def canonical_agent_ref(agent_ref: dict, agent_key: str) -> dict:
+    """The agent_ref shape emitted in metrics artifacts for a group keyed by ``agent_key``.
+
+    Mirrors ``row_agent_key``'s name-first precedence so a ref carrying both keys is labeled
+    by the same identity it was grouped under.
+    """
+    if agent_ref.get("name"):
+        return {"name": agent_key}
+    if agent_ref.get("url"):
+        return {"url": agent_ref["url"]}
+    return {"name": agent_key}
+
+
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
