@@ -50,7 +50,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -82,6 +82,19 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
+        default=60,
+        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
+        default=10,
+        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_probes: int = Field(
+        default=3,
+        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -102,9 +115,18 @@ def get_global_aiohttp_client(
 
 
 class _TCPKeepAliveConnector(TCPConnector):
-    _KEEPALIVE_IDLE_SECONDS: int = 60
-    _KEEPALIVE_INTERVAL_SECONDS: int = 10
-    _KEEPALIVE_PROBES: int = 3
+    def __init__(
+        self,
+        *args,
+        tcp_keepalive_idle_seconds: int,
+        tcp_keepalive_interval_seconds: int,
+        tcp_keepalive_probes: int,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._tcp_keepalive_idle_seconds = tcp_keepalive_idle_seconds
+        self._tcp_keepalive_interval_seconds = tcp_keepalive_interval_seconds
+        self._tcp_keepalive_probes = tcp_keepalive_probes
 
     async def _wrap_create_connection(self, *args, **kwargs):
         transport, protocol = await super()._wrap_create_connection(*args, **kwargs)
@@ -113,9 +135,9 @@ class _TCPKeepAliveConnector(TCPConnector):
             raise RuntimeError("_TCPKeepAliveConnector: transport has no underlying socket")
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for opt_name, opt_value in (
-            ("TCP_KEEPIDLE", self._KEEPALIVE_IDLE_SECONDS),
-            ("TCP_KEEPINTVL", self._KEEPALIVE_INTERVAL_SECONDS),
-            ("TCP_KEEPCNT", self._KEEPALIVE_PROBES),
+            ("TCP_KEEPIDLE", self._tcp_keepalive_idle_seconds),
+            ("TCP_KEEPINTVL", self._tcp_keepalive_interval_seconds),
+            ("TCP_KEEPCNT", self._tcp_keepalive_probes),
         ):
             opt = getattr(socket, opt_name, None)
             if opt is not None:
@@ -134,6 +156,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
+            tcp_keepalive_idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            tcp_keepalive_interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            tcp_keepalive_probes=cfg.global_aiohttp_tcp_keepalive_probes,
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
