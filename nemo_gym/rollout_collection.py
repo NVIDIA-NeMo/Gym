@@ -686,7 +686,23 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                # Retry transient agent-server failures (5xx / dropped
+                # connections). Without this, one flaky /run response kills the
+                # entire multi-hour training job (observed: a single 500 among
+                # ~45k successful rollouts aborted step 12 of a GRPO run).
+                max_attempts = 4
+                for attempt in range(1, max_attempts + 1):
+                    res = await server_client.post(
+                        server_name=row["agent_ref"]["name"], url_path="/run", json=row
+                    )
+                    if res.status < 500 or attempt == max_attempts:
+                        break
+                    print(
+                        f"[rollout_collection] /run got status={res.status}, "
+                        f"retrying (attempt {attempt}/{max_attempts})",
+                        flush=True,
+                    )
+                    await asyncio.sleep(2.0 * attempt)
                 try:
                     await raise_for_status(res)
                 except Exception:
