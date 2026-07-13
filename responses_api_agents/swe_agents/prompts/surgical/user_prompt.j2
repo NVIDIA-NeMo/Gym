@@ -1,4 +1,4 @@
-{% set language = instance.repo_language | default('python') %}
+{% set language = instance.repo_language | default('') %}
 <repository language="{{ language }}" path="{{ workspace_path }}" />
 
 <issue>
@@ -6,5 +6,5 @@
 </issue>
 
 <task>
-Fix this issue with the smallest possible change to non-test files. Identify the exact lines that need to change, change only those lines, and verify correctness.
+Fix this issue with the smallest possible change to non-test files in {{ workspace_path }}.
 </task>

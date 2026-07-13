@@ -119,7 +119,7 @@ claude_code_agent:
 - `model`: model name. Full names like `Qwen/Qwen3-4B-Instruct-2507` are kept as-is for local endpoints; the provider prefix is stripped only when `anthropic_base_url` is not set
 - `anthropic_api_key`: Anthropic API key, or any non-empty string for local endpoints
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
-- `max_turns`: passed to `--max-turns`
+- `max_turns`: passed to `--max-turns`. Set to `null` to omit the flag entirely (unlimited turns)
 - `timeout`: per-request wall-clock seconds
 - `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
