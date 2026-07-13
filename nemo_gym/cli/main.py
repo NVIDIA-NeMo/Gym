@@ -490,6 +490,11 @@ COMMANDS = {
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            _value_flag(
+                "agent-url",
+                "agent_url",
+                "External agent /run endpoint URL to collect rollouts with (alternative to --agent).",
+            ),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),

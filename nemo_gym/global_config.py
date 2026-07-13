@@ -122,6 +122,21 @@ RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
 SKILLS_REF_KEY_NAME = "skills_ref"
 
+
+def row_agent_key(row: dict) -> Optional[str]:
+    """Identity string for the agent that serves a rollout row.
+
+    Gym-managed agents are referenced by ``agent_ref: {"name": ...}`` (resolved to a
+    server via the global config) and external agents by ``agent_ref: {"url": ...}``
+    (dispatched directly over HTTP). Both shapes group, count, and key the same way
+    downstream; returns None when the row carries neither.
+    """
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    if not isinstance(agent_ref, dict):
+        return None
+    return agent_ref.get("name") or agent_ref.get("url")
+
+
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
