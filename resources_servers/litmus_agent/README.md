@@ -118,6 +118,15 @@ Legacy rows without `answer_format` fall back to `use_box_format`:
 `use_box_format: true` → boxed (`fmt_07`), `use_box_format: false` → double
 parentheses (`fmt_00`). When `answer_format` is present it takes precedence.
 
+> **Prefer delimited formats for numeric answers.** When the captured text is
+> not a clean float, extraction falls back to the *last* number-like token in the
+> capture. For the greedy open-ended formats (`fmt_22`–`fmt_30`, which capture to
+> end of line) this can misparse — e.g. `Final Answer: 42 (my 7th attempt)`
+> captures `42 (my 7th attempt)` and scores `7`, and `12.5 g/mol at 298K` scores
+> `298`. For numeric answers, prefer a delimited format (`fmt_00` `((...))`,
+> `fmt_07` `\boxed{...}`) so the value is bounded by the delimiters. This
+> behavior is inherited verbatim from `rdkit_chemistry`.
+
 ## Reward Signal
 
 `reward` is the value returned by the resolved reward rule (binary rules return
@@ -198,6 +207,16 @@ retained in the session's history only after it runs cleanly; a cell that raises
 returns its traceback and is dropped. This is faithful for pure, deterministic
 code (the litmus domain); its one cost — prior cells re-running their side
 effects each call — does not apply when cells only compute and print.
+
+> **Replay cost is O(N²) and shares one timeout.** Each call replays all prior
+> cells before the newest one, so a session's total exec work grows quadratically
+> in cell count, and every call's replay is charged against the same
+> `code_exec_timeout_s` (default 120s) as the new cell. A long session — many
+> cells, or one slow/non-deterministic prior cell — can start timing out on
+> *replay alone*, surfacing as a spurious failure of the newest cell. Keep tool
+> sessions short (order tens of cells), and raise `code_exec_timeout_s` if cells
+> are individually expensive. A replay that fails resets the session (its cell
+> history is dropped) rather than scoring on desynced state.
 
 Relevant config keys: `sandbox_provider`, `sandbox_spec`, `code_exec_tool_name`,
 `code_exec_timeout_s`, `code_exec_max_output_chars`, `code_exec_user`.
