@@ -43,7 +43,7 @@ The output file is a JSON array with one entry per agent:
 
 | Field | Description |
 |---|---|
-| `agent_ref` | Agent identity (`{"name": "..."}`) |
+| `agent_ref` | Agent identity: `{"name": "..."}` for Gym agent servers, `{"url": "..."}` for [external agents](/agent-server/drive-external-agent) |
 | `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()` |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |

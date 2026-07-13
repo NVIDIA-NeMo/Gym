@@ -165,6 +165,8 @@ Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 
 For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
 
+Have an agent that already runs as its own service? Pass `--agent-url http://host:port` instead of `--agent` to collect rollouts from it directly — see [Drive an External Agent](https://docs.nvidia.com/nemo/gym/main/agent-server/drive-external-agent).
+
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
