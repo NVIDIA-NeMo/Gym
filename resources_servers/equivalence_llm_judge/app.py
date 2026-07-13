@@ -78,6 +78,15 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     response_extract_regex: Optional[str] = None
     msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
 
+    # Optional cap on the number of characters of the extracted/returned answer
+    # sent to the judge. Disabled by default (None). When set to a positive int,
+    # a first-pass extracted answer longer than this is treated as a failed
+    # extraction (replaced with ``msg_extraction_failure`` -> graded not-equal)
+    # so the judge input cannot overflow its context window on pathologically
+    # long generations (e.g. a regex no-match that falls back to the full
+    # generation).
+    max_extracted_answer_chars: Optional[int] = None
+
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
@@ -423,6 +432,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         generated = _extract_last_assistant_text(
             body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
         )
+
+        # Cap the extracted answer length: an over-long extraction (e.g. a regex
+        # no-match that falls back to the full generation) would otherwise overflow
+        # the judge's context. Treat it as a failed extraction -> graded not-equal.
+        if (
+            self.config.max_extracted_answer_chars is not None
+            and len(generated) > self.config.max_extracted_answer_chars
+        ):
+            generated = self.config.msg_extraction_failure
 
         # Step 4: Run first judge evaluation
         first_equal, first_eval = await self._generate_judge_evaluation(
