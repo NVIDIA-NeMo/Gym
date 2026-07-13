@@ -5,7 +5,94 @@ position: 4
 ---
 
 <AccordionGroup>
-<Accordion title="v0.3.0" defaultOpen>
+<Accordion title="v0.4.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.4.0 expands evaluation tooling and agent integrations. It establishes a new monthly release cadence; we will continue to provide day-zero support for Nemotron models, datasets, and environments.
+
+Highlights:
+
+- Unified `gym` CLI: find agents and benchmarks by name with `gym list`, and catch config mistakes early with `gym env validate`
+- Diagnose evaluations with BLADE, an analysis skill for agents that reads your evaluation results and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (e.g. to the agent harness, training, verifier, or prompt)
+- Measure the impact of agent skills: run the same tasks with different skill sets and compare how each changes agent performance
+- Run agents in isolated sandboxes through a new pluggable provider framework
+- More agent harnesses out of the box, including OpenClaw, Pi, and OpenCode
+- Connect to hosted inference providers: Fireworks, Together.ai, OpenRouter, and more
+- New benchmarks across science, long-context, and interactive tasks
+
+### First-Time Contributors
+
+We welcomed 20+ new contributors to this release! A few highlights:
+
+- **@marta-sd** and **@wprazuch** led the CLI refactor and clearer config errors
+- **@hemildesai** added the pluggable sandbox provider infrastructure and OpenSandbox as the first built-in
+- **@adil-a** laid the groundwork for Gym-owned MCP resources servers, letting a server expose its tools over MCP
+- **@eric-tramel** added the BunsenChem chemistry benchmark
+- **@jeffwillette** added the long machine translation datasets and servers
+
+Thank you to all the new contributors for helping make NeMo Gym better!
+
+### Command Line Interface
+
+- One `gym` command for the full workflow, with `gym env`, `gym eval`, `gym list`, and `gym dataset` subcommands
+- Reference agents, benchmarks, and environments by name: use `gym list` to see what is available
+- `gym env validate` checks your config for missing, malformed, or empty values before a run and reports actionable errors
+
+### Evaluation & Diagnostics
+
+- Skill evaluation: measure how agent skills affect performance by running the same tasks with different skill sets. Skills apply at rollout time as a run-level knob, so one dataset works across all skill variants and every rollout is tagged for comparison
+- BLADE (Benchmark Level Analysis and Diagnostics Engine): a built-in analysis skill that reads an agent run's rollouts, metrics, and configs and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (e.g. harness, training, verifier, or prompt)
+
+### Sandboxing
+
+- Run tool-using and coding agents in isolated sandboxes through a pluggable provider framework
+- Built-in OpenSandbox and Apptainer providers, with third-party providers discoverable via entry points
+
+### Configure Agent Harnesses
+
+New harnesses join the existing built-in set (Claude Code, Hermes, OpenHands, and more):
+
+- Added OpenCode, OpenClaw, and Pi agents for evaluation
+- Claude Code runtime capabilities (tool access, MCP servers, and bare vs. native auto-discovery mode) are now easily set via the server config
+
+### Configure Models
+
+- New `inference_provider` model server connects to any OpenAI-compatible hosted provider (Fireworks, Together.ai, OpenRouter, DeepInfra, Gemini, and more) with ready-made configs
+- Every Gym model server now speaks the Anthropic Messages API, so Anthropic-native harnesses like the Claude Code CLI can run against any model you serve with Gym
+
+### New Benchmarks
+
+- **Science:** CritPt (research-level physics), SciCode (scientific coding), BunsenChem (chemistry multiple-choice), and FrontierScience Research (rubric-scored science)
+- **Long context:** Graphwalks (long-context graph reasoning) and Long Machine Translation (PG19, WMT24++)
+- **Interactive:** TALES, a text-adventure game suite
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Deprecation Notices
+
+- The legacy `ng_*` and `nemo_gym_*` CLI commands (such as `ng_run` and `ng_collect_rollouts`) are deprecated in favor of the unified `gym` CLI. They still work for now but will be removed in a future release.
+
+### Bug Fixes
+
+- Fixed intermittent connection errors during high-concurrency rollout collection
+- Clear error messages instead of crashes when a config file contains invalid YAML
+
+### Documentation
+
+- New Build Verifiers section with verification patterns and multi-reward verification
+- New Evaluate section covering benchmarks, evaluation metrics, and a guide to agent-native results diagnostics
+- New page for configuring and evaluating agent skills
+
+### Release Assets
+
+[GitHub Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0)
+
+
+
+</Accordion>
+
+<Accordion title="v0.3.0">
 
 ### Release Summary
 

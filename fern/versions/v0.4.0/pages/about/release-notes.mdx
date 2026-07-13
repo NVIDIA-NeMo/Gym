@@ -1,0 +1,266 @@
+---
+title: "Release Notes"
+description: ""
+position: 4
+---
+
+<AccordionGroup>
+<Accordion title="v0.4.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.4.0 expands evaluation tooling and agent integrations. It establishes a new monthly release cadence; we will continue to provide day-zero support for Nemotron models, datasets, and environments.
+
+Highlights:
+
+- Unified `gym` CLI: find agents and benchmarks by name with `gym list`, and catch config mistakes early with `gym env validate`
+- Diagnose evaluations with BLADE, an analysis skill for agents that reads your evaluation results and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (e.g. to the agent harness, training, verifier, or prompt)
+- Measure the impact of agent skills: run the same tasks with different skill sets and compare how each changes agent performance
+- Run agents in isolated sandboxes through a new pluggable provider framework
+- More agent harnesses out of the box, including OpenClaw, Pi, and OpenCode
+- Connect to hosted inference providers: Fireworks, Together.ai, OpenRouter, and more
+- New benchmarks across science, long-context, and interactive tasks
+
+### First-Time Contributors
+
+We welcomed 20+ new contributors to this release! A few highlights:
+
+- **@marta-sd** and **@wprazuch** led the CLI refactor and clearer config errors
+- **@hemildesai** added the pluggable sandbox provider infrastructure and OpenSandbox as the first built-in
+- **@adil-a** laid the groundwork for Gym-owned MCP resources servers, letting a server expose its tools over MCP
+- **@eric-tramel** added the BunsenChem chemistry benchmark
+- **@jeffwillette** added the long machine translation datasets and servers
+
+Thank you to all the new contributors for helping make NeMo Gym better!
+
+### Command Line Interface
+
+- One `gym` command for the full workflow, with `gym env`, `gym eval`, `gym list`, and `gym dataset` subcommands
+- Reference agents, benchmarks, and environments by name: use `gym list` to see what is available
+- `gym env validate` checks your config for missing, malformed, or empty values before a run and reports actionable errors
+
+### Evaluation & Diagnostics
+
+- Skill evaluation: measure how agent skills affect performance by running the same tasks with different skill sets. Skills apply at rollout time as a run-level knob, so one dataset works across all skill variants and every rollout is tagged for comparison
+- BLADE (Benchmark Level Analysis and Diagnostics Engine): a built-in analysis skill that reads an agent run's rollouts, metrics, and configs and produces an evidence-backed report of which tasks failed, why, and the highest-impact fix (e.g. harness, training, verifier, or prompt)
+
+### Sandboxing
+
+- Run tool-using and coding agents in isolated sandboxes through a pluggable provider framework
+- Built-in OpenSandbox and Apptainer providers, with third-party providers discoverable via entry points
+
+### Configure Agent Harnesses
+
+New harnesses join the existing built-in set (Claude Code, Hermes, OpenHands, and more):
+
+- Added OpenCode, OpenClaw, and Pi agents for evaluation
+- Claude Code runtime capabilities (tool access, MCP servers, and bare vs. native auto-discovery mode) are now easily set via the server config
+
+### Configure Models
+
+- New `inference_provider` model server connects to any OpenAI-compatible hosted provider (Fireworks, Together.ai, OpenRouter, DeepInfra, Gemini, and more) with ready-made configs
+- Every Gym model server now speaks the Anthropic Messages API, so Anthropic-native harnesses like the Claude Code CLI can run against any model you serve with Gym
+
+### New Benchmarks
+
+- **Science:** CritPt (research-level physics), SciCode (scientific coding), BunsenChem (chemistry multiple-choice), and FrontierScience Research (rubric-scored science)
+- **Long context:** Graphwalks (long-context graph reasoning) and Long Machine Translation (PG19, WMT24++)
+- **Interactive:** TALES, a text-adventure game suite
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Deprecation Notices
+
+- The legacy `ng_*` and `nemo_gym_*` CLI commands (such as `ng_run` and `ng_collect_rollouts`) are deprecated in favor of the unified `gym` CLI. They still work for now but will be removed in a future release.
+
+### Bug Fixes
+
+- Fixed intermittent connection errors during high-concurrency rollout collection
+- Clear error messages instead of crashes when a config file contains invalid YAML
+
+### Documentation
+
+- New Build Verifiers section with verification patterns and multi-reward verification
+- New Evaluate section covering benchmarks, evaluation metrics, and a guide to agent-native results diagnostics
+- New page for configuring and evaluating agent skills
+
+### Release Assets
+
+[GitHub Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0)
+
+
+
+</Accordion>
+
+<Accordion title="v0.3.0">
+
+### Release Summary
+
+NeMo Gym v0.3.0 ships alongside the NVIDIA Nemotron 3 Ultra model release, open sourcing the environments and corresponding datasets used during training.
+
+Highlights:
+
+- 70+ new environments, including benchmarks such as Tau2 and Nemotron RL training environments
+- Popular harness available out-of-the-box such as Claude Code and Hermes
+- Integrations with OpenEnv and Harbor - use environments from these libraries directly with NeMo Gym
+- Integration with VeRL - train with VeRL and scale rollout collection with NeMo Gym
+
+### First-Time Contributors
+
+We welcomed 30+ new contributors to this release! Here are a few highlights:
+
+- **@grace-lam** added the integration to run Harbor environments with NeMo Gym
+- **@aleksficek** — added Competitive Coding Challenges environment
+- **@jthomson04** improved rollout resilience when models emit malformed tool-call arguments or missing message content
+
+Thank you to all the new contributors for helping make NeMo Gym better!
+
+### New Environments & Benchmarks
+
+Added 70+ new environments including novel datasets and integrations of popular benchmarks. New coverage spans:
+- **Coding** — competitive programming, code infilling, SQL generation, and software-engineering benchmarks with execution-based verification
+- **Math & proofs** — olympiad-style problems, proof grading and validation, and formal verification (including Lean)
+- **Knowledge & science** — graduate-level QA, chemistry and physics tasks, and lab-style reasoning (including multimodal figure, table, and protocol tasks)
+- **Agentic** — multi-turn tool use, search, sandboxed execution, finance workflows, and tau-bench-style conversational agents
+- **Instruction following** — format constraints, citation compliance, and IFBench-style rule verification
+- **Safety & RLHF** — jailbreak detection, abstention calibration, prompt-injection resistance, and generative reward modeling
+- **Multimodal, speech & translation** — VLM benchmarks, visual grounding, ASR evaluation, and machine-translation quality metrics
+- **Chat & broad knowledge** — arena-style preference evaluation and MMLU-family benchmarks
+- **Interactive RL** — Gymnasium-style multi-step environments for spatial and game-based training
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Configure Agent Harnesses
+
+- Claude Code — available out of the box in NeMo Gym
+- Hermes — available out of the box in NeMo Gym
+- LangGraph agent — an adapter that lets you build custom agents using LangGraph patterns (reflection, subagent orchestration, parallel thinking, rewoo)
+- Gymnasium agent — generic multi-turn harness for use with OpenAI Gym-style environments
+
+### Configure Models
+
+- Optional `max_concurrent_requests` on the OpenAI model server to cap in-flight API calls — useful for rate-limited external endpoints when rollout concurrency is high
+
+### Rollout Collection & Profiling
+
+- New `ng_aggregate_rollouts` command to merge rollout shards collected independently across multiple nodes, enabling distributed eval without requiring a single coordinated collection job
+
+### Environment Library Integrations
+
+- OpenEnv — combine OpenEnv environments with NeMo Gym environments
+- Harbor — combine Harbor environments with NeMo Gym environments
+
+### Deprecation Notices
+
+- Documentation has moved from Sphinx to Fern. Old Sphinx URLs redirect to the new site at docs.nvidia.com/nemo/gym. The `docs/` directory is no longer used for publishing.
+
+### Bug Fixes
+
+- Fixed aiohttp connection limit exhaustion under FastAPI/Uvicorn with multiple workers
+- Fixed session cookie propagation for Starlette >= 1.0.0
+- Fixed duplicated usage counting and errors on empty usage in subsequent model calls
+- Improved rollout resilience when models emit malformed tool-call arguments or missing message content
+- Fixed prompt-key hashing when inputs contain Pydantic BaseModel objects
+
+### Documentation
+
+- New concepts pages for environments, evaluation, and training
+- Improved Architecture page to clarify how environments map to NeMo Gym components
+- Consolidated detailed setup and quickstart into a single improved quickstart with clearer descriptions
+- Expanded Ecosystem page with environment library, training framework, and agent harness integrations
+
+### Release Assets
+
+[GitHub Release v0.3.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0)
+
+
+
+</Accordion>
+
+<Accordion title="v0.2.1">
+
+Fixed PyPI package distribution that was broken in v0.2.0. No functional changes — all features and fixes from v0.2.0 apply.
+
+</Accordion>
+
+<Accordion title="v0.2.0">
+
+NeMo Gym v0.2.0 ships alongside the NVIDIA Nemotron 3 Super model release, open sourcing the RL environments and corresponding datasets used during training. This release adds 17 new training environments across coding, math, science, reasoning, agentic tasks, and safety, plus integrations with Aviary, Reasoning Gym, and Verifiers to combine additional environments. You can now run end-to-end rollout collection locally with vLLM and install directly from PyPI.
+
+### New Environments
+
+Added 17 new resources servers spanning:
+
+- **Coding**: Text to SQL, SWE RL Gen, SWE RL LLM Judge
+- **Math**: Lean4 Mathematical Proofs
+- **Science**: Aviary, NewtonBench
+- **Reasoning**: MultiChallenge, ARC-AGI
+- **Agent tasks**: xLAM Function Calling, Tavily Search, Single Step Tool Use, Terminus Judge, NeMo Skills Tools
+- **Safety**: Jailbreak Detection, Over Refusal Detection
+- **RLHF**: Generative Reward Model Compare
+
+Added 5 new agent servers: Aviary agent, proof refinement agent, SWE agents, tool simulation agent, and verifiers agent.
+
+**Environment library integrations**: Future House Aviary, Open-Thought Reasoning Gym, Prime Intellect Verifiers.
+
+### Model Serving
+
+- Local vLLM model server with end-to-end rollout collection without an external API
+- vLLM 0.16+ support for the reasoning field in responses
+- Per-task chat templates and extra body args to support different model configurations across environments in multi-environment training
+
+### Rollout Collection & Profiling
+
+- New `ng_reward_profile` command to compute per-task pass rates and aggregate metrics
+- CPU profiling for rollout performance analysis
+- Seeding on num_repeats for reproducible rollouts
+
+### Infrastructure & Developer Experience
+
+- PyPI compatibility: install via `pip install nemo-gym`
+- Dry run mode: `ng_run +dry_run=true` to validate configs and install environments without starting servers
+- `ng_status` command to list running servers and their health
+- FastAPI worker support for higher throughput across multiple workers
+- Server stdout/stderr redirection with server name prefixes
+
+### Model Recipes
+
+- Nemotron 3 Nano 30B end-to-end training recipe with single-GPU and multi-node tutorials
+
+### Documentation
+
+- Added training tutorials for Unsloth, TRL, and Nemotron 3 Nano (single-GPU and multi-node)
+- Added environment tutorials for creating environments, custom data preparation, and integrating external libraries
+- Rewrote concepts documentation with new training approaches page, architecture diagrams, and expanded agent/resources server docs
+- Revamped ecosystem page with training framework and environment library integrations
+- Added deployment topology and SWE RL infrastructure case study
+- Site-wide quality sweep: consistent naming, style guide, redirects, and FAQ additions
+
+### Bug Fixes
+
+- Fixed 0.1.1 environments to work correctly with RL training pipelines
+- Fixed crash when server receives malformed JSON during rollout collection
+- Fixed dry run mode failing after initial implementation
+- Fixed nested `responses_create_params` overrides not merging correctly from CLI
+- Fixed `ng_prepare_data` failing when multiple environments define overlapping metrics
+- Fixed reward profiling failing when model response doesn't include usage stats
+- Fixed NeMo-Skills python tool to use HTTP calls instead of subprocess execution
+- Bumped Pillow and other packages to address security vulnerabilities
+- `ng_dump_config` now redacts API key values from output
+
+### First-Time Contributors
+
+We'd like to highlight the following first-time contributors:
+
+- **@sidnarayanan** added the Aviary integration to enable training on any Aviary environment, a library of interactive RL environments spanning math, science, biology, and more
+- **@3mei** added the text-to-SQL environment to generate SQL queries from natural language across multiple SQL dialects
+- **@Kelvin0110** added the NewtonBench environment to discover scientific laws through interactive experimentation
+
+</Accordion>
+
+<Accordion title="v0.1.1">
+
+Initial public release of NeMo Gym.
+
+</Accordion>
+</AccordionGroup>
