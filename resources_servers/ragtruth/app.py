@@ -88,9 +88,7 @@ _DEFAULT_THINK_REGEXES = _make_think_res("think")
 def _strip_think(text: str, tag: str = "think") -> str:
     if not text:
         return ""
-    pair, orphan_close, orphan_open = (
-        _DEFAULT_THINK_REGEXES if tag == "think" else _make_think_res(tag)
-    )
+    pair, orphan_close, orphan_open = _DEFAULT_THINK_REGEXES if tag == "think" else _make_think_res(tag)
     # Remove paired <tag>…</tag> blocks, then handle stray tags from thinking
     # models: a lone </tag> (reasoning emitted with no opening tag) drops
     # everything up to and including it; a lone <tag> is dropped on its own.
