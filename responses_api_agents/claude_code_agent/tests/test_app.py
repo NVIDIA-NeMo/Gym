@@ -23,6 +23,7 @@ import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.agent_execution_capture import AgentExecutionRecorder
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -38,6 +39,7 @@ from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _ClaudeStreamObserver,
     _extract_instruction,
     parse_stream_json,
 )
@@ -73,6 +75,32 @@ def _event(type_: str, **kwargs) -> str:
     return json.dumps({"type": type_, **kwargs})
 
 
+def _assistant_tool_event(
+    response_id: str,
+    tool_call_id: str,
+    name: str,
+    *,
+    parent_id: str | None = None,
+    tool_input: dict | None = None,
+) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": response_id,
+            "content": [{"type": "tool_use", "id": tool_call_id, "name": name, "input": tool_input or {}}],
+        },
+        "parent_tool_use_id": parent_id,
+    }
+
+
+def _tool_result_event(tool_call_id: str, *, parent_id: str | None = None, is_error: bool = False) -> dict:
+    return {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_call_id, "is_error": is_error}]},
+        "parent_tool_use_id": parent_id,
+    }
+
+
 class FakeAioHTTPResponse:
     ok = True
 
@@ -82,6 +110,30 @@ class FakeAioHTTPResponse:
 
     async def read(self) -> bytes:
         return json.dumps(self.payload).encode()
+
+
+class FakeStreamProc:
+    def __init__(self, stdout: bytes, *, wait_for_kill: bool = False) -> None:
+        self.returncode = None if wait_for_kill else 0
+        self.wait_for_kill = wait_for_kill
+        self.killed = asyncio.Event()
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stderr = asyncio.StreamReader()
+        if not wait_for_kill:
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+    async def wait(self) -> int:
+        if self.wait_for_kill:
+            await self.killed.wait()
+        return self.returncode if self.returncode is not None else 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self.killed.set()
 
 
 class TestSanity:
@@ -312,6 +364,30 @@ class TestRunForwardsSkillsPath:
 
 
 class TestRunClaudeCode:
+    def _run_captured(
+        self,
+        tmp_path: Path,
+        agent: ClaudeCodeAgent,
+        recorder: AgentExecutionRecorder,
+        stdout: bytes,
+        *,
+        wait_for_kill: bool = False,
+    ) -> tuple[str, FakeStreamProc]:
+        processes = []
+
+        async def fake_exec(*cmd, **kwargs):
+            process = FakeStreamProc(stdout, wait_for_kill=wait_for_kill)
+            processes.append(process)
+            return process
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            result, _ = asyncio.run(agent._run_claude_code("hello", execution_recorder=recorder))
+        return result, processes[0]
+
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/mcp.json")
         captured: dict = {}
@@ -376,6 +452,83 @@ class TestRunClaudeCode:
         assert captured["skill_staged"] is True
         # skills present => --bare must be dropped even though config.bare is True
         assert "--bare" not in captured["cmd"]
+
+    def test_execution_recorder_observes_stream_while_process_runs(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+        recorder = AgentExecutionRecorder("0-0", "claude_code_agent")
+        lines = [
+            _event(
+                "assistant",
+                message={
+                    "id": "msg-1",
+                    "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {}}],
+                },
+                parent_tool_use_id=None,
+            ),
+            _event(
+                "user",
+                message={"content": [{"type": "tool_result", "tool_use_id": "tool-1"}]},
+                parent_tool_use_id=None,
+            ),
+        ]
+
+        stdout, _ = self._run_captured(tmp_path, agent, recorder, ("\n".join(lines) + "\n").encode())
+
+        assert stdout == "\n".join(lines) + "\n"
+        capture = recorder.capture()
+        assert capture.model_call_links[0].response_id == "msg-1"
+        assert capture.tool_spans[0].tool_call_id == "tool-1"
+
+    def test_execution_recorder_accepts_stream_event_larger_than_reader_limit(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+        recorder = AgentExecutionRecorder("0-0", "claude_code_agent")
+        line = _event(
+            "assistant",
+            message={"id": "msg-large", "content": [{"type": "text", "text": "x" * (70 * 1024)}]},
+            parent_tool_use_id=None,
+        )
+
+        stdout, _ = self._run_captured(tmp_path, agent, recorder, f"{line}\n".encode())
+
+        assert stdout == f"{line}\n"
+        assert recorder.capture().model_call_links[0].response_id == "msg-large"
+
+    def test_execution_recorder_timeout_kills_process(self, tmp_path: Path) -> None:
+        agent = _make_agent(timeout=0)
+        recorder = AgentExecutionRecorder("0-0", "claude_code_agent")
+        stdout, process = self._run_captured(tmp_path, agent, recorder, b"", wait_for_kill=True)
+
+        assert stdout == ""
+        assert process.killed.is_set()
+        assert recorder.capture().warnings == ["claude_code_timeout"]
+
+    def test_execution_recorder_cancellation_kills_and_drains_process(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        recorder = AgentExecutionRecorder("0-0", "claude_code_agent")
+        process = None
+        process_created = asyncio.Event()
+
+        async def fake_exec(*cmd, **kwargs):
+            nonlocal process
+            process = FakeStreamProc(b"", wait_for_kill=True)
+            process_created.set()
+            return process
+
+        async def run_and_cancel() -> None:
+            task = asyncio.create_task(agent._run_claude_code("hello", execution_recorder=recorder))
+            await process_created.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(run_and_cancel())
+
+        assert process is not None
+        assert process.killed.is_set()
 
     def test_bad_skills_path_does_not_leak_config_dir(self, tmp_path: Path) -> None:
         # stage_skills raises for a missing skills dir; the partially-created config dir must
@@ -645,6 +798,77 @@ class TestRolloutCorrelation:
         # so a prefix would 404 every /v1/messages call.
         anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
         assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
+
+
+class TestClaudeStreamObserver:
+    def _recorder(
+        self, clock, *, model_server: str | None = "policy"
+    ) -> tuple[AgentExecutionRecorder, _ClaudeStreamObserver]:
+        recorder = AgentExecutionRecorder("0-0", "claude_code_agent")
+        model_ref = ModelServerRef(type="responses_api_models", name=model_server) if model_server else None
+        observer = _ClaudeStreamObserver(recorder, model_ref=model_ref, clock=clock, wall_clock=lambda: 1.0)
+        return recorder, observer
+
+    def test_parallel_tool_events_keep_individual_overlapping_intervals(self) -> None:
+        recorder, observer = self._recorder(iter([10, 20, 50, 80]).__next__)
+        observer.observe(_assistant_tool_event("msg-1", "a", "Bash"))
+        observer.observe(_assistant_tool_event("msg-1", "b", "Read"))
+        observer.observe(_tool_result_event("a"))
+        observer.observe(_tool_result_event("b", is_error=True))
+
+        spans = {span.tool_call_id: span for span in recorder.capture().tool_spans}
+        assert (spans["a"].started_ns, spans["a"].ended_ns, spans["a"].status) == (10, 50, "returned")
+        assert (spans["b"].started_ns, spans["b"].ended_ns, spans["b"].status) == (20, 80, "returned")
+        assert spans["a"].reported_error is False
+        assert spans["b"].reported_error is True
+        assert spans["b"].started_ns < spans["a"].ended_ns
+        assert recorder.capture().model_call_links[0].response_id == "msg-1"
+
+    def test_nested_agent_events_form_tree_and_attribute_model_calls(self) -> None:
+        recorder, observer = self._recorder(iter([10, 20, 30, 40, 50, 60]).__next__)
+        events = [
+            _assistant_tool_event("msg-root", "child", "Agent", tool_input={"subagent_type": "Explore"}),
+            _assistant_tool_event("msg-child", "grandchild", "Task", parent_id="child"),
+            _assistant_tool_event("msg-grandchild", "bash", "Bash", parent_id="grandchild"),
+            _tool_result_event("bash", parent_id="grandchild"),
+            _tool_result_event("grandchild", parent_id="child"),
+            _tool_result_event("child"),
+        ]
+        for event in events:
+            observer.observe(event)
+        observer.finish()
+
+        capture = recorder.capture()
+        assert [(item.id, item.parent_id, item.source) for item in capture.agent_invocations] == [
+            ("root", None, "claude_code_agent"),
+            ("child", "root", "Explore"),
+            ("grandchild", "child", "Task"),
+        ]
+        assert [(link.agent_invocation_id, link.response_id) for link in capture.model_call_links] == [
+            ("root", "msg-root"),
+            ("child", "msg-child"),
+            ("grandchild", "msg-grandchild"),
+        ]
+        assert [item.status for item in capture.agent_invocations] == ["started", "completed", "completed"]
+
+    def test_agent_request_without_child_events_retains_attempted_invocation(self) -> None:
+        recorder, observer = self._recorder(iter([10, 20]).__next__)
+        observer.observe(_assistant_tool_event("msg-root", "child", "Agent"))
+
+        child = recorder.capture().agent_invocations[1]
+        assert (child.id, child.parent_id, child.status, child.spawn_response_id) == (
+            "child",
+            "root",
+            "requested",
+            "msg-root",
+        )
+
+    def test_external_model_response_id_is_not_emitted_as_capture_link(self) -> None:
+        recorder, observer = self._recorder(iter([10, 20]).__next__, model_server=None)
+        observer.observe(_assistant_tool_event("msg-external", "tool", "Bash"))
+        observer.observe(_tool_result_event("tool"))
+
+        assert recorder.capture().model_call_links == []
 
 
 class TestExtractInstruction:

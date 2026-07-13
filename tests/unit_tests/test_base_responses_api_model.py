@@ -135,6 +135,7 @@ def test_build_model_call_record_from_exchange():
         "latency_ms": 18.4,
         "request": {"input": "hi"},
         "response": {
+            "id": "response-3",
             "model": "m",
             "usage": {
                 "input_tokens": 10,
@@ -154,6 +155,7 @@ def test_build_model_call_record_from_exchange():
     assert rec.model_call_id == "call-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
+    assert rec.response_id == "response-3"
     assert rec.dialect == "responses"
     assert rec.started_at == 100.0 and rec.completed_at == 100.02
     assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
@@ -167,6 +169,7 @@ def test_build_model_call_record_from_exchange():
         "model_ref",
         "dialect",
         "status_code",
+        "response_id",
         "started_at",
         "completed_at",
         "tokens_in",
@@ -856,7 +859,11 @@ def test_reconstruct_chat_sse():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 
     chunks = [
-        {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
+        {
+            "id": "chatcmpl-1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}],
+        },
         {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
         {
             "choices": [
@@ -884,6 +891,7 @@ def test_reconstruct_chat_sse():
     msg = resp["choices"][0]["message"]
     assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
     assert msg["tool_calls"][0]["function"] == {"name": "f", "arguments": '{"a":1}'}
+    assert resp["id"] == "chatcmpl-1"
     assert resp["usage"]["total_tokens"] == 8
 
 
@@ -949,7 +957,7 @@ def _capture_exchange(dialect, model_server, usage, response):
         "status_code": 200,
         "error_category": None,
         "request": {"input": "hi"},
-        "response": {"model": "m", "usage": usage, **response},
+        "response": {"id": f"response-{model_server}", "model": "m", "usage": usage, **response},
     }
 
 
@@ -977,6 +985,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     attached_call = capture["calls"][0]
     assert attached_call["model_call_id"] == "call-A"
     assert attached_call["model_ref"] == {"type": "responses_api_models", "name": "A"}
+    assert attached_call["response_id"] == "response-A"
     assert attached_call["started_at"] == 100.0 and attached_call["completed_at"] == 100.01
     assert attached_call["tokens_in"] == 3
     assert "request" not in attached_call and "response" not in attached_call

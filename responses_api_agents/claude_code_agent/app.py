@@ -23,13 +23,14 @@ import subprocess
 import tempfile
 from asyncio import Semaphore
 from pathlib import Path
-from time import time
-from typing import Any, Optional
+from time import monotonic_ns, time
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import Request
 from pydantic import ConfigDict, PrivateAttr
 
+from nemo_gym.agent_execution_capture import AgentExecutionRecorder
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -52,6 +53,119 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 
 LOG = logging.getLogger(__name__)
+
+
+class _ClaudeStreamObserver:
+    """Translate Claude Code stream events into agent execution evidence."""
+
+    def __init__(
+        self,
+        recorder: AgentExecutionRecorder,
+        *,
+        model_ref: Optional[ModelServerRef],
+        clock: Callable[[], int] = monotonic_ns,
+        wall_clock: Callable[[], float] = time,
+    ) -> None:
+        self.recorder = recorder
+        self.model_ref = model_ref
+        self.clock = clock
+        self.wall_clock = wall_clock
+        self.pending_tools: dict[str, tuple[int, float, str, Optional[str]]] = {}
+        self.invocation_ids = {recorder.ROOT_INVOCATION_ID}
+        self.model_call_owners: dict[str, str] = {}
+
+    def observe(self, event: dict[str, Any]) -> None:
+        invocation_id = event.get("parent_tool_use_id") or self.recorder.ROOT_INVOCATION_ID
+        if invocation_id not in self.invocation_ids:
+            self.recorder.add_warning("claude_unknown_parent_tool_use_id")
+            return
+        if invocation_id != self.recorder.ROOT_INVOCATION_ID:
+            self.recorder.set_invocation_status(invocation_id, "started")
+
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return
+
+        if event.get("type") == "assistant":
+            raw_response_id = message.get("id")
+            response_id = raw_response_id if isinstance(raw_response_id, str) else None
+            if response_id is None and self.model_ref is not None:
+                self.recorder.add_warning("claude_model_response_missing_id")
+            if self.model_ref is not None and response_id is not None:
+                owner = self.model_call_owners.get(response_id)
+                if owner is None:
+                    self.model_call_owners[response_id] = invocation_id
+                    self.recorder.add_model_call_link(
+                        response_id=response_id,
+                        model_ref=self.model_ref,
+                        agent_invocation_id=invocation_id,
+                    )
+                elif owner != invocation_id:
+                    self.recorder.add_warning("claude_model_response_has_multiple_owners")
+
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                tool_call_id = block.get("id")
+                if not isinstance(tool_call_id, str):
+                    self.recorder.add_warning("claude_tool_use_missing_id")
+                    continue
+                if tool_call_id in self.pending_tools:
+                    self.recorder.add_warning("claude_duplicate_tool_use_id")
+                    continue
+                self.pending_tools[tool_call_id] = (self.clock(), self.wall_clock(), invocation_id, response_id)
+
+                if block.get("name") in {"Agent", "Task"}:
+                    tool_input = block.get("input")
+                    source = tool_input.get("subagent_type") if isinstance(tool_input, dict) else None
+                    if tool_call_id in self.invocation_ids:
+                        self.recorder.add_warning("claude_duplicate_agent_invocation")
+                    else:
+                        self.recorder.add_agent_invocation(
+                            tool_call_id,
+                            source=str(source or block["name"]),
+                            parent_id=invocation_id,
+                            status="requested",
+                            spawn_response_id=response_id,
+                        )
+                        self.invocation_ids.add(tool_call_id)
+
+        elif event.get("type") == "user":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_call_id = block.get("tool_use_id")
+                if not isinstance(tool_call_id, str):
+                    self.recorder.add_warning("claude_tool_result_missing_id")
+                    continue
+                pending = self.pending_tools.pop(tool_call_id, None)
+                if pending is None:
+                    self.recorder.add_warning("claude_tool_result_without_start")
+                    continue
+                started_ns, started_at, owner_id, response_id = pending
+                self.recorder.record_tool_span(
+                    tool_call_id=tool_call_id,
+                    measurement_scope="stream_observation_interval",
+                    started_ns=started_ns,
+                    ended_ns=self.clock(),
+                    started_at=started_at,
+                    completed_at=self.wall_clock(),
+                    status="returned",
+                    reported_error=bool(block.get("is_error")),
+                    agent_invocation_id=owner_id,
+                    model_ref=self.model_ref,
+                    model_response_id=response_id,
+                )
+                if tool_call_id in self.invocation_ids:
+                    self.recorder.set_invocation_status(
+                        tool_call_id,
+                        "failed" if block.get("is_error") else "completed",
+                    )
+
+    def finish(self) -> None:
+        if self.pending_tools:
+            self.recorder.add_warning("claude_tool_result_missing")
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -251,6 +365,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    def captures_agent_execution(self) -> bool:
+        return True
+
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         ensure_claude_code(self.config.claude_code_version)
@@ -381,6 +498,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        execution_recorder: Optional[AgentExecutionRecorder] = None,
     ) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name).
 
@@ -426,15 +544,86 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                return "", model
+            if execution_recorder is None:
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.communicate()
+                    LOG.warning("claude-code timed out after %ds", self.config.timeout)
+                    return "", model
+            else:
+                observer = _ClaudeStreamObserver(
+                    execution_recorder,
+                    model_ref=self.config.model_server,
+                )
+
+                def observe_line(line: bytes) -> None:
+                    if not line.strip():
+                        return
+                    try:
+                        event = json.loads(line)
+                        if isinstance(event, dict):
+                            observer.observe(event)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        execution_recorder.add_warning("claude_stream_event_invalid")
+                    except Exception:
+                        execution_recorder.add_warning("claude_stream_observation_failed")
+                        LOG.warning("Could not observe Claude Code stream event.", exc_info=True)
+
+                async def read_stdout() -> bytes:
+                    chunks: list[bytes] = []
+                    pending = bytearray()
+                    while chunk := await proc.stdout.read(64 * 1024):
+                        chunks.append(chunk)
+                        pending.extend(chunk)
+                        while (newline := pending.find(b"\n")) >= 0:
+                            observe_line(bytes(pending[:newline]))
+                            del pending[: newline + 1]
+                    if pending:
+                        observe_line(bytes(pending))
+                    return b"".join(chunks)
+
+                stdout_task = asyncio.create_task(read_stdout())
+                stderr_task = asyncio.create_task(proc.stderr.read())
+                timed_out = False
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=self.config.timeout)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    execution_recorder.add_warning("claude_code_timeout")
+                finally:
+                    if proc.returncode is None:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        execution_recorder.add_warning("claude_code_kill_timeout")
+                    try:
+                        output = await asyncio.wait_for(
+                            asyncio.gather(stdout_task, stderr_task, return_exceptions=True), timeout=5
+                        )
+                    except asyncio.TimeoutError:
+                        execution_recorder.add_warning("claude_stream_drain_timeout")
+                        stdout_task.cancel()
+                        stderr_task.cancel()
+                        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                        output = [b"", b""]
+                    stdout = output[0] if isinstance(output[0], bytes) else b""
+                    stderr = output[1] if isinstance(output[1], bytes) else b""
+                    if any(isinstance(item, BaseException) for item in output):
+                        execution_recorder.add_warning("claude_stream_read_failed")
+                    observer.finish()
+                if timed_out:
+                    LOG.warning("claude-code timed out after %ds", self.config.timeout)
+                    return "", model
 
             if proc.returncode not in (0, None):
+                if execution_recorder is not None:
+                    execution_recorder.add_warning("claude_code_nonzero_exit")
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
@@ -509,6 +698,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        execution_recorder: Optional[AgentExecutionRecorder] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -524,6 +714,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             mcp_config=mcp_config,
             skills_path=skills_path,
             rollout_id=rollout_id,
+            execution_recorder=execution_recorder,
         )
         output_items, usage = parse_stream_json(stdout)
 
@@ -590,6 +781,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
+            execution_recorder = self.agent_execution_recorder_for_run(body)
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
@@ -598,6 +790,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     mcp_config=mcp_config,
                     skills_path=skills_path,
                     rollout_id=rollout_id,
+                    execution_recorder=execution_recorder,
                 )
                 agent_resp_json = agent_resp.model_dump(mode="json")
 

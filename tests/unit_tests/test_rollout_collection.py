@@ -664,6 +664,7 @@ class TestRolloutCollection:
     async def test_run_from_config_replaces_stale_capture_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
     ) -> None:
+        from nemo_gym.agent_execution_capture import AgentExecutionCaptureStore, AgentExecutionRecorder
         from nemo_gym.base_responses_api_model import CaptureStore
 
         capture_dir = tmp_path / "captures"
@@ -690,17 +691,21 @@ class TestRolloutCollection:
             input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
 
         store = CaptureStore(capture_dir)
+        agent_store = AgentExecutionCaptureStore(capture_dir)
         store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
+        agent_store.write(AgentExecutionRecorder("0-0", "stale-agent").capture())
 
         class Helper(RolloutCollectionHelper):
             def run_examples(self, examples, *args, **kwargs):
                 [example] = examples
                 assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
                 assert store.read("0-0") == []
+                assert agent_store.read("0-0") is None
                 store.record(
                     "0-0",
                     {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
                 )
+                agent_store.write(AgentExecutionRecorder("0-0", "fresh-agent").capture())
                 future = Future()
                 future.set_result((example, {"response": {"usage": {}}}))
                 return [future]
@@ -709,6 +714,7 @@ class TestRolloutCollection:
 
         assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+        assert results[0]["ng_agent_execution_capture"]["agent_server"] == "fresh-agent"
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
