@@ -42,6 +42,8 @@ the provider rather than the agent config::
 from collections.abc import Mapping
 from typing import Any
 
+from nemo_gym.sandbox.providers import SandboxResources, SandboxSpec
+
 
 # Reserved keys inside a sandbox block that are not the provider config.
 SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
@@ -166,3 +168,82 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+
+def sandbox_spec_from_mapping(
+    spec_config: Mapping[str, Any],
+    *,
+    default_workdir: str | None = None,
+    metadata: Mapping[str, str] | None = None,
+    default_metadata: Mapping[str, str] | None = None,
+) -> SandboxSpec:
+    """Build a validated ``SandboxSpec`` from a plain configuration mapping.
+
+    Provider metadata is applied as defaults, explicit ``sandbox_spec.metadata``
+    overrides provider defaults, and caller metadata has final precedence.
+    """
+
+    plain_config = _to_plain_dict(spec_config)
+    if not isinstance(plain_config, Mapping):
+        raise TypeError(f"SandboxSpec config must be a mapping, got {type(plain_config).__name__}")
+    config = dict(plain_config)
+    configured_metadata = _string_mapping(config.pop("metadata", {}), "metadata")
+    merged_metadata = _string_mapping(
+        {**(default_metadata or {}), **configured_metadata, **(metadata or {})},
+        "metadata",
+    )
+    image = config.pop("image", None)
+    if image is not None and not isinstance(image, str):
+        raise TypeError(f"SandboxSpec image must be a string or null, got {type(image).__name__}")
+    ttl_s = _positive_number_or_none(config.pop("ttl_s", None), "ttl_s")
+    ready_timeout_s = _positive_number_or_none(config.pop("ready_timeout_s", None), "ready_timeout_s")
+    workdir = config.pop("workdir", default_workdir)
+    if workdir is not None and not isinstance(workdir, str):
+        raise TypeError(f"SandboxSpec workdir must be a string or null, got {type(workdir).__name__}")
+    env = _string_mapping(config.pop("env", {}), "env")
+    files = _string_mapping(config.pop("files", {}), "files")
+    resources = SandboxResources.from_mapping(config.pop("resources", {}))
+    entrypoint = config.pop("entrypoint", None)
+    if entrypoint is not None and (
+        not isinstance(entrypoint, (list, tuple)) or not all(isinstance(part, str) for part in entrypoint)
+    ):
+        raise TypeError("SandboxSpec entrypoint must be a list of strings or null")
+    entrypoint = list(entrypoint) if entrypoint is not None else None
+    provider_options_value = config.pop("provider_options", {})
+    if not isinstance(provider_options_value, Mapping):
+        raise TypeError(f"SandboxSpec provider_options must be a mapping, got {type(provider_options_value).__name__}")
+    provider_options = dict(provider_options_value)
+    if config:
+        unknown = ", ".join(sorted(config))
+        raise ValueError(f"Unknown SandboxSpec keys: {unknown}")
+
+    return SandboxSpec(
+        image=image,
+        ttl_s=ttl_s,
+        ready_timeout_s=ready_timeout_s,
+        workdir=workdir,
+        env=env,
+        files=files,
+        metadata=merged_metadata,
+        resources=resources,
+        entrypoint=entrypoint,
+        provider_options=provider_options,
+    )
+
+
+def _string_mapping(value: Any, field_name: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"SandboxSpec {field_name} must be a mapping, got {type(value).__name__}")
+    if not all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
+        raise TypeError(f"SandboxSpec {field_name} keys and values must be strings")
+    return dict(value)
+
+
+def _positive_number_or_none(value: Any, field_name: str) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"SandboxSpec {field_name} must be a number or null")
+    if value <= 0:
+        raise ValueError(f"SandboxSpec {field_name} must be greater than zero")
+    return value

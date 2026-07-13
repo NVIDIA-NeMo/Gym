@@ -19,3 +19,15 @@ claude_code_agent:
       bare: true  # set false to auto-discover skills, hooks, plugins, MCP, memory, CLAUDE.md
       mcp_config: null  # path to an MCP server config file (--mcp-config); works even with bare: true
       settings: null  # path to a settings JSON layered into the per-run CLAUDE_CONFIG_DIR
+      # Optional isolated execution. Leave null to run Claude Code as a host subprocess.
+      sandbox_provider: null  # named provider block or inline {provider_name: {...}} mapping
+      sandbox_spec: {}
+      sandbox_workspace: /workspace/nemo-gym
+      sandbox_user: root
+      sandbox_max_patch_bytes: 10485760
+      sandbox_max_output_bytes: 52428800
+      sandbox_cleanup_timeout: 30
+      sandbox_require_clean_workspace: true
+      sandbox_forbidden_workspace_paths: [.agents/skills, .claude/skills, .codex/skills]
+      sandbox_url_rewrites: {}  # e.g. {"http://127.0.0.1:8000": "http://host.docker.internal:8000"}
+      sandbox_provider_managed_env: []  # omit keys such as ANTHROPIC_BASE_URL from per-exec overrides

@@ -28,7 +28,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -46,8 +46,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata, sandbox_spec_from_mapping
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from responses_api_agents.claude_code_agent.sandbox_runner import ClaudeCodeSandboxRunner
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
@@ -233,6 +235,20 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     bare: bool = True
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
+    # Optional sandbox execution. When unset, Claude Code continues to run as a host subprocess.
+    sandbox_provider: Optional[str | dict[str, Any]] = None
+    sandbox_spec: dict[str, Any] = Field(default_factory=dict)
+    sandbox_workspace: str = "/workspace/nemo-gym"
+    sandbox_user: Optional[str | int] = "root"
+    sandbox_max_patch_bytes: int = 10 * 1024 * 1024
+    sandbox_max_output_bytes: int = 50 * 1024 * 1024
+    sandbox_cleanup_timeout: int = 30
+    sandbox_require_clean_workspace: bool = True
+    sandbox_forbidden_workspace_paths: list[str] = Field(
+        default_factory=lambda: [".agents/skills", ".claude/skills", ".codex/skills"]
+    )
+    sandbox_url_rewrites: dict[str, str] = Field(default_factory=dict)
+    sandbox_provider_managed_env: list[str] = Field(default_factory=list)
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -253,6 +269,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        if self.config.sandbox_provider is not None:
+            LOG.warning("claude-code sandbox execution enabled; the sandbox image must provide the claude CLI")
+            return
         ensure_claude_code(self.config.claude_code_version)
         try:
             ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
@@ -364,18 +383,159 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         cmd += ["--", instruction]
         return cmd
 
+    def _sandbox_claude_env(self, *, model: str, base_url: str, config_dir: str) -> dict[str, str]:
+        """Build the minimal environment forwarded to the sandboxed CLI."""
+
+        api_key = self.config.anthropic_api_key
+        env = {
+            "ANTHROPIC_API_KEY": api_key,  # pragma: allowlist secret
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "IS_SANDBOX": "1",
+            "CLAUDE_CONFIG_DIR": config_dir,
+        }
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = self._rewrite_sandbox_url(base_url)
+            env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
+        for key in self.config.sandbox_provider_managed_env:
+            env.pop(key, None)
+        return env
+
+    def _rewrite_sandbox_url(self, url: str) -> str:
+        """Rewrite host-visible endpoint prefixes for the sandbox network."""
+
+        for source in sorted(self.config.sandbox_url_rewrites, key=len, reverse=True):
+            if url.startswith(source):
+                return self.config.sandbox_url_rewrites[source] + url[len(source) :]
+        return url
+
+    def _stage_sandbox_mcp_config(self, source: Path, destination: Path) -> None:
+        """Copy an MCP config while rewriting HTTP endpoints for the sandbox."""
+
+        config = json.loads(source.read_text())
+        if not isinstance(config, dict):
+            raise ValueError(f"Claude Code MCP config must be a JSON object: {source}")
+        servers = config.get("mcpServers") or {}
+        if not isinstance(servers, dict):
+            raise ValueError(f"Claude Code MCP config has non-object mcpServers: {source}")
+        for server in servers.values():
+            if isinstance(server, dict) and isinstance(server.get("url"), str):
+                server["url"] = self._rewrite_sandbox_url(server["url"])
+        destination.write_text(json.dumps(config, indent=2, sort_keys=True))
+
+    async def _run_claude_code_sandbox(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        instruction: str,
+        system_prompt: Optional[str],
+        mcp_config: Optional[str],
+        skills_path: Optional[str],
+        execution_artifacts: Optional[dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Run Claude Code inside an ephemeral Gym sandbox."""
+
+        claude_config_dir = None
+        try:
+            claude_config_dir = self._setup_config_dir(skills_path=skills_path)
+            effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
+            remote_mcp_config = None
+            if effective_mcp_config:
+                source = Path(effective_mcp_config).expanduser()
+                if not source.is_file():
+                    raise ValueError(f"Claude Code MCP config does not exist: {source}")
+                staged_name = "gym_mcp_config.json"
+                self._stage_sandbox_mcp_config(source, claude_config_dir / staged_name)
+                remote_mcp_config = f"/tmp/nemo_gym_claude_config/{staged_name}"
+
+            command = self._build_command(
+                model,
+                instruction,
+                system_prompt=system_prompt,
+                mcp_config=remote_mcp_config,
+                skills_active=bool(skills_path),
+            )
+            global_config = self.server_client.global_config_dict
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config)
+            provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            spec = sandbox_spec_from_mapping(
+                self.config.sandbox_spec,
+                default_workdir=self.config.sandbox_workspace,
+                default_metadata=provider_metadata,
+                metadata={"nemo_gym_agent": "claude_code_agent"},
+            )
+            workspace = spec.workdir or self.config.sandbox_workspace
+            runner = ClaudeCodeSandboxRunner(
+                provider=provider,
+                spec=spec,
+                workspace=workspace,
+                timeout_s=self.config.timeout,
+                user=self.config.sandbox_user,
+                max_patch_bytes=self.config.sandbox_max_patch_bytes,
+                max_output_bytes=self.config.sandbox_max_output_bytes,
+                cleanup_timeout_s=self.config.sandbox_cleanup_timeout,
+                require_clean_workspace=self.config.sandbox_require_clean_workspace,
+                forbidden_workspace_paths=tuple(self.config.sandbox_forbidden_workspace_paths),
+            )
+            result = await runner.run(
+                command=command,
+                env=self._sandbox_claude_env(
+                    model=model,
+                    base_url=base_url,
+                    config_dir="/tmp/nemo_gym_claude_config",
+                ),
+                config_dir=claude_config_dir,
+            )
+            if result.return_code != 0 or result.error_type is not None:
+                LOG.warning(
+                    "sandboxed claude-code exited %d (error_type=%r): %s",
+                    result.return_code,
+                    result.error_type,
+                    result.stderr[:500],
+                )
+            if execution_artifacts is not None:
+                execution_artifacts.update(
+                    {
+                        "workspace_patch": result.workspace_patch,
+                        "workspace_base_revision": result.base_revision,
+                        "sandbox_return_code": result.return_code,
+                        "sandbox_error_type": result.error_type,
+                        "sandbox_elapsed_seconds": result.elapsed_seconds,
+                    }
+                )
+            LOG.debug("sandboxed claude-code stdout (%d chars): %s", len(result.stdout), result.stdout[:2000])
+            return result.stdout, model
+        finally:
+            if claude_config_dir is not None:
+                shutil.rmtree(claude_config_dir, ignore_errors=True)
+
     async def _run_claude_code(
         self,
         instruction: str,
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
+        execution_artifacts: Optional[dict[str, Any]] = None,
     ) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
         base_url = self._resolve_base_url()
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
+        if self.config.sandbox_provider is not None:
+            return await self._run_claude_code_sandbox(
+                model=model,
+                base_url=base_url,
+                instruction=instruction,
+                system_prompt=system_prompt,
+                mcp_config=mcp_config,
+                skills_path=skills_path,
+                execution_artifacts=execution_artifacts,
+            )
 
         claude_config_dir = None
         try:
@@ -493,6 +653,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
+        execution_artifacts: Optional[dict[str, Any]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -507,6 +668,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             system_prompt=system_prompt,
             mcp_config=mcp_config,
             skills_path=skills_path,
+            execution_artifacts=execution_artifacts,
         )
         output_items, usage = parse_stream_json(stdout)
 
@@ -551,7 +713,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body)
+        async with self.sem:
+            if self.config.sandbox_provider is not None:
+                LOG.warning(
+                    "direct sandboxed /v1/responses execution discards workspace patch artifacts; use /run to verify"
+                )
+            return await self._create_response(body)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -575,15 +742,19 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
+                execution_artifacts: dict[str, Any] = {}
                 agent_resp = await self._create_response(
-                    body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
+                    body.responses_create_params,
+                    mcp_config=mcp_config,
+                    skills_path=skills_path,
+                    execution_artifacts=execution_artifacts,
                 )
                 agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump() | {"response": agent_resp_json} | execution_artifacts,
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
@@ -599,7 +770,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
+                verify_json | execution_artifacts | {"turns_used": turns, "finished_naturally": naturally}
             )
 
 

@@ -40,6 +40,7 @@ from responses_api_agents.claude_code_agent.app import (
     _extract_instruction,
     parse_stream_json,
 )
+from responses_api_agents.claude_code_agent.sandbox_runner import SandboxRunResult
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -96,6 +97,19 @@ class TestSanity:
         assert cfg.bare is True
         assert cfg.mcp_config is None
         assert cfg.settings is None
+        assert cfg.sandbox_provider is None
+        assert cfg.sandbox_spec == {}
+        assert cfg.sandbox_workspace == "/workspace/nemo-gym"
+        assert cfg.sandbox_max_patch_bytes == 10 * 1024 * 1024
+        assert cfg.sandbox_max_output_bytes == 50 * 1024 * 1024
+        assert cfg.sandbox_require_clean_workspace is True
+        assert cfg.sandbox_forbidden_workspace_paths == [
+            ".agents/skills",
+            ".claude/skills",
+            ".codex/skills",
+        ]
+        assert cfg.sandbox_url_rewrites == {}
+        assert cfg.sandbox_provider_managed_env == []
 
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
@@ -189,6 +203,64 @@ class TestBuildSettings:
         agent = _make_agent(settings=str(settings_file))
         settings = agent._build_settings()
         assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
+
+
+class TestSandboxConfig:
+    def test_rewrites_model_endpoint_for_sandbox(self) -> None:
+        agent = _make_agent(
+            sandbox_provider={"fake": {}},
+            sandbox_url_rewrites={
+                "http://127.0.0.1": "http://host.docker.internal",
+                "http://127.0.0.1:8000": "http://model.internal:8000",
+            },
+        )
+
+        env = agent._sandbox_claude_env(
+            model="local-model",
+            base_url="http://127.0.0.1:8000/v1",
+            config_dir="/tmp/config",
+        )
+
+        assert env["ANTHROPIC_BASE_URL"] == "http://model.internal:8000/v1"
+
+    def test_rewrites_mcp_endpoints_for_sandbox(self, tmp_path: Path) -> None:
+        source = tmp_path / "mcp.json"
+        destination = tmp_path / "staged.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "gym": {"type": "http", "url": "http://127.0.0.1:9000/mcp"},
+                        "stdio": {"type": "stdio", "command": "tool"},
+                    }
+                }
+            )
+        )
+        agent = _make_agent(
+            sandbox_provider={"fake": {}},
+            sandbox_url_rewrites={"http://127.0.0.1:9000": "http://host.docker.internal:9000"},
+        )
+
+        agent._stage_sandbox_mcp_config(source, destination)
+
+        staged = json.loads(destination.read_text())
+        assert staged["mcpServers"]["gym"]["url"] == "http://host.docker.internal:9000/mcp"
+        assert staged["mcpServers"]["stdio"]["command"] == "tool"
+
+    def test_provider_can_manage_dynamic_endpoint_environment(self) -> None:
+        agent = _make_agent(
+            sandbox_provider={"fake": {}},
+            sandbox_provider_managed_env=["ANTHROPIC_BASE_URL"],
+        )
+
+        env = agent._sandbox_claude_env(
+            model="local-model",
+            base_url="http://127.0.0.1:8000/v1",
+            config_dir="/tmp/config",
+        )
+
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "local"
 
 
 class TestSetupConfigDir:
@@ -309,6 +381,39 @@ class TestRunForwardsSkillsPath:
 
         assert run_claude_code.call_args.kwargs["skills_path"] is None
 
+    def test_execution_artifacts_are_sent_to_verifier_and_returned(self) -> None:
+        agent = _make_agent()
+        verify_payload: dict = {}
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/verify":
+                verify_payload.update(json)
+                return _FakeHttpResp(
+                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
+                )
+            return _FakeHttpResp({})
+
+        async def run_claude_code(*args, **kwargs):
+            kwargs["execution_artifacts"].update(
+                {
+                    "workspace_patch": "diff --git a/probe.txt b/probe.txt\n",
+                    "workspace_base_revision": "a" * 40,
+                }
+            )
+            return "", "claude-sonnet-4-6"
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+
+        with patch.object(ClaudeCodeAgent, "_run_claude_code", side_effect=run_claude_code):
+            response = asyncio.run(agent.run(request, body))
+
+        assert verify_payload["workspace_patch"].startswith("diff --git")
+        assert verify_payload["workspace_base_revision"] == "a" * 40
+        assert response.model_extra["workspace_patch"].startswith("diff --git")
+
 
 class TestRunClaudeCode:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
@@ -421,6 +526,57 @@ class TestRunClaudeCode:
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
 
+    def test_sandbox_mode_returns_patch_artifacts(self, tmp_path: Path) -> None:
+        agent = _make_agent(
+            sandbox_provider={"fake": {}},
+            sandbox_spec={"image": "claude-code-test", "workdir": "/workspace/nemo-gym"},
+        )
+        agent.server_client.global_config_dict = {}
+        artifacts: dict = {}
+        sandbox_result = SandboxRunResult(
+            stdout='{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n',
+            stderr="",
+            return_code=0,
+            workspace_patch="diff --git a/probe.txt b/probe.txt\n",
+            base_revision="a" * 40,
+            elapsed_seconds=1.25,
+        )
+        runner = MagicMock()
+        runner.run = AsyncMock(return_value=sandbox_result)
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch(
+                "responses_api_agents.claude_code_agent.app.ClaudeCodeSandboxRunner",
+                return_value=runner,
+            ) as runner_class,
+        ):
+            stdout, model = asyncio.run(
+                agent._run_claude_code(
+                    "create probe.txt",
+                    execution_artifacts=artifacts,
+                )
+            )
+
+        assert '"type":"result"' in stdout
+        assert model == "claude-sonnet-4-6"
+        assert artifacts == {
+            "workspace_patch": sandbox_result.workspace_patch,
+            "workspace_base_revision": "a" * 40,
+            "sandbox_return_code": 0,
+            "sandbox_error_type": None,
+            "sandbox_elapsed_seconds": 1.25,
+        }
+        assert runner_class.call_args.kwargs["workspace"] == "/workspace/nemo-gym"
+        assert runner_class.call_args.kwargs["require_clean_workspace"] is True
+        assert runner_class.call_args.kwargs["forbidden_workspace_paths"] == (
+            ".agents/skills",
+            ".claude/skills",
+            ".codex/skills",
+        )
+        assert runner.run.call_args.kwargs["command"][-2:] == ["--", "create probe.txt"]
+        assert not (tmp_path / ".claude_code_agent").exists() or not any((tmp_path / ".claude_code_agent").iterdir())
+
 
 class TestRolloutMCPConfig:
     def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
@@ -525,7 +681,9 @@ class TestRolloutMCPConfig:
 
         captured: dict = {}
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
+        async def fake_run_claude_code(
+            instruction, system_prompt=None, mcp_config=None, skills_path=None, execution_artifacts=None
+        ):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
@@ -581,7 +739,9 @@ class TestRolloutMCPConfig:
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
+        async def fake_run_claude_code(
+            instruction, system_prompt=None, mcp_config=None, skills_path=None, execution_artifacts=None
+        ):
             captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
                 "headers"
             ]["X-NeMo-Gym-Session-Token"]

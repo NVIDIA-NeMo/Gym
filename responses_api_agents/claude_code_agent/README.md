@@ -113,6 +113,17 @@ claude_code_agent:
       bare: true
       mcp_config: null
       settings: null
+      sandbox_provider: null
+      sandbox_spec: {}
+      sandbox_workspace: /workspace/nemo-gym
+      sandbox_user: root
+      sandbox_max_patch_bytes: 10485760
+      sandbox_max_output_bytes: 52428800
+      sandbox_cleanup_timeout: 30
+      sandbox_require_clean_workspace: true
+      sandbox_forbidden_workspace_paths: [.agents/skills, .claude/skills, .codex/skills]
+      sandbox_url_rewrites: {}
+      sandbox_provider_managed_env: []
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -130,6 +141,17 @@ claude_code_agent:
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
+- `sandbox_provider`: optional named Gym sandbox provider or inline provider mapping. When set, the sandbox image supplies the `claude` CLI and the host auto-install is skipped
+- `sandbox_spec`: provider-neutral `SandboxSpec` fields such as `image`, `ttl_s`, `resources`, and `provider_options`
+- `sandbox_workspace`: Git checkout inside the sandbox where Claude Code runs and changes are captured
+- `sandbox_user`: user passed to sandbox command execution
+- `sandbox_max_patch_bytes`: maximum UTF-8 size of the captured binary Git patch
+- `sandbox_max_output_bytes`: maximum captured stdout and stderr bytes; excess output is drained inside the sandbox
+- `sandbox_cleanup_timeout`: independent timeout for best-effort sandbox teardown
+- `sandbox_require_clean_workspace`: reject images whose checkout has staged, unstaged, or untracked changes
+- `sandbox_forbidden_workspace_paths`: paths that must be absent so project-local skills cannot contaminate an A/B arm
+- `sandbox_url_rewrites`: host-visible URL-prefix to sandbox-visible URL-prefix mapping for model and HTTP MCP endpoints
+- `sandbox_provider_managed_env`: environment keys omitted from per-command overrides so providers can inject dynamic routing values
 
 For the full set of Claude Code CLI flags see the [CLI reference](https://code.claude.com/docs/en/cli-reference).
 
@@ -143,6 +165,40 @@ The agent defaults to a plain `bare` CLI call for simplicity and reproducibility
 - **Layer custom settings:** set `settings` to a JSON file path. It is merged into the per-run `CLAUDE_CONFIG_DIR/settings.json` (env shallow-merged onto the telemetry-disabling defaults).
 
 The per-run `CLAUDE_CONFIG_DIR` is created fresh for each request and removed afterward, so opted-in content is staged per rollout and does not leak between runs. This is the staging seam reused by skills evaluation (placing skills under `CLAUDE_CONFIG_DIR/skills/`).
+
+## Sandboxed execution
+
+Set `sandbox_provider` to run Claude Code inside an ephemeral Gym sandbox instead of as a host subprocess. Include a provider configuration in `config_paths`; for local Docker:
+
+```yaml
+sandbox_provider: sandbox
+sandbox_spec:
+  image: <image-containing-claude-and-a-git-checkout>
+  workdir: /workspace/nemo-gym
+  ttl_s: 1800
+  resources:
+    cpu: 4
+    memory_mib: 8192
+sandbox_workspace: /workspace/nemo-gym
+sandbox_url_rewrites:
+  http://127.0.0.1:8000: http://host.docker.internal:8000
+```
+
+The image must contain the `claude` executable and a clean Git checkout at `sandbox_workspace`. For skill A/B evaluation, build the fixture without `.agents/skills`, `.claude/skills`, or `.codex/skills`; the agent rejects those paths by default to prevent baseline contamination. The agent uploads its per-request settings, MCP configuration, and optional skills into a fresh sandbox config directory, runs the CLI there, and captures a binary patch against the pre-run Git revision. The patch includes committed, staged, unstaged, and untracked changes and is sent to `/verify` as `workspace_patch`; it is also propagated onto the rollout result.
+
+Host-local model and MCP URLs are not automatically reachable from a container or remote sandbox. Configure `sandbox_url_rewrites` for the selected provider. Docker commonly uses `host.docker.internal` together with `provider_options.run_args: ["--add-host=host.docker.internal:host-gateway"]`; remote providers should use their routable gateway or tunnel endpoint.
+
+Providers that inject dynamically routed endpoints can own selected environment keys. For example, when ECS Fargate configures an `outside_endpoints` route for `ANTHROPIC_BASE_URL`, set `sandbox_provider_managed_env: [ANTHROPIC_BASE_URL]` so the per-command environment does not replace the provider's tunnel URL.
+
+The sandbox is stopped in `finally` on success, command failure, setup failure, patch failure, or timeout. The host checkout is never used as the agent workspace.
+
+For a named provider, include its config alongside the agent config:
+
+```bash
+gym env start \
+  --config responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml
+```
 
 ## Skills evaluation
 
