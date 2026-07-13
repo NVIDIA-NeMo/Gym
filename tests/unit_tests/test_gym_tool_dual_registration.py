@@ -427,8 +427,9 @@ class TestContractLongTail:
             server.setup_webserver()
 
     def test_single_model_parameter_tool_is_rejected(self) -> None:
-        """A typed tool whose only parameter is a Pydantic model is ambiguous (nested vs flat
-        argument shape) and must be rejected at startup with a pointer to input_schema=."""
+        """A typed tool whose only parameter is a Pydantic model would serve nested arguments on
+        both transports when authors usually mean flat; rejected at startup with a pointer to
+        input_schema=."""
 
         class _Wrapped(SimpleResourcesServer):
             @gym_tool

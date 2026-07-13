@@ -130,9 +130,10 @@ def gym_tool(
       parameters, so write them flat — ``def get_weather(self, city: str)`` gives callers the
       argument shape ``{"city": ...}`` on both transports. Do not wrap the arguments in a single
       Pydantic parameter (``def get_weather(self, body: WeatherArgs)``): the schema derives from
-      the parameter list, so MCP callers would have to send ``{"body": {"city": ...}}`` while HTTP
-      callers send the flat form — one tool, two conflicting argument shapes. The base rejects
-      this shape at startup; declare ``input_schema=WeatherArgs`` instead.
+      the parameter list, so callers on both transports would have to nest the arguments one level
+      deeper (``{"body": {"city": ...}}``) — usually not what the author meant, and easy to ship
+      without noticing. The base rejects this shape at startup; declare
+      ``input_schema=WeatherArgs`` to serve the model's fields flat.
     - ``input_schema=<dict>``: for tools whose JSON schema already exists as data (registries,
       discovered tool sets). The dict is advertised over MCP exactly as given, and call arguments
       reach the callable unmodified on both transports — re-validating against a derived model
@@ -492,11 +493,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         annotation = hints.get(visible[0], signature.parameters[visible[0]].annotation)
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             raise ValueError(
-                f"@gym_tool {name!r}: the only parameter, {visible[0]!r}, is a Pydantic model, so it is "
-                f"unclear what callers should send — one nested argument ({{{visible[0]!r}: {{...}}}}) or "
-                f"the model's fields directly. For fields-directly (the usual intent), keep the same "
-                f"function and declare it as @gym_tool(input_schema={annotation.__name__}). If you really "
-                "want one nested argument, add a second parameter so the shape is unambiguous."
+                f"@gym_tool {name!r}: the only parameter, {visible[0]!r}, is a Pydantic model, so callers "
+                f"on both transports would have to send its fields nested one level deep "
+                f"({{{visible[0]!r}: {{...}}}}) — usually not what the author meant. To serve the model's "
+                f"fields directly (the usual intent), keep the same function and declare it as "
+                f"@gym_tool(input_schema={annotation.__name__}). If you really want one nested argument, "
+                "add a second parameter so the intent is unambiguous."
             )
 
     # --------------------------------------------------------------------------------------------
