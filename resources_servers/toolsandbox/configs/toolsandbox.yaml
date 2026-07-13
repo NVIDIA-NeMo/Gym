@@ -61,10 +61,13 @@ toolsandbox_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/toolsandbox/data/example.jsonl
-        license: CC-BY-NC-4.0 (apple/ToolSandbox scenarios)
+        # Apple/ToolSandbox scenarios are CC-BY-NC 4.0, which is not in
+        # nemo_gym's allowed license enum; TBD until the correct value exists.
+        license: TBD
       # Full scenario set: one row per scenario index. Regenerate with
       #   python resources_servers/toolsandbox/prepare_toolsandbox.py
       - name: test
         type: validation
         jsonl_fpath: resources_servers/toolsandbox/data/test_toolsandbox.jsonl
-        license: CC-BY-NC-4.0 (apple/ToolSandbox scenarios)
+        # See note above: CC-BY-NC 4.0 upstream, marked TBD pending an enum value.
+        license: TBD
