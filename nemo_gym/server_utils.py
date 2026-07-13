@@ -75,6 +75,8 @@ from nemo_gym.profiling import Profiler
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
+_LOGGER = getLogger(__name__)
+
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
@@ -127,12 +129,19 @@ class _TCPKeepAliveConnector(TCPConnector):
         self._tcp_keepalive_idle_seconds = tcp_keepalive_idle_seconds
         self._tcp_keepalive_interval_seconds = tcp_keepalive_interval_seconds
         self._tcp_keepalive_probes = tcp_keepalive_probes
+        self._warned_missing_socket: bool = False
 
     async def _wrap_create_connection(self, *args, **kwargs):
         transport, protocol = await super()._wrap_create_connection(*args, **kwargs)
         sock = transport.get_extra_info("socket")
         if sock is None:
-            raise RuntimeError("_TCPKeepAliveConnector: transport has no underlying socket")
+            if not self._warned_missing_socket:
+                _LOGGER.warning(
+                    "_TCPKeepAliveConnector: transport exposes no underlying socket; "
+                    "TCP keepalive will not be applied for connections on this transport."
+                )
+                self._warned_missing_socket = True
+            return transport, protocol
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for opt_name, opt_value in (
             ("TCP_KEEPIDLE", self._tcp_keepalive_idle_seconds),

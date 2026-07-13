@@ -16,7 +16,7 @@ import socket
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import TCPConnector
-from pytest import MonkeyPatch, raises
+from pytest import LogCaptureFixture, MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -292,7 +292,9 @@ class TestServerUtils:
 
         mock_socket.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-    async def test_TCPKeepAliveConnector_raises_when_no_socket(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_TCPKeepAliveConnector_degrades_when_no_socket(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
         mock_transport = MagicMock()
         mock_transport.get_extra_info.return_value = None
         mock_protocol = MagicMock()
@@ -306,10 +308,17 @@ class TestServerUtils:
             tcp_keepalive_probes=_TCP_KEEPALIVE_TEST_PROBES,
         )
         try:
-            with raises(RuntimeError):
-                await connector._wrap_create_connection()
+            with caplog.at_level("WARNING", logger=nemo_gym.server_utils.__name__):
+                transport1, protocol1 = await connector._wrap_create_connection()
+                transport2, protocol2 = await connector._wrap_create_connection()
         finally:
             await connector.close()
+
+        assert (transport1, protocol1) == (mock_transport, mock_protocol)
+        assert (transport2, protocol2) == (mock_transport, mock_protocol)
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "TCP keepalive will not be applied" in warnings[0].message
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
