@@ -227,8 +227,8 @@ class RewardProfiler:
             # agent identity string (server name, or URL for external agents)
             agent_key = row_agent_key(row)
             if agent_key is None:
-                # pandas groupby silently drops None keys, which would exclude these rollouts
-                # from agent-level metrics with no error — fail loudly instead.
+                # pandas groupby silently drops None keys — these rollouts would vanish from
+                # agent-level metrics with no error.
                 raise ValueError(
                     f"Rollout row (task_index={row.get(TASK_INDEX_KEY_NAME)}, "
                     f"rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}) carries no usable agent_ref "
@@ -283,8 +283,6 @@ class RewardProfiler:
         for agent_metrics in agent_level_metrics:
             agent_key = agent_metrics.pop("agent_name")
             agent_ref = agent_key_to_ref.get(agent_key) or {}
-            # Emit the ref in the same identity the rows were grouped under (name-first,
-            # matching row_agent_key), url-form only for purely external refs.
             agent_metrics[AGENT_REF_KEY_NAME] = canonical_agent_ref(agent_ref, agent_key)
 
         return group_level_metrics, agent_level_metrics

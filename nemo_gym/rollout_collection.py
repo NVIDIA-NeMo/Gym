@@ -118,20 +118,13 @@ def _failures_path_for(output_fpath: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# External agent dispatch (agent_url).
-#
-# Rows carrying ``agent_ref: {"url": ...}`` are POSTed straight to
-# ``{url}/run`` instead of resolving a named server through the head server.
-# External endpoints are not managed by Gym, so this path must not inherit
-# ``server_utils.request()``'s retry semantics: that loop retries
-# ClientOSError (which ClientConnectorError subclasses) forever, so a down
-# external agent would hang the run silently. Here connect-phase failures and
-# keepalive disconnects get a bounded number of tries, and every failure —
-# exhausted retries, timeout, non-2xx, malformed body — becomes a synthesized
-# result row carrying ``NG_FAILURE_CLASS_KEY`` so the dispatcher routes it to
-# the failures sidecar and resume retries it under the attempt cap. Raising
-# would abort the entire collection while in-flight rollouts keep executing
-# agent-side.
+# External agent dispatch (agent_url): rows with ``agent_ref: {"url": ...}``
+# POST straight to ``{url}/run``. This deliberately bypasses
+# ``server_utils.request()``, whose retry loop never gives up on connection
+# errors — a down external endpoint would hang the run. Retries here are
+# bounded, and every failure becomes a result row carrying
+# ``NG_FAILURE_CLASS_KEY`` (sidecar + retry on resume); raising instead would
+# abort the whole collection.
 # ---------------------------------------------------------------------------
 
 EXTERNAL_AGENT_FAILURE_CLASS = "external_agent_error"
@@ -173,12 +166,11 @@ def _rows_need_named_dispatch(rows: List[Dict]) -> bool:
 
 
 def _effective_per_host_connection_limit() -> Optional[int]:
-    """The shared HTTP client's real per-host connection cap, or None when unlimited.
+    """The shared HTTP client's per-host connection cap, or None when unlimited.
 
-    All traffic to a single agent_url shares one host:port pool key, so this bounds true
-    dispatch concurrency; requests queued beyond it keep burning their wallclock timeout.
-    Only inspects an already-initialized client (initializing one here would be a side
-    effect); before initialization, falls back to the config default.
+    Every request to a single agent_url competes for the same per-host connection pool,
+    and time spent waiting for a connection counts against the request's timeout. Never
+    initializes the client; before initialization, returns the config default.
     """
     if not is_global_aiohttp_client_setup():
         return _FALLBACK_PER_HOST_CONNECTION_LIMIT
@@ -255,10 +247,9 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
         return _external_agent_failure_result(
             run_url, f"expected a JSON object from /run, got {type(result).__name__}"
         )
-    # Hold external agents to the same verify-response shape named agents are schema-bound to;
-    # otherwise a nonconforming "success" row lands in the main jsonl and crashes downstream
-    # consumers (reward profiling reads result["response"]). Agents reporting a failure via the
-    # sentinel contract are exempt — failure rows carry no reward by design.
+    # A "success" missing reward/response would be written to the main jsonl and crash later
+    # readers (profiling reads result["response"]). Failure rows reported via the sentinel
+    # keys legitimately carry no reward, so they are exempt.
     if result.get(NG_FAILURE_CLASS_KEY) is None and not result.get(NG_NO_PERSIST_KEY):
         missing_keys = [key for key in ("reward", "response") if key not in result]
         if missing_keys:
@@ -290,7 +281,7 @@ async def _post_external_aggregate_metrics(
             timeout=ClientTimeout(total=_EXTERNAL_AGGREGATE_TIMEOUT_SECS),
             allow_redirects=False,
         )
-        # Read (and thereby release) the pooled connection before any early return.
+        # Reading the body releases the pooled connection — do it before any early return.
         content = await response.read()
         if response.status in (404, 405, 501):
             print(
@@ -775,9 +766,9 @@ class RolloutCollectionHelper(BaseModel):
                         f"to agent_url={config.agent_url}"
                     )
             else:
-                # A fresh run validates every row URL against +agent_url before dispatch; resume
-                # must not become the unvalidated back door. Frozen URL rows carry the tasks'
-                # verifier_metadata, so never dispatch them to an address nobody re-confirmed.
+                # Fresh runs validate every row URL against +agent_url; resume applies the same
+                # rule. These rows carry verifier_metadata, so they are never dispatched to a
+                # URL the user did not re-confirm.
                 frozen_urls = sorted(
                     {
                         agent_ref["url"]
@@ -817,10 +808,9 @@ class RolloutCollectionHelper(BaseModel):
 
         num_concurrent_samples = config.num_samples_in_parallel
 
-        # All external-agent traffic shares one host:port connection-pool key, and time spent
-        # queued for a pool slot counts against agent_run_timeout_secs — unbounded dispatch
-        # against one URL converts queue wait into mass spurious timeouts. Cap concurrency at
-        # the pool's real per-host limit instead of warning.
+        # Every request to a single agent_url shares one per-host connection pool, and time
+        # spent waiting for a connection counts against agent_run_timeout_secs — dispatching
+        # beyond the pool limit converts queue wait into spurious timeouts.
         has_url_rows = not all((row.get(AGENT_REF_KEY_NAME) or {}).get("url") is None for row in input_rows)
         if has_url_rows:
             per_host_limit = _effective_per_host_connection_limit()
@@ -961,10 +951,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             print("No successful rollouts to aggregate; skipping aggregate metrics.")
             return None
 
-        # A ServerClient requires a live head server; only construct one if some agent
-        # actually needs name resolution. Pure agent_url runs work with no Gym servers:
-        # get_global_aiohttp_client() self-initializes from the already-loaded global config.
-        # Name-first, matching row_agent_key: a ref carrying both keys is a named agent here.
+        # A ServerClient requires a live head server; only construct one if some agent needs
+        # name resolution (name-first, matching row_agent_key: a ref carrying both keys is a
+        # named agent). Pure agent_url runs work with no Gym servers.
         needs_named = any(ref.get("name") or not ref.get("url") for ref in agent_refs.values())
         server_client = self.setup_server_client() if needs_named else None
 

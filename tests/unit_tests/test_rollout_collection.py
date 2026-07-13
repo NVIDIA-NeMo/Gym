@@ -1809,8 +1809,8 @@ class TestExternalAggregateCoverageGaps:
         set_global_mock.assert_not_called()
 
 
-class TestPrReviewFixes:
-    """Regression tests for the findings confirmed by the team PR review."""
+class TestExternalAgentEdgeCases:
+    """Failure-containment and identity edge cases of external-agent dispatch."""
 
     _REQUIRED = {"input_jsonl_fpath": "in.jsonl", "output_jsonl_fpath": "out.jsonl"}
 
