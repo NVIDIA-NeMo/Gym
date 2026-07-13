@@ -213,19 +213,26 @@ _NS = {}
 # Replay prior cells with output suppressed so only the newest cell is shown.
 # Prior cells are known-good (the server retains a cell only after it succeeds),
 # so a replay failure means emulated state was lost -> signal a reset (exit 2).
+# Catch BaseException, not just Exception: a cell that calls sys.exit()/raises
+# SystemExit (or KeyboardInterrupt) would otherwise escape and surface as the
+# driver's own reserved exit code, silently desyncing the session.
 if len(_CELLS) > 1:
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             for _cell in _CELLS[:-1]:
                 exec(compile(_cell, "<cell>", "exec"), _NS)
-    except Exception:
+    except BaseException:
         print("litmus_agent: session state could not be restored; the environment was reset.", file=sys.stderr)
         raise SystemExit(2)
 
 _NEW = _CELLS[-1] if _CELLS else ""
+# Report any newest-cell failure as a cell error (exit 1). Catch BaseException
+# so a cell calling sys.exit(2)/exit(0) is translated here rather than leaking
+# its own status as one of the driver's reserved control codes (1 or 2) -- user
+# code must never be able to trigger a spurious session reset or false success.
 try:
     exec(compile(_NEW, "<cell>", "exec"), _NS)
-except Exception:
+except BaseException:
     traceback.print_exc()
     raise SystemExit(1)
 """
@@ -313,6 +320,13 @@ class LitmusAgentVerifyResponse(BaseVerifyResponse):
     correct: bool = False
     resolved_answer_type: str = ""
     resolved_reward_rule: str = ""
+
+
+# Fields verify() sets explicitly; passthrough dataset fields sharing these names
+# are dropped before the splat so they can't collide (see verify()).
+_RESERVED_RESPONSE_FIELDS = frozenset(
+    {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -718,8 +732,15 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             float_abs_tol=self.config.float_abs_tol,
         )
 
+        # model_dump() carries every extra="allow" passthrough field. Drop any
+        # that collide with the fields we set explicitly below: a dataset row is
+        # free to carry a passthrough field named e.g. "reward" or "correct", and
+        # splatting both would raise TypeError (multiple values for keyword) and
+        # 500 the endpoint instead of scoring the rollout.
+        passthrough = {k: v for k, v in body.model_dump().items() if k not in _RESERVED_RESPONSE_FIELDS}
+
         return LitmusAgentVerifyResponse(
-            **body.model_dump(),
+            **passthrough,
             reward=reward,
             predicted_value=predicted,
             correct=reward == 1.0,

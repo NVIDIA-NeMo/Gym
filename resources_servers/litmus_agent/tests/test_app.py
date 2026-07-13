@@ -351,6 +351,40 @@ class TestVerify:
         with pytest.raises(ValueError, match="not mappable"):
             await server.verify(_make_verify_request("((3))", expected_answer="3"))
 
+    async def test_string_content_message_extracted(self):
+        # Some backends emit the assistant message content as a bare string
+        # rather than a list of parts; the extractor handles both.
+        server = _make_server()
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[{"id": "msg_1", "type": "message", "role": "assistant", "content": "((3))"}],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        request = LitmusAgentVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=response,
+            expected_answer="3",
+            answer_type=FLOAT,
+        )
+        result = await server.verify(request)
+        assert result.reward == 1.0
+
+    async def test_reserved_passthrough_field_does_not_collide(self):
+        # A passthrough field named like one verify() sets explicitly (e.g.
+        # "reward"/"correct") must not 500 the endpoint via a splat kwarg
+        # collision -- the computed value wins and the colliding field is dropped.
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT, reward="ignore-me", correct="nope")
+        )
+        assert result.reward == 1.0
+        assert result.correct is True
+
 
 # ---------------------------------------------------------------------------
 # compute_metrics / get_key_metrics
@@ -512,6 +546,52 @@ class TestCodeExecTool:
         assert "ValueError: boom" in err
         # The bad cell was not retained, and earlier state survives.
         assert (await _run_code(server, "s1", "print(y)")).strip() == "10"
+
+    async def test_malformed_request_body_defaults_empty(self):
+        # A request whose body isn't valid JSON must not crash the endpoint; the
+        # code defaults to empty and the driver runs a no-op cell.
+        server = _make_sandbox_server()
+
+        class _BadRequest(_FakeRequest):
+            async def json(self):
+                raise ValueError("bad json")
+
+        response = await server.execute_code(_BadRequest(session_id="s1"))
+        assert response.body.decode() == ""
+
+    async def test_replay_failure_resets_session(self, tmp_path):
+        # A prior cell that succeeds once but fails when replayed (its side effect
+        # already applied) leaves emulated state unrecoverable -> the driver
+        # signals a reset (exit 2) and the server drops the session history.
+        server = _make_sandbox_server()
+        marker = tmp_path / "made"
+        await _run_code(server, "s1", f"import os; os.mkdir({str(marker)!r})")
+        session = server._sessions["s1"]
+        assert session.cells  # retained as known-good
+        # The replayed mkdir now raises FileExistsError, forcing a reset.
+        out = await _run_code(server, "s1", "print('unreached')")
+        assert "environment was reset" in out
+        assert session.cells == []
+
+    async def test_system_exit_reset_code_does_not_wipe_history(self):
+        # A cell that exits with the driver's reserved reset code (2) must not
+        # be able to spoof a session reset; prior state has to survive as an
+        # ordinary cell error rather than a silent history wipe.
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "keep = 99")
+        out = await _run_code(server, "s1", "import sys; sys.exit(2)")
+        assert "SystemExit" in out
+        assert (await _run_code(server, "s1", "print(keep)")).strip() == "99"
+
+    async def test_system_exit_zero_cell_not_retained(self):
+        # A cell calling sys.exit(0) terminates the interpreter before the driver
+        # can signal success, so it is reported as an error and dropped -- never
+        # replayed on later calls where its SystemExit would desync the session.
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "base = 7")
+        out = await _run_code(server, "s1", "import sys; sys.exit(0)")
+        assert "SystemExit" in out
+        assert (await _run_code(server, "s1", "print(base)")).strip() == "7"
 
     async def test_sessions_are_isolated(self):
         server = _make_sandbox_server()
