@@ -165,6 +165,67 @@ Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 
 For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
 
+### Baseline Matrix Scripts
+
+This repository includes helper scripts for running repeated baseline evaluations with local vLLM serving or through the Cryri queue. The selected models and benchmark presets live in:
+
+- `scripts/queue/config/models.yaml` — model IDs, decoding parameters, vLLM flags, GPU memory use, and tool-parser flags.
+- `scripts/queue/config/benchmarks.yaml` — smoke and full-run presets such as `gpqa_diamond_full`, `arc_agi_eval_full`, `reasoning_gym_train_full`, `workplace_assistant_validation_full`, and `calendar_validation_full`.
+
+The runners use each benchmark preset's defaults unless you pass `--limit` or `--num-repeats`. For `gpqa_diamond_full`, leave `--num-repeats` unset to keep the checked-in GPQA default of 8 repeats.
+
+Always inspect commands before launching a long run:
+
+```bash
+bash scripts/queue/run_gym_matrix.sh \
+  --models qwen35_4b,gemma4_e4b_it,lfm25_8b_a1b \
+  --benchmarks gpqa_diamond_full,arc_agi_eval_full \
+  --root /home/jovyan/shares/SR006.nfs3/sukhorukov/gym_runs/dryrun \
+  --no-prepare \
+  --dry-run
+```
+
+Run the same matrix locally, without Cryri:
+
+```bash
+bash scripts/queue/run_gym_local_matrix.sh \
+  --models qwen35_4b \
+  --benchmarks gpqa_diamond_full \
+  --root results/local_matrix/qwen_gpqa
+```
+
+If vLLM is already running, reuse it instead of starting a new server:
+
+```bash
+bash scripts/queue/run_gym_local_matrix.sh \
+  --models qwen35_4b \
+  --benchmarks gpqa_diamond_full \
+  --skip-vllm \
+  --model-url http://127.0.0.1:8000/v1 \
+  --model-api-key EMPTY
+```
+
+Submit queue jobs with `--submit`. Use a shared NFS3 output root so logs and results are visible from both the dispatcher and debug machines:
+
+```bash
+bash scripts/queue/run_gym_matrix.sh \
+  --models qwen35_4b,gemma4_e4b_it,lfm25_8b_a1b \
+  --benchmarks gpqa_diamond_full,arc_agi_eval_full \
+  --root /home/jovyan/shares/SR006.nfs3/sukhorukov/gym_full/baseline_$(date +%Y%m%d_%H%M%S) \
+  --no-prepare \
+  --max-active 12 \
+  --submit
+```
+
+Each run root contains `summary.md`, `jobs.tsv`, `submissions/`, `logs/<model>_<benchmark>/`, and `results/<model>/`. On the debug host, the same NFS3 path is typically visible under `/mnt/virtual_ai0001053-01336_SR006-nfs3/...`. The queue runner stops submitting new jobs if a tracked job fails or if free space drops below `--min-free-gb`.
+
+Monitor submitted jobs from `jobs.tsv` and the Cryri job list:
+
+```bash
+cat /home/jovyan/shares/SR006.nfs3/sukhorukov/gym_full/<run>/jobs.tsv
+cryri --jobs --region SR006
+```
+
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.

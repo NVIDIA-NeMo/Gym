@@ -1,0 +1,122 @@
+defaults:
+  limit: 5
+  num_repeats: 1
+  split: benchmark
+  prepare: false
+  tool_calls: false
+  gym_extra_args: []
+  vllm_extra_args: []
+  required_config_paths: []
+  required_files: []
+
+benchmarks:
+  tau2:
+    description: Tau2 checked-in example data smoke.
+    kind: config
+    config: responses_api_agents/tau2/configs/tau2_agent.yaml
+    input: responses_api_agents/tau2/data/example.jsonl
+    agent: tau2_agent
+    split: null
+    tool_calls: true
+    gym_wait_timeout: 1200
+
+  gpqa_diamond:
+    description: GPQA Diamond checked-in example data smoke.
+    kind: resources_server
+    target: gpqa_diamond
+    input: resources_servers/gpqa_diamond/data/example.jsonl
+    agent: gpqa_diamond_simple_agent
+    split: null
+    max_model_len: 16384
+
+  browsecomp:
+    description: BrowseComp advanced search harness checked-in example data smoke.
+    kind: config
+    config: benchmarks/browsecomp/config.yaml
+    input: resources_servers/browsecomp_advanced_harness/data/example.jsonl
+    agent: browsecomp_benchmark_agent
+    split: null
+    tool_calls: true
+    required_config_paths:
+      - browsecomp_benchmark_resources_server.resources_servers.browsecomp_advanced_harness.tavily_api_key
+      - browsecomp_benchmark_resources_server.resources_servers.browsecomp_advanced_harness.exclude_domains_file_path
+
+  arc_agi:
+    description: ARC-AGI checked-in example data smoke.
+    kind: environment
+    target: arc_agi
+    input: environments/arc_agi/data/example.jsonl
+    agent: arc_agi_simple_agent
+    split: null
+
+  gpqa_diamond_full:
+    description: Full GPQA Diamond benchmark using the checked-in default repeat count.
+    kind: benchmark
+    target: gpqa
+    split: benchmark
+    limit: null
+    num_repeats: null
+    gym_extra_args:
+      - ++overwrite_metrics_conflicts=true
+    required_files:
+      - benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl
+
+  arc_agi_eval_full:
+    description: Full ARC-AGI evaluation split for held-out baseline performance.
+    kind: environment
+    target: arc_agi
+    input: environments/arc_agi/data/arc_agi_1_evaluation.jsonl
+    agent: arc_agi_simple_agent
+    split: null
+    limit: null
+    num_repeats: 1
+    required_files:
+      - environments/arc_agi/data/arc_agi_1_evaluation.jsonl
+
+  arc_agi_train_full:
+    description: Full ARC-AGI training split for later training-set analysis; not part of held-out baseline submissions.
+    kind: environment
+    target: arc_agi
+    input: environments/arc_agi/data/arc_agi_1_training.jsonl
+    agent: arc_agi_simple_agent
+    split: null
+    limit: null
+    num_repeats: 1
+    required_files:
+      - environments/arc_agi/data/arc_agi_1_training.jsonl
+
+  reasoning_gym_train_full:
+    description: Full Reasoning Gym train split.
+    kind: environment
+    target: reasoning_gym
+    agent: reasoning_gym_simple_agent
+    split: train
+    limit: null
+    num_repeats: 1
+    required_files:
+      - environments/reasoning_gym/data/train.jsonl
+
+  workplace_assistant_validation_full:
+    description: Full Workplace Assistant validation split.
+    kind: environment
+    target: workplace_assistant
+    agent: workplace_assistant_simple_agent
+    split: validation
+    limit: null
+    num_repeats: 1
+    tool_calls: true
+    gym_wait_timeout: 1200
+    required_files:
+      - environments/workplace_assistant/data/validation.jsonl
+
+  calendar_validation_full:
+    description: Full Calendar validation split.
+    kind: environment
+    target: calendar
+    agent: calendar_simple_agent
+    split: validation
+    limit: null
+    num_repeats: 1
+    gym_wait_timeout: 1200
+    required_files:
+      - environments/calendar/data/validation.jsonl

@@ -1,0 +1,54 @@
+defaults:
+  cuda_visible_devices: "0"
+  concurrency: 1
+  gpu_memory_utilization: "0.97"
+  max_model_len: 32768
+  max_output_tokens: 8192
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  vllm_wait_timeout: 1800
+  gym_wait_timeout: 300
+  vllm_extra_args: []
+  tool_vllm_extra_args: []
+  env: {}
+
+models:
+  qwen35_4b:
+    model: Qwen/Qwen3.5-4B
+    temperature: 0.6
+    top_p: 0.95
+    vllm_extra_args:
+      - --reasoning-parser
+      - qwen3
+      - --gdn-prefill-backend
+      - triton
+    tool_vllm_extra_args:
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+
+  gemma4_e4b_it:
+    model: google/gemma-4-E4B-it
+    temperature: 0.6
+    top_p: 0.95
+    env:
+      VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS_B64: eyJlbmFibGVfdGhpbmtpbmciOnRydWV9
+    vllm_extra_args:
+      - --reasoning-parser
+      - gemma4
+    tool_vllm_extra_args:
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+
+  lfm25_8b_a1b:
+    model: LiquidAI/LFM2.5-8B-A1B
+    temperature: 0.2
+    top_p: 0.8
+    vllm_extra_args:
+      - --reasoning-parser
+      - qwen3
+    tool_vllm_extra_args:
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - lfm2

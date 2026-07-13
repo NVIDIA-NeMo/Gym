@@ -248,16 +248,16 @@ sandbox = [
     # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
     # License: Apache 2.0
     "opensandbox>=0.1.9",
+]
 
-    # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
-    # License: Apache 2.0 https://pypi.org/project/daytona/
-    "daytona>=0.179.0",
+vllm = [
+    # vLLM: optional local model serving for GPU evaluation runs.
+    # Keep this aligned with responses_api_models/local_vllm_model/setup.py.
+    "vllm==0.20.0; sys_platform != 'darwin'",
+    "vllm==0.11.0; sys_platform == 'darwin'",
 
-    # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
-    # CodeBuild/S3/SSM/Secrets Manager calls.
-    # Updated: Tue Jun 03, 2026 with boto3>=1.34
-    # License: Apache 2.0 https://github.com/boto/boto3/blob/develop/LICENSE
-    "boto3>=1.34",
+    # hf_transfer: faster Hugging Face model downloads when HF_HUB_ENABLE_HF_TRANSFER=1.
+    "hf_transfer==0.1.9",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
@@ -518,8 +518,7 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "environments/*",
-    "scripts/*",
+    "environments/*/prepare.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
