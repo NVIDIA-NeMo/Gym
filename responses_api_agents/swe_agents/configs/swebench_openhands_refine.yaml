@@ -1,6 +1,6 @@
 # Multi-turn (refine) SWE-bench wrapper configuration for OpenHands.
 # Same swe_agents package, entrypoint = refine_app.py (SWEBenchRefineWrapper).
-# Adds the per-attempt loop knobs; everything else mirrors swebench_openhands_training.yaml.
+# Adds the per-refinement-round loop knobs; everything else mirrors swebench_openhands_training.yaml.
 swe_agents_train:
   responses_api_agents:
     swe_agents:
@@ -20,9 +20,11 @@ swe_agents_train:
       command_exec_timeout: 300
       dataset_path: ???
       # --- refine (multi-turn) knobs ---
-      max_attempts: 2
+      max_refine_rounds: 2
+      refine_strategy: baseline
       carry_over_token_budget: 40000
-      skip_reset_after_first: false  # true → container-persistent refine (needs OpenHands SKIP_INITIAL_RESET)
+      refine_verify_feedback_chars: 8000
+      skip_reset_after_initial_round: false  # true → persistent refine (needs OpenHands SKIP_INITIAL_RESET)
       agent_prompt_overrides:
       # CodeAct agent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
@@ -60,9 +62,11 @@ swe_agents_val:
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
       dataset_path: ???
-      max_attempts: 2
+      max_refine_rounds: 2
+      refine_strategy: baseline
       carry_over_token_budget: 40000
-      skip_reset_after_first: false
+      refine_verify_feedback_chars: 8000
+      skip_reset_after_initial_round: false
       agent_prompt_overrides:
       - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
