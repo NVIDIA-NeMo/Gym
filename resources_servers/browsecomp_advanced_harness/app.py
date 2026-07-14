@@ -21,6 +21,7 @@ import threading
 from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional
@@ -187,6 +188,11 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     start_time: float
     end_time: float
     time_taken: Optional[float] = None
+    # Retry counts for THIS provider request: true 429s exactly (bc_frankie
+    # parity: status == 429), everything else retryable (500/502/503/504/520)
+    # separately — never conflated.
+    num_429_retries: int = 0
+    num_other_retries: int = 0
 
     @model_validator(mode="after")
     def compute_time_taken(self):
@@ -202,6 +208,35 @@ class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics
+    # Top-level ints so Gym's aggregate_other_metrics reports them alongside
+    # reward in <split>_metrics.json (nested metrics.* records are not recursed).
+    num_provider_429s: int = 0
+    num_provider_other_retries: int = 0
+
+
+# Task-local accumulator for provider retry counts. The client retry loops
+# increment it; _record_call moves it into the per-call metrics record and
+# resets it. A ContextVar (not client state) because clients are shared
+# round-robin across concurrent sessions — attribution must follow the asyncio
+# task making the call (per-query gather children each set their own).
+_PROVIDER_RETRY_COUNTS: ContextVar[Optional[Dict[str, int]]] = ContextVar("_PROVIDER_RETRY_COUNTS", default=None)
+
+
+def _count_provider_retry(status: int) -> None:
+    """Count one retried provider response: true 429s exactly, all other
+    retryable statuses (500/502/503/504/520) in a separate bucket."""
+    counts = _PROVIDER_RETRY_COUNTS.get()
+    if counts is None:
+        counts = {"num_429_retries": 0, "num_other_retries": 0}
+        _PROVIDER_RETRY_COUNTS.set(counts)
+    counts["num_429_retries" if status == 429 else "num_other_retries"] += 1
+
+
+def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
+    """(total true 429s, total other retried statuses) across a session's calls."""
+    n429 = sum(c.num_429_retries for c in metrics.async_tavily_calls)
+    n_other = sum(c.num_other_retries for c in metrics.async_tavily_calls)
+    return n429, n_other
 
 
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
@@ -256,6 +291,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
                 if rate_limited:
                     max_num_tries += 1
+                _count_provider_retry(response.status)
 
                 content = (await response.content.read()).decode()
                 tag = "tavily_rate_limit" if rate_limited else "tavily_retry"
@@ -323,6 +359,7 @@ class ExaAIOHTTPClient(BaseModel):
                 if rate_limited:
                     # don't let rate limits burn the retry budget
                     max_num_tries += 1
+                _count_provider_retry(response.status)
                 content = (await response.content.read()).decode()
                 tag = "exa_rate_limit" if rate_limited else "exa_retry"
                 print(
@@ -876,9 +913,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     ) -> None:
         """Append one per-API-call metering record (provider, function, latency).
         One record per provider HTTP request: per query for search, per call for browse."""
+        retry_counts = _PROVIDER_RETRY_COUNTS.get() or {}
+        _PROVIDER_RETRY_COUNTS.set(None)  # next call in this task starts from zero
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
-                function=function, provider=provider, status=status, start_time=start, end_time=time()
+                function=function,
+                provider=provider,
+                status=status,
+                start_time=start,
+                end_time=time(),
+                num_429_retries=retry_counts.get("num_429_retries", 0),
+                num_other_retries=retry_counts.get("num_other_retries", 0),
             )
         )
 
@@ -1127,12 +1172,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
         if agent_num_tool_calls is None:
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
+        session_metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
         verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=agent_num_tool_calls,
             reset_count=getattr(body.response, "reset_count", 0) or 0,
-            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+            metrics=session_metrics,
+            num_provider_429s=num_provider_429s,
+            num_provider_other_retries=num_provider_other_retries,
         )
 
         # terminal mode: clean up this session's disk workspace
