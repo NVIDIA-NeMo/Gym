@@ -342,40 +342,30 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     # Model call capture methods
     async def chat_completions_with_call_capture(
-        self, rollout_id: str, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+        self, rollout_id: str, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        if not self._capture_config.observability_enabled:
-            return await self.chat_completions(body)
-
         body_dict = body.model_dump()
-        mcr_dict = {
-            "rollout_id": rollout_id,
-            "route": "/v1/chat/completions",
-            "timestamp_start": perf_counter(),
-            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
-            "request": _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body_dict),
-            "raw_request": body_dict,
-        }
 
+        request.state.model_call_record_dict["route"] = "/v1/chat/completions"
+
+        request.state.model_call_record_dict["request"] = (
+            _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body_dict)
+        )
+
+        # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self.chat_completions(body)
-            mcr_dict["response"] = _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_response(body, response)
-            mcr_dict["error_response"] = None
-            mcr_dict["raw_response"] = response
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
-
-            return response
+            request.state.model_call_record_dict["response"] = _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_response(
+                body, response
+            )
+            request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
-            mcr_dict["response"] = None
-            mcr_dict["error_response"] = format_exc()
-            mcr_dict["raw_response"] = None
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+            request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
+
+        return response
 
     async def responses_with_call_capture(
         self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -400,43 +390,30 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
         # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
-        if not self._capture_config.observability_enabled:
-            return await self.messages(request, body)
+        request.state.model_call_record_dict["route"] = "/v1/messages"
 
-        mcr_dict = {
-            "rollout_id": rollout_id,
-            "route": "/v1/messages",
-            "timestamp_start": perf_counter(),
-            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
-            "request": _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body),
-            "raw_request": body,
-        }
+        request.state.model_call_record_dict["request"] = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
 
-        assert not mcr_dict["request"].stream, (
+        assert not request.state.model_call_record_dict["request"].stream, (
             "Model call capture for /v1/messages to /v1/responses converstion with streaming is currently not supported!"
         )
 
+        # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self.messages(request, body)
-            mcr_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(
-                response, mcr_dict["request"], model=mcr_dict["request"].model
+            request.state.model_call_record_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(
+                response,
+                request.state.model_call_record_dict["request"],
+                model=request.state.model_call_record_dict["request"].model,
             )
-            mcr_dict["error_response"] = None
-            mcr_dict["raw_response"] = response
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
-
-            return response
+            request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
-            mcr_dict["response"] = None
-            mcr_dict["error_response"] = format_exc()
-            mcr_dict["raw_response"] = None
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+            request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
+
+        return response
 
 
 # --- Observability records derived from captured exchanges ---
