@@ -341,9 +341,8 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path: Path):
     merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
 
     capture = record["ng_model_call_capture"]
-    assert set(capture) == {"rollout_id", "metrics", "calls"}
+    assert set(capture) == {"rollout_id", "calls"}
     assert capture["rollout_id"] == "0-0"
-    assert capture["metrics"]["num_calls"] == 1
     assert capture["calls"][0]["response"]["usage"]["output_tokens"] == 3
     assert "request" in capture["calls"][0] and "response" in capture["calls"][0]
     assert record["response"]["temperature"] == 0.95 and record["reward"] == 1.0
