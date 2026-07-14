@@ -49,9 +49,28 @@ def test_config_defaults():
     assert cfg.sandbox_python == "python3"
 
 
-def test_agent_only_runner_substitutes_agent_symbols():
+def test_gym_runner_script_boots_gym_and_posts_run():
+    agent = _make_agent(mode="gym_runner", nested_config_paths=["a.yaml", "b.yaml"], nested_agent_port=12345)
+    path, script, cmd = agent._runner()
+    assert path == "/work/runner.py"
+    assert "+config_paths=[a.yaml,b.yaml]" in script
+    assert "http://127.0.0.1:12345" in script
+    assert "sandbox_reward" in script
+    compile(script, "<runner>", "exec")
+
+
+def test_gym_runner_skips_gym_tar():
+    with (
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz") as tar,
+    ):
+        nested = SandboxAgent(config=_config(mode="gym_runner"), server_client=MagicMock(spec=ServerClient))
+        assert nested._gym_tar is None
+        tar.assert_not_called()
+
+
+def test_runner_substitutes_agent_symbols():
     agent = _make_agent(
-        mode="agent_only_runner",
         agent_module="responses_api_agents.opencode_agent.app",
         agent_class="OpenCodeAgent",
         agent_config_class="OpenCodeAgentConfig",
@@ -63,14 +82,6 @@ def test_agent_only_runner_substitutes_agent_symbols():
     assert "OpenCodeAgent" in script
     assert "OpenCodeAgentConfig" in script
     assert cmd == "/deps/bin/python3 /work/runner.py"
-
-
-def test_gym_runner_joins_config_paths():
-    agent = _make_agent(mode="gym_runner", nested_config_paths=["a.yaml", "b.yaml"])
-    path, script, cmd = agent._runner()
-    assert path == "/work/runner.sh"
-    assert "a.yaml,b.yaml" in script
-    assert cmd == "bash /work/runner.sh"
 
 
 def test_sandbox_model_url_rewrites_host_to_ip_and_preserves_port():
@@ -112,14 +123,10 @@ def test_sandbox_model_url_falls_back_to_hostname_on_dns_failure():
     assert url == "http://model-host:8000"
 
 
-def test_agent_only_runner_builds_gym_tar_gym_runner_does_not():
+def test_gym_tar_built_on_init():
     with (
         patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
-        patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz") as tar,
+        patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz"),
     ):
-        runner = SandboxAgent(config=_config(mode="agent_only_runner"), server_client=MagicMock(spec=ServerClient))
-        assert runner._gym_tar == "/tmp/fake.tar.gz"
-        tar.reset_mock()
-        nested = SandboxAgent(config=_config(mode="gym_runner"), server_client=MagicMock(spec=ServerClient))
-        assert nested._gym_tar is None
-        tar.assert_not_called()
+        agent = SandboxAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        assert agent._gym_tar == "/tmp/fake.tar.gz"
