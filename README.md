@@ -6,29 +6,20 @@
 [![CI](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Gym/actions/workflows/unit-tests.yml)
 [![Docs](https://img.shields.io/badge/docs-NVIDIA-brightgreen)](https://docs.nvidia.com/nemo/gym/main/about/)
 
-**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • *
-*[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • *
-*[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • *
-*[Citations](#-citations)**
+**[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
-NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides
-infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and
-training environments.
+NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
 
-An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to
-solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (
-per-task execution context).
+An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (per-task execution context).
 
 ## 🎯 When to Use NeMo Gym
 
 - You need to **evaluate models or agents** in stateful environments (e.g. code execution, tool calling, sandboxes)
 - You want **reproducible evaluation** across teams using shared environments and verifiers
-- You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for
-  training
+- You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for training
 - You want to **seamlessly transition** between evaluation, agent optimization, and training
 
-If you're scoring model outputs with a stateless check and don't need scale or training, a script is probably
-sufficient.
+If you're scoring model outputs with a stateless check and don't need scale or training, a script is probably sufficient.
 
 ## 🏆 What NeMo Gym Provides
 
@@ -43,13 +34,9 @@ sufficient.
 
 ## 🌎 Ecosystem
 
-NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/about/ecosystem#related-nemo-libraries),
-a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the
-broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/main/about/ecosystem) page for more
-details.
+NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/main/about/ecosystem) page for more details.
 
-**Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym
-environments. Examples:
+**Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments. Examples:
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
@@ -59,27 +46,23 @@ environments. Examples:
 [OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
 
 > [!IMPORTANT]
-> NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional
-> bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
+> NeMo Gym is currently in early development. You should expect evolving APIs, incomplete documentation, and occasional bugs. We welcome contributions and feedback - for any changes, please open an issue first to kick off discussion!
 
 ## 📣 News
 
 * **[07/01/2026]** [Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0):
-    * **Unified `gym` CLI**: discover agents and benchmarks with `gym list`, catch config errors before a run with
-      `gym env validate`
-    * **BLADE diagnostics**: an analysis skill that reads your eval results and reports which tasks failed, why, and the
-      highest-impact fix
-    * **Agent skill evaluation**: run the same tasks with different skill sets to measure each skill's impact
-    * **Pluggable sandboxes**: run tool-using agents in isolated environments via the sandbox provider of your choice
-    * **More agent harnesses**: OpenCode, OpenClaw, and Pi available out of the box
-    * **Hosted inference providers**: connect to Fireworks, Together.ai, OpenRouter, and more
-    * **New benchmarks**: across science, long-context, and interactive tasks
+  * **Unified `gym` CLI**: discover agents and benchmarks with `gym list`, catch config errors before a run with `gym env validate`
+  * **BLADE diagnostics**: an analysis skill that reads your eval results and reports which tasks failed, why, and the highest-impact fix
+  * **Agent skill evaluation**: run the same tasks with different skill sets to measure each skill's impact
+  * **Pluggable sandboxes**: run tool-using agents in isolated environments via the sandbox provider of your choice
+  * **More agent harnesses**: OpenCode, OpenClaw, and Pi available out of the box
+  * **Hosted inference providers**: connect to Fireworks, Together.ai, OpenRouter, and more
+  * **New benchmarks**: across science, long-context, and interactive tasks
 
 <details>
 <summary>Previous News</summary>
 
-* **[06/04/2026]** [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0): 70+ new environments,
-  Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
+* **[06/04/2026]** [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0): 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
 
 </details>
 
@@ -87,23 +70,22 @@ environments. Examples:
 
 NeMo Gym is designed to run on standard development machines:
 
-| Hardware Requirements                                                                                                                                               | Software Requirements                                                                                                                          |
-|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| Hardware Requirements | Software Requirements |
+| --------------------- | --------------------- |
 | **GPU**: Not required for NeMo Gym library operation<br>• GPU may be needed for specific resources servers or model inference (see individual server documentation) | **Operating System**:<br>• Linux (Ubuntu 20.04+, or equivalent)<br>• macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)<br>• Windows (via WSL2) |
-| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon)                                                                                     | **Python**: 3.12 or higher                                                                                                                     |
-| **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments)                                                                                                  | **Git**: For cloning the repository                                                                                                            |
-| **Storage**: Minimum 5 GB free disk space for installation and basic usage                                                                                          | **Internet Connection**: Required for downloading dependencies and API access                                                                  |
+| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.12 or higher |
+| **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments) | **Git**: For cloning the repository |
+| **Storage**: Minimum 5 GB free disk space for installation and basic usage | **Internet Connection**: Required for downloading dependencies and API access |
 
 **Additional Requirements**
 
 - **API Keys**: OpenAI API key with available credits (for the quickstart examples)
-    - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
+  - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
 - **Ray**: Automatically installed as a dependency (no separate setup required)
 
 ## 🚀 Quick Start
 
-Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See
-the [Getting Started](https://docs.nvidia.com/nemo/gym/main/get-started) docs for a more comprehensive walkthrough.
+Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/main/get-started) docs for a more comprehensive walkthrough.
 
 **Install NeMo Gym:**
 
@@ -118,11 +100,9 @@ uv sync
 
 **Configure your model:**
 
-This quickstart uses OpenAI. NeMo Gym supports local and hosted inference —
-see [Configure Model](https://docs.nvidia.com/nemo/gym/main/model-server) for vLLM, Fireworks, OpenRouter, and others.
+This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](https://docs.nvidia.com/nemo/gym/main/model-server) for vLLM, Fireworks, OpenRouter, and others.
 
 Create `env.yaml` in the project root:
-
 ```yaml
 policy_base_url: https://api.openai.com/v1
 policy_api_key: <your-openai-api-key>
@@ -131,9 +111,7 @@ policy_model_name: gpt-4.1-2025-04-14
 
 ### Run Evaluation
 
-Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [
-`simple_agent`](responses_api_agents/simple_agent/README.md) with the [`mcqa`](resources_servers/mcqa/README.md) (
-multiple-choice Q&A) environment and its included example data.
+Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [`simple_agent`](responses_api_agents/simple_agent/README.md) with the [`mcqa`](resources_servers/mcqa/README.md) (multiple-choice Q&A) environment and its included example data.
 
 **1. Start servers**
 
@@ -185,32 +163,27 @@ Rollouts: results/mcqa_rollouts.jsonl
 Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 ```
 
-For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands)
-command.
+For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
 
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
-- **[Agents](https://docs.nvidia.com/nemo/gym/main/agent-server)** — Explore available agent harnesses and learn how to
-  integrate your own.
-- **[Training](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** — Improve your agent or model with RL or
-  fine-tuning.
-- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** — Create your own
-  evaluation or training environments.
+- **[Agents](https://docs.nvidia.com/nemo/gym/main/agent-server)** — Explore available agent harnesses and learn how to integrate your own.
+- **[Training](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** — Improve your agent or model with RL or fine-tuning.
+- **[Build Custom Environments](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** — Create your own evaluation or training environments.
 
 ## 🧭 Environment Tutorials
 
 Learn how to build custom environments through hands-on tutorials. Here are popular starting points:
 
-| Name                                                                                               | Demonstrates                                                                 |
-|----------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
-| [Single Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/single-step-environment) | Basic single-step tool calling                                               |
-| [Multi Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment)   | Multi-step tool calling                                                      |
-| [Session State](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment)  | Session state management (in-memory)                                         |
-| [Multi Reward](https://docs.nvidia.com/nemo/gym/main/build-verifiers/multi-reward-verification)    | Multiple reward components for evaluation and multi-objective RL (e.g. GDPO) |
+| Name | Demonstrates |
+| ---- | ------------ |
+| [Single Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/single-step-environment) | Basic single-step tool calling |
+| [Multi Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment) | Multi-step tool calling |
+| [Session State](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment) | Session state management (in-memory) |
+| [Multi Reward](https://docs.nvidia.com/nemo/gym/main/build-verifiers/multi-reward-verification) | Multiple reward components for evaluation and multi-objective RL (e.g. GDPO) |
 
-See all [environment tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials) for additional patterns and
-advanced topics.
+See all [environment tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials) for additional patterns and advanced topics.
 
 ## 📦 Available Environments
 
@@ -218,15 +191,11 @@ Environments for training and evaluation.
 
 Each resources server includes example data, configuration files, and tests. See each server's README for details.
 
-The Dataset column links to publicly available datasets (e.g., on HuggingFace). A `-` means the train/validation data
-has not been publicly released yet, or that it is procedurally generated using a provided script. If no data is released
-yet, new data can be generated, or the environment can be used as a reference. Each server includes 5 example tasks in
-`data/example.jsonl`.
+The Dataset column links to publicly available datasets (e.g., on HuggingFace). A `-` means the train/validation data has not been publicly released yet, or that it is procedurally generated using a provided script. If no data is released yet, new data can be generated, or the environment can be used as a reference. Each server includes 5 example tasks in `data/example.jsonl`.
 
 <!-- START_TRAINING_SERVERS_TABLE -->
-
 | Environment                                   | Domain                | Description                                                                                                                                                                                                                                                                                                                                                                                                                     | Value                                                                                                                                 | Train | Validation | License                                                   | Config                                                                                                                                                                                                                      | Dataset                                                                                                                                                        |
-|-----------------------------------------------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|-------|------------|-----------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| --------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----- | ---------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Aalcr                                         | other                 | -                                                                                                                                                                                                                                                                                                                                                                                                                               | -                                                                                                                                     | -     | -          | -                                                         | <a href='resources_servers/aalcr/configs/aalcr.yaml'>aalcr.yaml</a>                                                                                                                                                         | -                                                                                                                                                              |
 | Abstention                                    | rlhf                  | Train models to abstain when unsure using three-tier reward on HotPotQA with LLM judge                                                                                                                                                                                                                                                                                                                                          | Improve calibration by rewarding abstention over incorrect answers                                                                    | ✓     | ✓          | Creative Commons Attribution-ShareAlike 4.0 International | <a href='resources_servers/abstention/configs/abstention.yaml'>abstention.yaml</a>                                                                                                                                          | -                                                                                                                                                              |
 | Anyterminal Agent                             | coding                | Terminal Bench run by claude-code natively inside the task container.                                                                                                                                                                                                                                                                                                                                                           | Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.                                                             | -     | -          | -                                                         | <a href='responses_api_agents/anyterminal_agent/configs/anyterminal_claude_code.yaml'>anyterminal_claude_code.yaml</a>                                                                                                      | -                                                                                                                                                              |
@@ -319,7 +288,6 @@ yet, new data can be generated, or the environment can be used as a reference. E
 | Proof Judge                                   | math                  | Theorem proving with verifier + meta-verifier judge (combined env)                                                                                                                                                                                                                                                                                                                                                              | -                                                                                                                                     | -     | -          | -                                                         | <a href='resources_servers/proof_judge/configs/proof_judge.yaml'>proof_judge.yaml</a>                                                                                                                                       | -                                                                                                                                                              |
 | Proof Verification                            | math                  | Proof verification scored against ground truth and meta-verifier agreement                                                                                                                                                                                                                                                                                                                                                      | -                                                                                                                                     | -     | -          | -                                                         | <a href='resources_servers/proof_verification/configs/proof_verification.yaml'>proof_verification.yaml</a>                                                                                                                  | -                                                                                                                                                              |
 | Rdkit Chemistry                               | knowledge             | [DEPRECATED — use litmus_agent] Molecular chemistry question answering: calculate properties of SMILES. Includes a mix of tool-use (python + rdkit) and no-tool-use questions. Superseded by the domain-agnostic litmus_agent server, which generalizes this server's scoring path.                                                                                                                                             | Improve molecular reasoning and SMILES parsing.                                                                                       | ✓     | -          | TBD                                                       | <a href='resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml'>rdkit_chemistry.yaml</a>                                                                                                                           | -                                                                                                                                                              |
-| Ragtruth                                      | knowledge             | RAGTruth case-level hallucination detection; reward = 1 when the model's binary "any hallucination?" verdict matches the gold label.                                                                                                                                                                                                                                                                                            | Improve faithfulness and grounding of generated text against supplied context.                                                        | -     | ✓          | -                                                         | <a href='resources_servers/ragtruth/configs/ragtruth.yaml'>ragtruth.yaml</a>                                                                                                                                                | -                                                                                                                                                              |
 | Reasoning Gym                                 | knowledge             | Claude Code agent harness for reasoning gym tasks                                                                                                                                                                                                                                                                                                                                                                               | Evaluate model capabilities in the Claude Code agent harness                                                                          | ✓     | -          | Creative Commons Attribution 4.0 International            | <a href='resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent.yaml'>reasoning_gym_claude_code_agent.yaml</a>                                                                                             | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1'>Nemotron-RL-ReasoningGym-v1</a>                                                   |
 | Reasoning Gym                                 | knowledge             | Claude Code agent harness for reasoning gym tasks, via a Gym model server's /v1/messages                                                                                                                                                                                                                                                                                                                                        | Showcase Claude Code running against any Gym model backend                                                                            | -     | -          | -                                                         | <a href='resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml'>reasoning_gym_claude_code_agent_model_server.yaml</a>                                                                   | -                                                                                                                                                              |
 | Reasoning Gym                                 | knowledge             | LangGraph orchestrator agent compatible with resource servers that do not use tools; enables diverse agent training data and test time scaling vs a simple agent, extensible to use tools or other agent architectures                                                                                                                                                                                                          | Iterative test time scaling for improved performance in reasoning tasks                                                               | ✓     | -          | Apache 2.0                                                | <a href='resources_servers/reasoning_gym/configs/orchestrator_agent.yaml'>orchestrator_agent.yaml</a>                                                                                                                       | -                                                                                                                                                              |
@@ -371,25 +339,22 @@ yet, new data can be generated, or the environment can be used as a reference. E
 | Workplace Assistant                           | agent                 | Workplace assistant multi-step tool-using environment                                                                                                                                                                                                                                                                                                                                                                           | Improve multi-step tool use capability                                                                                                | ✓     | ✓          | Apache 2.0                                                | <a href='resources_servers/workplace_assistant/configs/workplace_assistant.yaml'>workplace_assistant.yaml</a>                                                                                                               | <a href='https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant'>Nemotron-RL-agent-workplace_assistant</a>                               |
 | Xlam Fc                                       | agent                 | Salesforce xlam-function-calling-60k tool calling tasks                                                                                                                                                                                                                                                                                                                                                                         | Improve tool-calling capabilities                                                                                                     | ✓     | ✓          | Apache 2.0                                                | <a href='resources_servers/xlam_fc/configs/xlam_fc.yaml'>xlam_fc.yaml</a>                                                                                                                                                   | -                                                                                                                                                              |
 | Xstest                                        | safety                | XSTest safety benchmark - exaggerated safety (over-refusal) evaluation                                                                                                                                                                                                                                                                                                                                                          | Evaluate model safety calibration between helpfulness and harmlessness                                                                | -     | -          | -                                                         | <a href='resources_servers/xstest/configs/xstest.yaml'>xstest.yaml</a>                                                                                                                                                      | -                                                                                                                                                              |
-
 <!-- END_TRAINING_SERVERS_TABLE -->
 
 ## 📖 Documentation & Resources
 
 - **[Documentation](https://docs.nvidia.com/nemo/gym/main)** - Technical reference docs
 - **[Environment Tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** - Build custom environments
-- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** - Train with NeMo Gym
-  environments
-- **[API Reference](https://docs.nvidia.com/nemo/gym/main/api/reference/api-reference)** - Complete class and function
-  reference
+- **[Training Tutorials](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** - Train with NeMo Gym environments
+- **[API Reference](https://docs.nvidia.com/nemo/gym/main/api/reference/api-reference)** - Complete class and function reference
+
 
 ## 🤝 Community & Support
 
 We'd love your contributions! Here's how to get involved:
 
 - **[Report Issues](https://github.com/NVIDIA-NeMo/Gym/issues)** - Bug reports and feature requests
-- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/main/contribute)** - How to contribute code, docs, new
-  environments, or training framework integrations
+- **[Contributing Guide](https://docs.nvidia.com/nemo/gym/main/contribute)** - How to contribute code, docs, new environments, or training framework integrations
 
 ## 📚 Citations
 
