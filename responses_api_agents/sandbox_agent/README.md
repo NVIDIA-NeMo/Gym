@@ -18,17 +18,17 @@ Task shape lives in the dataset rows, not the agent config. Reserved keys in
 | Key | Behavior when present |
 |---|---|
 | `docker_image` | sandbox image for the task (else the `sandbox_image` default) |
-| `workdir` | in-box dir the delegate's `repo_dir` points at, so edits land in the graded tree |
-| `sandbox_eval` | JSON grading spec run in the box right after the solve, reward lands in response metadata as `sandbox_reward` (the spec is stripped from the delegate's request so the harness cannot peek at tests) |
+| `workdir` | in-box dir the agent's `repo_dir` points at, so edits land in the graded tree |
+| `sandbox_eval` | JSON grading spec run in the box right after the solve, reward lands in response metadata as `sandbox_reward` (the spec is stripped from the agent's request so it cannot peek at tests) |
 | `patch_workdir` | in-box dir whose `git diff` is captured into response metadata as `model_patch` for hermetic grading by a resources server |
 
 Tasks with an external verifier (e.g. math) need none of these beyond an image.
 
-## Delegate runtime
+## In-box agent runtime
 
 The server tars `nemo_gym/` and `responses_api_agents/` at startup (small, data and tests
 excluded) and unpacks it to `/gym_mount` in each sandbox. `setup_commands` install the
-delegate's dependencies, for example `pip install nemo-gym` for the import chain plus the
+agent's dependencies, for example `pip install nemo-gym` for the import chain plus the
 harness CLI itself.
 
 Because the harness inside the sandbox talks to a standard Gym model server, this agent
