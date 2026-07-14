@@ -23,7 +23,7 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 import orjson
 from fastapi import Body, FastAPI, Request, Response
@@ -241,7 +241,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # This function is within this closure so it has access to `self._store`
         @app.middleware("http")
-        async def model_call_capture_middleware(request: Request, call_next) -> Response:
+        async def model_call_capture_middleware(
+            request: Request, call_next: Callable[[Request], Awaitable[Response]]
+        ) -> Response:
             rollout_id = request.path_params.get("rollout_id")
             request.state.model_call_record_dict = {
                 "rollout_id": rollout_id,
