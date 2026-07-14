@@ -754,25 +754,35 @@ def _record(
     ttft_ms: Optional[float] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
+    request_body = None
+    request_raw = None
+    if request_bytes:
+        try:
+            parsed_request = json.loads(request_bytes)
+            if isinstance(parsed_request, dict):
+                request_body = parsed_request
+            else:
+                request_raw = request_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            request_raw = request_bytes.decode("utf-8", errors="replace")
+
     try:
-        store.record(
-            rollout_id,
-            {
-                "model_call_id": model_call_id,
-                "dialect": dialect,
-                "model_ref": (
-                    {"type": "responses_api_models", "name": model_server_name} if model_server_name else None
-                ),
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "latency_ms": round(latency_ms, 2),
-                "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
-                "status_code": status_code,
-                "error_category": error_category,
-                "request": json.loads(request_bytes) if request_bytes else None,
-                "response": response_body,
-            },
-        )
+        exchange = {
+            "model_call_id": model_call_id,
+            "dialect": dialect,
+            "model_ref": {"type": "responses_api_models", "name": model_server_name} if model_server_name else None,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "latency_ms": round(latency_ms, 2),
+            "latency_ttft_ms": round(ttft_ms, 2) if ttft_ms is not None else None,
+            "status_code": status_code,
+            "error_category": error_category,
+            "request": request_body,
+            "response": response_body,
+        }
+        if request_raw is not None:
+            exchange["request_raw"] = request_raw
+        store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
 
@@ -839,7 +849,7 @@ class _CaptureMiddleware:
             "streaming": False,
             "body": bytearray(),
             "ttft_ms": None,
-            "stream_error_category": None,
+            "stream_terminal": None,
         }
         started_at = time.time()
         start = time.perf_counter()
@@ -863,10 +873,8 @@ class _CaptureMiddleware:
                     sse_event_buffer.extend(chunk)
                     terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
                     defer_response = terminal is not None
-                    state["stream_error_category"] = {
-                        "error": "upstream_error",
-                        "incomplete": "incomplete",
-                    }.get(terminal)
+                    if terminal is not None:
+                        state["stream_terminal"] = terminal
                 if defer_response or not message.get("more_body", False):
                     deferred_response_messages.append(dict(message))
                     return
@@ -909,7 +917,7 @@ class _CaptureMiddleware:
         status = state["status"]
         body_bytes = bytes(state["body"])
         streaming = state["streaming"]
-        stream_error_category = state["stream_error_category"]
+        stream_terminal = state["stream_terminal"]
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
         store, model_server_name = self._store, self._model_server_name
@@ -926,8 +934,13 @@ class _CaptureMiddleware:
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None
-            if error_category is None and stream_error_category:
-                error_category = stream_error_category
+            if error_category is None:
+                error_category = {
+                    "error": "upstream_error",
+                    "incomplete": "incomplete",
+                }.get(stream_terminal)
+            if error_category is None and streaming and stream_terminal is None:
+                error_category = "stream_truncated"
             # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
             # doesn't silently count as a success with null tokens in reliability/cost sums.
             if error_category is None and body_bytes and response_body is None:
@@ -996,11 +1009,11 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
 
 
 def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
-    """Remove stale per-rollout capture files for these records before a fresh (non-resume) run.
+    """Remove stale per-rollout capture files for these records before dispatch.
 
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
-    re-run would append onto the previous run's capture for the same id. This run-scopes the capture
-    so each run's model-call evidence stays isolated.
+    fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
+    id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
     """
     if not capture_dirs:
         return

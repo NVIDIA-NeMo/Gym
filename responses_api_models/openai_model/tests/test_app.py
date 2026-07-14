@@ -19,8 +19,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym.base_responses_api_model import CaptureStore, aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    _CaptureMiddleware,
+    aggregate_model_call_metrics,
+    read_model_call_records,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -180,7 +186,10 @@ class TestApp:
         }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
-        client = TestClient(server.setup_webserver())
+        app = server.setup_webserver()
+        assert app.user_middleware[0].cls is _CaptureMiddleware
+        assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
+        client = TestClient(app)
 
         response = client.post(
             "/ng-rollout/messages-test/v1/messages",
@@ -196,6 +205,7 @@ class TestApp:
         assert "event: message_stop" in response.text
         calls = read_model_call_records(CaptureStore(tmp_path), "messages-test")
         assert len(calls) == 1 and calls[0].dialect == "messages"
+        assert calls[0].error_category is None
 
     async def test_responses_parses_hosted_mcp_call(self, monkeypatch: MonkeyPatch) -> None:
         """A server-side ``mcp_call`` output item must validate (200), not 500.

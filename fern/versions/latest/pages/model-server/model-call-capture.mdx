@@ -84,11 +84,14 @@ before invoking the downstream ASGI application; `completed_at` is recorded when
 returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
 trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
 order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls. The
-request and response payloads remain the model-call evidence.
+request and response payloads remain the model-call evidence. Malformed or non-object request bodies
+are retained in raw JSONL as `request_raw`; the derived record has `request: null`.
 
 Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
 Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
-status, correlation, and latency data remain available.
+status, correlation, and latency data remain available. A successful-status stream that closes
+without its dialect's terminal event retains any partial reconstruction and is marked
+`stream_truncated`.
 
 ## Rollout-record attachment
 
@@ -104,7 +107,8 @@ ng_model_call_capture = {
 
 `metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
 response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
-data does not mix with an earlier attempt.
+data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
+for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.

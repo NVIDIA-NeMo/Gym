@@ -522,10 +522,10 @@ class RolloutCollectionHelper(BaseModel):
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
 
-        # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
-        # same rollout ids, so clear the capture files this run is about to (re)write.
-        if capture_dirs and not config.resume_from_cache:
-            print("Clearing previously captured model calls because resume_from_cache=false")
+        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
+        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
+        if capture_dirs:
+            print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]

@@ -318,6 +318,34 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
 
 
+@pytest.mark.parametrize("request_bytes", [b"{not-json", b"[]"])
+def test_invalid_request_body_does_not_drop_capture(tmp_path, request_bytes):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _responses(body: dict = Body()) -> dict:
+        return {"output": []}
+
+    _install_capture(app, tmp_path)
+    response = TestClient(app).post(
+        "/ng-rollout/invalid-request/v1/responses",
+        content=request_bytes,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    [exchange] = CaptureStore(tmp_path).read("invalid-request")
+    assert exchange["request"] is None
+    assert exchange["request_raw"] == request_bytes.decode()
+    assert exchange["status_code"] == 422
+    assert exchange["error_category"] == "client_error"
+    assert exchange["response"] is not None
+
+    [record] = read_model_call_records(CaptureStore(tmp_path), "invalid-request")
+    assert record.request is None
+    assert "request_raw" not in record.model_dump()
+
+
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     """A caller attributes calls through the model base URL. The prefix is stripped before routing,
     while an ordinary unprefixed request remains unobserved."""
@@ -341,6 +369,7 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     assert len(exchanges) == 2
     assert exchanges[0]["model_ref"] == {"type": "responses_api_models", "name": "srv"}
     assert "model_server" not in exchanges[0]
+    assert "request_raw" not in exchanges[0]
 
     calls = read_model_call_records(store, "task7-roll2")
     assert len(calls) == 2 and all(call.tokens_total == 4 for call in calls)
@@ -483,6 +512,31 @@ def test_record_swallows_store_failure():
         error_category=None,
         latency_ms=1.0,
     )
+
+
+def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
+    import nemo_gym.base_responses_api_model as obs
+
+    monkeypatch.setattr(obs.json, "loads", MagicMock(side_effect=RecursionError))
+    store = CaptureStore(tmp_path)
+    obs._record(
+        store,
+        "responses",
+        "srv",
+        b"deeply-nested-request",
+        rollout_id="r",
+        model_call_id="call-1",
+        started_at=100.0,
+        completed_at=100.01,
+        response_body={},
+        status_code=400,
+        error_category="client_error",
+        latency_ms=1.0,
+    )
+
+    [exchange] = store.read("r")
+    assert exchange["request"] is None
+    assert exchange["request_raw"] == "deeply-nested-request"
 
 
 def test_capture_records_non_json_response_as_none(tmp_path):
@@ -669,6 +723,35 @@ def _sse(event_type: str, data: dict) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/responses", _sse("response.in_progress", {"response": {}})),
+        ("/v1/chat/completions", _sse("", {"choices": [{"delta": {}}]})),
+        ("/v1/messages", _sse("message_start", {"type": "message_start", "message": {}})),
+    ],
+    ids=("responses", "chat", "messages"),
+)
+def test_stream_without_terminal_event_is_truncated(tmp_path, path, payload):
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    async def _stream() -> StreamingResponse:
+        return StreamingResponse(iter([payload]), media_type="text/event-stream")
+
+    app.post(path)(_stream)
+    _install_capture(app, tmp_path)
+
+    response = TestClient(app).post(f"/ng-rollout/truncated{path}", json={})
+
+    assert response.status_code == 200
+    assert response.content == payload
+    [exchange] = CaptureStore(tmp_path).read("truncated")
+    assert exchange["response"] is not None
+    assert exchange["error_category"] == "stream_truncated"
+
+
 def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
@@ -766,6 +849,7 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     assert call.reasoning_content == "let me think"
     assert call.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
     assert call.latency_ttft_ms is not None
+    assert call.error_category is None
 
 
 def test_reconstruct_chat_sse():
