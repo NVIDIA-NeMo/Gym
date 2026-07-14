@@ -1,0 +1,54 @@
+# OpenShell sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `openshell` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/openshell/configs/openshell.yaml, $MODEL]"
+#
+# Requires a reachable OpenShell gateway (github.com/NVIDIA/OpenShell). For a local
+# gateway run OpenShell's deploy/docker compose setup; see ../README.md.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it. The
+# provider forwards metadata as gateway sandbox labels.
+sandbox:
+  default_metadata:
+    sandbox-api: openshell-grpc
+  openshell:
+    connection:
+      # host:port of the gateway's gRPC control plane. Plaintext unless TLS paths are set.
+      endpoint: ${oc.env:OPENSHELL_GATEWAY_ENDPOINT,localhost:8080}
+      # OIDC bearer token for authenticated gateways; null for the local compose gateway.
+      bearer_token: ${oc.env:OPENSHELL_BEARER_TOKEN,null}
+      # mTLS material for TLS gateways (ca / cert+key paths); all null -> plaintext channel.
+      # tls_ca_path: /path/to/ca.pem
+      # tls_cert_path: /path/to/client.pem
+      # tls_key_path: /path/to/client-key.pem
+      request_timeout_s: 30
+    create:
+      # Provisioning can include an image pull on the gateway host.
+      ready_timeout_s: 300
+      poll_interval_s: 1.0
+    exec:
+      default_timeout_s: 180
+      # Bounds in-flight gateway RPCs (the sync SDK blocks one worker thread per call).
+      concurrency: 32
+      # Commands run as `<exec_shell> -c <command>` inside the sandbox.
+      exec_shell: /bin/sh
+    probe:
+      command: printf openshell-sandbox-ready
+      expected_stdout: openshell-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1
+    operations:
+      # After delete, poll until the gateway reports the sandbox gone.
+      close_wait_deleted: true
+      close_timeout_s: 60
+      poll_interval_s: 1.0

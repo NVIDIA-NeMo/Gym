@@ -155,8 +155,15 @@ def _load_ecs_fargate_provider() -> ProviderClass:
     return EcsFargateProvider
 
 
+def _load_openshell_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.openshell import OpenShellProvider
+
+    return OpenShellProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
+_BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider
