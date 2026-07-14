@@ -23,7 +23,7 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 import orjson
 from fastapi import Body, FastAPI, Request, Response
@@ -300,7 +300,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    async def messages(self, request: Request, body: dict = Body()) -> Union[StreamingResponse, Dict[str, Any]]:
+    async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
 
         Translates the inbound Anthropic Messages request to the Responses API, delegates to this
