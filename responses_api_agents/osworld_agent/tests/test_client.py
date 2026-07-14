@@ -235,6 +235,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
 
     monkeypatch.setattr(osworld_client, "load_attr", fake_load_attr)
     monkeypatch.setattr(osworld_client.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(osworld_client, "_harden_pointer_agent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(osworld_client, "_close_pointer_agent", lambda _agent: None)
     monkeypatch.setenv("OSWORLD_COLD_BOOT_MIN_PNG_BYTES", "1")
 
 
@@ -591,6 +593,21 @@ def test_prompt_agent_runners_requiring_a11y_enable_env_a11y_tree(monkeypatch, r
 def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_path) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+    hardening_calls: List[tuple[Any, Dict[str, Any], float]] = []
+    close_calls: List[Any] = []
+
+    def harden_after_reset(
+        pointer_agent: Any,
+        options: Dict[str, Any],
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        assert pointer_agent.reset_calls
+        assert pointer_agent.predict_calls == 0
+        hardening_calls.append((pointer_agent, options, deadline_monotonic))
+
+    monkeypatch.setattr(osworld_client, "_harden_pointer_agent", harden_after_reset)
+    monkeypatch.setattr(osworld_client, "_close_pointer_agent", close_calls.append)
 
     result = osworld_client.run_osworld_task(
         {"id": "task-pointer", "instruction": "Use Pointer."},
@@ -618,7 +635,47 @@ def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_
     assert pointer.reset_calls[0]["instruction"] == "Use Pointer."
     assert pointer.predict_calls == 1
     assert pointer.log_usage_calls == 1
+    assert len(hardening_calls) == 1
+    hardened_pointer, options, deadline = hardening_calls[0]
+    assert hardened_pointer is pointer
+    assert options == {
+        "api_key": "test-key",  # pragma: allowlist secret
+        "base_url": "https://inference-api.nvidia.com",
+        "max_retries": 0,
+        "timeout": 120.0,
+    }
+    assert deadline > 0
+    assert close_calls == [pointer]
     assert (Path(pointer.reset_calls[0]["task_results_dir"]) / "pointer.log").exists()
+
+
+def test_pointer_client_cleanup_failure_does_not_mask_result(monkeypatch, tmp_path, caplog) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        osworld_client,
+        "_close_pointer_agent",
+        lambda _agent: (_ for _ in ()).throw(RuntimeError("close failed")),
+    )
+
+    with caplog.at_level("ERROR"):
+        result = osworld_client.run_osworld_task(
+            {"id": "task-pointer-cleanup", "instruction": "Use Pointer."},
+            model_fn=lambda *_args: "unused",
+            runner_name="pointer_agent",
+            env_class_path="fake.FakeEnv",
+            agent_class_path="fake.FakePointerAgent",
+            agent_kwargs={"provider_name": "anthropic"},
+            policy_base_url="https://inference-api.nvidia.com",
+            policy_api_key="test-key",  # pragma: allowlist secret
+            policy_model_name="azure/anthropic/claude-opus-4-7",
+            sleep_after_execution=0,
+            task_timeout=10,
+        )
+
+    assert result.reward == 1.0
+    assert result.error is None
+    assert "PointerAgent client cleanup raised" in caplog.text
 
 
 def test_m3_agent_runner_uses_messages_endpoint_and_native_predict_loop(monkeypatch, tmp_path) -> None:
@@ -1124,7 +1181,6 @@ def test_pointer_optional_parallel_patch_removes_web_tools(monkeypatch) -> None:
 
 def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")  # pragma: allowlist secret
-    monkeypatch.setenv("POINTER_ANTHROPIC_MAX_RETRIES", "6")
     monkeypatch.setenv("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "45.5")
 
     assert osworld_client._pointer_anthropic_client_options(
@@ -1133,7 +1189,7 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
     ) == {
         "api_key": "client-key",  # pragma: allowlist secret
         "base_url": "https://inference-api.nvidia.com",
-        "max_retries": 6,
+        "max_retries": 0,
         "timeout": 45.5,
     }
 
@@ -1141,6 +1197,17 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
         osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["api_key"]
         == "env-key"  # pragma: allowlist secret
     )
+
+    monkeypatch.setenv("POINTER_ANTHROPIC_MAX_RETRIES", "6")
+    assert osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["max_retries"] == 0
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_pointer_anthropic_client_timeout_must_be_finite_and_positive(monkeypatch, timeout: str) -> None:
+    monkeypatch.setenv("POINTER_ANTHROPIC_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")
 
 
 def test_pointer_anthropic_proxy_logs_schema_v2_request_and_response(tmp_path: Path) -> None:
@@ -1238,53 +1305,17 @@ def test_pointer_anthropic_proxy_logs_schema_v2_request_and_response(tmp_path: P
     assert records[0]["anthropic_request_sha256"] == osworld_client._pointer_io_sha256(request)
 
 
-def test_pointer_anthropic_patch_wraps_clients_only_in_logging_context(monkeypatch, tmp_path: Path) -> None:
-    class APIProvider:
-        ANTHROPIC = "anthropic"
+def test_pointer_hardening_wraps_clients_only_in_logging_context(monkeypatch, tmp_path: Path) -> None:
+    from responses_api_agents.osworld_agent import pointer_runtime
 
-    class LLMClient:
-        name = "executor"
-        api_key = "test-key"  # pragma: allowlist secret
+    hardening_calls: List[Dict[str, Any]] = []
 
-        def _create_client(self, provider: Any) -> Any:
-            return ("original", provider)
+    def capture_hardening(_agent: Any, _options: Dict[str, Any], **kwargs: Any) -> None:
+        hardening_calls.append(kwargs)
 
-    class LLMContextManager:
-        def _get_counting_client(self) -> str:
-            return "original-counting-client"
-
-    class Anthropic:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-            self.messages = SimpleNamespace(create=lambda **_kwargs: "response")
-
-    mm_agents = ModuleType("mm_agents")
-    pointer_package = ModuleType("mm_agents.pointer")
-    llm_client_module = ModuleType("mm_agents.pointer.llm_client")
-    context_manager_module = ModuleType("mm_agents.pointer.llm_context_manager")
-    utils_module = ModuleType("mm_agents.pointer.utils")
-    anthropic_module = ModuleType("anthropic")
-    llm_client_module.LLMClient = LLMClient
-    context_manager_module.LLMContextManager = LLMContextManager
-    utils_module.APIProvider = APIProvider
-    anthropic_module.Anthropic = Anthropic
-    pointer_package.llm_client = llm_client_module
-    pointer_package.llm_context_manager = context_manager_module
-    pointer_package.utils = utils_module
-    mm_agents.pointer = pointer_package
-    monkeypatch.setitem(sys.modules, "mm_agents", mm_agents)
-    monkeypatch.setitem(sys.modules, "mm_agents.pointer", pointer_package)
-    monkeypatch.setitem(sys.modules, "mm_agents.pointer.llm_client", llm_client_module)
-    monkeypatch.setitem(sys.modules, "mm_agents.pointer.llm_context_manager", context_manager_module)
-    monkeypatch.setitem(sys.modules, "mm_agents.pointer.utils", utils_module)
-    monkeypatch.setitem(sys.modules, "anthropic", anthropic_module)
-
-    osworld_client._patch_pointer_anthropic_client("https://inference-api.nvidia.com/")
-    client = LLMClient()
-    unlogged = client._create_client(APIProvider.ANTHROPIC)
-    assert isinstance(unlogged, Anthropic)
-    assert unlogged.kwargs["base_url"] == "https://inference-api.nvidia.com"
-    assert client._create_client("other") == ("original", "other")
+    monkeypatch.setattr(pointer_runtime, "harden_pointer_agent", capture_hardening)
+    osworld_client._harden_pointer_agent(object(), {}, deadline_monotonic=10.0)
+    assert hardening_calls[-1]["client_wrapper"] is None
 
     context = osworld_client._PointerModelIOContext(
         log_path=str(tmp_path / "model-io-agent.jsonl"),
@@ -1293,23 +1324,38 @@ def test_pointer_anthropic_patch_wraps_clients_only_in_logging_context(monkeypat
     )
     token = osworld_client._POINTER_MODEL_IO_CONTEXT.set(context)
     try:
-        logged = client._create_client(APIProvider.ANTHROPIC)
+        osworld_client._harden_pointer_agent(object(), {}, deadline_monotonic=20.0)
     finally:
         osworld_client._POINTER_MODEL_IO_CONTEXT.reset(token)
 
+    wrapper = hardening_calls[-1]["client_wrapper"]
+    assert callable(wrapper)
+    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **_kwargs: "response"))
+    logged = wrapper(client, "executor")
     assert isinstance(logged, osworld_client._PointerAnthropicClientProxy)
     assert logged.messages.create(model="model", messages=[]) == "response"
+    assert wrapper(client, "executor").messages.create(model="model", messages=[]) == "response"
     records = [
-        json.loads(line)
-        for line in (tmp_path / "model-io-agent.jsonl").read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in (tmp_path / "model-io-agent.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert [record["event"] for record in records] == ["model_request", "model_response"]
+    assert [record["event"] for record in records] == [
+        "model_request",
+        "model_response",
+        "model_request",
+        "model_response",
+    ]
+    assert [record["call_index"] for record in records] == [1, 1, 2, 2]
 
 
 def test_pointer_anthropic_proxy_logs_errors_and_preserves_exception(tmp_path: Path) -> None:
+    class ProviderError(RuntimeError):
+        status_code = 429
+        request_id = "request-1"
+        body = {"error": {"type": "budget_exceeded", "message": "sensitive provider body"}}
+
     class Messages:
         def create(self, **_kwargs: Any) -> Any:
-            raise RuntimeError("provider unavailable")
+            raise ProviderError("provider unavailable")
 
     class Client:
         messages = Messages()
@@ -1331,8 +1377,128 @@ def test_pointer_anthropic_proxy_logs_errors_and_preserves_exception(tmp_path: P
 
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert [record["event"] for record in records] == ["model_request", "model_error"]
-    assert records[1]["error_type"] == "RuntimeError"
+    assert records[1]["error_type"] == "ProviderError"
+    assert records[1]["status_code"] == 429
+    assert records[1]["provider_error_type"] == "budget_exceeded"
+    assert records[1]["request_id"] == "request-1"
     assert records[0]["call_id"] == records[1]["call_id"]
+    assert "sensitive" not in log_path.read_text(encoding="utf-8")
+
+
+def test_pointer_error_capture_logging_has_no_active_provider_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_error = RuntimeError("sensitive provider body")
+
+    class Messages:
+        def create(self, **_kwargs: Any) -> Any:
+            raise provider_error
+
+    class Client:
+        messages = Messages()
+
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("file", encoding="utf-8")
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(blocked_parent / "model-io-agent.jsonl"),
+        identity={"task_id": "task-error-context"},
+        step_ref=[1],
+    )
+    proxy = osworld_client._PointerAnthropicClientProxy(
+        Client(),
+        context=context,
+        agent_role="planner",
+    )
+    active_exceptions: List[BaseException | None] = []
+    monkeypatch.setattr(
+        osworld_client.LOG,
+        "error",
+        lambda *_args, **_kwargs: active_exceptions.append(sys.exception()),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        proxy.messages.create(model="model", messages=[])
+
+    assert exc_info.value is provider_error
+    assert active_exceptions
+    assert all(error is None for error in active_exceptions)
+
+
+def test_pointer_retry_capture_records_each_sanitized_attempt(monkeypatch, tmp_path: Path) -> None:
+    from responses_api_agents.osworld_agent import pointer_runtime
+
+    class APIStatusError(Exception):
+        status_code = 429
+        request_id = "request-2"
+        body = {"error": {"type": "budget_exceeded", "message": "sensitive provider body"}}
+        response = SimpleNamespace(headers={})
+
+    class Messages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **_kwargs: Any) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise APIStatusError("sensitive provider response")
+            return "response"
+
+    class Anthropic:
+        def __init__(self, **_options: Any) -> None:
+            self.messages = Messages()
+            self.beta = SimpleNamespace(messages=self.messages)
+
+        def close(self) -> None:
+            pass
+
+    anthropic_module = ModuleType("anthropic")
+    anthropic_module.APIStatusError = APIStatusError
+    anthropic_module.Anthropic = Anthropic
+    monkeypatch.setitem(sys.modules, "anthropic", anthropic_module)
+    now = [0.0]
+    monkeypatch.setattr(pointer_runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(pointer_runtime.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    monkeypatch.setattr(pointer_runtime.random, "random", lambda: 0.0)
+
+    log_path = tmp_path / "model-io-agent.jsonl"
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(log_path),
+        identity={"task_id": "task-retry"},
+        step_ref=[1],
+    )
+    controller = pointer_runtime._RetryController("executor", SimpleNamespace(warning=lambda *_args: None), None)
+    client = pointer_runtime._new_client(
+        {
+            "api_key": "test-key",  # pragma: allowlist secret
+            "base_url": "https://inference-api.nvidia.com",
+            "max_retries": 0,
+        },
+        controller,
+        "executor",
+        lambda raw_client, role: osworld_client._PointerAnthropicClientProxy(
+            raw_client,
+            context=context,
+            agent_role=role,
+        ),
+    )
+
+    controller.begin()
+    try:
+        assert client.beta.messages.create(model="model", messages=[]) == "response"
+    finally:
+        controller.end()
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "model_request",
+        "model_error",
+        "model_request",
+        "model_response",
+    ]
+    assert [record["call_index"] for record in records] == [1, 1, 2, 2]
+    assert records[1]["provider_error_type"] == "budget_exceeded"
+    assert "sensitive" not in log_path.read_text(encoding="utf-8")
 
 
 def test_pointer_model_io_log_failure_does_not_change_sdk_result(tmp_path: Path) -> None:
@@ -1422,6 +1588,16 @@ def test_pointer_model_io_context_is_opt_in_and_task_scoped(monkeypatch, tmp_pat
         "source_commit": "09a895d",
     }
 
+    sanitized = osworld_client._pointer_model_io_context(
+        {"task_id": "task-2"},
+        endpoint="https://user:password@example.com/v1?api_key=sensitive#fragment",
+        served_model="model",
+        step_ref=step_ref,
+    )
+    assert sanitized is not None
+    assert sanitized.identity["endpoint"] == "https://example.com/v1"
+    assert "password" not in str(sanitized.identity)
+
 
 def test_pointer_rollout_sets_and_resets_model_io_context(monkeypatch, tmp_path: Path) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
@@ -1430,8 +1606,8 @@ def test_pointer_rollout_sets_and_resets_model_io_context(monkeypatch, tmp_path:
     observed_contexts: List[osworld_client._PointerModelIOContext | None] = []
     monkeypatch.setattr(
         osworld_client,
-        "_patch_pointer_anthropic_client",
-        lambda _base_url: observed_contexts.append(osworld_client._POINTER_MODEL_IO_CONTEXT.get()),
+        "_harden_pointer_agent",
+        lambda *_args, **_kwargs: observed_contexts.append(osworld_client._POINTER_MODEL_IO_CONTEXT.get()),
     )
 
     result = osworld_client.run_osworld_task(

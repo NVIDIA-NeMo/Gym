@@ -25,6 +25,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -34,6 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
@@ -683,11 +685,14 @@ def _patch_pointer_optional_parallel_tools(disable_parallel_tools: bool) -> None
 def _pointer_anthropic_client_options(base_url: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Anthropic SDK options for PointerAgent's InferenceHub path."""
 
+    timeout = float(os.environ.get("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "120"))
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("POINTER_ANTHROPIC_TIMEOUT_SECONDS must be finite and positive")
     return {
         "api_key": api_key or os.environ.get("ANTHROPIC_API_KEY"),
         "base_url": base_url.rstrip("/"),
-        "max_retries": int(os.environ.get("POINTER_ANTHROPIC_MAX_RETRIES", "4")),
-        "timeout": float(os.environ.get("POINTER_ANTHROPIC_TIMEOUT_SECONDS", "120")),
+        "max_retries": 0,
+        "timeout": timeout,
     }
 
 
@@ -705,11 +710,17 @@ _POINTER_MODEL_IO_CONTEXT: contextvars.ContextVar[Optional[_PointerModelIOContex
     default=None,
 )
 _POINTER_SECRET_KEYS = {
+    "access_token",
     "api_key",
     "authorization",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "client_secret",
     "cookie",
     "password",
     "proxy_authorization",
+    "secret",
+    "session_token",
     "set_cookie",
     "token",
     "x_api_key",
@@ -723,16 +734,19 @@ def _pointer_io_jsonable(value: Any) -> Any:
         try:
             return value.model_dump(mode="json")
         except TypeError:
-            return value.model_dump()
+            try:
+                return value.model_dump()
+            except Exception:  # noqa: BLE001 - observability must not affect a rollout.
+                return {"_type": type(value).__name__}
         except Exception:  # noqa: BLE001 - observability must not affect a rollout.
-            return repr(value)
+            return {"_type": type(value).__name__}
     if isinstance(value, Mapping):
         return {str(key): _pointer_io_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_pointer_io_jsonable(item) for item in value]
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    return repr(value)
+    return {"_type": type(value).__name__}
 
 
 def _redact_pointer_io_secrets(value: Any) -> Any:
@@ -742,7 +756,9 @@ def _redact_pointer_io_secrets(value: Any) -> Any:
         redacted: Dict[str, Any] = {}
         for key, item in value.items():
             normalized_key = str(key).lower().replace("-", "_")
-            redacted[str(key)] = "<redacted>" if normalized_key in _POINTER_SECRET_KEYS else _redact_pointer_io_secrets(item)
+            redacted[str(key)] = (
+                "<redacted>" if normalized_key in _POINTER_SECRET_KEYS else _redact_pointer_io_secrets(item)
+            )
         return redacted
     if isinstance(value, list):
         return [_redact_pointer_io_secrets(item) for item in value]
@@ -752,6 +768,38 @@ def _redact_pointer_io_secrets(value: Any) -> Any:
 def _pointer_io_sha256(value: Any) -> str:
     serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _pointer_io_error_fields(error: Exception) -> Dict[str, Any]:
+    """Return provider diagnostics that cannot contain response text or credentials."""
+
+    fields: Dict[str, Any] = {"error_type": type(error).__name__}
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int):
+        fields["status_code"] = status_code
+    body = getattr(error, "body", None)
+    detail = body.get("error") if isinstance(body, Mapping) else None
+    provider_error_type = detail.get("type") if isinstance(detail, Mapping) else None
+    if isinstance(provider_error_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", provider_error_type):
+        fields["provider_error_type"] = provider_error_type
+    request_id = getattr(error, "request_id", None)
+    if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", request_id):
+        fields["request_id"] = request_id
+    return fields
+
+
+def _pointer_io_endpoint(endpoint: str) -> str:
+    """Remove URL credentials, query parameters, and fragments from capture metadata."""
+
+    try:
+        parsed = urlsplit(endpoint)
+        if not parsed.scheme or not parsed.hostname:
+            return "<configured>"
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except ValueError:
+        return "<configured>"
 
 
 def _pointer_io_images(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -793,15 +841,16 @@ def _pointer_io_images(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
 def _append_pointer_io_event(context: _PointerModelIOContext, event: Dict[str, Any]) -> None:
     """Append one durable schema-v2 event without changing rollout behavior."""
 
-    record = {
-        **context.identity,
-        "schema_version": 2,
-        "event_id": uuid.uuid4().hex,
-        "timestamp_unix_ns": time.time_ns(),
-        "pid": os.getpid(),
-        **event,
-    }
+    failed = False
     try:
+        record = {
+            **context.identity,
+            "schema_version": 2,
+            "event_id": uuid.uuid4().hex,
+            "timestamp_unix_ns": time.time_ns(),
+            "pid": os.getpid(),
+            **event,
+        }
         parent = os.path.dirname(context.log_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -810,7 +859,18 @@ def _append_pointer_io_event(context: _PointerModelIOContext, event: Dict[str, A
             handle.flush()
             os.fsync(handle.fileno())
     except Exception:  # noqa: BLE001 - model-I/O logging is strictly best-effort.
-        LOG.exception("Failed to append Pointer model-I/O log to %s", context.log_path)
+        failed = True
+    if failed:
+        _report_pointer_io_failure("Failed to append Pointer model-I/O log")
+
+
+def _report_pointer_io_failure(message: str) -> None:
+    """Emit fixed observability diagnostics outside the triggering exception context."""
+
+    try:
+        LOG.error(message)
+    except Exception:  # noqa: BLE001 - observability must not affect a rollout.
+        pass
 
 
 class _PointerMessagesProxy:
@@ -843,6 +903,7 @@ class _PointerMessagesProxy:
             "step": self._context.step_ref[0],
         }
         started_ns = time.time_ns()
+        request_capture_failed = False
         try:
             request = _redact_pointer_io_secrets(
                 _pointer_io_jsonable(
@@ -864,11 +925,21 @@ class _PointerMessagesProxy:
                 },
             )
         except Exception:  # noqa: BLE001 - logging must not change the SDK call.
-            LOG.exception("Failed to serialize Pointer model request for call %s", call_id)
+            request_capture_failed = True
+        if request_capture_failed:
+            _report_pointer_io_failure("Failed to serialize Pointer model request")
+
+        provider_error: Exception | None = None
+        provider_traceback: Any = None
         try:
             response = self._target.create(*args, **kwargs)
         except Exception as exc:
+            provider_error = exc
+            provider_traceback = exc.__traceback__
+
+        if provider_error is not None:
             finished_ns = time.time_ns()
+            error_capture_failed = False
             try:
                 _append_pointer_io_event(
                     self._context,
@@ -877,14 +948,17 @@ class _PointerMessagesProxy:
                         "event": "model_error",
                         "timestamp_unix_ns": finished_ns,
                         "elapsed_ns": finished_ns - started_ns,
-                        "error_type": type(exc).__name__,
-                        "error": repr(exc),
+                        **_pointer_io_error_fields(provider_error),
                     },
                 )
             except Exception:  # noqa: BLE001 - preserve the provider exception.
-                LOG.exception("Failed to serialize Pointer model error for call %s", call_id)
-            raise
+                error_capture_failed = True
+            if error_capture_failed:
+                _report_pointer_io_failure("Failed to serialize Pointer model error")
+            raise provider_error.with_traceback(provider_traceback)
+
         finished_ns = time.time_ns()
+        response_capture_failed = False
         try:
             response_value = _redact_pointer_io_secrets(_pointer_io_jsonable(response))
             _append_pointer_io_event(
@@ -899,7 +973,9 @@ class _PointerMessagesProxy:
                 },
             )
         except Exception:  # noqa: BLE001 - return the SDK response unchanged.
-            LOG.exception("Failed to serialize Pointer model response for call %s", call_id)
+            response_capture_failed = True
+        if response_capture_failed:
+            _report_pointer_io_failure("Failed to serialize Pointer model response")
         return response
 
     def __getattr__(self, name: str) -> Any:
@@ -929,9 +1005,16 @@ class _PointerBetaProxy:
 
 
 class _PointerAnthropicClientProxy:
-    def __init__(self, target: Any, *, context: _PointerModelIOContext, agent_role: str) -> None:
+    def __init__(
+        self,
+        target: Any,
+        *,
+        context: _PointerModelIOContext,
+        agent_role: str,
+        call_index_ref: Optional[List[int]] = None,
+    ) -> None:
         self._target = target
-        call_index_ref = [0]
+        call_index_ref = call_index_ref if call_index_ref is not None else [0]
         self.messages = _PointerMessagesProxy(
             target.messages,
             context=context,
@@ -966,7 +1049,7 @@ def _pointer_model_io_context(
     identity = {
         **dict(event_context),
         "adapter": "gym",
-        "endpoint": endpoint,
+        "endpoint": _pointer_io_endpoint(endpoint),
         "served_model": served_model,
         "source_commit": os.environ.get("NEMO_GYM_SOURCE_COMMIT", ""),
     }
@@ -977,63 +1060,47 @@ def _pointer_model_io_context(
     )
 
 
-def _patch_pointer_anthropic_client(base_url: str) -> None:
-    """Make Pointer's Anthropic SDK client honor the configured base URL."""
+def _harden_pointer_agent(
+    pointer_agent: Any,
+    client_options: Mapping[str, Any],
+    *,
+    deadline_monotonic: float,
+) -> None:
+    """Apply Gym's per-instance hardening to the pinned upstream PointerAgent."""
 
-    if not base_url:
-        return
-    try:
-        from mm_agents.pointer import llm_client as pointer_llm_client  # type: ignore
-        from mm_agents.pointer import llm_context_manager as pointer_context_manager  # type: ignore
-        from mm_agents.pointer import utils as pointer_utils  # type: ignore
-    except Exception:  # noqa: BLE001 - pointer is an optional runtime dependency.
-        return
-
-    original = getattr(
-        pointer_llm_client.LLMClient,
-        "_nemo_gym_original_create_client",
-        pointer_llm_client.LLMClient._create_client,
+    from responses_api_agents.osworld_agent.pointer_runtime import (  # noqa: PLC0415
+        harden_pointer_agent,
     )
-    if not hasattr(pointer_llm_client.LLMClient, "_nemo_gym_original_create_client"):
-        setattr(pointer_llm_client.LLMClient, "_nemo_gym_original_create_client", original)
 
-    def _create_client(self: Any, provider: Any) -> Any:
-        if provider == pointer_utils.APIProvider.ANTHROPIC:
-            from anthropic import Anthropic  # noqa: PLC0415
+    pointer_io_context = _POINTER_MODEL_IO_CONTEXT.get()
+    client_wrapper = None
+    if pointer_io_context is not None:
+        call_index_refs: Dict[str, List[int]] = {}
 
-            client = Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
-            context = _POINTER_MODEL_IO_CONTEXT.get()
-            if context is None:
-                return client
+        def wrap_client(client: Any, role: str) -> Any:
             return _PointerAnthropicClientProxy(
                 client,
-                context=context,
-                agent_role=str(getattr(self, "name", type(self).__name__)),
+                context=pointer_io_context,
+                agent_role=role,
+                call_index_ref=call_index_refs.setdefault(role, [0]),
             )
-        return original(self, provider)
 
-    pointer_llm_client.LLMClient._create_client = _create_client
+        client_wrapper = wrap_client
 
-    original_counting = getattr(
-        pointer_context_manager.LLMContextManager,
-        "_nemo_gym_original_get_counting_client",
-        pointer_context_manager.LLMContextManager._get_counting_client,
+    harden_pointer_agent(
+        pointer_agent,
+        client_options,
+        deadline_monotonic=deadline_monotonic,
+        client_wrapper=client_wrapper,
     )
-    if not hasattr(pointer_context_manager.LLMContextManager, "_nemo_gym_original_get_counting_client"):
-        setattr(
-            pointer_context_manager.LLMContextManager,
-            "_nemo_gym_original_get_counting_client",
-            original_counting,
-        )
 
-    def _get_counting_client(self: Any) -> Any:
-        from anthropic import Anthropic  # noqa: PLC0415
 
-        if not hasattr(self, "_counting_client"):
-            self._counting_client = Anthropic(**_pointer_anthropic_client_options(base_url))
-        return self._counting_client
+def _close_pointer_agent(pointer_agent: Any) -> None:
+    from responses_api_agents.osworld_agent.pointer_runtime import (  # noqa: PLC0415
+        close_pointer_agent,
+    )
 
-    pointer_context_manager.LLMContextManager._get_counting_client = _get_counting_client
+    close_pointer_agent(pointer_agent)
 
 
 def _safe_task_id(task_config: Dict[str, Any]) -> str:
@@ -1779,7 +1846,6 @@ def run_osworld_task(
             agent_cls = load_attr(runner_spec.agent_class_path)
             _sync_pointer_config(policy_model_name)
             _patch_pointer_optional_parallel_tools(disable_parallel_tools)
-            _patch_pointer_anthropic_client(anthropic_base_url)
             pointer_agent = agent_cls(
                 env=env,
                 screen_size=screen_size,
@@ -1787,6 +1853,15 @@ def run_osworld_task(
             )
             pointer_logger, pointer_log_handler = _setup_pointer_task_logger(task_config, pointer_task_dir)
             pointer_agent.reset(instruction, pointer_logger, pointer_task_dir)
+            if use_policy_endpoint and anthropic_base_url:
+                _harden_pointer_agent(
+                    pointer_agent,
+                    _pointer_anthropic_client_options(
+                        anthropic_base_url,
+                        policy_api_key,
+                    ),
+                    deadline_monotonic=task_start + task_timeout,
+                )
         if _record_dir and _record_video_for_task(task_config):
             try:
                 env.controller.start_recording()
@@ -2104,6 +2179,11 @@ def run_osworld_task(
     finally:
         if pointer_io_context_token is not None:
             _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
+        if "pointer_agent" in locals() and pointer_agent is not None:
+            try:
+                _close_pointer_agent(pointer_agent)
+            except Exception:  # noqa: BLE001 - cleanup must not mask rollout results.
+                LOG.exception("PointerAgent client cleanup raised")
         if "pointer_log_handler" in locals() and pointer_log_handler is not None:
             try:
                 pointer_log_handler.flush()
