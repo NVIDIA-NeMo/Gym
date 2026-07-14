@@ -34,16 +34,14 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
     CaptureStore,
-    ModelCallCaptureConfig,
     ModelCallRecord,
     SimpleResponsesAPIModel,
     clear_model_call_captures_for_rollouts,
     maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -279,28 +277,6 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
 
 
 # --- capture-store config + init failure ---
-def test_model_call_capture_keys_are_reserved_global_config():
-    assert {"should_capture_model_calls", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
-
-
-def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path: Path, monkeypatch: MonkeyPatch):
-    with pytest.raises(ValueError, match="required"):
-        ModelCallCaptureConfig(should_capture_model_calls=True)
-    with pytest.raises(ValueError, match="absolute"):
-        ModelCallCaptureConfig(should_capture_model_calls=True, model_call_capture_dir="relative")
-
-    global_config = OmegaConf.create({"should_capture_model_calls": True, "model_call_capture_dir": str(tmp_path)})
-    config = ModelCallCaptureConfig.model_validate(global_config)
-    store = CaptureStore(config.model_call_capture_dir)
-    assert store is not None and store.root == tmp_path
-    assert model_call_capture_dirs_from_config(global_config) == [store.root]
-
-    monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
-    assert model_call_capture_dirs_from_config({}) == []
-    nested_config = {"policy_model": {"responses_api_models": {"model": {"should_capture_model_calls": True}}}}
-    assert model_call_capture_dirs_from_config(nested_config) == []
-
-
 def test_capture_records_non_json_response_as_error_doesnt_record(tmp_path: Path):
     class MyTestSimpleResponsesAPIModel(TestSimpleResponsesAPIModel):
         async def responses(self, body: dict = Body()) -> PlainTextResponse:
@@ -318,18 +294,21 @@ def test_capture_records_non_json_response_as_error_doesnt_record(tmp_path: Path
 
 # --- base-agent correlation helpers ---
 def test_base_agent_resolve_model_call_path():
+    mock_agent = MagicMock()
+    mock_agent._capture_config.should_capture_model_calls = True
+
     with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
+        mock_agent, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
     )
     assert with_id == "http://my-test-url/v1"
 
     with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+        mock_agent, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
     )
     assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
 
     with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
-        None, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+        mock_agent, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
     )
     assert with_id == "/v1/responses/ng-rollout/2-4"
 

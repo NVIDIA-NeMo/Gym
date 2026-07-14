@@ -37,5 +37,7 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        agent = TestSimpleResponsesAPIAgent(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=dict())
+        )
         agent.setup_webserver()
