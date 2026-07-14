@@ -189,16 +189,19 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
         data = body
     else:
         return None
+
     task = data.get(TASK_INDEX_KEY_NAME)
     rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
     if task is None or rollout is None:
         return None
+
     rollout_id = f"{task}-{rollout}"
     attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None:
         attempt_index = int(attempt)
         if attempt_index > 0:
             rollout_id = f"{rollout_id}-a{attempt_index}"
+
     return rollout_id
 
 
