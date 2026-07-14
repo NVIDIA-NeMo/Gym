@@ -78,27 +78,27 @@ async def stage_and_run_eval(
         return float(local.read_text().strip() or 0.0)
 
 
-DELEGATE_RUNNER = """
+AGENT_RUNNER = """
 import asyncio, json, sys
 sys.path.insert(0, "/gym_mount")
 import nemo_gym
 assert nemo_gym.__file__.startswith("/gym_mount"), f"wrong nemo_gym: {{nemo_gym.__file__}}"
 from unittest.mock import MagicMock
 from omegaconf import OmegaConf
-from {delegate_module} import {delegate_class}, {delegate_config_class}
+from {agent_module} import {agent_class}, {agent_config_class}
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
 body = json.load(open("/work/request.json"))
 model_url = open("/work/model_url.txt").read().strip()
-# any __SANDBOX_MODEL_URL__ in the delegate config resolves to the sandbox-reachable model URL
-cfg_raw = open("/work/delegate_config.json").read().replace("__SANDBOX_MODEL_URL__", model_url)
+# any __SANDBOX_MODEL_URL__ in the agent config resolves to the sandbox-reachable model URL
+cfg_raw = open("/work/agent_config.json").read().replace("__SANDBOX_MODEL_URL__", model_url)
 cfg_dict = json.loads(cfg_raw)
 
-cfg = {delegate_config_class}(host="", port=0, entrypoint="", name="delegate", **cfg_dict)
+cfg = {agent_config_class}(host="", port=0, entrypoint="", name="agent", **cfg_dict)
 sc = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=0), global_config_dict=OmegaConf.create({{}}))
-agent = {delegate_class}(config=cfg, server_client=sc)
+agent = {agent_class}(config=cfg, server_client=sc)
 
 params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
 resp = asyncio.run(agent.responses(MagicMock(), params))
@@ -127,10 +127,10 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = 64
     mode: Literal["agent_only_runner", "gym_runner"] = "agent_only_runner"
 
-    delegate_module: Optional[str] = None
-    delegate_class: Optional[str] = None
-    delegate_config_class: Optional[str] = None
-    delegate_config: dict[str, Any] = Field(default_factory=dict)
+    agent_module: Optional[str] = None
+    agent_class: Optional[str] = None
+    agent_config_class: Optional[str] = None
+    agent_config: dict[str, Any] = Field(default_factory=dict)
 
     nested_config_paths: list[str] = Field(default_factory=list)
     nested_agent_port: int = 11001
@@ -161,8 +161,8 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     def _build_gym_tar(self) -> Path:
         root = Path(__file__).resolve().parent.parent.parent
-        # ship only what the delegate imports to keep sandbox uploads small
-        delegate_pkg = "/".join((self.config.delegate_module or "responses_api_agents").split(".")[:-1])
+        # ship only what the in-box agent imports to keep sandbox uploads small
+        agent_pkg = "/".join((self.config.agent_module or "responses_api_agents").split(".")[:-1])
         tar_path = Path(tempfile.gettempdir()) / f"gym_src_{uuid4().hex}.tar.gz"
         subprocess.run(
             [
@@ -180,7 +180,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 "-C",
                 str(root),
                 "nemo_gym",
-                delegate_pkg,
+                agent_pkg,
             ],
             check=True,
         )
@@ -211,10 +211,10 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     def _runner(self) -> tuple[str, str, str]:
         if self.config.mode == "agent_only_runner":
-            script = DELEGATE_RUNNER.format(
-                delegate_module=self.config.delegate_module,
-                delegate_class=self.config.delegate_class,
-                delegate_config_class=self.config.delegate_config_class,
+            script = AGENT_RUNNER.format(
+                agent_module=self.config.agent_module,
+                agent_class=self.config.agent_class,
+                agent_config_class=self.config.agent_config_class,
             )
             return "/work/runner.py", script, f"{self.config.sandbox_python} /work/runner.py"
         script = NESTED_GYM_RUNNER.format(
@@ -279,23 +279,23 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     async def _run_in_sandbox(self, request, body) -> NeMoGymResponse:
         # per-task shape comes from reserved row metadata keys: docker_image (box image),
-        # workdir (delegate repo_dir), sandbox_eval (in-box grading spec), patch_workdir (git diff capture)
+        # workdir (agent repo_dir), sandbox_eval (in-box grading spec), patch_workdir (git diff capture)
         meta = getattr(body, "metadata", None) or {}
         image = meta.get("docker_image") or self.config.sandbox_image
 
         runner_path, runner_script, runner_cmd = self._runner()
-        # the delegate must never see the eval spec, strip it from its request copy
-        delegate_body = body.model_copy(deep=True)
-        if getattr(delegate_body, "metadata", None):
-            delegate_body.metadata = {k: v for k, v in delegate_body.metadata.items() if k != "sandbox_eval"}
-        delegate_config = dict(self.config.delegate_config)
+        # the in-box agent must never see the eval spec, strip it from its request copy
+        agent_body = body.model_copy(deep=True)
+        if getattr(agent_body, "metadata", None):
+            agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
+        agent_config = dict(self.config.agent_config)
         if meta.get("workdir"):
-            delegate_config = delegate_config | {"repo_dir": meta["workdir"]}
+            agent_config = agent_config | {"repo_dir": meta["workdir"]}
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
-            "/work/request.json": delegate_body.model_dump_json(),
-            "/work/delegate_config.json": json.dumps(delegate_config),
+            "/work/request.json": agent_body.model_dump_json(),
+            "/work/agent_config.json": json.dumps(agent_config),
             runner_path: runner_script,
         }
         spec = SandboxSpec(image=image, **dict(self.config.sandbox_spec))
