@@ -298,6 +298,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if self.config.snap_dir and body.metadata:
             task_index = body.metadata.pop("task_index", None)
             attempt = body.metadata.pop("attempt", None)
+            # num_repeats > 1: rollouts of a task share task_index, so fold the
+            # rollout index into the snapshot dir key (sample_{ti}_r{ri}) or
+            # concurrent rollouts clobber each other's snapshot files. Absent
+            # rollout_index (single-rollout runs) keeps legacy sample_{ti} naming.
+            rollout_index = body.metadata.pop("rollout_index", None)
+            if task_index is not None and rollout_index not in (None, ""):
+                task_index = f"{task_index}_r{rollout_index}"
         reset_count = 0
         reset_steps = []  # step numbers at which a context reset fired (for the trajectory header)
         num_tool_calls = 0
@@ -701,6 +708,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     body.responses_create_params.metadata = dict(body.responses_create_params.metadata or {})
                     body.responses_create_params.metadata["task_index"] = str(getattr(body, "_ng_task_index", qid))
                     body.responses_create_params.metadata["attempt"] = str(attempt)
+                    # Disambiguate num_repeats>1 rollouts (same _ng_task_index) in snap paths.
+                    rollout_index = getattr(body, "_ng_rollout_index", None)
+                    if rollout_index is not None:
+                        body.responses_create_params.metadata["rollout_index"] = str(rollout_index)
                 response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path="/v1/responses",
