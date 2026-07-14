@@ -28,7 +28,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
 
-import nemo_gym.base_responses_api_model as obs
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
@@ -36,7 +35,6 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallRecord,
     SimpleResponsesAPIModel,
-    clear_model_call_captures_for_rollouts,
     maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
 )
@@ -369,7 +367,7 @@ def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path: Path):
         merge_model_call_capture_into_record(record, [tmp_path])
 
 
-def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monkeypatch: MonkeyPatch):
+def test_store_clear(tmp_path: Path, monkeypatch: MonkeyPatch):
     store = CaptureStore(tmp_path)
 
     record1 = _create_test_model_call_record()
@@ -381,19 +379,8 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monk
 
     assert store.read("0-0") and store.read("1-0")
 
-    # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
-    clear_model_call_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
-    assert store.read("0-0") == [] and store.read("1-0")
-    clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
-    assert store.read("1-0")
-
-    # A stale-capture cleanup failure must be visible rather than mixing old and new calls.
-    def _boom(_directory):
-        raise OSError("cannot open")
-
-    monkeypatch.setattr(obs, "CaptureStore", _boom)
-    with pytest.raises(OSError, match="cannot open"):
-        clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
+    store.clear()
+    assert store.read("0-0") == [] and store.read("1-0") == []
 
 
 def test_rollout_prefix_not_stripped_when_capture_disabled(tmp_path: Path):

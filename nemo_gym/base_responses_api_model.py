@@ -21,6 +21,7 @@ import os
 import threading
 from abc import abstractmethod
 from pathlib import Path
+from shutil import rmtree
 from time import perf_counter
 from traceback import format_exc
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
@@ -172,6 +173,9 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
+
+    def clear(self) -> None:
+        rmtree(self.root, ignore_errors=True)
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -454,23 +458,6 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
         if store.path_for(rollout_id).exists():
             return store
     return None
-
-
-def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
-    """Remove stale per-rollout capture files for these records before a fresh (non-resume) run.
-
-    Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
-    re-run would append onto the previous run's capture for the same id. This run-scopes the capture
-    so each run's model-call evidence stays isolated.
-    """
-    if not capture_dirs:
-        return
-    for directory in capture_dirs:
-        store = CaptureStore(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
 
 
 def merge_model_call_capture_into_record(

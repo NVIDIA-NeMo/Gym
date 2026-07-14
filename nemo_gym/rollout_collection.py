@@ -34,7 +34,7 @@ from wandb import Table
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
+    CaptureStore,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
@@ -525,8 +525,10 @@ class RolloutCollectionHelper(BaseModel):
         # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
         # same rollout ids, so clear the capture files this run is about to (re)write.
         if capture_dirs and not config.resume_from_cache:
-            print("Clearing previously captured model calls because resume_from_cache=false")
-            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+            print(f"Clearing previously captured model calls dir {capture_dirs} because resume_from_cache=false")
+            for capture_dir in capture_dirs:
+                store = CaptureStore(capture_dir)
+                store.clear()
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
