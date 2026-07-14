@@ -92,14 +92,6 @@ Check Docker:
 docker info --format '{{.ServerVersion}}'
 ```
 
-Validate the benchmark configuration without starting servers:
-
-```bash
-uv run gym env validate \
-  --benchmark agent_skills \
-  +agent_skills_sandbox_image=nemo-gym-agent-skills:create-environment-smoke
-```
-
 ## Build The Sandbox Fixture Image
 
 Run from the Gym repository root:
@@ -137,6 +129,16 @@ docker run --rm --entrypoint /bin/sh "${IMAGE}" -c '
 `GYM_REVISION` must be reachable from the configured `GYM_REPOSITORY`. If you are working from a fork, pass `--build-arg GYM_REPOSITORY=<your-git-url>`.
 
 </Note>
+
+Validate the benchmark configuration with the image reference you just built:
+
+```bash
+uv run gym env validate \
+  --benchmark agent_skills \
+  +agent_skills_sandbox_image="${IMAGE}"
+```
+
+This checks Gym configuration, paths, and cross-references without starting servers. The Docker image itself was verified by the preceding `docker run`; sandbox startup performs the final availability check during evaluation.
 
 ## Create A Smoke Experiment
 
