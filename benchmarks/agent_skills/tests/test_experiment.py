@@ -3,7 +3,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from benchmarks.agent_skills.scripts.run_experiment import (
     load_manifest,
     run_experiment,
     snapshot_arm_skills,
+    unsafe_uv_project_ancestor,
     validate_skills_provenance,
 )
 
@@ -255,6 +256,27 @@ def test_fresh_run_rejects_nonempty_unlocked_output(tmp_path: Path) -> None:
             dry_run=True,
             allow_dirty=True,
         )
+
+
+def test_detects_project_aware_uv_ancestor() -> None:
+    process = MagicMock()
+    project_uv = MagicMock()
+    project_uv.cmdline.return_value = ["uv", "run", "python", "driver.py"]
+    process.parents.return_value = [project_uv]
+    with patch(
+        "benchmarks.agent_skills.scripts.run_experiment.psutil.Process",
+        return_value=process,
+    ):
+        assert unsafe_uv_project_ancestor() is True
+
+    no_project_uv = MagicMock()
+    no_project_uv.cmdline.return_value = ["uv", "run", "--no-project", "python", "driver.py"]
+    process.parents.return_value = [no_project_uv]
+    with patch(
+        "benchmarks.agent_skills.scripts.run_experiment.psutil.Process",
+        return_value=process,
+    ):
+        assert unsafe_uv_project_ancestor() is False
 
 
 def test_comparison_rejects_partial_arm() -> None:

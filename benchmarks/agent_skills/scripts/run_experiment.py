@@ -8,12 +8,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+import psutil
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
@@ -103,6 +105,24 @@ def resolve_repo_path(path: str) -> Path:
 
 def load_manifest(path: Path) -> ExperimentManifest:
     return ExperimentManifest.model_validate(yaml.safe_load(path.read_text()))
+
+
+def unsafe_uv_project_ancestor() -> bool:
+    """Return whether this process inherits a project-aware ``uv run`` wrapper."""
+
+    for parent in psutil.Process().parents():
+        try:
+            command = parent.cmdline()
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+        if (
+            len(command) > 1
+            and os.path.basename(command[0]) == "uv"
+            and command[1] == "run"
+            and "--no-project" not in command[2:]
+        ):
+            return True
+    return False
 
 
 def _jsonl_paths(value: Any) -> list[str]:
@@ -414,6 +434,13 @@ def main() -> None:
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+
+    if unsafe_uv_project_ancestor():
+        raise RuntimeError(
+            "Do not launch this driver with project-aware `uv run`: Ray server subprocesses "
+            "use server-specific working directories. Use `.venv/bin/python "
+            "benchmarks/agent_skills/scripts/run_experiment.py ...` instead."
+        )
 
     manifest_path = args.config.resolve()
     manifest = load_manifest(manifest_path)

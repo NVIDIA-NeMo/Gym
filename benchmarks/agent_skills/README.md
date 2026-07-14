@@ -34,16 +34,18 @@ benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml
 Preview the locked commands and skill snapshot without running inference:
 
 ```bash
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+python benchmarks/agent_skills/scripts/run_experiment.py \
   --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
   --output-dir results/agent-skills/create-environment-v1 \
   --dry-run
 ```
 
+Use `.venv/bin/python` rather than `uv run python`: Ray server subprocesses use server-specific working directories, which are incompatible with inheriting the repository-root uv project hook.
+
 Run all configured arms and generate the paired comparison:
 
 ```bash
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
   --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
   --output-dir results/agent-skills/create-environment-v1 \
   --resume

@@ -190,11 +190,17 @@ git status --short
 Preview the commands:
 
 ```bash
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
   --config /tmp/create-environment-smoke.yaml \
   --output-dir results/agent-skills/create-environment-smoke \
   --dry-run
 ```
+
+<Note>
+
+Invoke the experiment driver with `.venv/bin/python`, not `uv run python`. The driver starts Gym server subprocesses whose Ray working directories are server-specific subdirectories; wrapping the driver in `uv run` makes Ray inherit the repository-root uv project and reject those working directories.
+
+</Note>
 
 The dry run:
 
@@ -232,7 +238,7 @@ The lock records the driver revision and fixture image identity separately. It d
 Execute the locked plan:
 
 ```bash
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
   --config /tmp/create-environment-smoke.yaml \
   --output-dir results/agent-skills/create-environment-smoke \
   --resume
@@ -371,12 +377,12 @@ output.write_text(yaml.safe_dump(config, sort_keys=False))
 print(output)
 PY
 
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
   --config /tmp/create-environment-v1.yaml \
   --output-dir results/agent-skills/create-environment-v1 \
   --dry-run
 
-uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
   --config /tmp/create-environment-v1.yaml \
   --output-dir results/agent-skills/create-environment-v1 \
   --resume

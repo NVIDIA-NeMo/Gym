@@ -1,2 +1,5 @@
-!data/*.jsonl
-!fixtures/**/*.jsonl
+!data/create_environment_development.jsonl
+!data/create_environment_validation.jsonl
+!fixtures/create-environment-sql/sql_tasks.jsonl
+data/*_metrics.json
+data/*_prepare.jsonl
