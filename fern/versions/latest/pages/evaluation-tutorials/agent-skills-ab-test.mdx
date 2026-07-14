@@ -4,8 +4,6 @@ description: "Run a sandboxed control-versus-treatment evaluation of a coding-ag
 position: 4
 ---
 
-# Evaluate an Agent Skill
-
 This walkthrough evaluates whether the `nemo-gym-create-environment` skill helps Claude Code build a valid NeMo Gym environment.
 
 You will:
@@ -115,12 +113,14 @@ Verify the sandbox fixture image:
 
 ```bash
 docker run --rm --entrypoint /bin/sh "${IMAGE}" -c '
+  set -eu
   test -x /workspace/nemo-gym/.venv/bin/python
   test -f /task_inputs/shop.db
   test -f /task_inputs/sql_tasks.jsonl
   test ! -e /workspace/nemo-gym/.agents/skills
   cd /workspace/nemo-gym
   test -z "$(git status --porcelain)"
+  echo "Sandbox fixture image checks passed."
 '
 ```
 
