@@ -135,7 +135,7 @@ def test_run_stages_config_executes_agent_and_captures_patch(tmp_path: Path) -> 
     result = asyncio.run(
         _runner(fake).run(
             command=["claude", "-p", "--", "create probe.txt"],
-            env={"ANTHROPIC_API_KEY": "secret"},
+            env={"ANTHROPIC_API_KEY": "secret"},  # pragma: allowlist secret
             config_dir=_config_dir(tmp_path),
         )
     )

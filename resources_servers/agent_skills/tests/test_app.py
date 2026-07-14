@@ -154,7 +154,7 @@ async def test_patch_verifier_applies_patch_and_runs_hidden_check(tmp_path: Path
     assert fake.exec_kwargs[-1]["cwd"] == "/tmp/nemo_gym_hidden_checks"
     assert fake.exec_kwargs[-1]["user"] == "root"
     assert "su -s /bin/sh nobody" in fake.exec_calls[-1]
-    assert "NEMO_GYM_WORKSPACE=/workspace/nemo-gym" in fake.exec_calls[-1]
+    assert "NEMO_GYM_WORKSPACE=/workspace/nemo-gym" in fake.exec_calls[-1]  # pragma: allowlist secret
     assert fake.uploaded_files["/tmp/nemo_gym_hidden_checks/hidden_tests/test_probe.py"].startswith("def test_probe")
     assert fake.uploaded_files["/tmp/nemo_gym_hidden_checks/hidden_tests/path_backed.py"] == "assert True\n"
     apply_event = next(
