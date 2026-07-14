@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_model import CaptureStore, aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.base_responses_api_model import CaptureStore, aggregate_model_call_metrics
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -130,7 +130,7 @@ class TestApp:
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
         )
-        calls = read_model_call_records(CaptureStore(tmp_path), "chat-test")
+        calls = CaptureStore(tmp_path).read("chat-test")
         assert len(calls) == 1 and calls[0].dialect == "chat"
 
     async def test_responses(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -163,7 +163,7 @@ class TestApp:
         assert called_args_response.get("model") == "dummy_model"
 
         server._client.create_response.assert_any_await(input="hello", model="dummy_model")
-        calls = read_model_call_records(CaptureStore(tmp_path), "openai-test")
+        calls = CaptureStore(tmp_path).read("openai-test")
         assert len(calls) == 1
         assert calls[0].dialect == "responses"
         assert calls[0].model_server == "test_model_server"
@@ -192,7 +192,7 @@ class TestApp:
 
         assert response.status_code == 200
         assert "event: message_stop" in response.text
-        calls = read_model_call_records(CaptureStore(tmp_path), "messages-test")
+        calls = CaptureStore(tmp_path).read("messages-test")
         assert len(calls) == 1 and calls[0].dialect == "messages"
 
     def test_semaphore_disabled_by_default(self) -> None:

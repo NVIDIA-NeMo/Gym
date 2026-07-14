@@ -58,11 +58,10 @@ Concurrent collection jobs with overlapping indices must use separate capture di
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
     aggregate_model_call_metrics,
-    read_model_call_records,
 )
 
 store = CaptureStore("/data/model-calls")
-calls = read_model_call_records(store, rollout_id)
+calls = store.read(rollout_id)
 totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 

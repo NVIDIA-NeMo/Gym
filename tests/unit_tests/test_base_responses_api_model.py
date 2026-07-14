@@ -41,7 +41,6 @@ from nemo_gym.base_responses_api_model import (
     maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
-    read_model_call_records,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -189,7 +188,7 @@ def test_capture_store_orjson_round_trip_preserves_unicode_and_blank_lines(tmp_p
     record2.request.input[0].content[0]["text"] = "second"
 
     store.record(record2)
-    assert read_model_call_records(store, TEST_ROLLOUT_ID) == [record, record2]
+    assert store.read(TEST_ROLLOUT_ID) == [record, record2]
 
 
 def test_capture_store_raises_on_malformed_nonblank_json(tmp_path: Path):
@@ -215,7 +214,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path: Path):
     r = client.post("/v1/ng-rollout/r-raise/responses", json={"input": "x"})
     assert r.status_code == 500  # error propagated, response unchanged
 
-    calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
+    calls = CaptureStore(tmp_path).read("r-raise")
     assert len(calls) == 1
     assert calls[0].response is None
     assert calls[0].error_response is not None and "RuntimeError" in calls[0].error_response
@@ -231,19 +230,19 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path: Pa
     # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
     r = client.post("/v1/ng-rollout/task7-roll2/responses", json={"input": "hi"})
     assert r.status_code == 200
-    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
+    calls = CaptureStore(tmp_path).read("task7-roll2")
     assert len(calls) == 1
 
     # Prefixed base_url: routes to /v1/responses and correlates capture by the path id.
     r = client.post("/v1/responses/ng-rollout/task7-roll2/", json={"input": "hi"})
     assert r.status_code == 200
-    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
+    calls = CaptureStore(tmp_path).read("task7-roll2")
     assert len(calls) == 2
 
     # Plain /v1 URL is routed normally but is not captured without an explicit rollout prefix.
     r2 = client.post("/v1/responses", json={"input": "hi"})
     assert r2.status_code == 200
-    assert read_model_call_records(CaptureStore(tmp_path), "rollout") == []
+    assert CaptureStore(tmp_path).read("rollout") == []
 
 
 def test_per_rollout_prefix_not_stripped_for_non_observed_paths_too(tmp_path: Path):

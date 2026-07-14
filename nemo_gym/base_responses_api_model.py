@@ -423,11 +423,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 # --- Observability records derived from captured exchanges ---
 
 
-def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelCallRecord]:
-    """Read captured exchanges in durable append order."""
-    return store.read(rollout_id)
-
-
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
     """Aggregate token and latency values from model-call records."""
 
@@ -438,7 +433,7 @@ def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]
 
 def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
     """Aggregate model-call metrics for one rollout id."""
-    return aggregate_model_call_records(read_model_call_records(store, rollout_id))
+    return aggregate_model_call_records(store.read(rollout_id))
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
@@ -500,7 +495,7 @@ def merge_model_call_capture_into_record(
     if store is None:
         return record
 
-    calls = read_model_call_records(store, rollout_id)
+    calls = store.read(rollout_id)
     if not calls:
         return record
 
