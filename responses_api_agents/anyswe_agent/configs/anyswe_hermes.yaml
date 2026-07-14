@@ -3,7 +3,7 @@ anyswe_hermes:
     anyswe_agent:
       entrypoint: app.py
       domain: coding
-      description: SWE-bench run by the hermes agent natively inside the task container.
+      description: SWE-bench run by Hermes Agent natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
       agent_server_module: responses_api_agents.hermes_agent.app
