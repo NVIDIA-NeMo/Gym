@@ -135,6 +135,28 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 The provider also normalizes metadata values for backend labels by replacing unsupported characters and truncating values to the provider limit.
 
+## Job Attribution
+
+Every sandbox's metadata automatically includes `team`, `user`, and `workload` keys so cluster
+operators can attribute running sandboxes (OpenSandbox stores metadata as Kubernetes labels on
+the sandbox and supports filtering the list API by metadata, e.g. `team=my-team`).
+
+Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
+`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` environment variables, then Slurm job environment
+variables (`SLURM_JOB_ACCOUNT` / `SLURM_JOB_USER` / `SLURM_JOB_NAME`), then the OS login name
+for `user`. Fields that cannot be resolved are omitted. Explicit `sandbox_spec.metadata` and
+`default_metadata` keys always take precedence over attribution keys.
+
+```yaml
+sandbox:
+  opensandbox:
+    attribution:
+      enabled: true      # set false to disable automatic attribution
+      # team: my-team    # override auto-detection
+      # user: my-user
+      # workload: my-benchmark
+```
+
 ## Lifecycle
 
 The provider creates one OpenSandbox sandbox per Gym sandbox:

@@ -24,6 +24,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from nemo_gym.sandbox.attribution import resolve_attribution
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -344,6 +345,23 @@ class OpenSandboxConnectionConfig:
 
 
 @dataclass(frozen=True)
+class OpenSandboxAttributionConfig:
+    """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
+
+    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
+    environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
+    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user``. Fields that
+    cannot be resolved are omitted. Explicit ``SandboxSpec.metadata`` keys always take
+    precedence over attribution keys.
+    """
+
+    enabled: bool = True
+    team: str | None = None
+    user: str | None = None
+    workload: str | None = None
+
+
+@dataclass(frozen=True)
 class OpenSandboxCreateConfig:
     """OpenSandbox create/reconnect retry settings."""
 
@@ -495,11 +513,13 @@ class OpenSandboxProvider:
         create: OpenSandboxCreateConfig | Mapping[str, Any] | None = None,
         probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
+        attribution: OpenSandboxAttributionConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
+        self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -812,8 +832,22 @@ class OpenSandboxProvider:
 
         raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
 
+    def _attribution_metadata(self) -> dict[str, str]:
+        if not self._attribution.enabled:
+            return {}
+        return resolve_attribution(
+            team=self._attribution.team,
+            user=self._attribution.user,
+            workload=self._attribution.workload,
+        )
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        """Create one sandbox through the configured OpenSandbox path."""
+        """Create one sandbox through the configured OpenSandbox path.
+
+        Job attribution keys (``team`` / ``user`` / ``workload``) are merged into the spec's
+        metadata (explicit spec keys win) so every sandbox is attributable via its labels.
+        """
+        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
         return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

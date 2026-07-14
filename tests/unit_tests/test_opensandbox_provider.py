@@ -734,3 +734,78 @@ async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch)
 
 async def _return_value(value: Any) -> Any:
     return value
+
+
+ATTRIBUTION_ENV_VARS = (
+    "NEMO_GYM_TEAM",
+    "NEMO_GYM_USER",
+    "NEMO_GYM_WORKLOAD",
+    "SLURM_JOB_ACCOUNT",
+    "SLURM_JOB_USER",
+    "SLURM_JOB_NAME",
+)
+
+
+@pytest.fixture
+def clean_attribution_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ATTRIBUTION_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+async def test_create_injects_attribution_metadata(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "nemo rl")  # sanitized to a valid label value below
+    monkeypatch.setenv("NEMO_GYM_USER", "alice")
+    monkeypatch.setenv("NEMO_GYM_WORKLOAD", "swe-gym")
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {
+        "team": "nemo_rl",
+        "user": "alice",
+        "workload": "swe-gym",
+        "purpose": "test",
+    }
+
+
+async def test_create_spec_metadata_and_config_win_over_attribution_detection(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "env-team")
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload"},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag", metadata={"team": "explicit-team"}))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {
+        "team": "explicit-team",
+        "user": "cfg-user",
+        "workload": "cfg-workload",
+    }
+
+
+async def test_create_attribution_disabled(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"enabled": False, "team": "cfg-team"},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {}
