@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 from starlette.background import BackgroundTask
 
+from nemo_gym import RESULTS_DIR
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
@@ -83,9 +84,8 @@ class ModelCallCaptureConfig(BaseModel):
         if self.model_call_capture_dir is None:
             raise ValueError("model_call_capture_dir is required when observability_enabled=true")
 
-        # TODO @bxyu-nvidia: Make this use the cwd as a default
         if not self.model_call_capture_dir.is_absolute():
-            raise ValueError("model_call_capture_dir must be an absolute path")
+            self.model_call_capture_dir = RESULTS_DIR / self.model_call_capture_dir
 
         return self
 
