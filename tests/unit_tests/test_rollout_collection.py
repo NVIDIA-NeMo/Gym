@@ -666,7 +666,7 @@ class TestRolloutCollection:
         capture_dir = tmp_path / "captures"
         get_global_config_dict = MagicMock(
             return_value={
-                "observability_enabled": True,
+                "should_capture_model_calls": True,
                 "model_call_capture_dir": str(capture_dir),
             }
         )

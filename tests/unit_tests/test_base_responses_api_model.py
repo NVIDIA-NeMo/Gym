@@ -66,7 +66,7 @@ class TestBaseResponsesAPIModel:
     def test_BaseResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
         BaseResponsesAPIModel(config=config)
-        assert "observability_enabled" not in BaseResponsesAPIModelConfig.model_fields
+        assert "should_capture_model_calls" not in BaseResponsesAPIModelConfig.model_fields
         assert "model_call_capture_dir" not in BaseResponsesAPIModelConfig.model_fields
 
     def test_SimpleResponsesAPIModel(self) -> None:
@@ -154,11 +154,11 @@ class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
 def _create_test_app_with_model_call_capture(
     tmp_path: Path,
     TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = TestSimpleResponsesAPIModel,
-    observability_enabled: bool = True,
+    should_capture_model_calls: bool = True,
 ) -> FastAPI:
     mock_server_client = MagicMock(spec=ServerClient)
     mock_server_client.global_config_dict = OmegaConf.create(
-        {"observability_enabled": observability_enabled, "model_call_capture_dir": str(tmp_path)}
+        {"should_capture_model_calls": should_capture_model_calls, "model_call_capture_dir": str(tmp_path)}
     )
 
     model_server = TestSimpleResponsesAPIModel_cls(
@@ -281,16 +281,16 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
 
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
-    assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
+    assert {"should_capture_model_calls", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path: Path, monkeypatch: MonkeyPatch):
     with pytest.raises(ValueError, match="required"):
-        ModelCallCaptureConfig(observability_enabled=True)
+        ModelCallCaptureConfig(should_capture_model_calls=True)
     with pytest.raises(ValueError, match="absolute"):
-        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir="relative")
+        ModelCallCaptureConfig(should_capture_model_calls=True, model_call_capture_dir="relative")
 
-    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
+    global_config = OmegaConf.create({"should_capture_model_calls": True, "model_call_capture_dir": str(tmp_path)})
     config = ModelCallCaptureConfig.model_validate(global_config)
     store = CaptureStore(config.model_call_capture_dir)
     assert store is not None and store.root == tmp_path
@@ -298,7 +298,7 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path: 
 
     monkeypatch.setenv("NEMO_GYM_MODEL_CALL_CAPTURE_DIR", str(tmp_path))
     assert model_call_capture_dirs_from_config({}) == []
-    nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
+    nested_config = {"policy_model": {"responses_api_models": {"model": {"should_capture_model_calls": True}}}}
     assert model_call_capture_dirs_from_config(nested_config) == []
 
 
@@ -419,7 +419,7 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path: Path, monk
 
 
 def test_rollout_prefix_not_stripped_when_capture_disabled(tmp_path: Path):
-    app = _create_test_app_with_model_call_capture(tmp_path, observability_enabled=False)
+    app = _create_test_app_with_model_call_capture(tmp_path, should_capture_model_calls=False)
 
     client = TestClient(app)
     # Dummy input to just test it doesn't 404

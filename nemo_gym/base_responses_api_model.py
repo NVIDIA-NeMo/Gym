@@ -73,16 +73,16 @@ class BaseResponsesAPIModel(BaseServer):
 class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
-    observability_enabled: bool = False
+    should_capture_model_calls: bool = False
     model_call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
-        if not self.observability_enabled:
+        if not self.should_capture_model_calls:
             return self
 
         if self.model_call_capture_dir is None:
-            raise ValueError("model_call_capture_dir is required when observability_enabled=true")
+            raise ValueError("model_call_capture_dir is required when should_capture_model_calls=true")
 
         if not self.model_call_capture_dir.is_absolute():
             self.model_call_capture_dir = RESULTS_DIR / self.model_call_capture_dir
@@ -209,7 +209,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self.setup_session_middleware(app)
 
         self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if self._capture_config.observability_enabled:
+        if self._capture_config.should_capture_model_calls:
             # Model call capture middleware must be the final middleware added so
             # 1. It is run first on request, the closest to the original request sent to the endpoint
             # 2. It is run last on response, so it can capture the response closest to what is sent back.
@@ -444,7 +444,7 @@ def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[s
 def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
     """Return the single run-wide capture directory when capture is enabled."""
     config = ModelCallCaptureConfig.model_validate(global_config_dict)
-    if not config.observability_enabled:
+    if not config.should_capture_model_calls:
         return []
     assert config.model_call_capture_dir is not None  # enforced by ModelCallCaptureConfig
     return [config.model_call_capture_dir]

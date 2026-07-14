@@ -76,7 +76,7 @@ class TestApp:
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_model_calls": True,
             "model_call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
@@ -136,7 +136,7 @@ class TestApp:
     async def test_responses(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_model_calls": True,
             "model_call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
@@ -173,7 +173,7 @@ class TestApp:
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_model_calls": True,
             "model_call_capture_dir": str(tmp_path),
         }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
