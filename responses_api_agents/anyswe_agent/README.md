@@ -59,9 +59,15 @@ agent_kwargs:
 ```
 
 For large runs, bake `/agent_deps_mount/bin/python`, NeMo Gym, and the selected
-agent into each task image. For development, set `upload_agent_runtime: true` to
-build the portable runtime with `setup_scripts/<agent>_deps.sh` and upload it to
-each sandbox.
+agent into each task image. `agent_runtime_source` controls other delivery modes:
+
+- `baked` uses the runtime in the task image and is the default.
+- `auto` builds the portable runtime with `setup_scripts/<agent>_deps.sh` once
+  and uploads the resulting archive to each sandbox.
+- A local tarball path uploads a prebuilt runtime.
+- An HTTP(S) URL downloads a prebuilt runtime inside the sandbox.
+
+Each archive must unpack the runtime directly under `/agent_deps_mount`.
 
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
