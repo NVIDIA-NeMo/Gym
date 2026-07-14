@@ -19,16 +19,14 @@ from pathlib import Path
 
 HF_DATASET = "princeton-nlp/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
-DEFAULT_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
 _THIS_DIR = Path(__file__).parent
 
 
-def _to_gym_row(inst: dict, split: str, sampling: dict) -> dict:
+def _to_gym_row(inst: dict, split: str) -> dict:
     return {
         "responses_create_params": {
             "input": [],
-            **sampling,
             "metadata": {
                 "instance_id": inst["instance_id"],
                 "dataset_name": HF_DATASET,
@@ -40,7 +38,7 @@ def _to_gym_row(inst: dict, split: str, sampling: dict) -> dict:
     }
 
 
-def build_dataset(output: Path, split: str, limit: int | None, instance_id: str | None, sampling: dict) -> None:
+def build_dataset(output: Path, split: str, limit: int | None, instance_id: str | None) -> None:
     try:
         from datasets import load_dataset
     except ImportError:
@@ -61,7 +59,7 @@ def build_dataset(output: Path, split: str, limit: int | None, instance_id: str 
     with output.open("w") as f:
         for inst in rows:
             inst = dict(inst)
-            f.write(json.dumps(_to_gym_row(inst, split, sampling)) + "\n")
+            f.write(json.dumps(_to_gym_row(inst, split)) + "\n")
             count += 1
     print(f"Wrote {count} rows -> {output}", flush=True)
 
@@ -72,20 +70,9 @@ def main() -> None:
     p.add_argument("--split", default=DEFAULT_SPLIT)
     p.add_argument("--limit", type=int, default=None, help="Only the first N instances (default: all)")
     p.add_argument("--instance-id", default=None, help="Only this instance")
-    p.add_argument("--model", default=DEFAULT_MODEL, help="Default model baked into each row")
-    p.add_argument("--temperature", type=float, default=0.7)
-    p.add_argument("--top-p", type=float, default=0.8)
-    p.add_argument("--max-output-tokens", type=int, default=12288)
     args = p.parse_args()
 
-    sampling = {
-        "model": args.model,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "max_output_tokens": args.max_output_tokens,
-    }
-
-    build_dataset(args.output, args.split, args.limit, args.instance_id, sampling)
+    build_dataset(args.output, args.split, args.limit, args.instance_id)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ task image through its `image` field or `container_formatter`.
 
 ## Agents
 
-The included configurations run Hermes, Claude Code, OpenClaw, or OpenCode with
+The included configurations run Hermes Agent, Claude Code, Pi, OpenClaw, or OpenCode with
 the same sandbox and grading path. Configure another Gym agent with:
 
 ```yaml

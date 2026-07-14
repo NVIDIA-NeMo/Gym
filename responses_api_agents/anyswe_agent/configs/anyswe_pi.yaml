@@ -1,0 +1,35 @@
+anyswe_pi:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by Pi inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.pi_agent.app
+      agent_server_class: PiAgent
+      agent_config_class: PiAgentConfig
+      agent_kwargs:
+        model: nemo/model
+        workspace_root: /tmp/pi-agent
+        thinking: high
+        timeout: 3600
+        pi_version: 0.80.2
+        system_prompt: Fix the bug in the repository at /testbed. Inspect and edit the source, run relevant checks, and leave the final fix applied.
+        models_config: {}
+
+      container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
+      sandbox_provider: sandbox
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      swebench_agent_timeout: 3900
+      swebench_tests_timeout: 1800
+      concurrency: 4
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl

@@ -3,7 +3,7 @@ anyswe_claude_code:
     anyswe_agent:
       entrypoint: app.py
       domain: coding
-      description: SWE-bench run by claude-code natively inside the task container.
+      description: SWE-bench run by Claude Code natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
       agent_server_module: responses_api_agents.claude_code_agent.app
