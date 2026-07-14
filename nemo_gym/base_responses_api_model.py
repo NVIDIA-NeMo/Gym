@@ -427,15 +427,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 # --- Run-level capture helpers (rollout-collection side) ---
 
 
-def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
-    """Return the single run-wide capture directory when capture is enabled."""
-    config = ModelCallCaptureConfig.model_validate(global_config_dict)
-    if not config.should_capture_model_calls:
-        return []
-    assert config.model_call_capture_dir is not None  # enforced by ModelCallCaptureConfig
-    return [config.model_call_capture_dir]
-
-
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
     for directory in capture_dirs:
         store = CaptureStore(directory)

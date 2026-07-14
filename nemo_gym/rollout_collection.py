@@ -35,8 +35,8 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
+    ModelCallCaptureConfig,
     merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
@@ -520,15 +520,16 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        capture_config = ModelCallCaptureConfig.model_validate(get_global_config_dict())
 
         # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
         # same rollout ids, so clear the capture files this run is about to (re)write.
-        if capture_dirs and not config.resume_from_cache:
-            print(f"Clearing previously captured model calls dir {capture_dirs} because resume_from_cache=false")
-            for capture_dir in capture_dirs:
-                store = CaptureStore(capture_dir)
-                store.clear()
+        if capture_config.should_capture_model_calls and not config.resume_from_cache:
+            print(
+                f"Clearing previously captured model calls dir {capture_config.model_call_capture_dir} because resume_from_cache=false"
+            )
+            store = CaptureStore(capture_config.model_call_capture_dir)
+            store.clear()
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -547,8 +548,8 @@ class RolloutCollectionHelper(BaseModel):
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs:
-                merge_model_call_capture_into_record(result, capture_dirs)
+            if capture_config.should_capture_model_calls:
+                merge_model_call_capture_into_record(result, [capture_config.model_call_capture_dir])
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
