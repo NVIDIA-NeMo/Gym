@@ -185,9 +185,8 @@ class ResponsesConverter(BaseModel):
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
         else:
-            tool_choice = responses_create_params.get("tool_choice")
-            if tool_choice not in (None, "auto", "none"):
-                raise ValueError(f"tool_choice={tool_choice!r} requires at least one tool")
+            if responses_create_params.get("tool_choice") == "required":
+                raise ValueError("tool_choice='required' requires at least one tool")
 
             responses_create_params.pop("tool_choice", None)
             responses_create_params.pop("parallel_tool_calls", None)
