@@ -21,9 +21,11 @@ Two modes:
     Wraps environments without a clean responses/verify split.
 """
 
+import asyncio
 import json
 import logging
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -78,76 +80,6 @@ async def stage_and_run_eval(
         return float(local.read_text().strip() or 0.0)
 
 
-## Run an agent harness implemented in another agent server responses() in the sandbox.
-AGENT_RUNNER = """
-import asyncio, json, sys
-sys.path.insert(0, "/gym_mount")
-import nemo_gym
-assert nemo_gym.__file__.startswith("/gym_mount"), f"wrong nemo_gym: {{nemo_gym.__file__}}"
-from unittest.mock import MagicMock
-from omegaconf import OmegaConf
-from {agent_module} import {agent_class}, {agent_config_class}
-from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-
-body = json.load(open("/work/request.json"))
-model_url = open("/work/model_url.txt").read().strip()
-# any __SANDBOX_MODEL_URL__ in the agent config resolves to the sandbox-reachable model URL
-cfg_raw = open("/work/agent_config.json").read().replace("__SANDBOX_MODEL_URL__", model_url)
-cfg_dict = json.loads(cfg_raw)
-
-cfg = {agent_config_class}(host="", port=0, entrypoint="", name="agent", **cfg_dict)
-sc = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=0), global_config_dict=OmegaConf.create({{}}))
-agent = {agent_class}(config=cfg, server_client=sc)
-
-params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
-resp = asyncio.run(agent.responses(MagicMock(), params))
-open("/work/response.json", "w").write(resp.model_dump_json())
-print("RUNNER_DONE")
-"""
-
-## Start and run Nemo Gym in container
-GYM_RUNNER = """
-import subprocess, time, urllib.request
-
-model_url = open("/work/model_url.txt").read().strip()
-overrides = ["+policy_base_url=" + model_url + "/v1"] + {overrides}
-subprocess.Popen(
-    ["ng_run", "+config_paths=[{config_paths}]"] + overrides,
-    stdout=open("/work/gym.log", "w"), stderr=subprocess.STDOUT,
-)
-for _ in range(150):
-    try:
-        urllib.request.urlopen("http://127.0.0.1:{agent_port}/health", timeout=2)
-        break
-    except Exception:
-        time.sleep(2)
-
-try:
-    subprocess.run(
-        [
-            "ng_collect_rollouts",
-            "+config_paths=[{config_paths}]",
-            "+input_jsonl_fpath=/work/input.jsonl",
-            "+output_jsonl_fpath=/work/rollouts.jsonl",
-            "+agent_name={agent_name}",
-        ]
-        + overrides,
-        stdout=open("/work/collect.log", "w"), stderr=subprocess.STDOUT,
-        timeout={timeout}, check=True,
-    )
-except Exception:
-    for f in ("/work/collect.log", "/work/gym.log"):
-        try:
-            print(f, open(f).read()[-3000:])
-        except OSError:
-            pass
-    raise
-print("RUNNER_DONE")
-"""
-
-
 class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -169,6 +101,8 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     setup_commands: list[str] = Field(default_factory=list)
     sandbox_python: str = "python3"
+    # "auto" tars the local repo, or a path to a prebuilt tar.gz, or a URL fetched in the sandbox
+    gym_source: str = "auto"
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
@@ -186,7 +120,15 @@ class SandboxAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         self._provider = create_provider(self.config.sandbox_provider)
-        self._gym_tar = self._build_gym_tar() if self.config.mode == "agent_only_runner" else None
+        self._gym_tar = None
+        self._gym_source_url = None
+        if self.config.mode == "agent_only_runner":
+            if self.config.gym_source == "auto":
+                self._gym_tar = self._build_gym_tar()
+            elif "://" in self.config.gym_source:
+                self._gym_source_url = self.config.gym_source
+            else:
+                self._gym_tar = Path(self.config.gym_source)
 
     def _build_gym_tar(self) -> Path:
         root = Path(__file__).resolve().parent.parent.parent
@@ -237,22 +179,24 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         netloc = f"{host}:{parsed.port}" if parsed.port else host
         return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
 
-    def _runner(self) -> tuple[str, str, str]:
+    def _runner(self) -> tuple[str, dict, str]:
         if self.config.mode == "agent_only_runner":
-            script = AGENT_RUNNER.format(
-                agent_module=self.config.agent_module,
-                agent_class=self.config.agent_class,
-                agent_config_class=self.config.agent_config_class,
-            )
+            script = (Path(__file__).parent / "agent_runner.py").read_text()
+            runner_config = {
+                "agent_module": self.config.agent_module,
+                "agent_class": self.config.agent_class,
+                "agent_config_class": self.config.agent_config_class,
+            }
         else:
-            script = GYM_RUNNER.format(
-                config_paths=",".join(self.config.nested_config_paths),
-                overrides=json.dumps(self.config.nested_overrides),
-                agent_name=self.config.nested_agent_name,
-                agent_port=self.config.nested_agent_port,
-                timeout=self.config.rollout_timeout,
-            )
-        return "/work/runner.py", script, f"{self.config.sandbox_python} /work/runner.py"
+            script = (Path(__file__).parent / "gym_runner.py").read_text()
+            runner_config = {
+                "config_paths": list(self.config.nested_config_paths),
+                "overrides": list(self.config.nested_overrides),
+                "agent_name": self.config.nested_agent_name,
+                "agent_port": self.config.nested_agent_port,
+                "timeout": self.config.rollout_timeout,
+            }
+        return script, runner_config, f"{self.config.sandbox_python} /work/runner.py"
 
     async def run(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
         if self.config.mode == "gym_runner":
@@ -313,8 +257,17 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                     local = Path(td) / str(i)
                     local.write_text(content)
                     await self._provider.upload_file(handle, local, target)
-            if self._gym_tar is not None:
-                await self._provider.upload_file(handle, self._gym_tar, "/work/gym_src.tar.gz")
+            if self._gym_tar is not None or self._gym_source_url is not None:
+                if self._gym_tar is not None:
+                    await self._provider.upload_file(handle, self._gym_tar, "/work/gym_src.tar.gz")
+                else:
+                    r = await self._provider.exec(
+                        handle,
+                        f"curl -fsSL -o /work/gym_src.tar.gz {shlex.quote(self._gym_source_url)}",
+                        timeout_s=600,
+                    )
+                    if r.return_code != 0:
+                        raise RuntimeError(f"gym source fetch failed: {(r.stderr or '')[:300]}")
                 r = await self._provider.exec(
                     handle, "mkdir -p /gym_mount && tar xzf /work/gym_src.tar.gz -C /gym_mount", timeout_s=300
                 )
@@ -353,20 +306,33 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     async def _run_nested(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
         row = body.model_dump()
+        row.pop("agent_ref", None)
         meta = (row.get("responses_create_params") or {}).get("metadata") or {}
         image = meta.get("docker_image") or self.config.sandbox_image
-        runner_path, runner_script, runner_cmd = self._runner()
+        runner_script, runner_config, runner_cmd = self._runner()
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
-            "/work/input.jsonl": body.model_dump_json() + "\n",
-            runner_path: runner_script,
+            "/work/input.jsonl": json.dumps(row) + "\n",
+            "/work/runner_config.json": json.dumps(runner_config),
+            "/work/runner.py": runner_script,
         }
         handle = await self._provision_box(image, files, model_url)
         try:
-            r = await self._provider.exec(handle, runner_cmd, timeout_s=self.config.rollout_timeout)
+            await self._provider.exec(
+                handle, f"nohup {runner_cmd} > /work/runner.out 2>&1 & echo started", timeout_s=60
+            )
+            deadline = self.config.rollout_timeout
+            waited = 0
+            while waited < deadline:
+                await asyncio.sleep(20)
+                waited += 20
+                r = await self._provider.exec(handle, "test -f /work/done && echo DONE", timeout_s=30)
+                if "DONE" in (r.stdout or ""):
+                    break
+            r = await self._provider.exec(handle, "tail -c 6000 /work/runner.out", timeout_s=30)
             if "RUNNER_DONE" not in (r.stdout or ""):
-                LOG.warning("runner incomplete: %s", (r.stderr or r.stdout or "")[-6000:])
+                LOG.warning("runner incomplete: %s", (r.stdout or "")[-6000:])
             rows = await self._download_json(handle, "/work/rollouts.jsonl")
             return BaseVerifyResponse.model_validate(rows)
         finally:
@@ -380,7 +346,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         meta = getattr(body, "metadata", None) or {}
         image = meta.get("docker_image") or self.config.sandbox_image
 
-        runner_path, runner_script, runner_cmd = self._runner()
+        runner_script, runner_config, runner_cmd = self._runner()
         agent_body = body.model_copy(deep=True)
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
@@ -392,7 +358,8 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
             "/work/agent_config.json": json.dumps(agent_config),
-            runner_path: runner_script,
+            "/work/runner_config.json": json.dumps(runner_config),
+            "/work/runner.py": runner_script,
         }
         handle = await self._provision_box(image, files, model_url)
         try:
