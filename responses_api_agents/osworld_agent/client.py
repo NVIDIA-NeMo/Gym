@@ -19,6 +19,7 @@ trigger them.
 from __future__ import annotations
 
 import base64
+import contextvars
 import datetime
 import hashlib
 import inspect
@@ -690,6 +691,292 @@ def _pointer_anthropic_client_options(base_url: str, api_key: Optional[str] = No
     }
 
 
+@dataclass
+class _PointerModelIOContext:
+    """Task-scoped destination and identity for Pointer's direct model calls."""
+
+    log_path: str
+    identity: Dict[str, Any]
+    step_ref: List[int]
+
+
+_POINTER_MODEL_IO_CONTEXT: contextvars.ContextVar[Optional[_PointerModelIOContext]] = contextvars.ContextVar(
+    "pointer_model_io_context",
+    default=None,
+)
+_POINTER_SECRET_KEYS = {
+    "api_key",
+    "authorization",
+    "cookie",
+    "password",
+    "proxy_authorization",
+    "set_cookie",
+    "token",
+    "x_api_key",
+}
+
+
+def _pointer_io_jsonable(value: Any) -> Any:
+    """Convert Anthropic SDK values into JSON-compatible data."""
+
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump(mode="json")
+        except TypeError:
+            return value.model_dump()
+        except Exception:  # noqa: BLE001 - observability must not affect a rollout.
+            return repr(value)
+    if isinstance(value, Mapping):
+        return {str(key): _pointer_io_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_pointer_io_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _redact_pointer_io_secrets(value: Any) -> Any:
+    """Remove transport credentials while retaining the complete model body."""
+
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).lower().replace("-", "_")
+            redacted[str(key)] = "<redacted>" if normalized_key in _POINTER_SECRET_KEYS else _redact_pointer_io_secrets(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_pointer_io_secrets(item) for item in value]
+    return value
+
+
+def _pointer_io_sha256(value: Any) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _pointer_io_images(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Index Anthropic base64 image parts without removing their source data."""
+
+    kwargs = request.get("kwargs")
+    messages = kwargs.get("messages") if isinstance(kwargs, Mapping) else None
+    if not isinstance(messages, list):
+        return []
+    images: List[Dict[str, Any]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if not isinstance(part, Mapping) or part.get("type") != "image":
+                continue
+            source = part.get("source")
+            encoded = source.get("data") if isinstance(source, Mapping) else None
+            if not isinstance(encoded, str):
+                continue
+            try:
+                decoded = base64.b64decode(encoded, validate=False)
+            except Exception:  # noqa: BLE001 - malformed diagnostic data must not affect inference.
+                decoded = b""
+            images.append(
+                {
+                    "message_index": message_index,
+                    "part_index": part_index,
+                    "encoded_chars": len(encoded),
+                    "encoded_sha256": hashlib.sha256(encoded.encode("ascii", errors="ignore")).hexdigest(),
+                    "decoded_bytes": len(decoded),
+                    "decoded_sha256": hashlib.sha256(decoded).hexdigest(),
+                }
+            )
+    return images
+
+
+def _append_pointer_io_event(context: _PointerModelIOContext, event: Dict[str, Any]) -> None:
+    """Append one durable schema-v2 event without changing rollout behavior."""
+
+    record = {
+        **context.identity,
+        "schema_version": 2,
+        "event_id": uuid.uuid4().hex,
+        "timestamp_unix_ns": time.time_ns(),
+        "pid": os.getpid(),
+        **event,
+    }
+    try:
+        parent = os.path.dirname(context.log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(context.log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_pointer_io_jsonable(record), ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:  # noqa: BLE001 - model-I/O logging is strictly best-effort.
+        LOG.exception("Failed to append Pointer model-I/O log to %s", context.log_path)
+
+
+class _PointerMessagesProxy:
+    """Log exact Anthropic Messages calls while preserving SDK behavior."""
+
+    def __init__(
+        self,
+        target: Any,
+        *,
+        context: _PointerModelIOContext,
+        agent_role: str,
+        api_surface: str,
+        call_index_ref: List[int],
+    ) -> None:
+        self._target = target
+        self._context = context
+        self._agent_role = agent_role
+        self._api_surface = api_surface
+        self._call_index_ref = call_index_ref
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        self._call_index_ref[0] += 1
+        call_index = self._call_index_ref[0]
+        call_id = uuid.uuid4().hex
+        identity = {
+            "call_id": call_id,
+            "call_index": call_index,
+            "agent_role": self._agent_role,
+            "api_surface": self._api_surface,
+            "step": self._context.step_ref[0],
+        }
+        started_ns = time.time_ns()
+        try:
+            request = _redact_pointer_io_secrets(
+                _pointer_io_jsonable(
+                    {
+                        "args": args,
+                        "kwargs": kwargs,
+                    }
+                )
+            )
+            _append_pointer_io_event(
+                self._context,
+                {
+                    **identity,
+                    "event": "model_request",
+                    "timestamp_unix_ns": started_ns,
+                    "anthropic_request": request,
+                    "anthropic_request_sha256": _pointer_io_sha256(request),
+                    "embedded_images": _pointer_io_images(request),
+                },
+            )
+        except Exception:  # noqa: BLE001 - logging must not change the SDK call.
+            LOG.exception("Failed to serialize Pointer model request for call %s", call_id)
+        try:
+            response = self._target.create(*args, **kwargs)
+        except Exception as exc:
+            finished_ns = time.time_ns()
+            try:
+                _append_pointer_io_event(
+                    self._context,
+                    {
+                        **identity,
+                        "event": "model_error",
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "error_type": type(exc).__name__,
+                        "error": repr(exc),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - preserve the provider exception.
+                LOG.exception("Failed to serialize Pointer model error for call %s", call_id)
+            raise
+        finished_ns = time.time_ns()
+        try:
+            response_value = _redact_pointer_io_secrets(_pointer_io_jsonable(response))
+            _append_pointer_io_event(
+                self._context,
+                {
+                    **identity,
+                    "event": "model_response",
+                    "timestamp_unix_ns": finished_ns,
+                    "elapsed_ns": finished_ns - started_ns,
+                    "anthropic_response": response_value,
+                    "anthropic_response_sha256": _pointer_io_sha256(response_value),
+                },
+            )
+        except Exception:  # noqa: BLE001 - return the SDK response unchanged.
+            LOG.exception("Failed to serialize Pointer model response for call %s", call_id)
+        return response
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+class _PointerBetaProxy:
+    def __init__(
+        self,
+        target: Any,
+        *,
+        context: _PointerModelIOContext,
+        agent_role: str,
+        call_index_ref: List[int],
+    ) -> None:
+        self._target = target
+        self.messages = _PointerMessagesProxy(
+            target.messages,
+            context=context,
+            agent_role=agent_role,
+            api_surface="beta.messages",
+            call_index_ref=call_index_ref,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+class _PointerAnthropicClientProxy:
+    def __init__(self, target: Any, *, context: _PointerModelIOContext, agent_role: str) -> None:
+        self._target = target
+        call_index_ref = [0]
+        self.messages = _PointerMessagesProxy(
+            target.messages,
+            context=context,
+            agent_role=agent_role,
+            api_surface="messages",
+            call_index_ref=call_index_ref,
+        )
+        if hasattr(target, "beta"):
+            self.beta = _PointerBetaProxy(
+                target.beta,
+                context=context,
+                agent_role=agent_role,
+                call_index_ref=call_index_ref,
+            )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+def _pointer_model_io_context(
+    event_context: Mapping[str, Any],
+    *,
+    endpoint: str,
+    served_model: str,
+    step_ref: List[int],
+) -> Optional[_PointerModelIOContext]:
+    """Build Pointer logging state only when full model-I/O is enabled."""
+
+    configured_path = os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip()
+    if not configured_path:
+        return None
+    identity = {
+        **dict(event_context),
+        "adapter": "gym",
+        "endpoint": endpoint,
+        "served_model": served_model,
+        "source_commit": os.environ.get("NEMO_GYM_SOURCE_COMMIT", ""),
+    }
+    return _PointerModelIOContext(
+        log_path=os.path.abspath(os.path.expanduser(configured_path)),
+        identity={key: value for key, value in identity.items() if value is not None and value != ""},
+        step_ref=step_ref,
+    )
+
+
 def _patch_pointer_anthropic_client(base_url: str) -> None:
     """Make Pointer's Anthropic SDK client honor the configured base URL."""
 
@@ -714,7 +1001,15 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         if provider == pointer_utils.APIProvider.ANTHROPIC:
             from anthropic import Anthropic  # noqa: PLC0415
 
-            return Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
+            client = Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
+            context = _POINTER_MODEL_IO_CONTEXT.get()
+            if context is None:
+                return client
+            return _PointerAnthropicClientProxy(
+                client,
+                context=context,
+                agent_role=str(getattr(self, "name", type(self).__name__)),
+            )
         return original(self, provider)
 
     pointer_llm_client.LLMClient._create_client = _create_client
@@ -1288,6 +1583,8 @@ def run_osworld_task(
     # ${OSWORLD_RECORD_VIDEO_DIR}/{task_id}.mp4.
     _record_dir = os.environ.get("OSWORLD_RECORD_VIDEO_DIR", "")
     _recording_started = False
+    _current_step = [0]
+    pointer_io_context_token: Optional[contextvars.Token[_PointerModelIOContext | None]] = None
 
     try:
         env = env_cls(
@@ -1463,6 +1760,22 @@ def run_osworld_task(
                 use_policy_endpoint=use_policy_endpoint,
                 disable_parallel_tools=disable_parallel_tools,
             )
+            pointer_results_base = os.environ.get(
+                "OSWORLD_POINTER_RESULTS_DIR",
+                os.path.join(cache_dir, "pointer_runs"),
+            )
+            pointer_task_dir = os.path.join(
+                pointer_results_base,
+                f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{_safe_task_id(task_config)}",
+            )
+            pointer_io_context = _pointer_model_io_context(
+                event_context,
+                endpoint=anthropic_base_url,
+                served_model=policy_model_name,
+                step_ref=_current_step,
+            )
+            if pointer_io_context is not None:
+                pointer_io_context_token = _POINTER_MODEL_IO_CONTEXT.set(pointer_io_context)
             agent_cls = load_attr(runner_spec.agent_class_path)
             _sync_pointer_config(policy_model_name)
             _patch_pointer_optional_parallel_tools(disable_parallel_tools)
@@ -1471,14 +1784,6 @@ def run_osworld_task(
                 env=env,
                 screen_size=screen_size,
                 **pointer_kwargs,
-            )
-            pointer_results_base = os.environ.get(
-                "OSWORLD_POINTER_RESULTS_DIR",
-                os.path.join(cache_dir, "pointer_runs"),
-            )
-            pointer_task_dir = os.path.join(
-                pointer_results_base,
-                f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{_safe_task_id(task_config)}",
             )
             pointer_logger, pointer_log_handler = _setup_pointer_task_logger(task_config, pointer_task_dir)
             pointer_agent.reset(instruction, pointer_logger, pointer_task_dir)
@@ -1503,7 +1808,6 @@ def run_osworld_task(
         if task_artifacts is not None:
             _vm_exec_log_paths.append(os.path.join(task_artifacts.directory, "vm-exec.jsonl"))
         _vm_exec_log_paths = list(dict.fromkeys(_vm_exec_log_paths))
-        _current_step = [0]
         if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
             for vm_exec_log_path in _vm_exec_log_paths:
                 os.makedirs(os.path.dirname(vm_exec_log_path), exist_ok=True)
@@ -1592,6 +1896,7 @@ def run_osworld_task(
                     {"event": "timeout", "step_num": step_idx + 1, "error": error},
                 )
                 break
+            _current_step[0] = step_idx + 1
             obs_entry = {
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
@@ -1680,8 +1985,6 @@ def run_osworld_task(
             step_done = False
             step_reward = 0.0
             step_info: Dict[str, Any] = {}
-            if _vm_exec_log_paths and hasattr(env.controller, "execute_python_command"):
-                _current_step[0] = step_idx + 1
             for action in actions:
                 terminal_action = _terminal_action_name(action)
                 if terminal_action is not None:
@@ -1799,6 +2102,8 @@ def run_osworld_task(
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
+        if pointer_io_context_token is not None:
+            _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
         if "pointer_log_handler" in locals() and pointer_log_handler is not None:
             try:
                 pointer_log_handler.flush()
