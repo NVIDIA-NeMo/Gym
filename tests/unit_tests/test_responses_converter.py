@@ -15,21 +15,27 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import pytest
+from openai.types.completion_usage import CompletionUsage
 
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
     NeMoGymFunction,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputText,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import (
@@ -397,6 +403,75 @@ def test_chat_messages_to_responses_items_all_roles(converter: ResponsesConverte
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
+
+
+# ===========================================================================
+# chat_completion_to_response
+# ===========================================================================
+
+
+def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
+    actual_response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            model="",
+            input=[
+                dict(
+                    role="user",
+                    content="hello",
+                ),
+            ],
+        ),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="hi",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+            ),
+        ),
+    )
+
+    expected_response = NeMoGymResponse(
+        id="resp_123",
+        created_at=0.0,
+        model="",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg_123",
+                content=[
+                    NeMoGymResponseOutputText(text="hi", type="output_text", annotations=[]),
+                ],
+                role="assistant",
+            )
+        ],
+        parallel_tool_calls=True,
+        usage=NeMoGymResponseUsage(
+            input_tokens=1,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=2,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=3,
+        ),
+        tool_choice="auto",
+        tools=[],
+    )
+
+    assert expected_response == actual_response
 
 
 # ===========================================================================
