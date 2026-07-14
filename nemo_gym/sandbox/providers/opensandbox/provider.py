@@ -702,7 +702,7 @@ class OpenSandboxProvider:
                 sandbox = await asyncio.wait_for(
                     Sandbox.connect(
                         handle.sandbox_id,
-                        connection_config=self._connection_config(request_timeout_s=attempt_timeout_s),
+                        connection_config=self._connection_config(),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
                         skip_health_check=True,
                     ),

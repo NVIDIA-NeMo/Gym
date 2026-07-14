@@ -690,3 +690,156 @@ class TestComputeMetrics:
             "pass@2/no_answer": result.agent_metrics["pass@2/no_answer"],
             "mean/reward": result.agent_metrics["mean/reward"],
         }
+
+
+def _make_verify_request_with_options(
+    text: str,
+    options: list[dict[str, str]],
+    expected: str,
+    grading_mode: str = "strict_single_letter_boxed",
+):
+    """Like _make_verify_request but with caller-supplied options (e.g. letters beyond A-D)."""
+    response = NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_test",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    return MCQAVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
+        response=response,
+        options=options,
+        expected_answer=expected,
+        grading_mode=grading_mode,
+    )
+
+
+class TestStrictBoxedLatexExtraction:
+    """strict_single_letter_boxed must read the answer letter even when it is wrapped in
+    \\text{} or followed by option text. These are the real rollout formats that used to be
+    scored as no_answer.
+    """
+
+    def _make_server(self, grading_mode="strict_single_letter_boxed"):
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="mcqa",
+            grading_mode=grading_mode,
+        )
+        return MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    # Options spanning A-J so we can exercise letters E and I from the real rollouts.
+    OPTIONS = [{chr(ord("A") + i): f"option {chr(ord('A') + i)} text"} for i in range(10)]
+
+    async def test_text_wrapped_bare_letter(self) -> None:
+        """\\boxed{\\text{E}} -> E (LaTeX \\text{} wrapper around a bare letter)."""
+        server = self._make_server()
+        body = _make_verify_request_with_options(r"\boxed{\text{E}}", self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_text_wrapped_letter_with_option_text(self) -> None:
+        """\\boxed{\\text{I: ...}} -> I (letter + option text, both inside the \\text wrapper)."""
+        server = self._make_server()
+        text = r"\boxed{\text{I: NGS can detect both coding and non-coding regions of the genome.}}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="I")
+        result = await server.verify(body)
+        assert result.extracted_answer == "I"
+        assert result.reward == 1.0
+
+    async def test_leading_letter_colon_then_wrapped_text(self) -> None:
+        """\\boxed{E: \\text{...}} -> E (letter outside, trailing colon + wrapped option text)."""
+        server = self._make_server()
+        text = r"\[ \boxed{E: \text{A polygenic risk score can provide a probability.}} \]"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_plain_boxed_letter_unchanged(self) -> None:
+        """\\boxed{B} -> B (existing behavior must be preserved)."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"\boxed{B}", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_bracketed_letter_unchanged(self) -> None:
+        """\\boxed{ [C] } -> C (existing non-letter padding must still parse)."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"Final: \boxed{ [C] }", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
+
+    async def test_bare_option_text_not_matched_in_strict(self) -> None:
+        """Guard: bare option text with no leading letter label must NOT match in strict mode.
+
+        A sentence-initial capital ("A polygenic ...") must not be mistaken for answer A.
+        Option-text matching is the job of lenient_boxed, not strict.
+        """
+        server = self._make_server()
+        text = r"\boxed{A polygenic risk score can provide a probability.}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="A")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_lenient_boxed_handles_text_wrapper(self) -> None:
+        """lenient_boxed inherits the strict improvement: \\boxed{\\text{E}} -> E."""
+        server = self._make_server(grading_mode="lenient_boxed")
+        body = _make_verify_request_with_options(
+            r"\boxed{\text{E}}", self.OPTIONS, expected="E", grading_mode="lenient_boxed"
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_unbalanced_box_is_no_answer(self) -> None:
+        """A \\boxed{ with no matching closing brace yields no_answer, not a crash."""
+        server = self._make_server()
+        body = _make_verify_request(text=r"\boxed{B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_last_box_wins_over_thinking_box(self) -> None:
+        """Two letter boxes: the LAST \\boxed{} is the final answer, not the first.
+
+        A chain-of-thought rollout may box a discarded candidate before the real
+        answer; strict mode must read the final box (E), not the earlier one (C).
+        """
+        server = self._make_server()
+        text = r"Candidate is \boxed{C}, but on reflection the answer is \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
+
+    async def test_non_letter_thinking_box_does_not_shadow_answer(self) -> None:
+        """A non-letter intermediate box must not block extraction of a later answer box.
+
+        Regression guard: reading only the first box would parse \\text{some idea},
+        find no letter, and return no_answer despite the real \\boxed{E} that follows.
+        """
+        server = self._make_server()
+        text = r"Thinking: \boxed{\text{some idea}}. Final answer: \boxed{E}"
+        body = _make_verify_request_with_options(text, self.OPTIONS, expected="E")
+        result = await server.verify(body)
+        assert result.extracted_answer == "E"
+        assert result.reward == 1.0
