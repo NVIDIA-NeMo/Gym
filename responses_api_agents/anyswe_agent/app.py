@@ -708,8 +708,6 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: BaseRunRequest) -> AnySweVerifyResponse:
         async with self._sem:
-            body.responses_create_params.parallel_tool_calls = True
-            body.responses_create_params.tool_choice = "auto"
             response = await self.responses(body.responses_create_params)
 
             meta, response.metadata = response.metadata, None
