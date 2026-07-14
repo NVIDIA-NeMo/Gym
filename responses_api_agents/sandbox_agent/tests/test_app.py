@@ -49,12 +49,12 @@ def test_config_defaults():
     assert cfg.sandbox_python == "python3"
 
 
-def test_agent_only_runner_substitutes_delegate_symbols():
+def test_agent_only_runner_substitutes_agent_symbols():
     agent = _make_agent(
         mode="agent_only_runner",
-        delegate_module="responses_api_agents.opencode_agent.app",
-        delegate_class="OpenCodeAgent",
-        delegate_config_class="OpenCodeAgentConfig",
+        agent_module="responses_api_agents.opencode_agent.app",
+        agent_class="OpenCodeAgent",
+        agent_config_class="OpenCodeAgentConfig",
         sandbox_python="/deps/bin/python3",
     )
     path, script, cmd = agent._runner()
@@ -117,8 +117,8 @@ def test_agent_only_runner_builds_gym_tar_gym_runner_does_not():
         patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
         patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz") as tar,
     ):
-        delegate = SandboxAgent(config=_config(mode="agent_only_runner"), server_client=MagicMock(spec=ServerClient))
-        assert delegate._gym_tar == "/tmp/fake.tar.gz"
+        runner = SandboxAgent(config=_config(mode="agent_only_runner"), server_client=MagicMock(spec=ServerClient))
+        assert runner._gym_tar == "/tmp/fake.tar.gz"
         tar.reset_mock()
         nested = SandboxAgent(config=_config(mode="gym_runner"), server_client=MagicMock(spec=ServerClient))
         assert nested._gym_tar is None
