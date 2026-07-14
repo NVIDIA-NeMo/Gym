@@ -5,8 +5,10 @@ rdkit_chemistry:
       domain: knowledge
       verified: false
       description: >-
-        Molecular chemistry question answering: calculate properties of SMILES.
-        Includes a mix of tool-use (python + rdkit) and no-tool-use questions.
+        [DEPRECATED — use litmus_agent] Molecular chemistry question answering:
+        calculate properties of SMILES. Includes a mix of tool-use (python +
+        rdkit) and no-tool-use questions. Superseded by the domain-agnostic
+        litmus_agent server, which generalizes this server's scoring path.
       value: Improve molecular reasoning and SMILES parsing.
       sandbox_venv_path: ${oc.env:SANDBOX_VENV_PATH,''}
       sandbox_proxy_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6001}
