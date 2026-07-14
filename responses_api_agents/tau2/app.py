@@ -250,7 +250,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     subtask = task["task"]["id"].split("]")[0].removeprefix("[")
                     telecom_subtask_rewards[f"telecom/{subtask}/reward"].append(task["reward"])
 
-                termination_reason = task["result"]["termination_reason"]
+                result = task.get("result")
+                if result is None:
+                    reason = "soft_failed" if task.get("_ng_soft_failed") else "missing_result"
+                    termination_reason_count[f"trajectory_termination_reason/{reason}/count"] += 1
+                    termination_reason_domain_count[f"{domain}/trajectory_termination_reason/{reason}/count"] += 1
+                    total_count += 1
+                    continue
+
+                termination_reason = result["termination_reason"]
                 termination_reason_count[f"trajectory_termination_reason/{termination_reason}/count"] += 1
                 termination_reason_domain_count[
                     f"{domain}/trajectory_termination_reason/{termination_reason}/count"
@@ -258,7 +266,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
                 this_task_transfer_to_human_agents = False
                 has_tool_call = False
-                for message in task["result"]["messages"]:
+                for message in result["messages"]:
                     if message["role"] == "tool":
                         # e.g. `Error: Tool 'run_speed_test' not found.`
                         if "Error: Tool" and "not found" in message["content"]:
