@@ -283,14 +283,17 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
 
 
 @pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
-def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: ResponsesConverter, tools_kwargs: dict):
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+def test_responses_to_chat_completion_no_tools_drops_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict, tool_choice: str
+):
     # vLLM rejects tool_choice without tools ("When using `tool_choice`, `tools` must be set."),
     # so requests with absent or empty tools must not carry tool_choice / parallel_tool_calls.
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
             input="hi",
             model="my-model",
-            tool_choice="auto",
+            tool_choice=tool_choice,
             parallel_tool_calls=True,
             **tools_kwargs,
         )
@@ -299,6 +302,26 @@ def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: Resp
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
     assert "parallel_tool_calls" not in dumped
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "name": "get_weather"}],
+    ids=["required", "specific_tool"],
+)
+def test_responses_to_chat_completion_no_tools_rejects_forced_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict, tool_choice: object
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                model="my-model",
+                tool_choice=tool_choice,
+                **tools_kwargs,
+            )
+        )
 
 
 def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
