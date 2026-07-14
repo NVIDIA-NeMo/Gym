@@ -524,6 +524,23 @@ COMMANDS = {
             ),
         ),
     ),
+    "eval reverify": Command(
+        target="nemo_gym.cli.eval:reverify_rollouts",
+        summary="Re-verify existing rollouts to recompute rewards with an updated resources server",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
+            _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
+            _bool_flag("judge-failed-only", "judge_failed_only", "Only re-verify rollouts with a failed judge call."),
+        ),
+    ),
     "eval profile": Command(
         target="nemo_gym.cli.eval:reward_profile",
         summary="Compute a reward profile from rollouts.",

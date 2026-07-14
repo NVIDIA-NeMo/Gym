@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
 import difflib
 import importlib
@@ -57,6 +56,7 @@ from nemo_gym.rollout_collection import (
     RolloutCollectionHelper,
     loads_jsonl_line,
 )
+from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
@@ -428,6 +428,17 @@ def aggregate_rollouts():  # pragma: no cover
     rah = RolloutAggregationHelper()
 
     asyncio.run(rah.run_from_config(config))
+
+
+@exit_cleanly_on_config_error
+def reverify_rollouts():  # pragma: no cover
+    rh = RunHelper()
+    rh.start(None)
+
+    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+    rrh = RolloutReverificationHelper()
+
+    asyncio.run(rrh.run_from_config(config))
 
 
 @exit_cleanly_on_config_error
