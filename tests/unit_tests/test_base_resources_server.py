@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,12 +25,14 @@ from nemo_gym.base_resources_server import (
     MCPResourcesServer,
     MCPServerMetadata,
     MCPSessionError,
+    ReverifyMode,
     SimpleResourcesServer,
     gym_tool,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
+# todo refactor this
 class TestBaseResourcesServer:
     def test_sanity(self) -> None:
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
@@ -40,6 +43,16 @@ class TestBaseResourcesServer:
 
         agent = TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
+
+    def test_reverify_mode(self) -> None:
+        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
+
+        class TestSimpleResourcesServer(SimpleResourcesServer):
+            async def verify(self, body):
+                pass
+
+        agent = TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert asyncio.run(agent.get_reverify_mode()) == ReverifyMode.UNSUPPORTED
 
 
 class TestMCPResourcesServer:
@@ -62,6 +75,7 @@ class TestMCPResourcesServer:
 
         assert "/seed_session" in paths
         assert "/verify" in paths
+        assert "/reverify_mode" in paths
         assert "/aggregate_metrics" in paths
         assert "/mcp" in paths
 
