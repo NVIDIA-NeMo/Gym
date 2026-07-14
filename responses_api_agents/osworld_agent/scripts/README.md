@@ -78,6 +78,8 @@ agent-facing request/response stream to `model-io-agent.jsonl`, the final VLLM
 transport payload/response stream to `model-io-transport.jsonl`, and a
 run-level VM command/response stream to `vm-exec.jsonl`. Full requests retain
 embedded screenshots, so the files are intentionally opt-in and may be large.
+The agent stream also captures Pointer's direct Anthropic Messages calls;
+transport credential fields are redacted without removing model-body content.
 Each schema-v2 event includes the run/task/domain/attempt/step identity; the
 transport service receives it through headers rather than model-body fields.
 The runner resolves `RUN_DIR` and all three model-I/O paths to absolute paths

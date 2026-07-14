@@ -8,6 +8,7 @@ Docker, QEMU, and model servers.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -1140,6 +1141,320 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
         osworld_client._pointer_anthropic_client_options("https://inference-api.nvidia.com")["api_key"]
         == "env-key"  # pragma: allowlist secret
     )
+
+
+def test_pointer_anthropic_proxy_logs_schema_v2_request_and_response(tmp_path: Path) -> None:
+    class Response:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            assert mode == "json"
+            return {"id": "msg-1", "content": [{"type": "text", "text": "done"}]}
+
+    class Messages:
+        def create(self, **kwargs: Any) -> Response:
+            content = kwargs["messages"][0]["content"]
+            if isinstance(content, list):
+                assert content[0]["source"]["data"] == "base64-pixels"
+            return Response()
+
+        def count_tokens(self, **_kwargs: Any) -> int:
+            return 123
+
+    class Beta:
+        messages = Messages()
+
+    class Client:
+        beta = Beta()
+        messages = Messages()
+
+    log_path = tmp_path / "model-io-agent.jsonl"
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(log_path),
+        identity={
+            "run_id": "run-20",
+            "adapter": "gym",
+            "task_id": "task-1",
+            "domain": "chrome",
+            "served_model": "azure/anthropic/claude-opus-4-7",
+        },
+        step_ref=[7],
+    )
+    proxy = osworld_client._PointerAnthropicClientProxy(
+        Client(),
+        context=context,
+        agent_role="executor",
+    )
+    response = proxy.beta.messages.create(
+        model="azure/anthropic/claude-opus-4-7",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "base64-pixels"},
+                    }
+                ],
+            }
+        ],
+        max_tokens=4096,
+        extra_headers={
+            "authorization": "Bearer secret",  # pragma: allowlist secret
+            "x-trace-id": "trace-1",
+        },
+    )
+    second_response = proxy.messages.create(
+        model="azure/anthropic/claude-opus-4-7",
+        messages=[{"role": "user", "content": "verify"}],
+        max_tokens=128,
+    )
+
+    assert isinstance(response, Response)
+    assert isinstance(second_response, Response)
+    assert proxy.beta.messages.count_tokens(messages=[]) == 123
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == [
+        "model_request",
+        "model_response",
+        "model_request",
+        "model_response",
+    ]
+    assert all(record["schema_version"] == 2 for record in records)
+    assert all(record["task_id"] == "task-1" for record in records)
+    assert all(record["agent_role"] == "executor" for record in records)
+    assert all(record["step"] == 7 for record in records)
+    assert [record["call_index"] for record in records] == [1, 1, 2, 2]
+    assert records[0]["api_surface"] == "beta.messages"
+    assert records[2]["api_surface"] == "messages"
+    request = records[0]["anthropic_request"]
+    assert request["kwargs"]["messages"][0]["content"][0]["source"]["data"] == "base64-pixels"
+    assert request["kwargs"]["extra_headers"] == {
+        "authorization": "<redacted>",
+        "x-trace-id": "trace-1",
+    }
+    assert records[0]["embedded_images"][0]["encoded_chars"] == len("base64-pixels")
+    assert records[1]["anthropic_response"]["id"] == "msg-1"
+    assert records[0]["call_id"] == records[1]["call_id"]
+    assert records[2]["call_id"] == records[3]["call_id"]
+    assert records[0]["anthropic_request_sha256"] == osworld_client._pointer_io_sha256(request)
+
+
+def test_pointer_anthropic_patch_wraps_clients_only_in_logging_context(monkeypatch, tmp_path: Path) -> None:
+    class APIProvider:
+        ANTHROPIC = "anthropic"
+
+    class LLMClient:
+        name = "executor"
+        api_key = "test-key"  # pragma: allowlist secret
+
+        def _create_client(self, provider: Any) -> Any:
+            return ("original", provider)
+
+    class LLMContextManager:
+        def _get_counting_client(self) -> str:
+            return "original-counting-client"
+
+    class Anthropic:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.messages = SimpleNamespace(create=lambda **_kwargs: "response")
+
+    mm_agents = ModuleType("mm_agents")
+    pointer_package = ModuleType("mm_agents.pointer")
+    llm_client_module = ModuleType("mm_agents.pointer.llm_client")
+    context_manager_module = ModuleType("mm_agents.pointer.llm_context_manager")
+    utils_module = ModuleType("mm_agents.pointer.utils")
+    anthropic_module = ModuleType("anthropic")
+    llm_client_module.LLMClient = LLMClient
+    context_manager_module.LLMContextManager = LLMContextManager
+    utils_module.APIProvider = APIProvider
+    anthropic_module.Anthropic = Anthropic
+    pointer_package.llm_client = llm_client_module
+    pointer_package.llm_context_manager = context_manager_module
+    pointer_package.utils = utils_module
+    mm_agents.pointer = pointer_package
+    monkeypatch.setitem(sys.modules, "mm_agents", mm_agents)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer", pointer_package)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.llm_client", llm_client_module)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.llm_context_manager", context_manager_module)
+    monkeypatch.setitem(sys.modules, "mm_agents.pointer.utils", utils_module)
+    monkeypatch.setitem(sys.modules, "anthropic", anthropic_module)
+
+    osworld_client._patch_pointer_anthropic_client("https://inference-api.nvidia.com/")
+    client = LLMClient()
+    unlogged = client._create_client(APIProvider.ANTHROPIC)
+    assert isinstance(unlogged, Anthropic)
+    assert unlogged.kwargs["base_url"] == "https://inference-api.nvidia.com"
+    assert client._create_client("other") == ("original", "other")
+
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(tmp_path / "model-io-agent.jsonl"),
+        identity={"task_id": "task-1"},
+        step_ref=[1],
+    )
+    token = osworld_client._POINTER_MODEL_IO_CONTEXT.set(context)
+    try:
+        logged = client._create_client(APIProvider.ANTHROPIC)
+    finally:
+        osworld_client._POINTER_MODEL_IO_CONTEXT.reset(token)
+
+    assert isinstance(logged, osworld_client._PointerAnthropicClientProxy)
+    assert logged.messages.create(model="model", messages=[]) == "response"
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "model-io-agent.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["event"] for record in records] == ["model_request", "model_response"]
+
+
+def test_pointer_anthropic_proxy_logs_errors_and_preserves_exception(tmp_path: Path) -> None:
+    class Messages:
+        def create(self, **_kwargs: Any) -> Any:
+            raise RuntimeError("provider unavailable")
+
+    class Client:
+        messages = Messages()
+
+    log_path = tmp_path / "model-io-agent.jsonl"
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(log_path),
+        identity={"task_id": "task-error"},
+        step_ref=[3],
+    )
+    proxy = osworld_client._PointerAnthropicClientProxy(
+        Client(),
+        context=context,
+        agent_role="planner",
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        proxy.messages.create(model="model", messages=[])
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == ["model_request", "model_error"]
+    assert records[1]["error_type"] == "RuntimeError"
+    assert records[0]["call_id"] == records[1]["call_id"]
+
+
+def test_pointer_model_io_log_failure_does_not_change_sdk_result(tmp_path: Path) -> None:
+    class Messages:
+        def create(self, **_kwargs: Any) -> str:
+            return "response"
+
+    class Client:
+        messages = Messages()
+
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("file", encoding="utf-8")
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(blocked_parent / "model-io-agent.jsonl"),
+        identity={"task_id": "task-logging-failure"},
+        step_ref=[1],
+    )
+    proxy = osworld_client._PointerAnthropicClientProxy(
+        Client(),
+        context=context,
+        agent_role="verifier",
+    )
+
+    assert proxy.messages.create(model="model", messages=[]) == "response"
+
+
+def test_pointer_model_io_serialization_failure_does_not_change_sdk_result(monkeypatch, tmp_path: Path) -> None:
+    class Messages:
+        def create(self, **_kwargs: Any) -> str:
+            return "response"
+
+    class Client:
+        messages = Messages()
+
+    context = osworld_client._PointerModelIOContext(
+        log_path=str(tmp_path / "model-io-agent.jsonl"),
+        identity={"task_id": "task-serialization-failure"},
+        step_ref=[1],
+    )
+    proxy = osworld_client._PointerAnthropicClientProxy(
+        Client(),
+        context=context,
+        agent_role="verifier",
+    )
+
+    def fail_hash(_value: Any) -> str:
+        raise RuntimeError("diagnostic serialization failed")
+
+    monkeypatch.setattr(osworld_client, "_pointer_io_sha256", fail_hash)
+
+    assert proxy.messages.create(model="model", messages=[]) == "response"
+
+
+def test_pointer_model_io_context_is_opt_in_and_task_scoped(monkeypatch, tmp_path: Path) -> None:
+    step_ref = [0]
+    monkeypatch.delenv("OSWORLD_MODEL_IO_LOG", raising=False)
+    assert (
+        osworld_client._pointer_model_io_context(
+            {"run_id": "run-20", "task_id": "task-1"},
+            endpoint="https://inference-api.nvidia.com",
+            served_model="azure/anthropic/claude-opus-4-7",
+            step_ref=step_ref,
+        )
+        is None
+    )
+
+    log_path = tmp_path / "model-io-agent.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    monkeypatch.setenv("NEMO_GYM_SOURCE_COMMIT", "09a895d")
+    context = osworld_client._pointer_model_io_context(
+        {"run_id": "run-20", "task_id": "task-1", "domain": "chrome"},
+        endpoint="https://inference-api.nvidia.com",
+        served_model="azure/anthropic/claude-opus-4-7",
+        step_ref=step_ref,
+    )
+
+    assert context is not None
+    assert context.log_path == str(log_path)
+    assert context.step_ref is step_ref
+    assert context.identity == {
+        "run_id": "run-20",
+        "task_id": "task-1",
+        "domain": "chrome",
+        "adapter": "gym",
+        "endpoint": "https://inference-api.nvidia.com",
+        "served_model": "azure/anthropic/claude-opus-4-7",
+        "source_commit": "09a895d",
+    }
+
+
+def test_pointer_rollout_sets_and_resets_model_io_context(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path / "pointer"))
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(tmp_path / "model-io-agent.jsonl"))
+    observed_contexts: List[osworld_client._PointerModelIOContext | None] = []
+    monkeypatch.setattr(
+        osworld_client,
+        "_patch_pointer_anthropic_client",
+        lambda _base_url: observed_contexts.append(osworld_client._POINTER_MODEL_IO_CONTEXT.get()),
+    )
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-context", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: "unused",
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        log_context={"run_id": "run-20", "task_attempt": 2},
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.error is None
+    assert len(observed_contexts) == 1
+    assert observed_contexts[0] is not None
+    assert observed_contexts[0].identity["task_id"] == "task-pointer-context"
+    assert observed_contexts[0].identity["task_attempt"] == 2
+    assert observed_contexts[0].step_ref == [1]
+    assert osworld_client._POINTER_MODEL_IO_CONTEXT.get() is None
 
 
 def test_pointer_config_sync_uses_anthropic_provider_for_policy_endpoint(monkeypatch) -> None:

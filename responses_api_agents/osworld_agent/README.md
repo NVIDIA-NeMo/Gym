@@ -313,9 +313,11 @@ FULL_MODEL_IO=1 RUN_DIR=results/omni-diagnostic \
   bash responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh
 ```
 
-This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. Parser events
-also state whether retry feedback, the pre-DONE checklist, or repeated-action
-recovery was injected. Requests may
+This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. The agent log
+includes direct Anthropic Messages calls made by Pointer as well as Gym-routed
+calls; credential fields are redacted while model-body content is retained.
+Parser events also state whether retry feedback, the pre-DONE checklist, or
+repeated-action recovery was injected. Requests may
 contain embedded screenshots and prompt content, so these logs can be large
 and sensitive. They are disabled by default.
 
