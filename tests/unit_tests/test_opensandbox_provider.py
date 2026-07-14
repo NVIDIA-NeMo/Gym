@@ -23,7 +23,14 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import (
+    SandboxCreateError,
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxResources,
+    SandboxSpec,
+    SandboxStatus,
+)
 
 
 pytestmark = pytest.mark.sandbox
@@ -734,3 +741,361 @@ async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch)
 
 async def _return_value(value: Any) -> Any:
     return value
+
+
+def test_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch))
+
+
+async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monkeypatch) -> None:
+    class FakeSDKSandbox:
+        create_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def create(cls, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.create_calls.append(kwargs)
+            return cls("sdk-sandbox-1")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, object, object, object, object),
+    )
+
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    monkeypatch.setattr(provider, "_connection_config", lambda request_timeout_s=None: object())
+
+    handle = await provider.create(
+        SandboxSpec(
+            image="image:tag",
+            metadata={
+                "harbor_instance_id": "swebench::django__django-10880",
+                "long": f"bad:{'x' * 80}:",
+            },
+        )
+    )
+
+    assert handle.sandbox_id == "sdk-sandbox-1"
+    metadata = FakeSDKSandbox.create_calls[0]["metadata"]
+    assert metadata["harbor_instance_id"] == "swebench_django__django-10880"
+    assert metadata["long"] == ("bad_" + "x" * 59)
+    extensions = FakeSDKSandbox.create_calls[0]["extensions"]
+    assert extensions[opensandbox_provider.IMAGE_PULL_POLICY_EXTENSION_KEY] == "IfNotPresent"
+    assert extensions[opensandbox_provider.IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY] == "IfNotPresent"
+
+
+def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
+
+
+async def _assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSDKSandbox:
+        connect_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def connect(cls, sandbox_id: str, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.connect_calls.append({"sandbox_id": sandbox_id, **kwargs})
+            return cls(sandbox_id)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, FakeConnectionConfig, object, object, object),
+    )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "protocol": "https", "request_timeout_s": 300},
+        create={"connect_attempt_timeout_s": 1},
+        probe={"command": None},
+    )
+    handle = await provider._connect_after_create(
+        SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=None),
+        SandboxSpec(image="image:tag", ready_timeout_s=10),
+    )
+
+    assert handle.sandbox_id == "sdk-sandbox-1"
+    assert isinstance(handle.raw, FakeSDKSandbox)
+    connect_call = FakeSDKSandbox.connect_calls[0]
+    assert connect_call["skip_health_check"] is True
+    assert connect_call["connection_config"].kwargs == {
+        "domain": "sandbox.example",
+        "protocol": "https",
+        "request_timeout": timedelta(seconds=300),
+    }
+
+
+def test_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_create_probe_can_require_stable_successes(monkeypatch))
+
+
+async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypatch) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={
+            "command": "true",
+            "expected_stdout": None,
+            "stable_count": 3,
+            "stable_delay_s": 0,
+        },
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def fake_exec(
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        calls.append(
+            {
+                "handle": handle,
+                "command": command,
+                "cwd": cwd,
+                "env": env,
+                "timeout_s": timeout_s,
+                "user": user,
+            }
+        )
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(provider, "_exec", fake_exec)
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-0", provider_name="opensandbox", raw=object())
+
+    await provider._verify_created_handle(handle)
+
+    assert [call["command"] for call in calls] == ["true", "true", "true"]
+    assert all(call["timeout_s"] == 30 for call in calls)
+    assert all(call["user"] == "root" for call in calls)
+
+
+def test_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch))
+
+
+async def _assert_opensandbox_create_probe_polls_same_sandbox_after_transient_errors(monkeypatch) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"connect_poll_s": 0.01},
+        probe={
+            "command": "true",
+            "expected_stdout": None,
+            "timeout_s": 1,
+            "deadline_s": 2,
+            "stable_count": 2,
+            "stable_delay_s": 0,
+        },
+    )
+    attempts = 0
+    handles: list[SandboxHandle] = []
+
+    async def fake_exec(
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        del command, cwd, env, timeout_s, user
+        nonlocal attempts
+        attempts += 1
+        handles.append(handle)
+        if attempts <= 2:
+            raise ConnectionError("direct execd endpoint is not accepting connections yet")
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(provider, "_exec", fake_exec)
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-0", provider_name="opensandbox", raw=object())
+
+    await provider._verify_created_handle(handle)
+
+    assert attempts == 4
+    assert {seen_handle.sandbox_id for seen_handle in handles} == {"sdk-sandbox-0"}
+
+
+def test_opensandbox_create_probe_failures_are_retryable() -> None:
+    error = opensandbox_provider.OpenSandboxCreateVerificationError("pod sdk-sandbox-0 failed create probe")
+
+    assert isinstance(error, SandboxCreateError)
+    assert opensandbox_provider._is_retryable_create_error(error) is True
+
+
+def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
+    error = RuntimeError(
+        "Get endpoint for sandbox sdk-sandbox-0 port 44772 failed: "
+        "Pod IP is not yet available. The Pod may still be starting."
+    )
+
+    assert opensandbox_provider._is_retryable_create_error(error) is True
+
+
+def test_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch))
+
+
+async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeLog:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeLogs:
+        stdout = [FakeLog("ok")]
+        stderr: list[FakeLog] = []
+
+    class FakeExecution:
+        logs = FakeLogs()
+        error = None
+        exit_code = 0
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> FakeExecution:
+            del command, opts
+            self.calls += 1
+            if self.calls <= 2:
+                raise ConnectionError("transient connection failure")
+            return FakeExecution()
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "command_retries": 2,
+        },
+        probe={"command": None},
+    )
+    raw = FakeRaw()
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "echo hello", timeout_s=30)
+
+    assert result.stdout == "ok"
+    assert result.return_code == 0
+    assert raw.commands.calls == 3
+
+
+def test_opensandbox_command_retries_default_to_disabled(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_command_retries_default_to_disabled(monkeypatch))
+
+
+async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> None:
+            del command, opts
+            self.calls += 1
+            raise ConnectionError("transient connection failure")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+        },
+        probe={"command": None},
+    )
+    raw = FakeRaw()
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
+
+    try:
+        await provider.exec(handle, "echo hello", timeout_s=30)
+    except ConnectionError:
+        pass
+    else:
+        raise AssertionError("expected provider.exec to propagate the command failure")
+
+    assert raw.commands.calls == 1
+
+
+def test_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
+    asyncio.run(_assert_opensandbox_close_timeout_does_not_fail_after_stop())
+
+
+async def _assert_opensandbox_close_timeout_does_not_fail_after_stop() -> None:
+    class SlowCloseRaw:
+        def __init__(self) -> None:
+            self.killed = False
+
+        async def kill(self) -> None:
+            self.killed = True
+
+        async def close(self) -> None:
+            await asyncio.sleep(60)
+
+    raw = SlowCloseRaw()
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"close_timeout_s": 0.01},
+        probe={"command": None},
+    )
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
+
+    await provider.close(handle)
+
+    assert raw.killed is True
+
+
+def test_opensandbox_close_propagates_stop_failure() -> None:
+    asyncio.run(_assert_opensandbox_close_propagates_stop_failure())
+
+
+async def _assert_opensandbox_close_propagates_stop_failure() -> None:
+    class StopFailureRaw:
+        async def kill(self) -> None:
+            raise RuntimeError("stop failed")
+
+        async def close(self) -> None:
+            return None
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"close_timeout_s": 0.01},
+        probe={"command": None},
+    )
+    handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=StopFailureRaw())
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await provider.close(handle)
