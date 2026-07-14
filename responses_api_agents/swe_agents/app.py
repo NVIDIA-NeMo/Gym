@@ -3802,6 +3802,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 responses_create_params=responses_create_params,
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
+                mask_sample=instance_config.mask_sample,
                 **metrics.model_dump(),
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,

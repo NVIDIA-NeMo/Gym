@@ -2672,6 +2672,7 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(self._run_body())
 
         assert result.switchyard_trace_error is None
+        assert result.mask_sample is False
         assert result.instance_config.mask_sample is False
         assert result.reward == 1.0
         assert [item.model_dump() for item in result.responses_create_params.input] == [
@@ -2704,6 +2705,7 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(self._run_body())
 
         # Fail closed for training, open for diagnostics.
+        assert result.mask_sample is True
         assert result.instance_config.mask_sample is True
         assert result.switchyard_trace_error == (
             "session 0123456789abcdef0123456789abcdef: SwitchyardTraceError: "
@@ -2742,6 +2744,7 @@ class TestSWEBenchWrapperRun:
 
         retrieve.assert_not_called()
         assert result.switchyard_trace_error is None
+        assert result.mask_sample is False
         assert result.instance_config.mask_sample is False
 
     @pytest.mark.asyncio

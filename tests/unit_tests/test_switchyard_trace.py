@@ -157,7 +157,16 @@ class TestReconstruction:
 
     def test_reordered_records_rejected(self) -> None:
         records = list(reversed(_two_call_records()))
-        with pytest.raises(SwitchyardTraceError, match="does not extend"):
+        with pytest.raises(SwitchyardTraceError, match="not extend"):
+            _reconstruct(_envelope(records))
+
+    def test_non_extending_token_history_rejected(self) -> None:
+        # Messages extend but the token ids don't (e.g. a chat template that
+        # re-renders earlier history differently) — the trainer would hard-assert
+        # on this, so reconstruction must mask it instead.
+        records = _two_call_records()
+        records[1]["prompt_token_ids"] = [9, 9, 9, 9, 9, 9]
+        with pytest.raises(SwitchyardTraceError, match="do not extend the prior prompt"):
             _reconstruct(_envelope(records))
 
 

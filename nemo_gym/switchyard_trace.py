@@ -97,8 +97,19 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
     assembled: List[Dict[str, Any]] = []
     annotated: List[Dict[str, Any]] = []
     record_uuids: List[str] = []
+    # Token-level counterpart of the message-history check: trainers concatenate
+    # the per-call triples into one sequence and hard-assert that each call's
+    # prompt tokens extend the previous prompt+generation. Validate it here so a
+    # violation (e.g. a template that re-renders history differently) masks the
+    # sample instead of crashing the training step.
+    token_history: List[int] = []
     for i, record in enumerate(records):
         _validate_record(record, i, session_id, record_uuids)
+        if record["prompt_token_ids"][: len(token_history)] != token_history:
+            raise SwitchyardTraceError(
+                f"record {i} prompt_token_ids do not extend the prior prompt+generation tokens"
+            )
+        token_history = record["prompt_token_ids"] + record["generation_token_ids"]
         if record["model"] != model:
             raise SwitchyardTraceError(f"record {i} model {record['model']!r} != session model {model!r}")
         if record["tools"] != tools or record.get("tool_choice") != tool_choice:

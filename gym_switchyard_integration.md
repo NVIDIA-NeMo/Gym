@@ -291,6 +291,8 @@ Reject the session unless:
 - every record has non-empty `request_id` and `model`;
 - prompt and generation IDs are non-empty integer arrays;
 - generation IDs and finite generation log probabilities have equal lengths;
+- each record's prompt token ids extend the prior record's prompt plus
+  generation token ids (the trainer's contiguity requirement);
 - messages are non-empty and end with an assistant message; and
 - model, tools, and tool choice are consistent across the session.
 
@@ -348,7 +350,9 @@ Instead:
 
 - keep the current OpenHands-derived response;
 - set the existing `SWEBenchWrapperInstanceConfig.mask_sample` flag to true — this
-  is Gym's established training-mask convention, already used for agent failures;
+  is Gym's established training-mask convention, already used for agent failures —
+  and surface it as the top-level `mask_sample` field on the verify response
+  (`BaseVerifyResponse`), which NeMo RL maps to a zero loss multiplier;
 - add `switchyard_trace_error: Optional[str]` to `SWEBenchVerifyResponse`,
   following the existing `agent_error_kind`-style metrics naming;
 - store a concise error containing the session ID and reason; and
