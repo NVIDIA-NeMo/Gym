@@ -97,6 +97,17 @@ class SeedResult:
     # env declares and forwards it to verify; it never learns the job shape.
     harvest_files: list[str] = field(default_factory=list)
     harvest_commands: list[str] = field(default_factory=list)
+    # How the environment grades relative to the sandbox:
+    #   "none"     — grade the assembled response and/or harvested artifact;
+    #                the verifier touches no sandbox (the agent closes the box).
+    #   "live_ref" — the verifier operates the SAME live box; the agent mints an
+    #                operate co-lease and passes its ref to verify, keeping the
+    #                box up until verify returns (terminal-bench style).
+    # A verifier that spins up its OWN fresh box (SWE-bench extract-and-apply,
+    # code-gen execute-the-response) needs no special sharing here: it uses the
+    # sandbox_server_url passed to verify. So this only distinguishes "verifier
+    # needs the agent's live box" from everything else.
+    sandbox_sharing: str = "none"
 
 
 @runtime_checkable

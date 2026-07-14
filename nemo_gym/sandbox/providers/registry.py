@@ -152,5 +152,18 @@ def _load_ecs_fargate_provider() -> ProviderClass:
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
-_BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
+# The 'remote' provider is intentionally NOT registered here: it needs an
+# injected HTTP transport, so it is constructed programmatically by the server
+# layer (nemo_gym.sandbox_client), never selected from a config string.
+
+
+def _load_local_subprocess_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.local_subprocess import LocalSubprocessProvider
+
+    return LocalSubprocessProvider
+
+
+# Local, uncommitted dev-only registration (no isolation) — for in-container
+# training where Docker-in-Docker is unavailable. Not part of the PR stack.
+_BUILTIN_PROVIDER_LOADERS["local_subprocess"] = _load_local_subprocess_provider

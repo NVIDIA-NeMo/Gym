@@ -31,6 +31,7 @@ from nemo_gym.sandbox.providers import (
     SandboxStatus,
     create_provider,
 )
+from nemo_gym.sandbox.ref import SandboxRef
 
 
 T = TypeVar("T")
@@ -130,6 +131,50 @@ class AsyncSandbox:
         finally:
             await self._provider.aclose()
             self._closed = True
+
+    @classmethod
+    async def attach(cls, ref: "SandboxRef", *, transport: Any, api_key: str | None = None) -> "AsyncSandbox":
+        """Attach to a sandbox already owned by a sandbox server, by reference.
+
+        Unlike :meth:`start`, this creates nothing: it binds to the existing
+        physical sandbox named by ``ref`` so a second Gym server (e.g. a
+        verifier) can operate the same live box the agent used. The returned
+        sandbox is already "started"; ``stop()`` releases this holder's lease
+        (it destroys the box only when ``ref`` is owner-scoped).
+
+        ``transport`` is a :class:`~nemo_gym.sandbox.transport.SandboxHttpTransport`
+        injected by the server layer; prefer ``nemo_gym.sandbox_client.attach_sandbox``,
+        which wires Gym's HTTP client for you.
+        """
+        from nemo_gym.sandbox.providers.remote import RemoteSandboxProvider
+
+        provider = RemoteSandboxProvider(server_url=ref.server_url, transport=transport, api_key=api_key)
+        sandbox = cls(provider, SandboxSpec(workdir=ref.workdir))
+        sandbox._handle = SandboxHandle(sandbox_id=ref.sandbox_id, provider_name=provider.name, raw=ref)
+        sandbox._stopped = False
+        return sandbox
+
+    def ref(self, *, scope: str | None = None) -> "SandboxRef":
+        """Return this sandbox's serializable ``SandboxRef`` (server-owned only).
+
+        Raises if the sandbox is in-process (no ref exists to share). ``scope``
+        is informational for the caller; minting a narrower co-lease is done via
+        :meth:`grant`.
+        """
+        handle = self._require_handle()
+        raw = handle.raw
+        if isinstance(raw, SandboxRef):
+            return raw
+        raise RuntimeError("ref() is only available for server-owned sandboxes (provider 'remote')")
+
+    async def grant(self, *, scope: str = "operate", ttl_s: float | None = None) -> "SandboxRef":
+        """Mint a co-lease on this server-owned sandbox and return its ref, to
+        hand to another server so it can operate the same live box."""
+        handle = self._require_handle()
+        grant = getattr(self._provider, "grant", None)
+        if grant is None:
+            raise RuntimeError("grant() is only available for server-owned sandboxes (provider 'remote')")
+        return await grant(handle, scope=scope, ttl_s=ttl_s)
 
     async def __aenter__(self) -> "AsyncSandbox":
         return self

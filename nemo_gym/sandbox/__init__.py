@@ -31,12 +31,16 @@ from nemo_gym.sandbox.providers import (
     list_providers,
     register_provider,
 )
+from nemo_gym.sandbox.ref import SCOPE_OPERATE, SCOPE_OWNER, SandboxRef
 from nemo_gym.sandbox.utils import rewrite_image
 
 
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "SandboxRef",
+    "SCOPE_OWNER",
+    "SCOPE_OPERATE",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

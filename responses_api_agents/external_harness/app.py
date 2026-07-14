@@ -40,6 +40,7 @@ from nemo_gym.rollout_id import is_valid_rollout_id, make_rollout_id
 from nemo_gym.sandbox import SandboxResources, resolve_provider_config
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxSpec
+from nemo_gym.sandbox_client import make_remote_provider
 from nemo_gym.server_utils import request
 from nemo_gym.trajectory.builder import (
     assert_nemo_rl_contiguity,
@@ -73,9 +74,14 @@ class HarnessSettings(BaseModel):
     training_mode: bool = False
     # Sandbox selection, resolved through nemo_gym.sandbox.resolve_provider_config:
     # either the name of a sandbox block from a separately-composed provider
-    # config, or an inline single-key {provider: {...}} mapping. No default —
-    # the config picks the provider.
-    sandbox_provider: str | dict
+    # config, or an inline single-key {provider: {...}} mapping. Optional when a
+    # sandbox_server is named instead (below).
+    sandbox_provider: str | dict | None = None
+    # Alternatively, the NAME of a sandbox server to create the sandbox THROUGH.
+    # When set, the box is owned by that server, so the verifier can operate the
+    # SAME live box (live_ref) or spin up its own eval box using the server URL
+    # passed to verify. Exactly one of sandbox_provider / sandbox_server is used.
+    sandbox_server: str | None = None
     # SandboxSpec fields for the run (image, resources, provider_options, ...).
     # No image default: the config supplies the image. workdir is optional
     # (the orchestrator creates a per-rollout dir under it).
@@ -91,6 +97,9 @@ class ExternalHarnessConfig(BaseModel):
     model_api_key: str = "dummy_key"
     policy_model_name: str = ""
     capture_dir: Optional[str] = None  # local fast path when co-located
+    # Resolved base URL of the sandbox server (when settings.sandbox_server is
+    # set). Passed to verify so an env can spin up its own eval box.
+    sandbox_server_url: Optional[str] = None
     # The verifier: seeds the task and owns /verify (exactly one). Base URL.
     verify_url: Optional[str] = None
     # Tool providers: base URLs of resources servers that ONLY lend tools over
@@ -148,6 +157,7 @@ async def _seed_rollout(cfg: "ExternalHarnessConfig", rollout_id: str, task_row:
     files = (task_row.get("verifier_metadata") or {}).get("files", {}) or {}
     mcp_servers: dict[str, dict] = {}
     harvest: dict = {}
+    sharing = "none"
     if cfg.verify_url:
         resp = await request(
             "POST",
@@ -167,6 +177,7 @@ async def _seed_rollout(cfg: "ExternalHarnessConfig", rollout_id: str, task_row:
         # The verifier declares what to pull out of the sandbox to grade
         # (files to read and/or commands to run); empty for response-scored envs.
         harvest = seed_json.get("harvest") or {}
+        sharing = str(seed_json.get("sandbox_sharing") or "none")
 
     # Tool providers lend tools only: seed each with tool_only=true (no task
     # materialized) and merge its MCP server, keyed by its own server name so
@@ -188,6 +199,7 @@ async def _seed_rollout(cfg: "ExternalHarnessConfig", rollout_id: str, task_row:
         mcp_servers=mcp_servers,
         harvest_files=[str(f) for f in (harvest.get("files") or [])],
         harvest_commands=[str(c) for c in (harvest.get("commands") or [])],
+        sandbox_sharing=sharing,
     )
 
 
@@ -296,11 +308,25 @@ async def run_external_harness_rollout(
     seed = await _seed_rollout(cfg, rollout_id, task_row)
     files = seed.files
 
-    # 2. sandbox: resolve the provider (name ref or inline mapping) and build the
-    #    spec. Seed task files as absolute paths under the workdir so the
-    #    harness's cwd and its files line up.
+    # 2. sandbox: pick where the box lives. With a sandbox_server the box is
+    #    owned by that server (so the verifier can operate the same live box or
+    #    spin up its own eval box); otherwise it's an in-process provider (name
+    #    ref or inline mapping). Seed task files as absolute paths under the
+    #    workdir so the harness's cwd and its files line up.
     seeded = {f"{workdir.rstrip('/')}/{rel}": content for rel, content in files.items()}
-    provider = resolve_provider_config(settings.sandbox_provider, named_configs)
+    if settings.sandbox_server:
+        if not cfg.sandbox_server_url:
+            raise ValueError("settings.sandbox_server is set but no sandbox server URL was resolved")
+        provider: Any = make_remote_provider(cfg.sandbox_server_url)
+    else:
+        if not settings.sandbox_provider:
+            raise ValueError("one of settings.sandbox_provider or settings.sandbox_server is required")
+        provider = resolve_provider_config(settings.sandbox_provider, named_configs)
+    # Bind the box to this rollout: the sandbox server refuses to mint a lease
+    # whose rollout id differs, so a leaked ref can't touch another rollout's
+    # box. In-process providers ignore metadata.
+    metadata = dict(spec_config.pop("metadata", {}))
+    metadata["ng_rollout_id"] = rollout_id
     sandbox_spec = SandboxSpec(
         image=spec_config.pop("image", None),
         workdir=workdir,
@@ -308,11 +334,24 @@ async def run_external_harness_rollout(
         ttl_s=spec_config.pop("ttl_s", None),
         ready_timeout_s=spec_config.pop("ready_timeout_s", None),
         env=spec_config.pop("env", {}),
-        metadata=spec_config.pop("metadata", {}),
+        metadata=metadata,
         resources=SandboxResources.from_mapping(spec_config.pop("resources", {})),
         provider_options=spec_config.pop("provider_options", {}),
     )
     sandbox = await AsyncSandbox(provider, sandbox_spec).start()
+
+    # The box stays up through /verify: a live_ref env inspects it there. Capture
+    # read and verify live inside the try so the box is alive for both; the
+    # trajectory build (step 9) needs only the capture and runs after stop().
+    reader = HttpCaptureReader(
+        cfg.model_server_url, api_key=cfg.model_api_key, local_dir=cfg.capture_dir, local_read="auto"
+    )
+    steps: list = []
+    summary: dict = {}
+    response: dict = {}
+    resp_by_reqid: dict = {}
+    reward, is_resolved, info = 0.0, False, {}
+    sandbox_ref: Optional[dict] = None
     try:
         # Ensure the workdir exists. The docker provider creates it via `run -w`,
         # but others (e.g. opensandbox) do not, and an env with no seeded files
@@ -342,11 +381,10 @@ async def run_external_harness_rollout(
 
         # 5. outcome harvest. Prefer a standard ng_outcome.json the harness/env
         #    writes; else base the outcome on harness stdout/stderr. On top of
-        #    that, harvest any files the env asked for (seed.outcome_files) —
-        #    file-artifact envs (e.g. "write the answer to answer.txt") grade
-        #    from these; response-scored envs declare none and grade the
-        #    assembled response (below). The file to grade lives with the env,
-        #    not the agent.
+        #    that, harvest any files/commands the env asked for — file-artifact
+        #    envs (e.g. "write the answer to answer.txt") and patch envs (git
+        #    diff) grade from these. response-scored envs declare none. The
+        #    extraction spec lives with the env, not the agent.
         raw = await sandbox_read_text(sandbox, f"{workdir.rstrip('/')}/ng_outcome.json")
         outcome = json.loads(raw) if raw else {"harness_stdout": out[-1000:], "error": err[-1000:]}
         harvested_files: dict[str, str] = {}
@@ -366,53 +404,57 @@ async def run_external_harness_rollout(
             outcome.setdefault("harvested_files", harvested_files)
         if command_outputs:
             outcome.setdefault("command_outputs", command_outputs)
-        # Convenience single-value view (the field simple file/patch verifiers
-        # read): first harvested file, else first command's stdout.
         if harvested_files:
             outcome.setdefault("outcome_text", next(iter(harvested_files.values())))
         elif command_outputs:
             outcome.setdefault("outcome_text", next(iter(command_outputs.values()))["stdout"])
         outcome["harness_exit_code"] = exit_code
+
+        # If the env grades from the LIVE box, mint an operate co-lease for the
+        # verifier and keep the box up (the finally below stops it only after
+        # verify returns). The verifier attaches to the SAME physical box.
+        if seed.sandbox_sharing == "live_ref" and settings.sandbox_server:
+            sandbox_ref = (await sandbox.grant(scope="operate")).to_dict()
+
+        # 6. wait for capture, then read it back. Capture is the source of truth
+        #    for what the harness's model calls produced.
+        await asyncio.sleep(0.25)
+        await reader.prefetch(rollout_id)
+        steps = [r for r in reader.records(rollout_id, kinds={"model_call"}) if isinstance(r, ModelCallRecord)]
+        summary = reader.summary(rollout_id)
+
+        # 7. assemble the semantic response from capture (final-answer text
+        #    across turns, all dialects). This is what response-scored envs grade.
+        semantic_response = _assemble_semantic_response(steps, rollout_id, cfg.policy_model_name, summary)
+        response = semantic_response.model_dump(mode="json")
+        resp_by_reqid = {s.request_id: s.response for s in steps}
+
+        # 8. verify (resources server owns reward authority). Send the full task
+        #    row plus the assembled response, the harvested artifact, and — when
+        #    server-backed — the sandbox server URL (so the env can create its
+        #    own eval box) and a live sandbox_ref (so it can operate the agent's
+        #    box). The env uses whichever fits its grading shape.
+        if cfg.verify_url:
+            verify_payload = dict(task_row)
+            verify_payload.update(
+                {
+                    "rollout_id": rollout_id,
+                    "ng_rollout_id": rollout_id,
+                    "responses_create_params": task_row.get("responses_create_params", {}),
+                    "response": response,
+                    "blackbox_outcome": outcome,
+                    "sandbox_server_url": cfg.sandbox_server_url,
+                    "sandbox_ref": sandbox_ref,
+                }
+            )
+            verify_resp = await request("POST", cfg.verify_url.rstrip("/") + "/verify", json=verify_payload)
+            verify_resp.raise_for_status()
+            verify_json = await verify_resp.json()
+            reward = float(verify_json.get("reward", 0.0))
+            is_resolved = bool(verify_json.get("is_resolved", reward >= 1.0))
+            info = verify_json.get("info", {}) or {}
     finally:
         await sandbox.stop()
-
-    # 6. wait for capture, then read it back over HTTP. Capture is the source of
-    #    truth for what the harness's model calls produced.
-    reader = HttpCaptureReader(
-        cfg.model_server_url, api_key=cfg.model_api_key, local_dir=cfg.capture_dir, local_read="auto"
-    )
-    await asyncio.sleep(0.25)
-    await reader.prefetch(rollout_id)
-    steps = [r for r in reader.records(rollout_id, kinds={"model_call"}) if isinstance(r, ModelCallRecord)]
-    summary = reader.summary(rollout_id)
-
-    # 7. assemble the semantic response from capture (final-answer text across
-    #    turns, all dialects). This is what response-scored envs grade.
-    semantic_response = _assemble_semantic_response(steps, rollout_id, cfg.policy_model_name, summary)
-    response: dict = semantic_response.model_dump(mode="json")
-    resp_by_reqid = {s.request_id: s.response for s in steps}
-
-    # 8. verify (resources server owns reward authority). Send the full task row
-    #    (so response-scored envs get question/answer/metadata) plus the
-    #    assembled response and the harvested artifact (for file-scored envs).
-    reward, is_resolved, info = 0.0, False, {}
-    if cfg.verify_url:
-        verify_payload = dict(task_row)
-        verify_payload.update(
-            {
-                "rollout_id": rollout_id,
-                "ng_rollout_id": rollout_id,
-                "responses_create_params": task_row.get("responses_create_params", {}),
-                "response": response,
-                "blackbox_outcome": outcome,
-            }
-        )
-        verify_resp = await request("POST", cfg.verify_url.rstrip("/") + "/verify", json=verify_payload)
-        verify_resp.raise_for_status()
-        verify_json = await verify_resp.json()
-        reward = float(verify_json.get("reward", 0.0))
-        is_resolved = bool(verify_json.get("is_resolved", reward >= 1.0))
-        info = verify_json.get("info", {}) or {}
 
     # 9. in training mode, project the main chain (token ids) as the response.
     trajectories = []
@@ -506,6 +548,7 @@ class ExternalHarnessAgent(SimpleResponsesAPIAgent):
         row = body.model_dump()
         # The merged global config resolves a named sandbox_provider to its block.
         global_config_dict = ServerClient.load_from_global_config().global_config_dict
+        sandbox_server_name = self.config.settings.sandbox_server
         cfg = ExternalHarnessConfig(
             settings=self.config.settings,
             model_server_url=get_server_url(self.config.model_server.name),
@@ -513,6 +556,7 @@ class ExternalHarnessAgent(SimpleResponsesAPIAgent):
             tool_provider_urls=[get_server_url(p.name) for p in self.config.tool_providers],
             policy_model_name=self.config.policy_model_name,
             capture_dir=None,
+            sandbox_server_url=get_server_url(sandbox_server_name) if sandbox_server_name else None,
         )
         try:
             result = await run_external_harness_rollout(

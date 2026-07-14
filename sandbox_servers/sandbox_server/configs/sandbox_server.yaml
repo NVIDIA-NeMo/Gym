@@ -1,0 +1,17 @@
+# A sandbox server fronting the local Docker provider. Compose it into a run
+# with +config_paths and reference it from an agent's settings.sandbox_server.
+#
+# One server instance fronts exactly ONE provider. To offer another backend
+# (e.g. opensandbox on a cluster), compose a second sandbox_servers block with
+# its own provider — agents/verifiers pick one by name.
+pool_sandbox_server:
+  sandbox_servers:
+    sandbox_server:
+      entrypoint: app.py
+      sandbox_provider:
+        docker:
+          create:
+            # The harness in the container must reach the model gate on the host.
+            network: host
+      max_concurrent: 16
+      default_ttl_s: 1800
