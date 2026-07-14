@@ -21,6 +21,14 @@ def _read_run_env(path: Path) -> dict[str, str]:
     return dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
 
 
+def _fake_uv(tmp_path: Path) -> Path:
+    uv_bin = tmp_path / "bin" / "uv"
+    uv_bin.parent.mkdir(exist_ok=True)
+    uv_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
+    return uv_bin
+
+
 @pytest.mark.parametrize(
     ("requested", "expect_shortened"),
     [
@@ -39,10 +47,7 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
 ) -> None:
     run_dir = tmp_path / "run"
     server_venv_root = tmp_path / "server-venvs"
-    uv_bin = tmp_path / "bin" / "uv"
-    uv_bin.parent.mkdir()
-    uv_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    uv_bin.chmod(0o755)
+    uv_bin = _fake_uv(tmp_path)
     env = os.environ.copy()
     env.update(
         {
@@ -81,6 +86,167 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
         f"{run_env['RAY_TMPDIR'].rstrip('/')}/ray/session_2099-12-31_23-59-59_999999_999999/sockets/plasma_store"
     )
     assert len(socket_probe) <= 107
+
+
+def test_multienv_dry_run_writes_complete_terminal_lifecycle(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    env = os.environ.copy()
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "RUN_DIR": str(run_dir),
+            "RUN_ATTEMPT_ID": "fresh-test",
+            "RUNNER_NAME": "gym_pyautogui",
+            "RECORD_VIDEO": "0",
+            "TASK_ARTIFACTS": "0",
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (run_dir / "started_at.txt").read_text().strip()
+    assert (run_dir / "finished_at.txt").read_text().strip()
+    assert (run_dir / "launcher.pid").read_text().strip().isdigit()
+    assert (run_dir / "exit_code.txt").read_text() == "0\n"
+    resolved = (run_dir / "resolved-command.log").read_text(encoding="utf-8")
+    assert "--- ng_run command ---" in resolved
+    assert "--- ng_collect_rollouts command ---" in resolved
+    run_env = _read_run_env(run_dir / "run.env")
+    assert run_env["RUN_ATTEMPT_ID"] == "fresh-test"
+    assert run_env["RUN_LIFECYCLE_DIR"] == str(run_dir)
+    assert run_env["MATERIALIZED_INPUT_JSONL"] == str(run_dir / "rollouts_materialized_inputs.jsonl")
+
+
+def test_multienv_refuses_to_mutate_an_existing_run(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    sentinel = run_dir / "owned-by-previous-run.txt"
+    sentinel.write_text("unchanged\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "RUN_DIR": str(run_dir),
+            "RUN_ATTEMPT_ID": "must-not-exist",
+            "RUNNER_NAME": "gym_pyautogui",
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "immutable run already exists" in completed.stderr
+    assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
+    assert sorted(path.name for path in run_dir.iterdir()) == [sentinel.name]
+
+
+def test_multienv_preflight_failure_still_writes_terminal_markers(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    failing_python = tmp_path / "preflight-failure"
+    failing_python.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
+    failing_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "RUN_DIR": str(run_dir),
+            "RUN_ATTEMPT_ID": "failed-preflight",
+            "RUNNER_NAME": "prompt_agent",
+            "PYTHON_BIN": str(failing_python),
+            "PREFLIGHT_ONLY": "1",
+            "RECORD_VIDEO": "0",
+            "TASK_ARTIFACTS": "0",
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 7
+    assert (run_dir / "started_at.txt").is_file()
+    assert (run_dir / "finished_at.txt").is_file()
+    assert (run_dir / "exit_code.txt").read_text() == "7\n"
+    assert (run_dir / "resolved-command.log").is_file()
+
+
+def test_multienv_resume_uses_a_new_attempt_directory_and_requires_prior_failure(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "rollouts.jsonl").write_text("", encoding="utf-8")
+    (run_dir / "rollouts_materialized_inputs.jsonl").write_text("", encoding="utf-8")
+    (run_dir / "started_at.txt").write_text("2026-07-13T00:00:00Z\n", encoding="utf-8")
+    (run_dir / "finished_at.txt").write_text("2026-07-13T01:00:00Z\n", encoding="utf-8")
+    (run_dir / "exit_code.txt").write_text("1\n", encoding="utf-8")
+    original_terminal_files = {
+        name: (run_dir / name).read_bytes()
+        for name in ("started_at.txt", "finished_at.txt", "exit_code.txt")
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "RESUME_FROM_CACHE": "1",
+            "RUN_DIR": str(run_dir),
+            "RUN_ATTEMPT_ID": "resume-1",
+            "RUNNER_NAME": "gym_pyautogui",
+            "RECORD_VIDEO": "0",
+            "TASK_ARTIFACTS": "0",
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    attempt_dir = run_dir / "resume-attempts" / "resume-1"
+    assert (attempt_dir / "exit_code.txt").read_text() == "0\n"
+    assert _read_run_env(attempt_dir / "run.env")["RUN_LIFECYCLE_DIR"] == str(attempt_dir)
+    assert "+resume_from_cache=true" in (attempt_dir / "resolved-command.log").read_text()
+    assert {
+        name: (run_dir / name).read_bytes()
+        for name in original_terminal_files
+    } == original_terminal_files
+
+    env["RUN_ATTEMPT_ID"] = "resume-2"
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert "refusing to resume a successfully completed run" in completed.stderr
+    assert not (run_dir / "resume-attempts" / "resume-2").exists()
 
 
 def test_omni_configs_declare_adapter_agent_class(tmp_path: Path) -> None:

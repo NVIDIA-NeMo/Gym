@@ -62,16 +62,28 @@ For resumable runs:
 
 ```bash
 INPUT_JSONL=responses_api_agents/osworld_agent/data/test_all.jsonl \
+RUN_DIR=results/<failed-run> \
 LIMIT=null NUM_ENVS=4 RESUME_FROM_CACHE=1 \
 bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
 ```
 
 Keep the input order, output path, repeat count, and video-sampling seed stable
-when resuming.
+when resuming. A normal invocation atomically creates `RUN_DIR` and refuses to
+reuse any existing path. `RESUME_FROM_CACHE=1` is the only exception: the
+launcher verifies that Gym's output and materialized-input JSONLs exist, every
+prior attempt is terminal, and no prior attempt succeeded. Resume control
+records are written to `${RUN_DIR}/resume-attempts/<attempt-id>` so earlier
+records remain unchanged.
+
+Every attempt writes `started_at.txt`, `launcher.pid`, `run.env`, and
+`resolved-command.log`, then writes `finished_at.txt` and `exit_code.txt` on
+normal completion, preflight failure, or signal termination. For a fresh run
+these files live directly in `RUN_DIR`; a resume uses its attempt directory.
 
 The script writes per-task logs, trajectories, screenshots, VM execution logs,
-and result metadata under `${RUN_DIR}/task-artifacts`. Disable them with
-`TASK_ARTIFACTS=0`, or move them with `TASK_ARTIFACT_ROOT=/path/to/artifacts`.
+and result metadata under the current attempt's `task-artifacts` directory.
+Disable them with `TASK_ARTIFACTS=0`, or move them with
+`TASK_ARTIFACT_ROOT=/path/to/artifacts`.
 
 For adapter-parity debugging, add `FULL_MODEL_IO=1`. This writes the complete
 agent-facing request/response stream to `model-io-agent.jsonl`, the final VLLM
@@ -87,7 +99,7 @@ before starting Gym, so agent and policy services cannot split the files
 across their component-specific working directories.
 
 Use `FULL_MODEL_IO=1` only for targeted diagnostics. It records full agent and
-vLLM payloads, including embedded screenshots, in the run directory.
+vLLM payloads, including embedded screenshots, in the current attempt directory.
 
 ## MiniMax M3
 
