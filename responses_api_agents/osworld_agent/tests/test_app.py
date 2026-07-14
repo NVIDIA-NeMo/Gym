@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,7 @@ from responses_api_agents.osworld_agent.app import (
     _model_io_images,
     _normalize_chat_message,
     _resolve_policy_model_name,
+    _validate_runner_runtime,
 )
 
 
@@ -463,6 +465,29 @@ def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_serve
 class TestApp:
     def test_sanity(self) -> None:
         OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+    @patch("responses_api_agents.osworld_agent.app.load_attr")
+    def test_startup_validates_runner_in_agent_runtime(self, mock_load_attr) -> None:
+        agent = OSWorldAgent(
+            config=make_config(
+                runner_name="m3_agent",
+                agent_class_path="custom_runtime.M3Agent",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        assert agent.sem is not None
+        mock_load_attr.assert_called_once_with("custom_runtime.M3Agent")
+
+    @patch("responses_api_agents.osworld_agent.app.load_attr")
+    def test_pointer_startup_disables_unconfigured_parallel_tools(self, mock_load_attr, monkeypatch) -> None:
+        monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+
+        class_path = _validate_runner_runtime(make_config(runner_name="pointer_agent"))
+
+        assert class_path == "mm_agents.pointer.PointerAgent"
+        assert os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"
+        mock_load_attr.assert_called_once_with(class_path)
 
     def test_metrics_report_binary_and_raw_osworld_scores(self) -> None:
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))

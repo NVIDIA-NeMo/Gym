@@ -50,10 +50,12 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
-from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME
+from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
+
+POINTER_PARALLEL_DISABLED_SENTINEL = "__nemo_gym_parallel_tools_disabled__"
 
 _OSWORLD_LOG_CONTEXT_FIELDS = (
     "run_id",
@@ -186,6 +188,27 @@ def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) 
             )
         return runtime_name
     return configured_name
+
+
+def _validate_runner_runtime(config: "OSWorldAgentConfig") -> Optional[str]:
+    """Import the effective runner class inside the Gym-created agent venv."""
+
+    runner_spec = resolve_runner_spec(
+        config.runner_name,
+        action_space=config.action_space,
+        observation_type=config.observation_type,
+        env_class_path=config.env_class_path,
+        agent_class_path=config.agent_class_path,
+        agent_kwargs=config.agent_kwargs,
+    )
+    if runner_spec.kind == "pointer_agent" and not os.environ.get("PARALLEL_API_KEY"):
+        # Pointer constructs its optional Parallel client while importing the
+        # module. Match the rollout runtime's no-web-tools mode when no real
+        # credential is configured.
+        os.environ["PARALLEL_API_KEY"] = POINTER_PARALLEL_DISABLED_SENTINEL
+    if runner_spec.agent_class_path:
+        load_attr(runner_spec.agent_class_path)
+    return runner_spec.agent_class_path
 
 
 class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
@@ -676,6 +699,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:

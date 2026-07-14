@@ -3,6 +3,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -82,7 +83,7 @@ def test_multienv_ray_tmpdir_respects_unix_socket_limit(
     assert len(socket_probe) <= 107
 
 
-def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> None:
+def test_omni_configs_declare_adapter_agent_class(tmp_path: Path) -> None:
     input_path = tmp_path / "input.jsonl"
     input_path.write_text('{"verifier_metadata":{"task_id":"task-1","osworld_task":{"id":"task-1"}}}\n')
     configs = ",".join(
@@ -94,7 +95,7 @@ def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> Non
 
     completed = subprocess.run(
         [
-            str(REPO_ROOT / ".venv/bin/python"),
+            sys.executable,
             str(PREFLIGHT_SCRIPT),
             "--config-paths",
             configs,
@@ -111,6 +112,94 @@ def test_omni_configs_reference_importable_adapter_agents(tmp_path: Path) -> Non
 
     assert '"preflight": "ok"' in completed.stdout
     assert "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent" in completed.stdout
+
+
+def test_multienv_preflight_does_not_require_prebuilt_agent_runtime(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"verifier_metadata":{"task_id":"task-1","osworld_task":{"id":"task-1"}}}\n')
+    run_dir = tmp_path / "run"
+    uv_bin = tmp_path / "uv"
+    uv_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
+    configs = ",".join(
+        [
+            "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
+            "responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml",
+        ]
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "RUN_DIR": str(run_dir),
+            "INPUT_JSONL": str(input_path),
+            "EXPECTED_INPUT_ROWS": "1",
+            "CONFIG_PATHS": configs,
+            "RUNNER_NAME": "nemotron_v3_nano_omni_agent",
+            # ng_run owns this path and has not created it yet. The launcher
+            # preflight must not require it before ng_run gets that chance.
+            "SERVER_VENV_ROOT": str(tmp_path / "missing-server-venvs"),
+            "PYTHON_BIN": sys.executable,
+            "UV_BIN": str(uv_bin),
+            "PREFLIGHT_ONLY": "1",
+            "RECORD_VIDEO": "0",
+            "TASK_ARTIFACTS": "0",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    run_env = _read_run_env(run_dir / "run.env")
+    assert run_env["SERVER_VENV_ROOT"] == str(tmp_path / "missing-server-venvs")
+    assert '"preflight": "ok"' in completed.stdout
+    assert "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent" in completed.stdout
+
+
+def test_pointer_launcher_preflight_does_not_import_runtime_package(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"verifier_metadata":{"task_id":"task-1","osworld_task":{"id":"task-1"}}}\n')
+    fake_package = tmp_path / "mm_agents"
+    fake_package.mkdir()
+    (fake_package / "__init__.py").write_text("", encoding="utf-8")
+    (fake_package / "pointer.py").write_text(
+        'raise AssertionError("launcher preflight must not import the runtime package")\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path)
+    configs = ",".join(
+        [
+            "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
+            "responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml",
+        ]
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT_SCRIPT),
+            "--config-paths",
+            configs,
+            "--input-jsonl",
+            str(input_path),
+            "--runner-name",
+            "pointer_agent",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert '"preflight": "ok"' in completed.stdout
+    assert "mm_agents.pointer.PointerAgent" in completed.stdout
 
 
 def test_omni_runner_defaults_match_the_three_image_recipe(tmp_path: Path) -> None:

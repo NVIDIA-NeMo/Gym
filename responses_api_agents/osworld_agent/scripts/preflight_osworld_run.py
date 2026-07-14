@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import sys
@@ -48,7 +47,10 @@ def _load_config_paths(config_paths: str) -> list[dict[str, Any]]:
     return configs
 
 
-def _validate_agent_classes(configs: list[dict[str, Any]]) -> list[str]:
+def _resolve_agent_class_paths(
+    configs: list[dict[str, Any]],
+    runner_name: str | None = None,
+) -> list[str]:
     from responses_api_agents.osworld_agent.runner_registry import resolve_runner_spec
 
     class_paths = {
@@ -57,23 +59,24 @@ def _validate_agent_classes(configs: list[dict[str, Any]]) -> list[str]:
         for key, value in _walk(config)
         if key == "agent_class_path" and isinstance(value, str) and value.strip()
     }
-    runner_names = {
-        value
-        for config in configs
-        for key, value in _walk(config)
-        if key == "runner_name" and isinstance(value, str) and value.strip()
-    }
+    runner_names = (
+        {runner_name}
+        if runner_name
+        else {
+            value
+            for config in configs
+            for key, value in _walk(config)
+            if key == "runner_name" and isinstance(value, str) and value.strip()
+        }
+    )
     for runner_name in runner_names:
         runner_spec = resolve_runner_spec(runner_name)
         if runner_spec.agent_class_path:
             class_paths.add(runner_spec.agent_class_path)
     for class_path in sorted(class_paths):
-        module_name, separator, attribute = class_path.rpartition(".")
+        _module_name, separator, _attribute = class_path.rpartition(".")
         if not separator:
             raise ValueError(f"agent_class_path must be module-qualified: {class_path}")
-        module = importlib.import_module(module_name)
-        if not hasattr(module, attribute):
-            raise ValueError(f"agent class does not exist: {class_path}")
     return sorted(class_paths)
 
 
@@ -114,11 +117,18 @@ def main() -> int:
     parser.add_argument("--config-paths", required=True)
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--expected-rows", type=int)
+    parser.add_argument(
+        "--runner-name",
+        help="Effective runner override; validates only that runner instead of every layered config default.",
+    )
     args = parser.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT))
     configs = _load_config_paths(args.config_paths)
-    class_paths = _validate_agent_classes(configs)
+    # The launcher may run before ng_run has created the per-server venv.
+    # Resolve the effective class paths here, then let OSWorldAgent import
+    # them while starting inside the real agent runtime.
+    class_paths = _resolve_agent_class_paths(configs, args.runner_name)
     _validate_docker_lock(configs)
     rows, unique_task_ids = _validate_input(args.input_jsonl, args.expected_rows)
     print(
