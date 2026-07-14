@@ -302,7 +302,7 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path: 
     assert model_call_capture_dirs_from_config(nested_config) == []
 
 
-def test_capture_records_non_json_response_as_error(tmp_path: Path):
+def test_capture_records_non_json_response_as_error_doesnt_record(tmp_path: Path):
     class MyTestSimpleResponsesAPIModel(TestSimpleResponsesAPIModel):
         async def responses(self, body: dict = Body()) -> PlainTextResponse:
             return PlainTextResponse("not json")
@@ -314,8 +314,7 @@ def test_capture_records_non_json_response_as_error(tmp_path: Path):
     r = client.post("/v1/ng-rollout/rnj/responses", json={"input": "x"})
     assert r.status_code == 500
     records = CaptureStore(tmp_path).read("rnj")
-    assert len(records) == 1 and records[0].response is None
-    assert records[0].error_response is not None
+    assert len(records) == 0
 
 
 # --- base-agent correlation helpers ---
