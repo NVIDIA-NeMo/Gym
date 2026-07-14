@@ -421,10 +421,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             model_url = model_url if model_url.endswith("/v1") else f"{model_url}/v1"
             agent_kwargs["model"] = f"nemo/{model_name}"
             agent_kwargs["openai_base_url"] = model_url
-            agent_kwargs["openai_api_key"] = "EMPTY"
+            agent_kwargs["openai_api_key"] = "EMPTY"  # pragma: allowlist secret
             providers = agent_kwargs.setdefault("opencode_config", {}).setdefault("provider", {})
             nemo = providers.setdefault("nemo", {"npm": "@ai-sdk/openai-compatible"})
-            nemo.setdefault("options", {}).update({"baseURL": model_url, "apiKey": "EMPTY"})
+            nemo.setdefault("options", {}).update(
+                {"baseURL": model_url, "apiKey": "EMPTY"}  # pragma: allowlist secret
+            )
             model_config = nemo.setdefault("models", {}).get(model_name, {})
             nemo["models"] = {model_name: model_config}
         return {
