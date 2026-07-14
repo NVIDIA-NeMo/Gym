@@ -146,7 +146,7 @@ class TestSandboxAPI:
         assert kwargs["model"] == "nemo/model"
         assert kwargs["opencode_config"]["provider"]["nemo"]["options"] == {
             "baseURL": "http://model-host:8000/v1",
-            "apiKey": "EMPTY",
+            "apiKey": "EMPTY",  # pragma: allowlist secret
         }
 
     def test_agent_error_classification_matches_swe_agents(self) -> None:
@@ -190,7 +190,9 @@ class TestSandboxAPI:
     def test_safe_config_redacts_provider_key(self) -> None:
         class Params:
             def model_dump_json(self) -> str:
-                return json.dumps({"sandbox_provider": {"opensandbox": {"api_key": "secret"}}})
+                return json.dumps(
+                    {"sandbox_provider": {"opensandbox": {"api_key": "secret"}}}  # pragma: allowlist secret
+                )
 
         assert json.loads(_safe_config_json(Params()))["sandbox_provider"]["opensandbox"]["api_key"] == "***"
 
