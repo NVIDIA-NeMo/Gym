@@ -94,9 +94,10 @@ PR #63 already provides:
 - buffered upstream responses with a normal synthesized client stream
 - `GET /v1/sessions/{session_id}/completions`
 
-The completion endpoint returns records ordered by capture time and UUID. The Gym
-adapter still validates message-history continuity and never repairs a broken chain
-using timestamps.
+The retrieval envelope is `{schema_version, session_id, completions}` — the record
+list field is named `completions`. Records are returned ordered by
+(`captured_at`, `uuid`). The Gym adapter still validates message-history continuity
+and never repairs a broken chain using timestamps.
 
 ## MVP scope
 
@@ -154,8 +155,14 @@ switchyard \
   -- serve
 ~~~
 
-Do not replace this with `serve --config`; that code path does not install the
-capture processors in the current Switchyard branch.
+Do not replace this with `serve --config`; that path runs the Rust profile server,
+which has no Python processor chain and rejects `--enable-rl-logging` outright.
+
+The session-retrieval endpoint is registered only on this capture-enabled serve
+path. Records are plain JSON files under `--rl-log-dir`, so retrieval does not
+require the exact process that captured them: any capture-enabled Switchyard
+process pointed at the same log directory can serve
+`GET /v1/sessions/...`, including after a proxy restart.
 
 ### Gym
 
@@ -196,7 +203,8 @@ Add `switchyard_session_id: Optional[str] = None` to
 
 - `switchyard_base_url` is configured;
 - `agent_framework == "openhands"`; and
-- this is a normal agent run rather than golden-patch verification.
+- this is a normal agent run rather than golden-patch verification
+  (`verify_golden_patch` is false).
 
 A lowercase UUID hex string is URL-safe, maps safely through Switchyard's current
 session-directory sanitizer, and is unique across retries. It is serialized in the
@@ -218,14 +226,30 @@ The direct path is:
    - copy `params`;
    - replace `params["model"]` with `NEMO_GYM_MODEL_SERVER_NAME`;
    - POST to `<base-url>/v1/chat/completions`;
-   - send `proxy_x_session_id: <session-id>`.
+   - send `proxy_x_session_id: <session-id>`;
+   - make exactly one HTTP attempt — no transport retries.
 4. Reuse the client's existing response-status handling, JSON parsing, cookies,
    metrics, and completion-log writing.
+
+The single-attempt rule exists because an attempt that reaches vLLM writes a
+capture record even when the client never receives the response. A transport
+retry can therefore leave two records with the same prompt history; strict-history
+reconstruction would refuse the session and mask the sample. Gym's
+`ServerClient.post` and `nemo_gym.server_utils.request` both retry with backoff,
+so the direct path must use the shared aiohttp client without the retry wrapper
+and let a failed call fail the run through existing OpenHands error handling.
 
 The model rewrite is required. Switchyard dispatches on the incoming OpenAI
 `model` field, while OpenHands normally sends the underlying LLM model string.
 `NEMO_GYM_MODEL_SERVER_NAME` is already exported by the Gym harness and exactly
-matches the `policy_model` route in the example.
+matches the `policy_model` route in the example. `params["model"]` always exists:
+`_nemo_gym_llm_kwargs` is built with `model=self.config.model`.
+
+No message-format change is needed. On the direct path the response message never
+carries `prompt_token_ids`, `generation_token_ids`, or `generation_log_probs` —
+those are attached by Gym's model server, not vLLM — so the client's existing
+token-field stripping loop is a no-op and every captured prompt history stays
+strictly extending.
 
 Gym must export two additional values only into the agent container:
 
@@ -255,9 +279,11 @@ After `SWEBenchWrapper.responses` returns, `run` already reads the serialized
 GET <switchyard-base-url>/v1/sessions/<session-uuid>/completions
 ~~~
 
-Use Gym's existing async HTTP and response helpers with a bounded timeout. No polling
+Use Gym's existing async HTTP helper (`nemo_gym.server_utils.request`) with a
+bounded timeout; its retries are safe here because the GET is idempotent. No polling
 or session-finalization protocol is needed: OpenHands has exited, and Switchyard
-writes each record before returning that call's model response.
+durably writes each record (atomic rename) before returning that call's model
+response.
 
 ### Required session validation
 
@@ -265,7 +291,7 @@ Reject the session unless:
 
 - the envelope has `schema_version == 1`;
 - the envelope session ID equals the requested UUID;
-- at least one record exists;
+- the `completions` list is non-empty;
 - every record has `schema_version == 1`;
 - every record has the requested session ID and a unique UUID;
 - every record has `is_valid == true`;
@@ -328,9 +354,10 @@ patch, evaluation metrics, response text, or reward.
 Instead:
 
 - keep the current OpenHands-derived response;
-- set `instance_config["mask_sample"] = true`;
-- add `ng_switchyard_trace_error: Optional[str]` to
-  `SWEBenchVerifyResponse`;
+- set the existing `SWEBenchWrapperInstanceConfig.mask_sample` flag to true — this
+  is Gym's established training-mask convention, already used for agent failures;
+- add `switchyard_trace_error: Optional[str]` to `SWEBenchVerifyResponse`,
+  following the existing `agent_error_kind`-style metrics naming;
 - store a concise error containing the session ID and reason; and
 - emit no Switchyard token annotations.
 
@@ -366,9 +393,12 @@ of this MVP.
 1. `responses_api_agents/swe_agents/app.py`
    - add `switchyard_base_url`;
    - add and generate `switchyard_session_id`;
-   - export the two Switchyard environment variables for OpenHands only;
+   - export the two Switchyard environment variables next to the existing
+     `NEMO_GYM_MODEL_SERVER_NAME` export in `OpenHandsHarnessProcessor`'s
+     agent command (agent container only; the opencode harness and the eval
+     container command are untouched);
    - retrieve and apply the reconstructed trace in `run`;
-   - add `ng_switchyard_trace_error`.
+   - add `switchyard_trace_error`.
 2. `responses_api_agents/swe_agents/switchyard_trace.py`
    - DTOs, validation, tool mapping, and reconstruction.
 3. `responses_api_agents/swe_agents/tests/test_app.py`
@@ -390,6 +420,7 @@ Do not change `nemo_gym/rollout_collection.py` or generic model-server code.
    - route-model rewrite;
    - session header;
    - missing-session failure;
+   - exactly one HTTP attempt per call (no transport retries);
    - response parsing, cookies, metrics, and completion logging.
 3. Push the fork commit before updating Gym's pin.
 
