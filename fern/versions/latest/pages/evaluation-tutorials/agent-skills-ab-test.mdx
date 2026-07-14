@@ -10,7 +10,7 @@ This walkthrough evaluates whether the `nemo-gym-create-environment` skill helps
 
 You will:
 
-1. Build an isolated coding-agent fixture.
+1. Build the Docker image that provides the agent's clean evaluation workspace.
 2. Create a low-cost control-versus-treatment experiment.
 3. Preview and lock the exact commands.
 4. Run both arms.
@@ -39,6 +39,23 @@ Use a disposable or appropriately hardened host, do not mount a writable host ch
 
 The verifier also reports `correctness`, `completeness`, and `convention_compliance`.
 
+## Terms Used In This Tutorial
+
+This workflow combines coding-agent, container, and evaluation terminology. The terms below describe different objects:
+
+| Term | Meaning |
+|---|---|
+| Coding agent | Claude Code: the program that reads the task, edits files, and runs commands. |
+| Sandbox fixture image | The Docker image used to create clean workspaces. It contains a pinned Gym checkout, Claude Code, dependencies, task inputs, and the SQLite database. It does not contain the target skill or hidden checks. |
+| Experiment arm | One configured variant of the run. The control and treatment arms differ only in whether the target skill is available. |
+| Skill bundle | An immutable copy of the skill directory staged for the treatment arm. |
+| Agent sandbox | A fresh container created from the fixture image where the coding agent performs the task. |
+| Workspace patch | The Git diff captured from the agent sandbox after the agent finishes. This is the artifact submitted for scoring. |
+| Verifier sandbox | A second fresh container created from the same fixture image. It receives the workspace patch but does not reuse agent state. |
+| Hidden checks | Server-owned tests uploaded to the verifier sandbox only after the patch is applied. They are never exposed to the agent while it works. |
+
+In short: the **image** is the reusable starting point, a **sandbox** is one running container created from that image, and the **patch** is the only workspace change passed from agent execution to verification.
+
 ## How The Evaluation Works
 
 ```text
@@ -50,7 +67,7 @@ Experiment driver
 
 Each patch
 └── fresh verifier sandbox
-    ├── confirm the verifier fixture matches the agent fixture
+    ├── confirm the base workspace revision matches the agent sandbox
     ├── apply patch
     ├── upload hidden checks
     └── run checks as an unprivileged user
@@ -65,9 +82,9 @@ The source task is identical in both arms. The model, agent, image, sampling par
 - Complete [Installation](/get-started/installation).
 - Install Docker and ensure the Docker daemon is running.
 - Configure `anthropic_api_key` in `env.yaml`.
-- Push the branch revision you want in the fixture image to a Git remote.
+- Push the branch revision you want in the sandbox fixture image to a Git remote.
 - Commit or stash local changes before running the locked experiment.
-- Allow disk space for the fixture image and at least 4 CPUs / 8 GiB for the one-rollout smoke test. The checked-in concurrency of 4 can request up to roughly 16 CPUs / 32 GiB across active sandboxes.
+- Allow disk space for the sandbox fixture image and at least 4 CPUs / 8 GiB for the one-rollout smoke test. The checked-in concurrency of 4 can request up to roughly 16 CPUs / 32 GiB across active sandboxes.
 
 Check Docker:
 
@@ -83,7 +100,7 @@ uv run gym env validate \
   +agent_skills_sandbox_image=nemo-gym-agent-skills:create-environment-smoke
 ```
 
-## Build The Fixture Image
+## Build The Sandbox Fixture Image
 
 Run from the Gym repository root:
 
@@ -102,7 +119,7 @@ docker build \
 
 The build clones `GYM_REVISION`, installs the coding-agent runtime and Gym dependencies, creates `/task_inputs/shop.db`, and removes project-local skill directories.
 
-Verify the fixture:
+Verify the sandbox fixture image:
 
 ```bash
 docker run --rm --entrypoint /bin/sh "${IMAGE}" -c '
