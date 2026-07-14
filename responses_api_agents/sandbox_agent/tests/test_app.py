@@ -49,13 +49,19 @@ def test_config_defaults():
     assert cfg.sandbox_python == "python3"
 
 
-def test_gym_runner_script_boots_gym_and_posts_run():
-    agent = _make_agent(mode="gym_runner", nested_config_paths=["a.yaml", "b.yaml"], nested_agent_port=12345)
+def test_gym_runner_script_boots_gym_and_collects():
+    agent = _make_agent(
+        mode="gym_runner",
+        nested_config_paths=["a.yaml", "b.yaml"],
+        nested_agent_name="nested_math",
+        nested_agent_port=12345,
+    )
     path, script, cmd = agent._runner()
     assert path == "/work/runner.py"
     assert "+config_paths=[a.yaml,b.yaml]" in script
     assert "http://127.0.0.1:12345" in script
-    assert "sandbox_reward" in script
+    assert "ng_collect_rollouts" in script
+    assert "+agent_name=nested_math" in script
     compile(script, "<runner>", "exec")
 
 

@@ -77,6 +77,7 @@ async def stage_and_run_eval(
         await provider.download_file(handle, reward_file, local)
         return float(local.read_text().strip() or 0.0)
 
+
 ## Run an agent harness implemented in another agent server responses() in the sandbox.
 AGENT_RUNNER = """
 import asyncio, json, sys
@@ -123,17 +124,26 @@ for _ in range(150):
     except Exception:
         time.sleep(2)
 
-subprocess.run(
-    [
-        "ng_collect_rollouts",
-        "+input_jsonl_fpath=/work/input.jsonl",
-        "+output_jsonl_fpath=/work/rollouts.jsonl",
-        "+agent_name={agent_name}",
-    ]
-    + overrides,
-    stdout=open("/work/collect.log", "w"), stderr=subprocess.STDOUT,
-    timeout={timeout}, check=True,
-)
+try:
+    subprocess.run(
+        [
+            "ng_collect_rollouts",
+            "+config_paths=[{config_paths}]",
+            "+input_jsonl_fpath=/work/input.jsonl",
+            "+output_jsonl_fpath=/work/rollouts.jsonl",
+            "+agent_name={agent_name}",
+        ]
+        + overrides,
+        stdout=open("/work/collect.log", "w"), stderr=subprocess.STDOUT,
+        timeout={timeout}, check=True,
+    )
+except Exception:
+    for f in ("/work/collect.log", "/work/gym.log"):
+        try:
+            print(f, open(f).read()[-3000:])
+        except OSError:
+            pass
+    raise
 print("RUNNER_DONE")
 """
 
@@ -339,10 +349,11 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            return json.loads(local.read_text())
+            return json.loads(local.read_text().strip().splitlines()[0])
 
     async def _run_nested(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
-        meta = (body.responses_create_params or {}).get("metadata") or {}
+        row = body.model_dump()
+        meta = (row.get("responses_create_params") or {}).get("metadata") or {}
         image = meta.get("docker_image") or self.config.sandbox_image
         runner_path, runner_script, runner_cmd = self._runner()
         model_url = self._sandbox_model_url(request)
@@ -405,11 +416,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
             return resp
         finally:
-            if handle is not None:
-                try:
-                    await self._provider.close(handle)
-                except Exception:
-                    LOG.warning("sandbox close failed", exc_info=True)
+            await self._close_box(handle)
 
 
 if __name__ == "__main__":
