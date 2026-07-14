@@ -63,6 +63,7 @@ RUN_DIR="${RUN_DIR:-results/${RUN_TAG}}"
 RUN_DIR="$(gym_absolute_path "${RUN_DIR}")"
 export RUN_DIR
 OUTPUT_JSONL="${OUTPUT_JSONL:-${RUN_DIR}/rollouts.jsonl}"
+OUTPUT_JSONL="$(gym_absolute_path "${OUTPUT_JSONL}")"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 LIMIT="${LIMIT:-4}"
 EXPECTED_INPUT_ROWS="${EXPECTED_INPUT_ROWS:-}"
@@ -75,11 +76,11 @@ PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
 TASK_ARTIFACTS="${TASK_ARTIFACTS:-1}"
 FULL_MODEL_IO="${FULL_MODEL_IO:-0}"
-TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-${RUN_DIR}/task-artifacts}"
+TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-}"
 VIDEO_SAMPLE_PER="${VIDEO_SAMPLE_PER:-100}"
 VIDEO_SAMPLE_COUNT="${VIDEO_SAMPLE_COUNT:-4}"
 VIDEO_SAMPLE_SEED="${VIDEO_SAMPLE_SEED:-${RUN_TAG}}"
-VIDEO_SAMPLE_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE:-${RUN_DIR}/video_task_ids.txt}"
+VIDEO_SAMPLE_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE:-}"
 NG_RUN_BIN="${NG_RUN_BIN:-ng_run}"
 NG_COLLECT_BIN="${NG_COLLECT_BIN:-ng_collect_rollouts}"
 NG_STATUS_BIN="${NG_STATUS_BIN:-ng_status}"
@@ -94,18 +95,121 @@ POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 MAX_STEPS="${MAX_STEPS:-}"
 TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
 TASK_PARITY_IDS_FILE="${TASK_PARITY_IDS_FILE:-}"
-TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-${RUN_DIR}/task-input-parity.json}"
+TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-}"
+RUN_ATTEMPT_ID="${RUN_ATTEMPT_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}}"
+if [[ ! "${RUN_ATTEMPT_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "RUN_ATTEMPT_ID contains unsupported characters: ${RUN_ATTEMPT_ID}" >&2
+    exit 2
+fi
 SERVER_VENV_ROOT="${SERVER_VENV_ROOT:-}"
 if [[ -n "${SERVER_VENV_ROOT}" ]]; then
     SERVER_VENV_ROOT="$(gym_absolute_path "${SERVER_VENV_ROOT}")"
 fi
+
+# A fresh invocation owns a fresh run directory. An explicit cache resume is
+# the only supported exception: it must target a terminal, failed attempt with
+# both files that Gym needs to verify its cache. Resume control records live in
+# a new subdirectory so prior manifests and terminal markers remain untouched.
+output_filename="$(basename "${OUTPUT_JSONL}")"
+output_stem="${output_filename%.*}"
+MATERIALIZED_INPUT_JSONL="$(dirname "${OUTPUT_JSONL}")/${output_stem}_materialized_inputs.jsonl"
+if [[ -e "${RUN_DIR}" ]]; then
+    if [[ "${RESUME_FROM_CACHE}" != "1" ]]; then
+        echo "immutable run already exists: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    if [[ ! -d "${RUN_DIR}" || -L "${RUN_DIR}" ]]; then
+        echo "resume target must be a real directory, not a file or symlink: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    if [[ ! -f "${OUTPUT_JSONL}" || ! -f "${MATERIALIZED_INPUT_JSONL}" ]]; then
+        echo "resume requires existing output and materialized input JSONL files" >&2
+        echo "  output:       ${OUTPUT_JSONL}" >&2
+        echo "  materialized: ${MATERIALIZED_INPUT_JSONL}" >&2
+        exit 2
+    fi
+    if [[ ! -f "${RUN_DIR}/finished_at.txt" || ! -f "${RUN_DIR}/exit_code.txt" ]]; then
+        echo "resume target has no complete terminal lifecycle: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    previous_exit_code="$(<"${RUN_DIR}/exit_code.txt")"
+    if [[ ! "${previous_exit_code}" =~ ^[0-9]+$ ]]; then
+        echo "resume target has an invalid exit code: ${previous_exit_code}" >&2
+        exit 2
+    fi
+    completed_attempt=0
+    if [[ "${previous_exit_code}" == "0" ]]; then
+        completed_attempt=1
+    fi
+    for previous_attempt in "${RUN_DIR}"/resume-attempts/*; do
+        [[ -d "${previous_attempt}" ]] || continue
+        if [[ ! -f "${previous_attempt}/finished_at.txt" || ! -f "${previous_attempt}/exit_code.txt" ]]; then
+            echo "resume target contains a non-terminal attempt: ${previous_attempt}" >&2
+            exit 2
+        fi
+        previous_exit_code="$(<"${previous_attempt}/exit_code.txt")"
+        if [[ ! "${previous_exit_code}" =~ ^[0-9]+$ ]]; then
+            echo "resume attempt has an invalid exit code: ${previous_attempt}" >&2
+            exit 2
+        fi
+        if [[ "${previous_exit_code}" == "0" ]]; then
+            completed_attempt=1
+        fi
+    done
+    if [[ "${completed_attempt}" == "1" ]]; then
+        echo "refusing to resume a successfully completed run: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    mkdir -p "${RUN_DIR}/resume-attempts"
+    RUN_LIFECYCLE_DIR="${RUN_DIR}/resume-attempts/${RUN_ATTEMPT_ID}"
+    if ! mkdir "${RUN_LIFECYCLE_DIR}"; then
+        echo "resume attempt already exists: ${RUN_LIFECYCLE_DIR}" >&2
+        exit 2
+    fi
+else
+    if [[ "${RESUME_FROM_CACHE}" == "1" ]]; then
+        echo "RESUME_FROM_CACHE=1 requires an existing run directory: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    mkdir -p "$(dirname "${RUN_DIR}")"
+    if ! mkdir "${RUN_DIR}"; then
+        echo "failed to create immutable run directory: ${RUN_DIR}" >&2
+        exit 2
+    fi
+    RUN_LIFECYCLE_DIR="${RUN_DIR}"
+fi
+export RUN_LIFECYCLE_DIR
+
+ng_run_pid=""
+finalize_run() {
+    local rc=$?
+    trap - EXIT INT TERM
+    if [[ -n "${ng_run_pid}" ]]; then
+        echo
+        echo "Stopping ng_run pid ${ng_run_pid}"
+        kill "${ng_run_pid}" >/dev/null 2>&1 || true
+        wait "${ng_run_pid}" >/dev/null 2>&1 || true
+    fi
+    date -u +%Y-%m-%dT%H:%M:%SZ > "${RUN_LIFECYCLE_DIR}/finished_at.txt" || true
+    printf '%s\n' "${rc}" > "${RUN_LIFECYCLE_DIR}/exit_code.txt" || true
+    exit "${rc}"
+}
+trap finalize_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+date -u +%Y-%m-%dT%H:%M:%SZ > "${RUN_LIFECYCLE_DIR}/started_at.txt"
+printf '%s\n' "$$" > "${RUN_LIFECYCLE_DIR}/launcher.pid"
+
+TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-${RUN_LIFECYCLE_DIR}/task-artifacts}"
+VIDEO_SAMPLE_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE:-${RUN_LIFECYCLE_DIR}/video_task_ids.txt}"
+TASK_PARITY_REPORT="${TASK_PARITY_REPORT:-${RUN_LIFECYCLE_DIR}/task-input-parity.json}"
 
 # Ray appends a long session/sockets suffix to its temp root. Linux limits
 # AF_UNIX socket paths to 107 bytes, so a descriptive absolute run directory
 # can otherwise fail before either Gym server starts. Keep an explicit short,
 # per-run temp root and replace only caller-provided values that cannot fit.
 RAY_TMPDIR_REQUESTED="${RAY_TMPDIR:-}"
-ray_run_key="$(printf '%s' "${RUN_TAG}" | sha256sum | cut -c1-12)"
+ray_run_key="$(printf '%s' "${RUN_TAG}-${RUN_ATTEMPT_ID}" | sha256sum | cut -c1-12)"
 short_ray_tmpdir="/tmp/ngray-${ray_run_key}"
 if [[ -n "${RAY_TMPDIR_REQUESTED}" ]]; then
     ray_socket_probe="${RAY_TMPDIR_REQUESTED%/}/ray/session_2099-12-31_23-59-59_999999_999999/sockets/plasma_store"
@@ -120,7 +224,7 @@ else
 fi
 export RAY_TMPDIR
 
-mkdir -p "${RUN_DIR}" "$(dirname "${OUTPUT_JSONL}")" "${RAY_TMPDIR}"
+mkdir -p "$(dirname "${OUTPUT_JSONL}")" "${RAY_TMPDIR}"
 if [[ -n "${SERVER_VENV_ROOT}" ]]; then
     mkdir -p "${SERVER_VENV_ROOT}"
 fi
@@ -142,9 +246,9 @@ if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then
 fi
 
 if [[ "${FULL_MODEL_IO}" == "1" ]]; then
-    OSWORLD_MODEL_IO_LOG="$(gym_absolute_path "${OSWORLD_MODEL_IO_LOG:-${RUN_DIR}/model-io-agent.jsonl}")"
-    OSWORLD_TRANSPORT_IO_LOG="$(gym_absolute_path "${OSWORLD_TRANSPORT_IO_LOG:-${RUN_DIR}/model-io-transport.jsonl}")"
-    OSWORLD_VM_EXEC_LOG="$(gym_absolute_path "${OSWORLD_VM_EXEC_LOG:-${RUN_DIR}/vm-exec.jsonl}")"
+    OSWORLD_MODEL_IO_LOG="$(gym_absolute_path "${OSWORLD_MODEL_IO_LOG:-${RUN_LIFECYCLE_DIR}/model-io-agent.jsonl}")"
+    OSWORLD_TRANSPORT_IO_LOG="$(gym_absolute_path "${OSWORLD_TRANSPORT_IO_LOG:-${RUN_LIFECYCLE_DIR}/model-io-transport.jsonl}")"
+    OSWORLD_VM_EXEC_LOG="$(gym_absolute_path "${OSWORLD_VM_EXEC_LOG:-${RUN_LIFECYCLE_DIR}/vm-exec.jsonl}")"
     export OSWORLD_MODEL_IO_LOG OSWORLD_TRANSPORT_IO_LOG OSWORLD_VM_EXEC_LOG
     mkdir -p \
         "$(dirname "${OSWORLD_MODEL_IO_LOG}")" \
@@ -160,13 +264,13 @@ else
 fi
 
 if [[ "${RECORD_VIDEO}" == "1" || "${RECORD_VIDEO}" == "sample" ]]; then
-    export OSWORLD_RECORD_VIDEO_DIR="${OSWORLD_RECORD_VIDEO_DIR:-${RUN_DIR}/videos}"
+    export OSWORLD_RECORD_VIDEO_DIR="${OSWORLD_RECORD_VIDEO_DIR:-${RUN_LIFECYCLE_DIR}/videos}"
     mkdir -p "${OSWORLD_RECORD_VIDEO_DIR}"
 fi
 
 if [[ "${RECORD_VIDEO}" == "sample" ]]; then
     export OSWORLD_RECORD_VIDEO_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE}"
-    "${PYTHON_BIN}" - <<'PY' "${INPUT_JSONL}" "${LIMIT}" "${VIDEO_SAMPLE_PER}" "${VIDEO_SAMPLE_COUNT}" "${VIDEO_SAMPLE_SEED}" "${VIDEO_SAMPLE_TASK_IDS_FILE}" "${RUN_DIR}/video_sample_manifest.json"
+    "${PYTHON_BIN}" - <<'PY' "${INPUT_JSONL}" "${LIMIT}" "${VIDEO_SAMPLE_PER}" "${VIDEO_SAMPLE_COUNT}" "${VIDEO_SAMPLE_SEED}" "${VIDEO_SAMPLE_TASK_IDS_FILE}" "${RUN_LIFECYCLE_DIR}/video_sample_manifest.json"
 import json
 import random
 import sys
@@ -240,11 +344,14 @@ print(f"video sample task ids: {out_txt_path} ({len(selected)} selected)")
 PY
 fi
 
-cat > "${RUN_DIR}/run.env" <<EOF
+cat > "${RUN_LIFECYCLE_DIR}/run.env" <<EOF
 RUN_TAG=${RUN_TAG}
 RUN_DIR=${RUN_DIR}
+RUN_ATTEMPT_ID=${RUN_ATTEMPT_ID}
+RUN_LIFECYCLE_DIR=${RUN_LIFECYCLE_DIR}
 INPUT_JSONL=${INPUT_JSONL}
 OUTPUT_JSONL=${OUTPUT_JSONL}
+MATERIALIZED_INPUT_JSONL=${MATERIALIZED_INPUT_JSONL}
 RUNNER_NAME=${RUNNER_NAME}
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME}
 LIMIT=${LIMIT}
@@ -281,6 +388,8 @@ echo "=== OSWorld multienv agent run ==="
 echo "root:        ${GYM_ROOT}"
 echo "run tag:     ${RUN_TAG}"
 echo "run dir:     ${RUN_DIR}"
+echo "attempt:     ${RUN_ATTEMPT_ID}"
+echo "lifecycle:   ${RUN_LIFECYCLE_DIR}"
 echo "runner:      ${RUNNER_NAME}"
 echo "input:       ${INPUT_JSONL}"
 echo "output:      ${OUTPUT_JSONL}"
@@ -355,13 +464,16 @@ if [[ "${RESUME_FROM_CACHE}" == "1" ]]; then
     collect_cmd+=("+resume_from_cache=true")
 fi
 
-echo "--- ng_run command ---"
-printf ' %q' "${ng_run_cmd[@]}"
-echo
-echo
-echo "--- ng_collect_rollouts command ---"
-printf ' %q' "${collect_cmd[@]}"
-echo
+{
+    echo "--- ng_run command ---"
+    printf ' %q' "${ng_run_cmd[@]}"
+    echo
+    echo
+    echo "--- ng_collect_rollouts command ---"
+    printf ' %q' "${collect_cmd[@]}"
+    echo
+} > "${RUN_LIFECYCLE_DIR}/resolved-command.log"
+cat "${RUN_LIFECYCLE_DIR}/resolved-command.log"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
     exit 0
@@ -419,17 +531,6 @@ wait_for_servers_ready() {
     return 1
 }
 
-ng_run_pid=""
-cleanup() {
-    if [[ -n "${ng_run_pid}" ]]; then
-        echo
-        echo "Stopping ng_run pid ${ng_run_pid}"
-        kill "${ng_run_pid}" >/dev/null 2>&1 || true
-        wait "${ng_run_pid}" >/dev/null 2>&1 || true
-    fi
-}
-trap cleanup EXIT INT TERM
-
 if [[ "${START_NG_RUN}" == "1" ]]; then
     echo
     echo "--- starting ng_run ---"
@@ -479,6 +580,7 @@ PY
 
 echo
 echo "Run dir: ${RUN_DIR}"
+echo "Lifecycle: ${RUN_LIFECYCLE_DIR}"
 if [[ "${TASK_ARTIFACTS}" == "1" ]]; then
     echo "Task artifacts: ${OSWORLD_TASK_ARTIFACT_ROOT}"
 fi
