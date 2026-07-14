@@ -1,0 +1,54 @@
+anyswe_openclaw:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by OpenClaw natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.openclaw_agent.app
+      agent_server_class: OpenClawAgent
+      agent_config_class: OpenClawAgentConfig
+      agent_kwargs:
+        model: nvinf/nvidia/qwen/qwen3.6-35b-a3b
+        timeout: 1800
+        setup_timeout: 300
+        thinking: "off"
+        system_prompt: "You are fixing a bug in the repository at /testbed. Use your tools to inspect and edit the source files. Make the minimal correct code change, run relevant checks if practical, and leave the final fix applied in /testbed."
+        openclaw_config:
+          agents:
+            defaults:
+              workspace: /testbed
+          tools:
+            profile: coding
+          models:
+            providers:
+              nvinf:
+                api: openai-completions
+                baseUrl: ${policy_base_url}
+                apiKey: ${policy_api_key}
+                models:
+                - id: azure/openai/gpt-5.4
+                  name: azure/openai/gpt-5.4
+                  api: openai-completions
+                - id: nvidia/qwen/qwen3.6-35b-a3b
+                  name: nvidia/qwen/qwen3.6-35b-a3b
+                  api: openai-completions
+                - id: nvidia/moonshotai/kimi-k2.6
+                  name: nvidia/moonshotai/kimi-k2.6
+                  api: openai-completions
+                - id: aws/anthropic/bedrock-claude-opus-4-7
+                  name: aws/anthropic/bedrock-claude-opus-4-7
+                  api: openai-completions
+
+      container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
+      sandbox_provider: sandbox
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      swebench_agent_timeout: 2100
+      swebench_tests_timeout: 1800
+      concurrency: 2
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
