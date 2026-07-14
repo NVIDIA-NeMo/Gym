@@ -23,12 +23,14 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import orjson
-from fastapi import Body, FastAPI, Request
+from fastapi import APIRouter, Body, FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, model_validator
+from starlette.background import BackgroundTask
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
@@ -78,10 +80,14 @@ class ModelCallCaptureConfig(BaseModel):
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
         if not self.observability_enabled:
             return self
+
         if self.model_call_capture_dir is None:
             raise ValueError("model_call_capture_dir is required when observability_enabled=true")
+
+        # TODO @bxyu-nvidia: Make this use the cwd as a default
         if not self.model_call_capture_dir.is_absolute():
             raise ValueError("model_call_capture_dir must be an absolute path")
+
         return self
 
 
@@ -92,6 +98,7 @@ class ModelCallRecord(BaseModel):
     rollout_id: str
 
     # HTTP information
+    status_code: int
     route: str
 
     # Timing information
@@ -106,11 +113,9 @@ class ModelCallRecord(BaseModel):
     response: Optional[NeMoGymResponse]  # Only present if the call succeeded
     error_response: Optional[str]  # Only present if the call failed
 
-    # Used for cases where we never hit a NeMoGymResponsesCreateParams or NeMoGymResponse in a model call e.g. calling an Anthropic model with /v1/messages
-    # For those scenarios we always store the raw_request and raw_response and provided a normalized version by converting to Responses
-    # For normal Responses routes, this is empty.
-    raw_request: Optional[Dict[str, Any]]
-    raw_response: Optional[Dict[str, Any]]
+    # Raw information that is always logged
+    raw_request: Dict[str, Any]
+    raw_response: Dict[str, Any]
 
 
 class CaptureStore:
@@ -215,24 +220,85 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         if self._capture_config.observability_enabled:
-            # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
-            # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
-            app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
-                self.chat_completions_with_call_capture
-            )
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(
-                self.chat_completions_with_call_capture
-            )
-
-            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
-
-            app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
-
-            self._store = CaptureStore(self._capture_config.model_call_capture_dir)
+            self.setup_model_call_capture(app)
 
         return app
+
+    def setup_model_call_capture(self, app: FastAPI) -> None:
+        server = self
+        self._store = CaptureStore(self._capture_config.model_call_capture_dir)
+
+        # This class is within this closure so it has access to `self._store`
+        class ModelCallCaptureRoute(APIRoute):
+            def get_route_handler(self) -> Callable:
+                original_route_handler = super().get_route_handler()
+
+                async def custom_route_handler(request: Request) -> Response:
+                    rollout_id = request.path_params.get("rollout_id")
+                    request.state.model_call_record_dict = {
+                        "rollout_id": rollout_id,
+                        "timestamp_start": perf_counter(),
+                        "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
+                    }
+
+                    # Grab the request body. The body is only loaded once here.
+                    req_body = await request.body()
+
+                    response = await original_route_handler(request)
+
+                    if not rollout_id:
+                        return response
+
+                    request.state.model_call_record_dict["timestamp_end"] = perf_counter()
+                    request.state.model_call_record_dict["status_code"] = response.status_code
+                    # TODO @bxyu-nvidia: These orjson.loads can be offloaded to the background task to not block the response
+                    request.state.model_call_record_dict["raw_request"] = orjson.loads(req_body)
+                    request.state.model_call_record_dict["raw_response"] = orjson.loads(response.body)
+
+                    # TODO @bxyu-nvidia
+                    # if isinstance(response, StreamingResponse):
+                    #     pass
+                    # else:
+                    #     pass
+
+                    # Record in the background to not block the response
+                    task = BackgroundTask(
+                        server._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict)
+                    )
+
+                    # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+                    assert not response.background
+                    response.background = task
+
+                    return response
+
+                return custom_route_handler
+
+        model_call_capture_router = APIRouter(route_class=ModelCallCaptureRoute)
+        app.include_router(model_call_capture_router)
+
+        # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
+        # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
+        model_call_capture_router.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
+            self.chat_completions_with_call_capture
+        )
+        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(
+            self.chat_completions_with_call_capture
+        )
+
+        model_call_capture_router.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
+            self.responses_with_call_capture
+        )
+        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(
+            self.responses_with_call_capture
+        )
+
+        model_call_capture_router.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
+            self.messages_with_call_capture
+        )
+        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(
+            self.messages_with_call_capture
+        )
 
     @abstractmethod
     async def chat_completions(
@@ -314,37 +380,23 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses_with_call_capture(
         self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        if not self._capture_config.observability_enabled:
-            return await self._invoke_responses(request, body)
+        request.state.model_call_record_dict["route"] = "/v1/responses"
 
-        mcr_dict = {
-            "rollout_id": rollout_id,
-            "route": "/v1/responses",
-            "timestamp_start": perf_counter(),
-            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
-            "request": body,
-            "raw_request": None,
-        }
+        # Directly use the input body since it's already in Responses format
+        request.state.model_call_record_dict["request"] = body
 
+        # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self._invoke_responses(request, body)
-            mcr_dict["response"] = response
-            mcr_dict["error_response"] = None
-            mcr_dict["raw_response"] = None
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
-
-            return response
+            request.state.model_call_record_dict["response"] = response
+            request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
-            mcr_dict["response"] = None
-            mcr_dict["error_response"] = format_exc()
-            mcr_dict["raw_response"] = None
-
-            mcr_dict["timestamp_end"] = perf_counter()
-            self._store.record(ModelCallRecord.model_validate(mcr_dict))
+            request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
+
+        return response
 
     async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
         # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
