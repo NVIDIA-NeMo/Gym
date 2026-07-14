@@ -6,6 +6,10 @@ ragtruth:
       verified: false
       description: RAGTruth case-level hallucination detection; reward = 1 when the model's binary "any hallucination?" verdict matches the gold label.
       value: Improve faithfulness and grounding of generated text against supplied context.
+      # Tag name used to strip thinking-model reasoning blocks before JSON parsing.
+      # Default is "think" (<think>…</think>). Override for models that use a
+      # different tag, e.g. think_tag: reasoning for <reasoning>…</reasoning>.
+      # think_tag: think
 
 ragtruth_simple_agent:
   responses_api_agents:

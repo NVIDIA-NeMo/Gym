@@ -62,22 +62,9 @@ gym env start --resources-server ragtruth --model-type vllm_model
 
 ## Example rollouts and metrics
 
-`data/example_rollouts.jsonl` and `data/example_metrics.json` are committed
-and can be regenerated at any time with the scripts below (no servers needed):
+`data/example_rollouts.jsonl` and `data/example_metrics.json` are committed and show live examples of rollouts and metrics.
 
-```bash
-# Regenerate synthetic rollouts (deterministic scoring, no model call)
-python resources_servers/ragtruth/generate_example_rollouts.py
-
-# Aggregate rollouts -> per-task-type metrics summary
-python resources_servers/ragtruth/generate_example_metrics.py
-
-# Inspect
-tail -n 1 resources_servers/ragtruth/data/example_rollouts.jsonl | jq .reward
-cat resources_servers/ragtruth/data/example_metrics.json | jq .
-```
-
-To collect rollouts from a live model instead:
+To collect rollouts from a live model:
 
 ```bash
 gym eval run --no-serve \
