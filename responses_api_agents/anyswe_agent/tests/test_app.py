@@ -22,7 +22,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from responses_api_agents.anyswe_agent.app import (
-    _RUNNER_TEMPLATE,
     AnySweAgent,
     AnySweAgentConfig,
     _classify_agent_error,
@@ -51,36 +50,30 @@ def _config(**overrides) -> AnySweAgentConfig:
     return AnySweAgentConfig(**base)
 
 
-class TestRunnerTemplate:
-    def test_renders_valid_python(self) -> None:
-        rendered = _RUNNER_TEMPLATE.format(
-            agent_module="responses_api_agents.hermes_agent.app",
-            agent_class="HermesAgent",
-            agent_cfg_class="HermesAgentConfig",
-            agent_class_lower="hermesagent",
-        )
-        compile(rendered, "<runner>", "exec")
-        assert "HermesAgent(config=config" in rendered
-        assert '["git", "add", "-A"]' in rendered
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in rendered
+class TestAgentRunner:
+    @staticmethod
+    def _source() -> str:
+        return (Path(__file__).parent.parent / "agent_runner.py").read_text()
+
+    def test_is_valid_python(self) -> None:
+        source = self._source()
+        compile(source, "<runner>", "exec")
+        assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
+        assert '["git", "add", "-A"]' in source
+        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
 
     def test_patch_extraction_includes_untracked_files(self) -> None:
-        assert '["git", "add", "-A"]' in _RUNNER_TEMPLATE
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in _RUNNER_TEMPLATE
-        assert "patch.diff" in _RUNNER_TEMPLATE
+        source = self._source()
+        assert '["git", "add", "-A"]' in source
+        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
+        assert "patch.diff" in source
 
     def test_sampling_is_forwarded(self) -> None:
-        rendered = _RUNNER_TEMPLATE.format(
-            agent_module="responses_api_agents.hermes_agent.app",
-            agent_class="HermesAgent",
-            agent_cfg_class="HermesAgentConfig",
-            agent_class_lower="hermesagent",
-        )
-        compile(rendered, "<runner>", "exec")
-        assert "NGSWE_SAMPLING" in rendered
-        assert "**SAMPLING," in rendered
-        assert "**AGENT_KWARGS, **_cfg_sampling" in rendered
-        assert "HermesAgentConfig.model_fields" in rendered
+        source = self._source()
+        assert "NGSWE_SAMPLING" in source
+        assert "**sampling," in source
+        assert "**{**agent_kwargs, **config_sampling}" in source
+        assert "config_class.model_fields" in source
 
 
 class TestSandboxAPI:
@@ -96,7 +89,7 @@ class TestSandboxAPI:
             container_formatter="registry.example.com/anyswe:{instance_id}",
         )
         assert config.sandbox_provider == "sandbox"
-        assert not config.upload_agent_runtime
+        assert config.agent_runtime_source == "baked"
 
     def test_image_uses_swebench_tag_format(self) -> None:
         image = AnySweAgent._sandbox_image(
@@ -140,6 +133,8 @@ class TestSandboxAPI:
             },
             model_server_url="http://model-host:8000/v1",
             agent_server_module="responses_api_agents.opencode_agent.app",
+            agent_server_class="OpenCodeAgent",
+            agent_config_class="OpenCodeAgentConfig",
         )
         env = AnySweAgent._sandbox_agent_env(params)
         kwargs = json.loads(base64.b64decode(env["NGSWE_AGENT_KWARGS_B64"]))

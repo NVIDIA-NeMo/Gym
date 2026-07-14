@@ -131,85 +131,6 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
     return bool(required) and all(statuses.get(test) == "PASSED" for test in required)
 
 
-_RUNNER_TEMPLATE = """\
-#!/usr/bin/env python3
-import asyncio, base64, json, os, subprocess, sys
-from pathlib import Path
-
-sys.path.insert(0, "/nemo_gym_mount")
-os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
-
-def _json_env(name):
-    encoded = os.environ.get(name + "_B64")
-    if encoded:
-        return json.loads(base64.b64decode(encoded).decode())
-    return json.loads(os.environ.get(name, "{{}}"))
-
-MODEL_URL   = os.environ.get("NGSWE_MODEL_URL", "")
-MODEL_NAME  = os.environ["NGSWE_MODEL_NAME"]
-INSTRUCTION = Path("/trajectories_mount/instruction.txt").read_text()
-AGENT_KWARGS = _json_env("NGSWE_AGENT_KWARGS")
-SAMPLING = _json_env("NGSWE_SAMPLING")
-
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
-from {agent_module} import {agent_class}, {agent_cfg_class}
-
-
-_mock_client = ServerClient.model_construct(global_config_dict={{}})
-_mock_client._build_server_base_url = lambda cfg: MODEL_URL
-
-
-_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
-
-_model_server = ModelServerRef(name=MODEL_NAME, type="responses_api_models") if MODEL_URL else None
-config = {agent_cfg_class}(
-    host="0.0.0.0",
-    port=0,
-    name="{agent_class_lower}",
-    entrypoint="app.py",
-    model_server=_model_server,
-    resources_server=ResourcesServerRef(name="anyswe", type="resources_servers"),
-    **{{**AGENT_KWARGS, **_cfg_sampling}},
-)
-agent = {agent_class}(config=config, server_client=_mock_client)
-
-if MODEL_URL:
-    if hasattr(agent, "_resolve_model_base_url"):
-        _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
-        agent._resolve_model_base_url = lambda: _v1
-    if hasattr(agent, "_resolve_base_url"):
-        agent._resolve_base_url = lambda: MODEL_URL
-
-body = NeMoGymResponseCreateParamsNonStreaming(
-    input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
-    model=MODEL_NAME,
-    **SAMPLING,
-)
-response = asyncio.run(agent.responses(request=None, body=body))
-Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
-print(f"agent finished: {{len(response.output)}} output items", flush=True)
-
-patch = ""
-for candidate in ["/testbed", "/workspace/repo", "/app", "/root/repo"]:
-    p = Path(candidate)
-    if p.exists() and (p / ".git").exists():
-        subprocess.run(["git", "add", "-A"], check=True, cwd=str(p))
-        patch = subprocess.run(
-            ["git", "diff", "--no-color", "--cached", "HEAD"],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=True,
-            cwd=str(p),
-        ).stdout
-        print(f"patch: {{len(patch)}} chars from {{p}}", flush=True)
-        break
-Path("/trajectories_mount/patch.diff").write_text(patch)
-"""
-
-
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
@@ -224,7 +145,7 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | Dict[str, Any] = "sandbox"
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
-    upload_agent_runtime: bool = False
+    agent_runtime_source: str = "baked"
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
@@ -235,6 +156,7 @@ class AnySweServerConfig(BaseModel):
     base_results_dir: Path
     model_server_url: str
     agent_deps_archive: Optional[Path]
+    agent_deps_url: Optional[str]
     resolved_sandbox_provider: Dict[str, Any]
     sandbox_default_metadata: Dict[str, Any]
 
@@ -306,13 +228,7 @@ class GymAgentHarnessProcessor(BaseModel):
         cfg: AnySweInstanceConfig = self.config
 
         (cfg.persistent_dir / "instruction.txt").write_text(cfg.problem_info.get("problem_statement", ""))
-
-        runner = _RUNNER_TEMPLATE.format(
-            agent_module=cfg.agent_server_module,
-            agent_class=cfg.agent_server_class,
-            agent_cfg_class=cfg.agent_config_class,
-            agent_class_lower=cfg.agent_server_class.lower(),
-        )
+        runner = Path(__file__).with_name("agent_runner.py").read_text()
         (cfg.persistent_dir / "agent_runner.py").write_text(runner)
 
 
@@ -338,7 +254,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         workspace = Path(__file__).parent
         agent_deps_archive = None
-        if self.config.upload_agent_runtime:
+        agent_deps_url = None
+        if self.config.agent_runtime_source == "auto":
             agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
@@ -347,6 +264,13 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 with tarfile.open(temporary, "w:gz") as archive:
                     archive.add(agent_deps_dir, arcname=".")
                 temporary.replace(agent_deps_archive)
+        elif self.config.agent_runtime_source != "baked":
+            if "://" in self.config.agent_runtime_source:
+                agent_deps_url = self.config.agent_runtime_source
+            else:
+                agent_deps_archive = Path(self.config.agent_runtime_source).expanduser()
+                if not agent_deps_archive.is_file():
+                    raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
         session_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
         self._server = AnySweServerConfig(
@@ -354,6 +278,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             base_results_dir=workspace / f"anyswe_results_{session_id}",
             model_server_url=model_url,
             agent_deps_archive=agent_deps_archive,
+            agent_deps_url=agent_deps_url,
             resolved_sandbox_provider=resolve_provider_config(
                 self.config.sandbox_provider, self.server_client.global_config_dict
             ),
@@ -432,6 +357,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return {
             "NGSWE_MODEL_NAME": model_name,
             "NGSWE_MODEL_URL": params.model_server_url,
+            "NGSWE_AGENT_MODULE": params.agent_server_module,
+            "NGSWE_AGENT_CLASS": params.agent_server_class,
+            "NGSWE_AGENT_CONFIG_CLASS": params.agent_config_class,
             "NGSWE_AGENT_KWARGS_B64": base64.b64encode(json.dumps(agent_kwargs).encode()).decode(),
             "NGSWE_SAMPLING_B64": base64.b64encode(json.dumps(sampling).encode()).decode(),
         }
@@ -552,10 +480,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         try:
             await sandbox.start()
             await sandbox.exec("mkdir -p /agent_deps_mount /trajectories_mount", timeout_s=30, user="root")
-            if params.upload_agent_runtime:
-                if params.agent_deps_archive is None:
-                    raise RuntimeError("agent runtime archive is missing")
+            external_runtime = params.agent_deps_archive is not None or params.agent_deps_url is not None
+            if params.agent_deps_archive is not None:
                 await sandbox.upload(params.agent_deps_archive, "/tmp/anyswe_agent_deps.tar.gz")
+            elif params.agent_deps_url is not None:
+                fetched = await sandbox.exec(
+                    f"curl -fsSL -o /tmp/anyswe_agent_deps.tar.gz {shlex.quote(params.agent_deps_url)}",
+                    timeout_s=600,
+                    user="root",
+                )
+                if fetched.return_code != 0:
+                    raise RuntimeError(f"agent runtime fetch failed: {(fetched.stderr or '')[:300]}")
             else:
                 runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
                 if runtime.return_code != 0:
@@ -569,7 +504,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     user="root",
                 )
             command = "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
-            if params.upload_agent_runtime:
+            if external_runtime:
                 command = "tar -xzf /tmp/anyswe_agent_deps.tar.gz -C /agent_deps_mount && " + command
             result = await sandbox.exec(
                 command,
