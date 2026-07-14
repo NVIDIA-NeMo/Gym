@@ -111,8 +111,10 @@ Your environment comes preinstalled with a comprehensive set of Python packages 
 - Poppler utilities (PDF tools such as `pdftotext`, `pdfimages`)
 - Ghostscript (PostScript/PDF processing)
 - FFmpeg (complete audio/video processing suite with all codecs)
+- ImageMagick (image conversion and manipulation via `convert`)
 - Graphviz (graph visualization with DOT language)
-- OpenJDK 21 JRE (Java runtime for Tabula and other Java-based tools)
+- TeX Live (full LaTeX toolchain: pdflatex, xelatex, lualatex, latexmk)
+- OpenJDK JRE (Java runtime for Tabula and other Java-based tools)
 - GDAL/GEOS/Proj (geospatial data libraries and utilities)
 - Build tools: gcc, g++, cmake, pkg-config, make
 
@@ -133,6 +135,8 @@ In order to complete the task you must use the `finish` tool to submit your work
 **Required in your finish call:**
 1. A brief summary of what you accomplished
 2. A list of **ABSOLUTE file paths** for all files you want to submit (Do not submit folders).
+
+As a last resort, if you have genuinely concluded that the task cannot be completed because required inputs are missing, a hard dependency is unavailable, or the request is incoherent, call the `abandon_task_finish` tool with a brief reason instead of submitting files. Do not use it to escape difficulty.
 
 ## Task
 

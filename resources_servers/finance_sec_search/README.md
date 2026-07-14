@@ -152,8 +152,8 @@ public benchmark lives in `benchmarks/finance_sec_search/`. It downloads the
 `public.csv` dataset from GitHub and converts it to Gym format:
 
 ```bash
-# Prepare via Gym CLI (recommended — used by ng_run with benchmark configs):
-ng_prepare_benchmark +benchmark=benchmarks/finance_sec_search/config_no_web_search.yaml
+# Prepare via Gym CLI (recommended — used by gym env start with benchmark configs):
+gym eval prepare --benchmark finance_sec_search/config_no_web_search
 
 # Or run the script directly:
 python benchmarks/finance_sec_search/prepare.py            # without web_search
@@ -194,40 +194,42 @@ Launch a vLLM-compatible model server (e.g. Qwen3-30B-A3B) so the policy and jud
 With a local vLLM model server:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/finance_sec_search/configs/finance_sec_search.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+  --model-type vllm_model \
+  --resources-server finance_sec_search
 ```
 
 Or with an OpenAI-compatible API (e.g. OpenAI, Azure, NIM):
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/finance_sec_search/configs/finance_sec_search.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+  --model-type openai_model \
+  --resources-server finance_sec_search
 ```
 
 ### 4. Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=finance_agent \
-  +input_jsonl_fpath=resources_servers/finance_sec_search/data/example.jsonl \
-  +output_jsonl_fpath=results/finance_sec_search_rollouts.jsonl
+gym eval run --no-serve \
+  --agent finance_agent \
+  --input resources_servers/finance_sec_search/data/example.jsonl \
+  --output results/finance_sec_search_rollouts.jsonl
 ```
 
-Add `+limit=1` for a quick single-question test:
+Add `--limit 1` for a quick single-question test:
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=finance_agent \
-  +input_jsonl_fpath=resources_servers/finance_sec_search/data/example.jsonl \
-  +output_jsonl_fpath=results/finance_sec_search_rollouts.jsonl \
-  +limit=1
+gym eval run --no-serve \
+  --agent finance_agent \
+  --input resources_servers/finance_sec_search/data/example.jsonl \
+  --output results/finance_sec_search_rollouts.jsonl \
+  --limit 1
 ```
 
 ### Run tests
 
 ```bash
-ng_test +entrypoint=resources_servers/finance_sec_search
+gym env test --resources-server finance_sec_search
 ```
 
 ## Verification

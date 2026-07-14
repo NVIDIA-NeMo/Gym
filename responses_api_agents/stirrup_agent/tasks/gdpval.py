@@ -155,15 +155,30 @@ class GDPValTask(TaskStrategy):
 
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         container_path = getattr(config, "gdpval_container_path", None)
+
+        # GDPval MUST run inside the Apptainer sandbox built from
+        # containers/gdpval.def. The sandbox carries the heavy dependency set
+        # the task prompt advertises (TeX Live, the full data/ML/document/audio
+        # stack, CPU torch, ...). We deliberately do NOT install these into the
+        # evaluation/agent container — that would bloat the eval image by many
+        # GB. Consequently the local (non-sandbox) backend cannot provide the
+        # advertised environment, and silently falling back to it would run
+        # every task in a crippled sandbox and yield invalid results. Throw
+        # early instead of degrading silently.
         if not container_path:
-            return None
+            raise RuntimeError(
+                "GDPval requires the Apptainer sandbox: set `gdpval_container_path` to the "
+                ".sif built from responses_api_agents/stirrup_agent/containers/gdpval.def. "
+                "The local (non-sandbox) backend is rejected because the heavy sandbox "
+                "dependencies are not — and must not be — installed in the evaluation container."
+            )
 
         if not os.path.exists(container_path):
-            print(
-                f"[gdpval] WARNING: container not found at {container_path}, falling back to local sandbox",
-                flush=True,
+            raise RuntimeError(
+                f"GDPval Apptainer container not found at {container_path}. Build the .sif from "
+                "responses_api_agents/stirrup_agent/containers/gdpval.def. Refusing to fall back "
+                "to the local backend, which lacks the sandbox dependencies."
             )
-            return None
 
         from responses_api_agents.stirrup_agent.apptainer_provider import ApptainerCodeExecToolProvider
 

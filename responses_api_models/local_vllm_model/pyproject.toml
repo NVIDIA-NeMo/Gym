@@ -27,6 +27,12 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["local_vllm_model"]
 
+[tool.uv]
+# <8.0.2 crashes on FastAPI>=0.137 pathless routes in vLLM /metrics. See vllm-project/vllm#45629
+constraint-dependencies = [
+    "prometheus-fastapi-instrumentator>=8.0.2",
+]
+
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
 
