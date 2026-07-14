@@ -1,0 +1,429 @@
+---
+title: "Evaluate an Agent Skill"
+description: "Run a sandboxed control-versus-treatment evaluation of a coding-agent skill and inspect the paired comparison report."
+position: 4
+---
+
+# Evaluate an Agent Skill
+
+This walkthrough evaluates whether the `nemo-gym-create-environment` skill helps Claude Code build a valid NeMo Gym environment.
+
+You will:
+
+1. Build an isolated coding-agent fixture.
+2. Create a low-cost control-versus-treatment experiment.
+3. Preview and lock the exact commands.
+4. Run both arms.
+5. Inspect task scores, skill provenance, and the paired comparison.
+
+<Warning>
+
+Coding-agent evaluation executes model-generated commands and code as root inside Docker. The container receives model credentials and has network access by default. Docker shares the host kernel and is not a VM-grade security boundary.
+
+Use a disposable or appropriately hardened host, do not mount a writable host checkout, restrict egress and Linux capabilities for untrusted workloads, and follow your organization's sandbox policy. Read [Docker Sandbox](/infrastructure/sandbox/docker) before evaluating third-party tasks or skills.
+
+</Warning>
+
+## What This Tutorial Runs
+
+| Component | Value |
+|---|---|
+| Benchmark | `agent_skills` |
+| Task | Create a native SQL-generation resources server |
+| Agent | `agent_skills_create_environment_claude_code_agent` |
+| Control | Claude Code discovery enabled, no target skill |
+| Treatment | Same agent with `nemo-gym-create-environment` staged |
+| Agent isolation | Fresh Docker sandbox per rollout |
+| Verification | Patch applied in a separate sandbox with hidden checks |
+| Primary score | `task_success` / `reward` |
+
+The verifier also reports `correctness`, `completeness`, and `convention_compliance`.
+
+## How The Evaluation Works
+
+```text
+Experiment driver
+├── discovery control
+│   └── clean agent sandbox ──► Git patch
+└── treatment
+    └── clean agent sandbox + skill ──► Git patch
+
+Each patch
+└── fresh verifier sandbox
+    ├── confirm the verifier fixture matches the agent fixture
+    ├── apply patch
+    ├── upload hidden checks
+    └── run checks as an unprivileged user
+
+Paired rollout rows ──► comparison.json + report.md
+```
+
+The source task is identical in both arms. The model, agent, image, sampling parameters, and hidden verifier are also fixed.
+
+## Prerequisites
+
+- Complete [Installation](/get-started/installation).
+- Install Docker and ensure the Docker daemon is running.
+- Configure `anthropic_api_key` in `env.yaml`.
+- Push the branch revision you want in the fixture image to a Git remote.
+- Commit or stash local changes before running the locked experiment.
+- Allow disk space for the fixture image and at least 4 CPUs / 8 GiB for the one-rollout smoke test. The checked-in concurrency of 4 can request up to roughly 16 CPUs / 32 GiB across active sandboxes.
+
+Check Docker:
+
+```bash
+docker info --format '{{.ServerVersion}}'
+```
+
+Validate the benchmark configuration without starting servers:
+
+```bash
+uv run gym env validate \
+  --benchmark agent_skills \
+  +agent_skills_sandbox_image=nemo-gym-agent-skills:create-environment-smoke
+```
+
+## Build The Fixture Image
+
+Run from the Gym repository root:
+
+```bash
+GYM_REVISION="$(git rev-parse HEAD)"
+IMAGE="nemo-gym-agent-skills:create-environment-${GYM_REVISION:0:12}"
+
+docker build \
+  --file benchmarks/agent_skills/fixtures/create-environment-sql/Dockerfile \
+  --build-arg GYM_REVISION="${GYM_REVISION}" \
+  --build-arg CLAUDE_CODE_VERSION=2.1.207 \
+  --build-arg UV_VERSION=0.10.4 \
+  --tag "${IMAGE}" \
+  .
+```
+
+The build clones `GYM_REVISION`, installs the coding-agent runtime and Gym dependencies, creates `/task_inputs/shop.db`, and removes project-local skill directories.
+
+Verify the fixture:
+
+```bash
+docker run --rm --entrypoint /bin/sh "${IMAGE}" -c '
+  test -x /workspace/nemo-gym/.venv/bin/python
+  test -f /task_inputs/shop.db
+  test -f /task_inputs/sql_tasks.jsonl
+  test ! -e /workspace/nemo-gym/.agents/skills
+  cd /workspace/nemo-gym
+  test -z "$(git status --porcelain)"
+'
+```
+
+<Note>
+
+`GYM_REVISION` must be reachable from the configured `GYM_REPOSITORY`. If you are working from a fork, pass `--build-arg GYM_REPOSITORY=<your-git-url>`.
+
+</Note>
+
+## Create A Smoke Experiment
+
+The checked-in manifest runs three arms with three repeats. That is appropriate for exercising the complete workflow, but it is unnecessarily expensive for the first smoke test.
+
+Create a temporary two-arm manifest with one rollout per arm:
+
+```bash
+export IMAGE
+
+uv run python - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+source = Path(
+    "benchmarks/agent_skills/configs/experiments/"
+    "create_environment_v1.yaml"
+)
+config = yaml.safe_load(source.read_text())
+config["name"] = "create-environment-smoke"
+config["agent"]["sandbox_image"] = os.environ["IMAGE"]
+config["sampling"]["repeats"] = 1
+config["sampling"]["concurrency"] = 1
+config["arms"].pop("bare_baseline")
+
+output = Path("/tmp/create-environment-smoke.yaml")
+output.write_text(yaml.safe_dump(config, sort_keys=False))
+print(output)
+PY
+```
+
+The two remaining arms are:
+
+- `discovery_control`: native discovery enabled without the skill;
+- `treatment`: native discovery enabled with the skill.
+
+This is the causal comparison used for the headline delta.
+
+## Preview And Lock The Experiment
+
+The driver requires a clean Git checkout so the lock describes a reproducible source revision:
+
+```bash
+git status --short
+```
+
+Preview the commands:
+
+```bash
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config /tmp/create-environment-smoke.yaml \
+  --output-dir results/agent-skills/create-environment-smoke \
+  --dry-run
+```
+
+The dry run:
+
+- resolves the Docker tag to an immutable image digest;
+- hashes the manifest, benchmark config, and dataset;
+- copies the treatment skill into an immutable experiment bundle;
+- records the driver checkout revision;
+- randomizes arm order deterministically;
+- writes `experiment.lock.json`;
+- prints commands without running inference.
+
+Inspect the lock:
+
+```bash
+uv run python -m json.tool \
+  results/agent-skills/create-environment-smoke/experiment.lock.json
+```
+
+Important fields include:
+
+| Field | Purpose |
+|---|---|
+| `git.revision` | Driver checkout revision |
+| `dataset_sha256` | Source-task identity |
+| `benchmark_config_sha256` | Direct `benchmarks/agent_skills/config.yaml` identity |
+| `sandbox_image.execution_reference` | Immutable image digest used by both arms |
+| `skill_snapshots.treatment.skills_ref.hash` | Evaluated skill bytes |
+| `arm_order` | Actual randomized execution order |
+| `commands` | Exact Gym commands |
+
+The lock records the driver revision and fixture image identity separately. It does not independently prove that the image was built from `git.revision`; preserve the image build command and `GYM_REVISION` with reported results.
+
+## Run The Experiment
+
+Execute the locked plan:
+
+```bash
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config /tmp/create-environment-smoke.yaml \
+  --output-dir results/agent-skills/create-environment-smoke \
+  --resume
+```
+
+`--resume` means "execute or continue this existing lock." If an arm has partial rollout output, the driver forwards Gym's rollout `--resume` behavior.
+
+The run creates:
+
+```text
+results/agent-skills/create-environment-smoke/
+├── experiment.lock.json
+├── skill-bundles/
+│   └── treatment/
+├── discovery_control/
+│   ├── rollouts.jsonl
+│   ├── rollouts_materialized_inputs.jsonl
+│   └── rollouts_aggregate_metrics.json
+├── treatment/
+│   ├── rollouts.jsonl
+│   ├── rollouts_materialized_inputs.jsonl
+│   └── rollouts_aggregate_metrics.json
+├── comparison.json
+└── report.md
+```
+
+## Read The Comparison
+
+Open the Markdown report:
+
+```bash
+cat results/agent-skills/create-environment-smoke/report.md
+```
+
+The report includes:
+
+- control and treatment means;
+- treatment-minus-control deltas;
+- win, loss, and tie counts;
+- pass@k;
+- per-task and per-rollout outcomes;
+- paired task confidence intervals when enough independent tasks exist.
+
+Rows are aligned by task ID and rollout index so the same task positions are compared. Model sampling is not seeded across arms, so rollout-level win/loss/tie counts are descriptive; task-level mean deltas across independent tasks are the stronger comparison.
+
+<Info>
+
+The checked-in validation split currently contains one task. The smoke run validates infrastructure, scoring, and provenance, but it cannot establish general skill quality. A one-task report shows the confidence interval as `n/a`.
+
+</Info>
+
+Inspect the machine-readable comparison:
+
+```bash
+uv run python -m json.tool \
+  results/agent-skills/create-environment-smoke/comparison.json
+```
+
+Key metrics:
+
+| Metric | Meaning |
+|---|---|
+| `reward` | Overall task success; all required checks must pass |
+| `correctness` | Runtime SQL verifier behavior |
+| `completeness` | Required files, converted data, config, tests, and public validation |
+| `convention_compliance` | Absence of known Gym implementation anti-patterns |
+| `sandbox_elapsed_seconds` | Coding-agent sandbox time |
+| `verifier_elapsed_seconds` | Hidden verification time |
+| `input_tokens`, `output_tokens` | Agent model usage |
+
+## Inspect Individual Rollouts
+
+Compare the same task and rollout index across arms:
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+root = Path("results/agent-skills/create-environment-smoke")
+for arm in ("discovery_control", "treatment"):
+    row = json.loads((root / arm / "rollouts.jsonl").read_text().splitlines()[0])
+    print(
+        arm,
+        {
+            "reward": row.get("reward"),
+            "correctness": row.get("correctness"),
+            "completeness": row.get("completeness"),
+            "convention_compliance": row.get("convention_compliance"),
+            "skills_hash": (row.get("skills_ref") or {}).get("hash"),
+            "status": row.get("status"),
+        },
+    )
+PY
+```
+
+Expected provenance:
+
+- control rows do not contain `skills_ref`;
+- every treatment row contains the hash from the locked treatment bundle.
+
+The driver rejects mixed or missing treatment hashes instead of comparing incompatible runs.
+
+For a failed task, inspect:
+
+- `details.stdout` for hidden check results;
+- `details.stderr` for execution failures;
+- `workspace_patch` for the submitted implementation;
+- the response trajectory and tool calls;
+- `_failures.jsonl` if rollout collection failed before verification.
+
+## Run The Full Manifest
+
+Do not edit the checked-in manifest immediately before a run: that would make the checkout dirty and invalidate the reproducibility preflight.
+
+Create a temporary full manifest that changes only the image reference:
+
+```bash
+export IMAGE
+
+uv run python - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+source = Path(
+    "benchmarks/agent_skills/configs/experiments/"
+    "create_environment_v1.yaml"
+)
+config = yaml.safe_load(source.read_text())
+config["agent"]["sandbox_image"] = os.environ["IMAGE"]
+
+output = Path("/tmp/create-environment-v1.yaml")
+output.write_text(yaml.safe_dump(config, sort_keys=False))
+print(output)
+PY
+
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config /tmp/create-environment-v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --dry-run
+
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config /tmp/create-environment-v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --resume
+```
+
+The additional `bare_baseline` arm disables native auto-discovery. Compare:
+
+- treatment minus discovery control for the skill effect;
+- discovery control minus bare baseline for the runtime-discovery effect.
+
+## Troubleshooting
+
+### The driver rejects a dirty checkout
+
+Commit or stash changes. Use `--allow-dirty` only for local development; the lock records the dirty state.
+
+### The driver says the output already exists
+
+Use `--resume` with the same manifest. Do not delete or edit the locked skill bundle between invocations.
+
+### The manifest or dataset changed
+
+Start a new output directory. A changed manifest, dataset, benchmark config, or Git revision is a different experiment.
+
+### The sandbox cannot reach the model endpoint
+
+Configure `sandbox_url_rewrites` under the Claude Code agent in `resources_servers/agent_skills/configs/agent_skills.yaml`. For a model endpoint on the Docker host, map the URL to `host.docker.internal` and add this to both agent and verifier `sandbox_spec` blocks:
+
+```yaml
+provider_options:
+  run_args:
+    - --add-host=host.docker.internal:host-gateway
+```
+
+Provider-managed tunnels can instead own endpoint environment keys through `sandbox_provider_managed_env`.
+
+### Hidden verification fails before running checks
+
+Confirm the agent and verifier use the same image digest and therefore the same fixture revision. Verify that `/workspace/nemo-gym/.venv/bin/python` and `/task_inputs/shop.db` exist in the image. Compare the recorded image build arguments separately with the driver checkout revision when publishing results.
+
+### The run stopped midway
+
+Run the same command again with `--resume`. Completed rollout keys are reused; partial arms continue from their existing artifacts.
+
+## Next Steps
+
+The current SQL task is a vertical slice. Before using the results to accept or reject the skill:
+
+1. Add independent create-environment tasks.
+2. Add unrelated negative controls.
+3. Run multiple rollouts per task.
+4. Define acceptable correctness, regression, latency, and token-cost thresholds.
+5. Diagnose unexpected wins and losses from the raw patches and trajectories.
+
+<Cards>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+Understand <code>skills.path</code>, native discovery, and <code>skills_ref</code>.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use rollout evidence to explain score changes.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand pass@k and custom verifier metrics.
+</Card>
+
+</Cards>
