@@ -1188,7 +1188,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        judge_create_params.max_output_tokens = 2048
+        # Budget covers reasoning + final message combined (the reasoning parser splits
+        # post-hoc). 2048 made reasoning judges (e.g. GLM-5.1) burn the whole budget
+        # thinking on ~2.7% of calls — no final message emitted, so output[-1] is the
+        # reasoning item and parsing fails until a retry samples a shorter think.
+        judge_create_params.max_output_tokens = 10240
         judge_create_params.input = [
             NeMoGymEasyInputMessage(role="user", content=judge_prompt),
         ]
