@@ -1,0 +1,5 @@
+{"question":"Return the name of the user with id 1.","expected_rows":[["Alice"]]}
+{"question":"List user names in ascending id order.","expected_rows":[["Alice"],["Bob"]]}
+{"question":"Count all users.","expected_rows":[[2]]}
+{"question":"Return the name of the user with id 2.","expected_rows":[["Bob"]]}
+{"question":"Return user ids whose name starts with A.","expected_rows":[[1]]}

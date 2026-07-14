@@ -1,0 +1,39 @@
+name: create-environment-v1
+benchmark: agent_skills
+
+dataset:
+  path: benchmarks/agent_skills/data/create_environment_validation.jsonl
+  split: benchmark
+
+agent:
+  name: agent_skills_create_environment_claude_code_agent
+  sandbox_image: nemo-gym-agent-skills:create-environment-smoke
+
+model:
+  name: claude-sonnet-4-6
+  temperature: 0.2
+  max_output_tokens: 16384
+
+sampling:
+  repeats: 3
+  seed: 1234
+  concurrency: 4
+
+arms:
+  discovery_control:
+    bare: false
+    skills: []
+
+  treatment:
+    bare: false
+    skills:
+      - .agents/skills/nemo-gym-create-environment
+
+  bare_baseline:
+    bare: true
+    skills: []
+
+comparison:
+  control: discovery_control
+  treatment: treatment
+  bootstrap_samples: 2000

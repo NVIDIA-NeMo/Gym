@@ -23,6 +23,53 @@ docker build \
 
 The image contains a clean Gym checkout, a runnable `/task_inputs/shop.db`, and pinned Claude Code and uv versions, but removes project-local skill directories. The agent runner rejects dirty or skill-contaminated images. For a release run, also override `PYTHON_IMAGE` with an immutable image digest and record the resulting fixture image digest in the experiment manifest.
 
+## Run the automated experiment
+
+Update the sandbox image in:
+
+```text
+benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml
+```
+
+Preview the locked commands and skill snapshot without running inference:
+
+```bash
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --dry-run
+```
+
+Run all configured arms and generate the paired comparison:
+
+```bash
+uv run python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --resume
+```
+
+The dry run creates the immutable experiment lock. The real invocation uses `--resume` to execute that exact plan. The same flag safely continues interrupted experiments and forwards Gym's rollout-resume behavior for arms with partial output.
+
+The driver refuses a dirty Git checkout by default, snapshots treatment skills, resolves the sandbox image to an immutable digest, verifies that the manifest dataset is bound by the benchmark config, randomizes arm order deterministically, invokes `gym eval run`, validates complete `skills_ref` provenance, and writes:
+
+```text
+results/agent-skills/create-environment-v1/
+├── experiment.lock.json
+├── skill-bundles/
+├── bare_baseline/rollouts.jsonl
+├── discovery_control/rollouts.jsonl
+├── treatment/rollouts.jsonl
+├── comparison.json
+└── report.md
+```
+
+Use `--allow-dirty` only for development; the lock records that the source checkout was dirty.
+
+## Manual arm commands
+
+The commands below show the underlying public Gym interface used by the driver.
+
 ## Create an immutable treatment bundle
 
 `skills.path` must point to a directory containing skill directories:
@@ -40,6 +87,7 @@ cp -R .agents/skills/nemo-gym-create-environment "${BUNDLE}/"
 gym eval run \
   --benchmark agent_skills \
   --agent agent_skills_create_environment_claude_code_agent \
+  --split benchmark \
   --output results/agent-skills/discovery-control.jsonl \
   --num-repeats 3 \
   --concurrency 4 \
@@ -54,6 +102,7 @@ The configured agent uses native discovery (`bare: false`) but receives no targe
 gym eval run \
   --benchmark agent_skills \
   --agent agent_skills_create_environment_claude_code_agent \
+  --split benchmark \
   --output results/agent-skills/treatment.jsonl \
   --num-repeats 3 \
   --concurrency 4 \
