@@ -244,9 +244,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         async def model_call_capture_middleware(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
         ) -> Response:
-            rollout_id = request.path_params.get("rollout_id")
             request.state.model_call_record_dict = {
-                "rollout_id": rollout_id,
                 "timestamp_start": perf_counter(),
                 "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
             }
@@ -256,9 +254,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             response = await call_next(request)
 
+            # Grab the rollout_id here after the route handler has run to populate the path_params
+            rollout_id = request.path_params.get("rollout_id")
+
             if not rollout_id:
                 return response
 
+            request.state.model_call_record_dict["rollout_id"] = rollout_id
             request.state.model_call_record_dict["timestamp_end"] = perf_counter()
             request.state.model_call_record_dict["status_code"] = response.status_code
             # TODO @bxyu-nvidia: These orjson.loads can be offloaded to the background task to not block the response
