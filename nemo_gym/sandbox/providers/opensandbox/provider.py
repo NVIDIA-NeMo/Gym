@@ -90,6 +90,8 @@ RETRYABLE_ERROR_MARKERS = (
     "timeout",
 )
 METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload).
+DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -348,6 +350,12 @@ class OpenSandboxConnectionConfig:
 class OpenSandboxAttributionConfig:
     """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
 
+    OpenSandbox propagates sandbox metadata as Kubernetes labels on the sandbox resources, so
+    attribution is queryable both through the OpenSandbox list API and at the cluster level
+    (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix`` namespaces
+    the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
+    ``team`` / ``user`` / ``workload`` keys.
+
     Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
     environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
     ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user``. Fields that
@@ -359,6 +367,13 @@ class OpenSandboxAttributionConfig:
     team: str | None = None
     user: str | None = None
     workload: str | None = None
+    key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
+
+    def __post_init__(self) -> None:
+        normalized = self.key_prefix.strip()
+        if normalized and not normalized.endswith("/"):
+            normalized += "/"
+        object.__setattr__(self, "key_prefix", normalized)
 
 
 @dataclass(frozen=True)
@@ -835,11 +850,13 @@ class OpenSandboxProvider:
     def _attribution_metadata(self) -> dict[str, str]:
         if not self._attribution.enabled:
             return {}
-        return resolve_attribution(
+        resolved = resolve_attribution(
             team=self._attribution.team,
             user=self._attribution.user,
             workload=self._attribution.workload,
         )
+        prefix = self._attribution.key_prefix
+        return {f"{prefix}{key}": value for key, value in resolved.items()}
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path.

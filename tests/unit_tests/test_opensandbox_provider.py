@@ -768,9 +768,9 @@ async def test_create_injects_attribution_metadata(
     await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
 
     assert FakeSandbox.created_kwargs["metadata"] == {
-        "team": "nemo_rl",
-        "user": "alice",
-        "workload": "swe-gym",
+        "nemo-gym.nvidia.com/team": "nemo_rl",
+        "nemo-gym.nvidia.com/user": "alice",
+        "nemo-gym.nvidia.com/workload": "swe-gym",
         "purpose": "test",
     }
 
@@ -787,12 +787,12 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
         attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload"},
     )
 
-    await provider.create(SandboxSpec(image="image:tag", metadata={"team": "explicit-team"}))
+    await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
 
     assert FakeSandbox.created_kwargs["metadata"] == {
-        "team": "explicit-team",
-        "user": "cfg-user",
-        "workload": "cfg-workload",
+        "nemo-gym.nvidia.com/team": "explicit-team",
+        "nemo-gym.nvidia.com/user": "cfg-user",
+        "nemo-gym.nvidia.com/workload": "cfg-workload",
     }
 
 
@@ -809,3 +809,30 @@ async def test_create_attribution_disabled(
     await provider.create(SandboxSpec(image="image:tag"))
 
     assert FakeSandbox.created_kwargs["metadata"] == {}
+
+
+@pytest.mark.parametrize(
+    ("key_prefix", "expected_key"),
+    [
+        ("", "team"),
+        ("acme.example.com/", "acme.example.com/team"),
+        ("acme.example.com", "acme.example.com/team"),  # trailing slash is normalized in
+        ("  ", "team"),
+    ],
+)
+async def test_create_attribution_key_prefix(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    key_prefix: str,
+    expected_key: str,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"team": "cfg-team", "key_prefix": key_prefix},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    metadata = FakeSandbox.created_kwargs["metadata"]
+    assert metadata[expected_key] == "cfg-team"

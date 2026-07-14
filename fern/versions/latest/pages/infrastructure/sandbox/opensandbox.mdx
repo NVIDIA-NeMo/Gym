@@ -137,9 +137,15 @@ The provider also normalizes metadata values for backend labels by replacing uns
 
 ## Job Attribution
 
-Every sandbox's metadata automatically includes `team`, `user`, and `workload` keys so cluster
-operators can attribute running sandboxes (OpenSandbox stores metadata as Kubernetes labels on
-the sandbox and supports filtering the list API by metadata, e.g. `team=my-team`).
+Every sandbox's metadata automatically includes `nemo-gym.nvidia.com/team`,
+`nemo-gym.nvidia.com/user`, and `nemo-gym.nvidia.com/workload` keys. OpenSandbox propagates
+sandbox metadata as Kubernetes labels on the sandbox resources, so running sandboxes are
+attributable both through the OpenSandbox list API metadata filter and directly at the
+cluster level:
+
+```bash
+kubectl get pods -l nemo-gym.nvidia.com/team=my-team
+```
 
 Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
 `NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` environment variables, then Slurm job environment
@@ -151,8 +157,9 @@ for `user`. Fields that cannot be resolved are omitted. Explicit `sandbox_spec.m
 sandbox:
   opensandbox:
     attribution:
-      enabled: true      # set false to disable automatic attribution
-      # team: my-team    # override auto-detection
+      enabled: true                       # set false to disable automatic attribution
+      key_prefix: nemo-gym.nvidia.com/    # label-key namespace; "" for bare team/user/workload keys
+      # team: my-team                     # override auto-detection
       # user: my-user
       # workload: my-benchmark
 ```
