@@ -95,7 +95,7 @@ the same CVDP `/verify`.
    the shared portable-Python + nemo_gym base).
 2. Add a config under `configs/` naming the harness and its `agent_kwargs`.
 
-No Python changes — `agentic_generic.py` and `in_sandbox_runner.py` stay untouched.
+No Python changes — `agentic_generic.py` and `sandbox_runner.py` stay untouched.
 
 ### Sandbox / apptainer notes (read this before running)
 
@@ -182,10 +182,13 @@ download/conversion steps and report-output details.
 
 ### Supporting files
 
-- `**in_sandbox_runner.py**` — `render_runner()` builds the script injected into the sandbox
-(imports the named harness, calls `responses()`, writes the trajectory out). `harvest()`
-collects produced files by glob, skipping files unchanged from what was seeded. Plus
-`agent_key()` (module → deps-script key) and `deps_recipe_key()` (cache fingerprint).
+- `**sandbox_runner.py**` — `load_runner_source()` returns the script injected into the sandbox
+(`sandbox_agent_runner.py`, a plain module that imports the named harness, calls `responses()`,
+writes the trajectory out). `harvest()` collects produced files by glob, skipping files
+unchanged from what was seeded. Plus `agent_key()` (module → deps-script key) and
+`deps_recipe_key()` (cache fingerprint).
+- `**sandbox_agent_runner.py**` — the injected runner itself. Reads the agent module/class and
+task inputs from `NV_*` env vars set by the agent; copied verbatim into the container.
 - `**setup_scripts/**`
   - `_portable_python.sh` — shared base: downloads a relocatable CPython and `pip install`s
   nemo_gym into `$DEPS_DIR`. (Leading underscore = sourced helper, not run directly.)
