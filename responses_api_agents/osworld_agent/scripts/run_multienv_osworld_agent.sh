@@ -71,6 +71,7 @@ NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
 RESUME_FROM_CACHE="${RESUME_FROM_CACHE:-0}"
 START_NG_RUN="${START_NG_RUN:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
 TASK_ARTIFACTS="${TASK_ARTIFACTS:-1}"
 FULL_MODEL_IO="${FULL_MODEL_IO:-0}"
@@ -250,6 +251,7 @@ LIMIT=${LIMIT}
 NUM_ENVS=${NUM_ENVS}
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL}
 RESUME_FROM_CACHE=${RESUME_FROM_CACHE}
+PREFLIGHT_ONLY=${PREFLIGHT_ONLY}
 NUM_REPEATS=${NUM_REPEATS}
 MAX_STEPS=${MAX_STEPS}
 MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS}
@@ -372,6 +374,8 @@ preflight_cmd=(
     "${CONFIG_PATHS}"
     "--input-jsonl"
     "${INPUT_JSONL}"
+    "--runner-name"
+    "${RUNNER_NAME}"
 )
 if [[ -n "${EXPECTED_INPUT_ROWS}" ]]; then
     preflight_cmd+=("--expected-rows" "${EXPECTED_INPUT_ROWS}")
@@ -380,6 +384,10 @@ fi
 echo
 echo "--- OSWorld runtime preflight ---"
 "${preflight_cmd[@]}"
+
+if [[ "${PREFLIGHT_ONLY}" == "1" ]]; then
+    exit 0
+fi
 
 wait_for_servers_ready() {
     local expected_line="${EXPECTED_SERVERS} servers found (${EXPECTED_SERVERS} healthy, 0 unhealthy)"
