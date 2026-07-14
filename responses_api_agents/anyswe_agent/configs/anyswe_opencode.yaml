@@ -1,0 +1,56 @@
+anyswe_opencode:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by OpenCode inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.opencode_agent.app
+      agent_server_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_kwargs:
+        model: nemo/model
+        openai_api_key: EMPTY
+        workspace_root: /tmp/opencode
+        repo_dir: /testbed
+        thinking: true
+        timeout: 3600
+        setup_timeout: 300
+        extra_args:
+          - --dangerously-skip-permissions
+        opencode_version: 1.17.8
+        system_prompt: Fix the bug in the repository at /testbed. Inspect and edit the source, run relevant checks, and leave the final fix applied.
+        opencode_config:
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+          provider:
+            nemo:
+              npm: "@ai-sdk/openai-compatible"
+              name: Local model server
+              models:
+                model:
+                  name: model
+                  interleaved:
+                    field: reasoning
+                  limit:
+                    context: 262144
+                    output: 131072
+
+      container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
+      sandbox_provider: sandbox
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      swebench_agent_timeout: 3900
+      swebench_tests_timeout: 1800
+      concurrency: 4
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
