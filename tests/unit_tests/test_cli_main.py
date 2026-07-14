@@ -1053,8 +1053,8 @@ class TestInstallRootResolution:
         install_root.mkdir()
         user_cwd.mkdir()
         self._make_resources_server(install_root)  # built-in only under the install root
-        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
-        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         resolved = cli_main._asset_config_path("resources-server", "foo")
@@ -1066,8 +1066,8 @@ class TestInstallRootResolution:
         install_root.mkdir()
         user_cwd.mkdir()
         self._make_resources_server(user_cwd, name="myenv")  # exists only in the user's project
-        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
-        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         resolved = cli_main._asset_config_path("resources-server", "myenv")
@@ -1081,8 +1081,8 @@ class TestInstallRootResolution:
         user_cwd.mkdir()
         self._make_resources_server(install_root)
         self._make_resources_server(user_cwd)
-        monkeypatch.setattr(cli_main, "PARENT_DIR", install_root)
-        monkeypatch.setattr(cli_main, "WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         with pytest.raises(ValueError, match="ambiguous"):
@@ -1094,8 +1094,8 @@ class TestInstallRootResolution:
         repo_root = tmp_path / "Gym"
         repo_root.mkdir()
         self._make_resources_server(repo_root)
-        monkeypatch.setattr(cli_main, "PARENT_DIR", repo_root)
-        monkeypatch.setattr(cli_main, "WORKING_DIR", repo_root)
+        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", repo_root)
+        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", repo_root)
         monkeypatch.chdir(repo_root)
 
         resolved = cli_main._asset_config_path("resources-server", "foo")
@@ -1112,3 +1112,9 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--json"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
+
+    def test_search_dir_becomes_config_override(self, monkeypatch: MonkeyPatch) -> None:
+        # `--search-dir` (repeatable) reaches the no-arg list command as the reserved `search_dir` config
+        # key, read centrally from the resolved config — like --json/--query.
+        _, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
+        assert overrides == ["+search_dir=[/a,/b]"]

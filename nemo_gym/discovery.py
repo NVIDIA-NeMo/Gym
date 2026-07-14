@@ -12,28 +12,68 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared component-discovery utilities for the ``gym list``/``gym search`` commands.
+"""Shared component-discovery helpers: which roots to scan for a component, how to resolve name
+collisions across them, and how to read a component's ``(domain, description)``.
 
-An environment and a benchmark (a benchmark is a specific kind of environment) are listed with the
-same columns, read the same way. This module holds the config-reading code both listings share so the
-per-component registries (``registry.py``, ``benchmarks.py``, ``agent_registry.py``) can depend on it
-without depending on each other. It only reads config files — it never starts servers — and only
-imports lower-level config utilities, so it sits below those registries in the import graph.
+Lives below the per-component registries (``registry.py``, ``benchmarks.py``, ``agent_registry.py``) so
+they can share it without depending on each other. Reads configs only; never starts servers.
 """
 
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError
 
+from nemo_gym import PARENT_DIR, WORKING_DIR
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
 )
+
+
+_T = TypeVar("_T")
+
+
+def component_search_roots(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> List[Path]:
+    """Ordered, de-duplicated roots to look for a Gym component under: any ``search_dirs`` (one dir or a
+    list, e.g. from ``--search-dir``), then cwd, then ``WORKING_DIR`` and the install root (``PARENT_DIR``,
+    the built-ins).
+
+    Earlier roots win on a name collision (see :func:`merge_by_name`), so user components shadow built-ins.
+    De-duplicated by resolved path, since cwd/``WORKING_DIR``/install root coincide in an editable checkout.
+    The single source of truth for where Gym looks for components — used by both config resolution
+    (``_asset_config_path``) and the ``gym list``/``gym search`` discovery functions.
+    """
+    if search_dirs is None:
+        extra: List[Path] = []
+    elif isinstance(search_dirs, (str, Path)):
+        extra = [Path(search_dirs)]  # a single dir
+    else:
+        extra = [Path(d) for d in search_dirs]  # a list of dirs
+    candidates: List[Path] = [*extra, Path.cwd(), WORKING_DIR, PARENT_DIR]
+    roots: List[Path] = []
+    seen: set[Path] = set()
+    for root in candidates:
+        resolved = root.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(root)
+    return roots
+
+
+def merge_by_name(per_root: Iterable[Dict[str, _T]]) -> Dict[str, _T]:
+    """Merge per-root ``name -> entry`` mappings; earlier roots win on a collision (user shadows built-in),
+    matching :func:`component_search_roots` precedence. Insertion order preserved.
+    """
+    merged: Dict[str, _T] = {}
+    for entries in per_root:
+        for name, entry in entries.items():
+            merged.setdefault(name, entry)
+    return merged
 
 
 # Fills unset `???`/`${...}` values during listing: they reference runtime-only values (API keys,
@@ -46,12 +86,9 @@ _SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_ap
 
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
-    """`parse_no_environment` for *listing*: fill unset `???` values and undefined `${...}` interpolations
-    with a placeholder so a component referencing runtime-only values can still be identified. Never mutates
-    the caller's config; errors other than those two propagate.
-
-    `???` is filled anywhere; `${...}` only where parse forces resolution (top-level and server sections),
-    not inside arbitrary non-server nested dicts — fine for listing, whose interpolations live in servers.
+    """`parse_no_environment` for listing: fill unset `???` and undefined `${...}` values (runtime-only
+    things like API keys/endpoints) with a placeholder so the config still resolves enough to identify the
+    component. Never mutates the input; errors other than those two propagate.
     """
     working = deepcopy(initial_config_dict)  # never mutate the caller's config
     parser = GlobalConfigDictParser()
@@ -78,10 +115,8 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
 
 
 def _scan_servers_for_metadata(container) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort ``(domain, description)`` from a config mapping, scanning every server group.
-
-    Reads the first ``domain`` and the first ``description`` found across all server instances. Defensive
-    against malformed shapes (non-mapping top level, a server group that isn't a dict) so it never raises.
+    """Best-effort ``(domain, description)`` from a config mapping: the first of each found across all
+    server groups. Defensive against malformed shapes, so it never raises.
     """
     domain: Optional[str] = None
     description: Optional[str] = None
@@ -105,20 +140,15 @@ def _scan_servers_for_metadata(container) -> Tuple[Optional[str], Optional[str]]
 
 
 def read_config_metadata(config_path: Path) -> Tuple[Optional[str], Optional[str]]:
-    """Shared listing metadata reader: ``(domain, description)`` for an environment *or* benchmark config.
+    """Shared ``(domain, description)`` reader for an environment *or* benchmark config. Two passes, because
+    the two declare metadata differently:
 
-    A benchmark is a specific kind of environment, so both are read the same way. Two-pass, because the two
-    kinds declare metadata differently:
+    1. Raw (non-resolving) scan — environment configs declare it inline, and this is safe even though they
+       reference servers defined elsewhere (resolving in isolation would raise).
+    2. Resolving fallback for whatever's still unset — benchmark configs inherit it via
+       ``config_paths``/``_inherit_from``. Tolerates unset runtime values; on failure keeps the raw result.
 
-    1. **Raw (non-resolving) scan** of the config as written. Environment configs declare ``domain``/
-       ``description`` inline, and reading them without resolution is safe even though an environment config
-       references model/agent servers defined elsewhere (resolving it in isolation would raise).
-    2. **Resolving fallback**, only for whatever the raw scan left unset. Benchmark configs inherit their
-       metadata via ``config_paths``/``_inherit_from``, so it isn't present until the config is resolved.
-       Uses the listing-tolerant parser (unset runtime values are placeholdered); on any failure — e.g. an
-       environment config that references servers defined elsewhere — whatever the raw scan found is kept.
-
-    Never raises: an unreadable or unresolvable config yields ``(None, None)``.
+    Never raises: an unreadable/unresolvable config yields ``(None, None)``.
     """
     try:
         raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)

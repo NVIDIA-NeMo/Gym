@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nemo_gym import PARENT_DIR, WORKING_DIR
+from nemo_gym.discovery import component_search_roots
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
@@ -164,10 +164,10 @@ _ASSETS = {
 def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ()) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the Gym install root (`PARENT_DIR` — where the built-in asset trees live in both
-    editable and wheel installs), then the current working directory (the user's project), then
-    any user-registered --search-dir roots. Searching `PARENT_DIR` is what lets built-ins resolve
-    by name from an arbitrary cwd (e.g. a wheel install), not just from inside the repo checkout.
+    Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``--search-dir`` + cwd +
+    install root), the same helper that backs `gym list`/`gym search`, so config resolution and discovery
+    agree on where components live. Searching the install root is what lets built-ins resolve by name from
+    an arbitrary cwd (e.g. a wheel install), not just inside the repo checkout.
     """
     parent, subdir, default_flavor = _ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
@@ -175,15 +175,7 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
     config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
     path = f"{config_dir}/{config_flavor}.yaml"
 
-    # Search the install root (built-ins) and the user's cwd / --search-dir roots; dedupe roots that
-    # resolve to the same directory so an editable install run from the repo root isn't searched twice.
-    seen_roots: set[Path] = set()
-    roots: list[Path] = []
-    for root in (PARENT_DIR, WORKING_DIR, Path.cwd(), *(Path(d) for d in search_dirs)):
-        resolved_root = root.resolve()
-        if resolved_root not in seen_roots:
-            seen_roots.add(resolved_root)
-            roots.append(root)
+    roots = component_search_roots(search_dirs)
     matches: list[Path] = []
 
     for root in roots:
@@ -245,14 +237,30 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
-# Shared flag: register extra root dirs to search for named components. Consumed by the asset selectors above
-# (not emitted as a Hydra override). Reused by every command that accepts a --<component type> NAME selector.
+# `--search-dir` for the asset selectors above: read straight from argv during config resolution, not
+# emitted as a Hydra override. On every command that accepts a --<component type> NAME selector.
 SEARCH_DIR = Flag(
     register=lambda p: p.add_argument(
         "--search-dir",
         action="append",
         metavar="DIR",
         help="Extra root directory to search for named components; repeatable.",
+    ),
+)
+
+# `--search-dir` for the `list`/`search` commands. Their targets are called with no args, so — like
+# --json/--query — the roots reach them as the reserved `search_dir` config key, not read from argv.
+DISCOVERY_SEARCH_DIR = Flag(
+    register=lambda p: p.add_argument(
+        "--search-dir",
+        action="append",
+        metavar="DIR",
+        help="Extra root directory to search for components; repeatable.",
+    ),
+    translate_to_hydra=lambda args: (
+        [f"+search_dir=[{','.join(getattr(args, 'search_dir', None) or [])}]"]
+        if getattr(args, "search_dir", None)
+        else []
     ),
 )
 
@@ -312,20 +320,24 @@ GROUPS = {
 # NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
-        target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
+        target="nemo_gym.cli.eval:list_benchmarks",
+        summary="List available benchmarks.",
+        flags=(JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list environments": Command(
-        target="nemo_gym.cli.env:list_environments", summary="List available environments by name.", flags=(JSON,)
+        target="nemo_gym.cli.env:list_environments",
+        summary="List available environments by name.",
+        flags=(JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
         summary="List agent harnesses and how each composes (Pattern A vs self-contained B).",
-        flags=(JSON,),
+        flags=(JSON, DISCOVERY_SEARCH_DIR),
     ),
     "search": Command(
         target="nemo_gym.cli.eval:list_benchmarks",
         summary="Search available components (currently benchmarks) by name; like `list` filtered to a query.",
-        flags=(QUERY, JSON),
+        flags=(QUERY, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "dataset upload": Command(
         target=_dataset_upload,

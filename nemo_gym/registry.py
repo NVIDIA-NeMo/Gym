@@ -20,21 +20,21 @@ environment's short ``<name>`` to its config so it can be enumerated by name —
 ``gym list environments``. Resolving a name to a config path for *running* is handled by the CLI's
 generic ``--environment`` asset selector, so this module is intentionally discovery-only.
 
-Discovery only reads config files and never starts servers. Its ``domain``/``description`` metadata is
-read via the shared :func:`~nemo_gym.discovery.read_config_metadata` reader (the same one benchmark
-listing uses), which tolerates unset secrets/API keys referenced by a config, so discovery is safe to
-call even when those are not set in the environment.
+Discovery only reads config files and never starts servers; ``domain``/``description`` come from the
+shared :func:`~nemo_gym.discovery.read_config_metadata` reader, which tolerates unset secrets/API keys,
+so it's safe to call even when those aren't set.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Union
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import read_config_metadata
+from nemo_gym.discovery import component_search_roots, merge_by_name, read_config_metadata
 
 
-ENVIRONMENTS_DIR = PARENT_DIR / "environments"
+ENVIRONMENTS_SUBDIR = "environments"
+ENVIRONMENTS_DIR = PARENT_DIR / ENVIRONMENTS_SUBDIR
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
 
 
@@ -49,8 +49,8 @@ class EnvironmentEntry:
     domain: Optional[str] = None
 
 
-def discover_environments(environments_dir: Path = ENVIRONMENTS_DIR) -> Dict[str, EnvironmentEntry]:
-    """Map environment name -> :class:`EnvironmentEntry` for every ``<name>/config.yaml``.
+def _discover_environments_in_dir(environments_dir: Path) -> Dict[str, EnvironmentEntry]:
+    """Map environment name -> :class:`EnvironmentEntry` for every ``<name>/config.yaml`` under one dir.
 
     The name is the directory name. Returns an empty dict if the directory is missing.
     """
@@ -73,3 +73,17 @@ def discover_environments(environments_dir: Path = ENVIRONMENTS_DIR) -> Dict[str
         )
 
     return environments
+
+
+def discover_environments(
+    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
+) -> Dict[str, EnvironmentEntry]:
+    """Map environment name -> :class:`EnvironmentEntry` for every discoverable ``<name>/config.yaml``.
+
+    Scans the ``environments/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
+    (``search_dirs`` + cwd + built-ins), merged so user environments shadow same-named built-ins.
+    ``search_dirs`` is one dir or a list.
+    """
+    return merge_by_name(
+        _discover_environments_in_dir(root / ENVIRONMENTS_SUBDIR) for root in component_search_roots(search_dirs)
+    )

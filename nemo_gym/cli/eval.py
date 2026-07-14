@@ -41,6 +41,7 @@ from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SEARCH_DIR_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -77,7 +78,8 @@ def list_benchmarks() -> None:
     """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point).
 
     A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
-    domain, description) and reads them through the same `read_config_metadata` helper.
+    domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -86,7 +88,7 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    benchmarks = discover_benchmarks()
+    benchmarks = discover_benchmarks(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
 
     # Resolve domain + description once per benchmark, via the shared component-metadata reader —
     # the same one `gym list environments` uses — for the columns and `gym search`.

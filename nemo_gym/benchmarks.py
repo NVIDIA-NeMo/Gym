@@ -17,14 +17,14 @@
 import sys
 from glob import glob
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Union
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BenchmarkDatasetConfig
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
+from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, component_search_roots, merge_by_name
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
@@ -33,7 +33,8 @@ from nemo_gym.global_config import (
 )
 
 
-BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
+BENCHMARKS_SUBDIR = "benchmarks"
+BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
 
 
 class BenchmarkConfig(BaseModel):
@@ -127,12 +128,9 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
 def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
-    A config defines a benchmark iff it declares a `type: benchmark` dataset (see `BenchmarkConfig`),
-    regardless of its filename. So discovery is content-based: scan every yaml and keep the ones that
-    literally declare such a dataset. That text check is a cheap prefilter so we only pay the resolve
-    cost on real candidates (not every prompt/endpoint yaml), and it finds benchmarks whose config
-    isn't named `config.yaml` — e.g. tau2's `configs/*.yaml` and livecodebench's `cascade.yaml`.
-    Returns an empty list if the directory is missing.
+    A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
+    every yaml. The `type: benchmark` text check is a cheap prefilter (pay the resolve cost only on real
+    candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
     """
     if not benchmarks_dir.is_dir():
         return []
@@ -140,9 +138,17 @@ def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     return sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
 
 
-def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
-    """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under ``benchmarks/``."""
-    return _load_benchmarks_from_config_paths(_benchmark_config_paths(BENCHMARKS_DIR))
+def discover_benchmarks(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
+
+    Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
+    (``search_dirs`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
+    ``search_dirs`` is one dir or a list.
+    """
+    return merge_by_name(
+        _load_benchmarks_from_config_paths(_benchmark_config_paths(root / BENCHMARKS_SUBDIR))
+        for root in component_search_roots(search_dirs)
+    )
 
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.

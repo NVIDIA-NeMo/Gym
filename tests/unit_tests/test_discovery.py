@@ -16,11 +16,62 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
     _parse_no_environment_tolerating_unset_values,
+    component_search_roots,
+    merge_by_name,
     read_config_metadata,
 )
+
+
+class TestComponentSearchRoots:
+    def test_default_includes_cwd_and_install_root(self) -> None:
+        resolved = {root.resolve() for root in component_search_roots()}
+        assert Path.cwd().resolve() in resolved
+        assert PARENT_DIR.resolve() in resolved
+
+    def test_search_dirs_take_precedence_and_keep_order(self, tmp_path: Path) -> None:
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+
+        roots = component_search_roots(search_dirs=[a, b])
+
+        assert roots[0] == a  # explicit search dirs come first, in the given order
+        assert roots[1] == b
+        assert PARENT_DIR.resolve() in {root.resolve() for root in roots}  # built-ins still scanned
+
+    def test_accepts_a_single_dir(self, tmp_path: Path) -> None:
+        # `search_dirs` takes one dir or a list; a lone Path must be treated as that single root.
+        assert component_search_roots(tmp_path)[0] == tmp_path
+
+    def test_dedupes_roots_by_resolved_path(self) -> None:
+        # Passing the install root as an explicit search dir must not scan it twice.
+        roots = component_search_roots(search_dirs=[PARENT_DIR])
+        resolved = [root.resolve() for root in roots]
+
+        assert resolved.count(PARENT_DIR.resolve()) == 1
+        assert roots[0].resolve() == PARENT_DIR.resolve()  # the explicit search dir still takes precedence
+
+
+class TestMergeByName:
+    def test_merges_disjoint_roots(self) -> None:
+        assert merge_by_name([{"a": 1}, {"b": 2}]) == {"a": 1, "b": 2}
+
+    def test_earlier_root_shadows_later_on_name_collision(self) -> None:
+        # A component found in an earlier root (e.g. the user's cwd) wins over a same-named one in a
+        # later root (e.g. a built-in) — the collision policy every `gym list` command relies on.
+        merged = merge_by_name([{"dup": "from_first"}, {"dup": "from_second", "other": "kept"}])
+        assert merged == {"dup": "from_first", "other": "kept"}
+
+    def test_preserves_order_within_and_across_roots(self) -> None:
+        assert list(merge_by_name([{"a": 1, "b": 2}, {"c": 3}])) == ["a", "b", "c"]
+
+    def test_empty_input(self) -> None:
+        assert merge_by_name([]) == {}
 
 
 class TestTolerantInterpolationParse:

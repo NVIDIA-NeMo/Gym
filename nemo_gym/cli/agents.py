@@ -22,18 +22,16 @@ from nemo_gym.cli.utils import print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
+    SEARCH_DIR_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
 
 
 def list_agents() -> None:
-    """CLI command: list discovered agent harnesses and how each composes (Pattern A vs B).
-
-    Complements ``gym list benchmarks``: the asset selectors resolve a component *by name*, but only
-    this listing surfaces which agents are freely wireable into a separate environment (Pattern A)
-    versus self-contained harnesses that run with their own config (Pattern B) — the distinction the
-    config composer's compatibility guard relies on.
+    """List discovered agent harnesses and how each composes: freely wireable into a separate environment
+    (Pattern A) vs. self-contained harnesses that run with their own config (Pattern B). ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -42,7 +40,7 @@ def list_agents() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    agents = discover_agents()
+    agents = discover_agents(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [

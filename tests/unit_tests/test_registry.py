@@ -14,7 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.registry import discover_environments
+from nemo_gym.registry import _discover_environments_in_dir, discover_environments
 
 
 def _make_env(environments_dir: Path, name: str, config_body: str) -> Path:
@@ -50,7 +50,7 @@ class TestDiscoverEnvironments:
         _make_env(envs_dir, "alpha", _ENV_CONFIG.format(name="alpha"))
         _make_env(envs_dir, "beta", _ENV_CONFIG.format(name="beta"))
 
-        environments = discover_environments(envs_dir)
+        environments = _discover_environments_in_dir(envs_dir)
 
         assert set(environments) == {"alpha", "beta"}
         alpha = environments["alpha"]
@@ -61,7 +61,7 @@ class TestDiscoverEnvironments:
         assert alpha.domain == "agent"
 
     def test_missing_directory_returns_empty(self, tmp_path: Path) -> None:
-        assert discover_environments(tmp_path / "does_not_exist") == {}
+        assert _discover_environments_in_dir(tmp_path / "does_not_exist") == {}
 
     def test_ignores_dirs_without_config_and_loose_files(self, tmp_path: Path) -> None:
         envs_dir = tmp_path / "environments"
@@ -69,7 +69,7 @@ class TestDiscoverEnvironments:
         (envs_dir / "not_an_env").mkdir()  # dir without a config.yaml
         (envs_dir / "__init__.py").write_text("")  # loose file
 
-        assert set(discover_environments(envs_dir)) == {"real"}
+        assert set(_discover_environments_in_dir(envs_dir)) == {"real"}
 
     def test_unparseable_or_metadataless_configs_still_discovered(self, tmp_path: Path) -> None:
         # Configs without a parseable resources_servers block (or malformed YAML) must still be
@@ -81,7 +81,7 @@ class TestDiscoverEnvironments:
         _make_env(envs_dir, "rs_not_dict", "top:\n  resources_servers: not_a_mapping\n")  # rs not a dict
         _make_env(envs_dir, "broken", "key: [unclosed\n")  # malformed YAML -> load raises
 
-        environments = discover_environments(envs_dir)
+        environments = _discover_environments_in_dir(envs_dir)
 
         assert set(environments) == {"no_rs", "top_list", "scalar_top", "rs_not_dict", "broken"}
         for entry in environments.values():
@@ -103,7 +103,7 @@ class TestDiscoverEnvironments:
             "      api_key: ${some_unset_key}\n",
         )
 
-        environments = discover_environments(envs_dir)
+        environments = _discover_environments_in_dir(envs_dir)
         assert "needs_key" in environments
         assert environments["needs_key"].domain == "other"
 
@@ -114,3 +114,19 @@ class TestRealEnvironments:
         environments = discover_environments()
         assert "workplace_assistant" in environments
         assert environments["workplace_assistant"].config_path.name == "config.yaml"
+
+
+class TestDiscoverEnvironmentsAcrossRoots:
+    def test_search_dirs_surface_user_environments_alongside_builtins(self, tmp_path: Path) -> None:
+        _make_env(tmp_path / "environments", "custom_env", _ENV_CONFIG.format(name="custom_env"))
+
+        environments = discover_environments(search_dirs=[tmp_path])
+
+        assert "custom_env" in environments  # a user-supplied environment is discovered
+        assert "workplace_assistant" in environments  # ...alongside the built-ins
+
+    def test_cwd_is_scanned_by_default(self, tmp_path: Path, monkeypatch) -> None:
+        _make_env(tmp_path / "environments", "cwd_env", _ENV_CONFIG.format(name="cwd_env"))
+        monkeypatch.chdir(tmp_path)
+
+        assert "cwd_env" in discover_environments()

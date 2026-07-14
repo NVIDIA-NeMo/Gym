@@ -46,6 +46,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    SEARCH_DIR_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -921,11 +922,14 @@ def validate():
 def list_environments() -> None:
     """List the environments available under environments/, by short name.
 
+    ``--search-dir`` adds extra roots to scan on top of the cwd and built-ins.
+
     Examples:
 
     ```bash
     gym list environments
     gym list environments --json
+    gym list environments --search-dir /path/to/project
     ```
     """
     global_config_dict = get_global_config_dict(
@@ -935,7 +939,7 @@ def list_environments() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    environments = discover_environments()
+    environments = discover_environments(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(
