@@ -207,11 +207,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
 
-        # Model call capture middleware must be the final middleware added so
-        # 1. It is run first on request, the closest to the original request sent to the endpoint
-        # 2. It is run last on response, so it can capture the response closest to what is sent back.
         self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         if self._capture_config.observability_enabled:
+            # Model call capture middleware must be the final middleware added so
+            # 1. It is run first on request, the closest to the original request sent to the endpoint
+            # 2. It is run last on response, so it can capture the response closest to what is sent back.
+            # Here, we setup the exception middleware first so that we guarantee the ordering
+            self._is_exception_middleware_setup = False
+            self.setup_exception_middleware(app)
             self.setup_model_call_capture_middleware(app)
 
         app.post("/v1/chat/completions")(self.chat_completions)
@@ -225,6 +228,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/messages")(self.messages)
 
         return app
+
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        if self._is_exception_middleware_setup:
+            return
+
+        return super().setup_exception_middleware(app)
 
     def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
         server = self
