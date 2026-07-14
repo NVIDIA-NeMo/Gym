@@ -1,6 +1,6 @@
 # sandbox_agent
 
-Runs any Gym agent harness inside a sandbox.
+Runs any Gym environment inside a sandbox.
 
 ## Modes
 
@@ -12,8 +12,8 @@ Runs any Gym agent harness inside a sandbox.
 
 ## Per-task metadata keys
 
-Task shape lives in the dataset rows, not the agent config. Reserved keys in
-`responses_create_params.metadata`:
+Task shape lives in the dataset rows to remain agnostic, not the agent config. 
+Reserved keys in `responses_create_params.metadata`:
 
 | Key | Behavior when present |
 |---|---|
@@ -24,7 +24,7 @@ Task shape lives in the dataset rows, not the agent config. Reserved keys in
 
 Tasks with an external verifier (e.g. math) need none of these beyond an image.
 
-## In-box agent runtime
+## In-sandbox agent runtime
 
 The server tars `nemo_gym/` and `responses_api_agents/` at startup (small, data and tests
 excluded) and unpacks it to `/gym_mount` in each sandbox. `setup_commands` install the
@@ -32,5 +32,5 @@ agent's dependencies, for example `pip install nemo-gym` for the import chain pl
 harness CLI itself.
 
 Because the harness inside the sandbox talks to a standard Gym model server, this agent
-composes with future model-server capabilities (e.g. token-ID buffering for training)
+composes with future model-server capabilities (e.g. token-ID capture for training)
 without changes to the harness or this server.
