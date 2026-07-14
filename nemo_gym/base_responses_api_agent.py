@@ -23,7 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, maybe_rollout_id_from_run_body
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -53,6 +53,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         self.setup_session_middleware(app)
 
+        # Used for constructing the model call path
+        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -60,6 +63,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return app
 
     def resolve_model_call_path(self, base_url_or_path: str, body: Any) -> str:
+        if not self._capture_config.should_capture_model_calls:
+            return base_url_or_path
+
         maybe_rollout_id = maybe_rollout_id_from_run_body(body)
         if not maybe_rollout_id:
             return base_url_or_path
