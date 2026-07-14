@@ -8,11 +8,12 @@
 
 **Gym implementation branch:** `feature/switchyard-openhands-integration`
 
-**Switchyard implementation:** `drifold/feature/token-capture` at `1365ca0`
+**Switchyard implementation:** `drifold/feature/token-capture` at `eb351a7`
 ([NVIDIA-NeMo/Switchyard#63](https://github.com/NVIDIA-NeMo/Switchyard/pull/63))
 
 **OpenHands base:** Gym's pinned
 [`nv-OpenHands` commit](https://github.com/sdevare-nv/nv-OpenHands/tree/5f0180054732945df08ad2293903e6873f0492b6)
+— unchanged; this integration requires no OpenHands-side modification
 
 ## Objective
 
@@ -99,6 +100,13 @@ list field is named `completions`. Records are returned ordered by
 (`captured_at`, `uuid`). The Gym adapter still validates message-history continuity
 and never repairs a broken chain using timestamps.
 
+Since `eb351a7`, the branch also accepts the session id as a top-level
+request-body field `proxy_x_session_id` (the header takes precedence; the field
+is always stripped before the request is forwarded upstream). This serves clients whose only reachable knob is extra JSON body
+fields — the pinned OpenHands client among them — and generalizes to any harness
+that can set OpenAI-SDK/litellm `extra_body`, with no custom-header surface
+required.
+
 ## MVP scope
 
 The first implementation supports:
@@ -182,7 +190,8 @@ swe_agents:
 When `switchyard_base_url` is absent, behavior remains unchanged. When present for
 an OpenHands run, policy calls go directly to Switchyard.
 
-The URL must be reachable from both:
+The URL must be exactly `http://<host>:<port>` (validated at server startup) and
+reachable from both:
 
 - the Gym wrapper process, for retrieval; and
 - the OpenHands Apptainer container, for model calls.
@@ -211,60 +220,42 @@ session-directory sanitizer, and is unique across retries. It is serialized in t
 existing `instance_config`, so `SWEBenchWrapper.run` can retrieve the same session
 after `responses` returns without introducing shared mutable state.
 
-## OpenHands transport change
+## OpenHands transport (no fork change)
 
-Change the existing `NemoGymClient._post_completion` in the external
-`nv-OpenHands` fork. Do not add a second client or a local compatibility proxy.
+No nv-OpenHands modification is required, and the three OpenHands YAML pins do
+not move. The pinned client already provides everything the transport needs,
+reachable entirely through configuration Gym writes on every run:
 
-The direct path is:
+1. `NemoGymClient._post_completion` posts to the server named
+   `NEMO_GYM_MODEL_SERVER_NAME`, resolving its host/port from the
+   `NEMO_GYM_CONFIG_DICT` the harness exports. Gym rewrites that model-server
+   entry to Switchyard's host/port — in the agent container's copy only. The
+   eval container keeps the original config dict and makes no policy calls.
+2. The posted `model` field echoes the TOML `[llm.model] model`. Gym writes the
+   Switchyard route id there; Switchyard dispatches on it and substitutes the
+   route target's real model upstream.
+3. The TOML `completion_kwargs` (a stock OpenHands `LLMConfig` field) merge
+   verbatim into the posted JSON body. Gym rides the capture session on the
+   `proxy_x_session_id` body field, which Switchyard strips before forwarding.
 
-1. Build `params` exactly as the client does today.
-2. If `SWITCHYARD_BASE_URL` is absent, keep the existing
-   `ServerClient.post` behavior.
-3. If it is present:
-   - require `SWITCHYARD_SESSION_ID`;
-   - copy `params`;
-   - replace `params["model"]` with `NEMO_GYM_MODEL_SERVER_NAME`;
-   - POST to `<base-url>/v1/chat/completions`;
-   - send `proxy_x_session_id: <session-id>`;
-   - make exactly one HTTP attempt — no transport retries.
-4. Reuse the client's existing response-status handling, JSON parsing, cookies,
-   metrics, and completion-log writing.
+Because `ServerClient` can only target plain `http://<host>:<port>`,
+`switchyard_base_url` must have exactly that form; Gym validates it at server
+startup and fails fast rather than masking every sample.
 
-The single-attempt rule exists because an attempt that reaches vLLM writes a
-capture record even when the client never receives the response. A transport
-retry can therefore leave two records with the same prompt history; strict-history
-reconstruction would refuse the session and mask the sample. Gym's
-`ServerClient.post` and `nemo_gym.server_utils.request` both retry with backoff,
-so the direct path must use the shared aiohttp client without the retry wrapper
-and let a failed call fail the run through existing OpenHands error handling.
+The pinned client keeps writing its per-call completion logs and
+`NEMO_GYM_METRICS_FPATH` metrics, so the existing fallback rollout, metrics, and
+non-Switchyard behavior are unchanged.
 
-The model rewrite is required. Switchyard dispatches on the incoming OpenAI
-`model` field, while OpenHands normally sends the underlying LLM model string.
-`NEMO_GYM_MODEL_SERVER_NAME` is already exported by the Gym harness and exactly
-matches the `policy_model` route in the example. `params["model"]` always exists:
-`_nemo_gym_llm_kwargs` is built with `model=self.config.model`.
+Token-field handling needs no attention: Switchyard's translation layer drops
+vLLM's engine token fields from the client-facing response, so the client's
+token bookkeeping is inert and every captured prompt history stays strictly
+extending.
 
-No message-format change is needed. On the direct path the response message never
-carries `prompt_token_ids`, `generation_token_ids`, or `generation_log_probs` —
-those are attached by Gym's model server, not vLLM — so the client's existing
-token-field stripping loop is a no-op and every captured prompt history stays
-strictly extending.
-
-Gym must export two additional values only into the agent container:
-
-~~~text
-SWITCHYARD_BASE_URL=<configured-base-url>
-SWITCHYARD_SESSION_ID=<generated-uuid>
-~~~
-
-The evaluator container does not make policy calls and does not receive these values.
-
-After the fork change is pushed, update every OpenHands pin in Gym:
-
-- `responses_api_agents/swe_agents/configs/swebench_openhands.yaml`
-- `responses_api_agents/swe_agents/configs/swebench_openhands_training.yaml`
-- `responses_api_agents/swe_agents/configs/swebench_multi_tools.yaml`
+Transport retries: the client's `ServerClient` path retries only on
+connection-level errors. A retry after a call that actually reached vLLM writes
+a second capture record whose prompt history does not extend the first;
+reconstruction then refuses the session and masks the sample — fail-closed,
+never partially annotated.
 
 ## Gym retrieval and adaptation
 
@@ -391,42 +382,34 @@ of this MVP.
 ### Gym
 
 1. `responses_api_agents/swe_agents/app.py`
-   - add `switchyard_base_url`;
+   - add `switchyard_base_url` (validated as `http://<host>:<port>` at startup);
    - add and generate `switchyard_session_id`;
-   - export the two Switchyard environment variables next to the existing
-     `NEMO_GYM_MODEL_SERVER_NAME` export in `OpenHandsHarnessProcessor`'s
-     agent command (agent container only; the opencode harness and the eval
-     container command are untouched);
+   - in `OpenHandsHarnessProcessor.get_run_command`, when configured: write the
+     route id as the TOML model, add `completion_kwargs.proxy_x_session_id`, and
+     export a config dict whose model-server entry points at Switchyard
+     (`_parse_switchyard_base_url`, `_switchyard_ng_config_dict_str`; agent
+     container only — the opencode harness and the eval container are untouched);
    - retrieve and apply the reconstructed trace in `run`;
    - add `switchyard_trace_error`.
 2. `responses_api_agents/swe_agents/switchyard_trace.py`
    - DTOs, validation, tool mapping, and reconstruction.
 3. `responses_api_agents/swe_agents/tests/test_app.py`
-   - configuration, UUID creation, environment export, retrieval integration, and
-     masking behavior.
+   - configuration and URL validation, UUID creation, TOML/config-dict routing,
+     retrieval integration, and masking behavior.
 4. `responses_api_agents/swe_agents/tests/test_switchyard_trace.py`
    - focused adapter and validation tests.
-5. The three OpenHands YAML files listed above
-   - update the fork commit after the external change lands.
 
 Do not change `nemo_gym/rollout_collection.py` or generic model-server code.
 
 ### nv-OpenHands
 
-1. Update `openhands/agenthub/nemo_gym_client.py`.
-2. Add focused client tests for:
-   - fallback to Gym `ServerClient`;
-   - direct URL construction;
-   - route-model rewrite;
-   - session header;
-   - missing-session failure;
-   - exactly one HTTP attempt per call (no transport retries);
-   - response parsing, cookies, metrics, and completion logging.
-3. Push the fork commit before updating Gym's pin.
+Nothing. The pinned fork commit is unchanged and no pins move.
 
 ### Switchyard
 
-No Gym-specific Switchyard feature is required beyond PR #63.
+One addition on the PR #63 branch: `TokenCaptureRequestProcessor` also resolves
+the session from the `proxy_x_session_id` request-body field (header takes
+precedence) and always strips it before forwarding upstream, with focused tests.
 
 Two correctness limitations remain in that branch:
 
@@ -443,10 +426,12 @@ The parser and target schema already agree on nested
 Minimum coverage:
 
 1. No Switchyard setting preserves current OpenHands behavior exactly.
-2. A configured run creates a unique UUID and exports it only to the agent
-   container.
-3. The OpenHands client selects direct HTTP, rewrites the route model, and sends the
-   session header.
+2. A configured run creates a unique UUID, writes it into the agent TOML as
+   `completion_kwargs.proxy_x_session_id`, and points the agent container's
+   config-dict model-server entry at Switchyard; the eval container keeps the
+   original config dict.
+3. Switchyard resolves the session from the body field, strips it before
+   forwarding upstream, and the header keeps precedence.
 4. A valid two-call tool trajectory reconstructs into one Gym rollout with two
    exact token triples and unchanged reward.
 5. Invalid schema, wrong session, duplicate UUID, empty tokens, non-finite
@@ -473,13 +458,12 @@ uv run pytest -q \
 
 ## Implementation order
 
-1. Change and test the pinned `nv-OpenHands` client.
-2. Push the fork commit and update Gym's three pins.
-3. Add Gym config/session plumbing and agent-only environment export.
-4. Add the Gym trace DTO, validation, and reconstruction module.
-5. Integrate retrieval and fail-closed masking in `SWEBenchWrapper.run`.
-6. Run focused unit tests.
-7. Run one example end to end with a fresh Switchyard log directory.
+1. Add the Switchyard body-field session change and run the capture suite.
+2. Add Gym config/session plumbing and the agent-only TOML/config-dict routing.
+3. Add the Gym trace DTO, validation, and reconstruction module.
+4. Integrate retrieval and fail-closed masking in `SWEBenchWrapper.run`.
+5. Run focused unit tests.
+6. Run one example end to end with a fresh Switchyard log directory.
 
 ## Done when
 

@@ -37,6 +37,7 @@ from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import ray
 import tomlkit
@@ -182,10 +183,12 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     switchyard_base_url: Optional[str] = Field(
         default=None,
         description=(
-            "Base URL of a token-capture-enabled Switchyard proxy (e.g. http://host:4000). When set for an "
-            "OpenHands run, agent policy calls go directly to Switchyard and the captured per-call token "
-            "records are retrieved after the agent finishes to build the training rollout. Must be reachable "
-            "from both this process and the agent container. When absent, behavior is unchanged."
+            "Base URL of a token-capture-enabled Switchyard proxy, exactly http://<host>:<port>. When set "
+            "for an OpenHands run, agent policy calls are routed to Switchyard (via the agent container's "
+            "NEMO_GYM_CONFIG_DICT and oh_config.toml — no OpenHands change needed) and the captured "
+            "per-call token records are retrieved after the agent finishes to build the training rollout. "
+            "Must be reachable from both this process and the agent container. When absent, behavior is "
+            "unchanged."
         ),
     )
 
@@ -1515,6 +1518,36 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _parse_switchyard_base_url(switchyard_base_url: str) -> Tuple[str, int]:
+    """Host/port of the Switchyard proxy.
+
+    The agent container reaches Switchyard through the pinned OpenHands client's
+    ServerClient path, which can only target ``http://<host>:<port>`` — so the
+    configured base URL must be exactly that shape.
+    """
+    parsed = urlparse(switchyard_base_url)
+    if parsed.scheme != "http" or not parsed.hostname or not parsed.port or parsed.path.strip("/") or parsed.query:
+        raise ValueError(f"switchyard_base_url must have the form http://<host>:<port>, got {switchyard_base_url!r}")
+    return parsed.hostname, parsed.port
+
+
+def _switchyard_ng_config_dict_str(
+    ng_global_config_dict_str: str, model_server_name: str, switchyard_base_url: str
+) -> str:
+    """NEMO_GYM_CONFIG_DICT (shell-quoted YAML) for a Switchyard-routed agent container.
+
+    Rewrites the model server's host/port to Switchyard's, so the in-container
+    client's existing ``ServerClient.post(server_name=...)`` lands on the proxy
+    with no OpenHands change.
+    """
+    host, port = _parse_switchyard_base_url(switchyard_base_url)
+    global_config_dict = OmegaConf.create(shlex.split(ng_global_config_dict_str)[0])
+    server_config_dict = get_first_server_config_dict(global_config_dict, model_server_name)
+    server_config_dict.host = host
+    server_config_dict.port = port
+    return shlex.quote(OmegaConf.to_yaml(global_config_dict))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1610,6 +1643,27 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             "top_p": self.config.inference_params["top_p"],
         }
 
+        # Zero-fork Switchyard transport. The pinned OpenHands client posts to the
+        # server named NEMO_GYM_MODEL_SERVER_NAME with the TOML model string, and
+        # litellm `completion_kwargs` land verbatim in its request body. So: make
+        # the model string the Switchyard route id (Switchyard dispatches on it),
+        # ride the capture session on the body field Switchyard strips before
+        # forwarding, and point the model-server entry of the agent container's
+        # NEMO_GYM_CONFIG_DICT at Switchyard. Agent container only: the eval
+        # container makes no policy calls and keeps the original config dict.
+        if self.config.switchyard_base_url and self.config.switchyard_session_id:
+            config["llm"]["model"]["model"] = self.config.model_server_name
+            config["llm"]["model"]["completion_kwargs"] = {
+                "proxy_x_session_id": self.config.switchyard_session_id,
+            }
+            ng_config_dict_str = _switchyard_ng_config_dict_str(
+                self.config.ng_global_config_dict_str,
+                self.config.model_server_name,
+                self.config.switchyard_base_url,
+            )
+        else:
+            ng_config_dict_str = self.config.ng_global_config_dict_str
+
         config_str = tomlkit.dumps(config)
 
         eval_dir_in_openhands = self.config.eval_dir_in_openhands
@@ -1702,17 +1756,6 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
-        # Agent container only: the eval container makes no policy calls and must
-        # not receive these. The in-container NemoGymClient switches to direct
-        # Switchyard HTTP when SWITCHYARD_BASE_URL is set.
-        if self.config.switchyard_base_url and self.config.switchyard_session_id:
-            switchyard_cmd = (
-                f"export SWITCHYARD_BASE_URL={shlex.quote(self.config.switchyard_base_url)} && "
-                f"export SWITCHYARD_SESSION_ID={self.config.switchyard_session_id} && "
-            )
-        else:
-            switchyard_cmd = ""
-
         workspace_check_cmd = ""
 
         # Run the same baseline dependency/env repair the eval uses (if any), in a
@@ -1743,9 +1786,8 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
-            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_CONFIG_DICT={ng_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
-            f"{switchyard_cmd}"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
@@ -2790,6 +2832,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
 
     def model_post_init(self, context: Any) -> None:
+        # Fail fast on a malformed Switchyard URL rather than masking every sample.
+        if self.config.switchyard_base_url:
+            _parse_switchyard_base_url(self.config.switchyard_base_url)
+
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
         # Only set up the agent harness that's actually selected. Both share the

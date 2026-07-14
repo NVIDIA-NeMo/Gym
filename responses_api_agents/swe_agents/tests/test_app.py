@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import tempfile
 import time
@@ -54,8 +55,10 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
+    _parse_switchyard_base_url,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
+    _switchyard_ng_config_dict_str,
     file_lock,
     runner_ray_remote,
     update_and_read_metrics,
@@ -174,6 +177,15 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
     )
     defaults.update(overrides)
     return SWEBenchWrapperInstanceConfig(**defaults)
+
+
+def _ng_config_dict_str(host: str = "model-host", port: int = 9999) -> str:
+    """Shell-quoted NEMO_GYM_CONFIG_DICT YAML with a resolvable test_model entry."""
+    return shlex.quote(
+        OmegaConf.to_yaml(
+            OmegaConf.create({"test_model": {"responses_api_models": {"vllm_model": {"host": host, "port": port}}}})
+        )
+    )
 
 
 ########################################
@@ -938,27 +950,64 @@ class TestOpenHandsHarnessProcessor:
             processor.get_run_command()
             assert "CAMEL_CASE_TOOL_NAMES=true" in self._read_agent_script(config)
 
-    def test_get_run_command_switchyard_env(self) -> None:
+    def test_get_run_command_switchyard_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(
                 tmpdir,
                 switchyard_base_url="http://switchyard:4000",
                 switchyard_session_id="0123456789abcdef0123456789abcdef",
+                ng_global_config_dict_str=_ng_config_dict_str(),
             )
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
             script = self._read_agent_script(config)
-            assert "export SWITCHYARD_BASE_URL=http://switchyard:4000 && " in script
-            assert "export SWITCHYARD_SESSION_ID=0123456789abcdef0123456789abcdef && " in script
+            # The TOML model becomes the Switchyard route id and carries the
+            # capture session as a body field via litellm completion_kwargs.
+            assert 'model = "test_model"' in script
+            assert 'proxy_x_session_id = "0123456789abcdef0123456789abcdef"' in script
+            # The agent's NEMO_GYM_CONFIG_DICT points the model server at Switchyard.
+            assert "host: switchyard" in script
+            assert "port: 4000" in script
 
-    def test_get_run_command_no_switchyard_env_by_default(self) -> None:
+    def test_get_run_command_no_switchyard_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_instance_config(tmpdir)
+            config = _make_instance_config(tmpdir, ng_global_config_dict_str=_ng_config_dict_str())
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
-            assert "SWITCHYARD" not in self._read_agent_script(config)
+            script = self._read_agent_script(config)
+            assert 'model = "test-model"' in script
+            assert "proxy_x_session_id" not in script
+            assert "host: switchyard" not in script
+
+
+class TestSwitchyardTransportConfig:
+    @pytest.mark.parametrize(
+        "url",
+        ["https://switchyard:4000", "http://switchyard:4000/v1", "http://switchyard", "switchyard:4000"],
+    )
+    def test_rejects_non_host_port_urls(self, url) -> None:
+        with pytest.raises(ValueError, match="http://<host>:<port>"):
+            _parse_switchyard_base_url(url)
+
+    def test_accepts_host_port(self) -> None:
+        assert _parse_switchyard_base_url("http://switchyard:4000") == ("switchyard", 4000)
+        assert _parse_switchyard_base_url("http://10.0.0.5:4000/") == ("10.0.0.5", 4000)
+
+    def test_config_dict_rewrite_points_model_server_at_switchyard(self) -> None:
+        rewritten = _switchyard_ng_config_dict_str(_ng_config_dict_str(), "test_model", "http://switchyard:4000")
+        loaded = OmegaConf.create(shlex.split(rewritten)[0])
+        assert loaded.test_model.responses_api_models.vllm_model.host == "switchyard"
+        assert loaded.test_model.responses_api_models.vllm_model.port == 4000
+
+    def test_wrapper_fails_fast_on_bad_url(self, monkeypatch) -> None:
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
+        config = _minimal_server_config()
+        config.switchyard_base_url = "http://switchyard:4000/v1"
+        with pytest.raises(ValueError, match="http://<host>:<port>"):
+            SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 ########################################
@@ -2336,15 +2385,17 @@ class TestSWEBenchWrapperSetupParams:
             wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
             self._setup_oh_dirs(wrapper)
             wrapper.config.switchyard_base_url = "http://switchyard:4000"
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
 
             params, _ = wrapper._setup_params(self._switchyard_body())
             session_id = params.switchyard_session_id
             assert session_id is not None
             assert len(session_id) == 32
             assert set(session_id) <= set("0123456789abcdef")
-            # Exported into the agent container script.
-            assert f"export SWITCHYARD_SESSION_ID={session_id} && " in params.agent_script
-            assert "export SWITCHYARD_BASE_URL=http://switchyard:4000 && " in params.agent_script
+            # Routed into the agent container via the TOML and the rewritten
+            # NEMO_GYM_CONFIG_DICT — no OpenHands-side changes involved.
+            assert f'proxy_x_session_id = "{session_id}"' in params.agent_script
+            assert "host: switchyard" in params.agent_script
 
             # Unique per run.
             params2, _ = wrapper._setup_params(self._switchyard_body())
@@ -2356,10 +2407,12 @@ class TestSWEBenchWrapperSetupParams:
             (Path(tmpdir) / "django__django-12345.sif").touch()
             wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
             self._setup_oh_dirs(wrapper)
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
 
             params, _ = wrapper._setup_params(self._switchyard_body())
             assert params.switchyard_session_id is None
-            assert "SWITCHYARD" not in params.agent_script
+            assert "proxy_x_session_id" not in params.agent_script
+            assert "host: switchyard" not in params.agent_script
 
     def test_setup_params_no_switchyard_for_golden_patch(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2369,10 +2422,11 @@ class TestSWEBenchWrapperSetupParams:
             self._setup_oh_dirs(wrapper)
             wrapper.config.switchyard_base_url = "http://switchyard:4000"
             wrapper.config.verify_golden_patch = True
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
 
             params, _ = wrapper._setup_params(self._switchyard_body())
             assert params.switchyard_session_id is None
-            assert "SWITCHYARD" not in params.agent_script
+            assert "proxy_x_session_id" not in params.agent_script
 
 
 class TestSWEBenchWrapperResponses:
