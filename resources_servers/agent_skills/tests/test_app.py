@@ -106,6 +106,7 @@ def _request(**overrides) -> AgentSkillsVerifyRequest:
     data = {
         "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input="task"),
         "response": _response(),
+        "task_id": "task-1",
         "verifier_metadata": {"task_id": "task-1", "check_suite_id": "suite"},
         "workspace_patch": PATCH,
         "workspace_base_revision": BASE_REVISION,
@@ -151,6 +152,7 @@ async def test_patch_verifier_applies_patch_and_runs_hidden_check(tmp_path: Path
     assert result.status == "pass"
     assert fake.uploaded_patch == PATCH
     assert "pytest -q hidden_tests" in fake.exec_calls[-1]
+    assert "chmod -R a+rX,a-w" in fake.exec_calls[-2]
     assert fake.exec_kwargs[-1]["cwd"] == "/tmp/nemo_gym_hidden_checks"
     assert fake.exec_kwargs[-1]["user"] == "root"
     assert "su -s /bin/sh nobody" in fake.exec_calls[-1]

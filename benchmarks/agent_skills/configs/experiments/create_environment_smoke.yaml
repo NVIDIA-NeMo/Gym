@@ -1,4 +1,4 @@
-name: create-environment-v1
+name: create-environment-smoke
 benchmark: agent_skills
 
 dataset:
@@ -8,8 +8,8 @@ dataset:
 agent:
   name: agent_skills_create_environment_claude_code_agent
   sandbox_image: nemo-gym-agent-skills:create-environment-smoke
-  max_turns: 40
-  timeout: 1200
+  max_turns: 30
+  timeout: 600
 
 model:
   env_key: anthropic_model_name
@@ -17,9 +17,9 @@ model:
   max_output_tokens: 16384
 
 sampling:
-  repeats: 3
+  repeats: 1
   seed: 1234
-  concurrency: 4
+  concurrency: 1
 
 arms:
   discovery_control:
@@ -30,10 +30,6 @@ arms:
     bare: false
     skills:
       - .agents/skills/nemo-gym-create-environment
-
-  bare_baseline:
-    bare: true
-    skills: []
 
 comparison:
   control: discovery_control

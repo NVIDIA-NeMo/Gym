@@ -11,15 +11,18 @@ from benchmarks.agent_skills.scripts.compare_variants import compare_rollouts, r
 from benchmarks.agent_skills.scripts.run_experiment import (
     build_arm_command,
     load_manifest,
+    resolve_model_access,
     run_experiment,
     snapshot_arm_skills,
     unsafe_uv_project_ancestor,
+    validate_execution_health,
     validate_skills_provenance,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST_PATH = REPO_ROOT / "benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml"
+SMOKE_MANIFEST_PATH = REPO_ROOT / "benchmarks/agent_skills/configs/experiments/create_environment_smoke.yaml"
 
 
 def _row(task_id: str, rollout_index: int, reward: float, *, skills_hash: str | None = None):
@@ -31,6 +34,9 @@ def _row(task_id: str, rollout_index: int, reward: float, *, skills_hash: str | 
         "completeness": reward,
         "convention_compliance": 1.0,
         "sandbox_elapsed_seconds": 10.0,
+        "sandbox_return_code": 0,
+        "sandbox_error_type": None,
+        "workspace_patch": "diff --git a/file b/file\n",
         "verifier_elapsed_seconds": 2.0,
         "response": {
             "usage": {
@@ -60,6 +66,7 @@ def test_manifest_and_arm_commands(tmp_path: Path) -> None:
         output_dir=tmp_path,
         skill_snapshot=None,
         execution_image="sha256:image",
+        execution_model="test-model",
     )
     treatment_command = build_arm_command(
         manifest,
@@ -68,13 +75,26 @@ def test_manifest_and_arm_commands(tmp_path: Path) -> None:
         output_dir=tmp_path,
         skill_snapshot=snapshots["treatment"],
         execution_image="sha256:image",
+        execution_model="test-model",
     )
 
     assert "--benchmark" in control_command
     assert "agent_skills" in control_command
     assert any(value.endswith(".bare=false") for value in control_command)
+    assert any(value.endswith(".max_turns=40") for value in control_command)
+    assert any(value.endswith(".timeout=1200") for value in control_command)
     assert not any("skills.path" in value for value in control_command)
     assert any("skills.path" in value for value in treatment_command)
+
+
+def test_checked_smoke_manifest_is_minimal() -> None:
+    manifest = load_manifest(SMOKE_MANIFEST_PATH)
+
+    assert set(manifest.arms) == {"discovery_control", "treatment"}
+    assert manifest.sampling.repeats == 1
+    assert manifest.sampling.concurrency == 1
+    assert manifest.agent.max_turns == 30
+    assert manifest.agent.timeout == 600
 
 
 def test_paired_comparison_and_report() -> None:
@@ -139,6 +159,19 @@ def test_skills_provenance_validation() -> None:
         )
 
 
+def test_execution_health_rejects_sandbox_failure() -> None:
+    row = _row("task", 0, 0)
+    row["sandbox_return_code"] = 1
+    row["workspace_patch"] = ""
+    row["response"]["output"] = [{"content": [{"text": "Invalid API key"}]}]
+
+    with pytest.raises(RuntimeError, match="refusing to report them as model scores"):
+        validate_execution_health([row], arm_name="control")
+
+    row["workspace_patch"] = "diff --git a/file b/file\n"
+    validate_execution_health([row], arm_name="control")
+
+
 def test_dry_run_writes_lock_without_running_gym(tmp_path: Path) -> None:
     manifest = load_manifest(MANIFEST_PATH)
     output_dir = tmp_path / "experiment"
@@ -150,6 +183,10 @@ def test_dry_run_writes_lock_without_running_gym(tmp_path: Path) -> None:
         patch(
             "benchmarks.agent_skills.scripts.run_experiment.resolve_image_digest",
             return_value="sha256:image",
+        ),
+        patch(
+            "benchmarks.agent_skills.scripts.run_experiment.resolve_model_access",
+            return_value={"name": "test-model", "base_url": "https://endpoint.example"},
         ),
         patch("benchmarks.agent_skills.scripts.run_experiment.subprocess.run") as run,
     ):
@@ -166,6 +203,10 @@ def test_dry_run_writes_lock_without_running_gym(tmp_path: Path) -> None:
     lock = json.loads((output_dir / "experiment.lock.json").read_text())
     assert lock["dataset_sha256"]
     assert lock["sandbox_image"]["execution_reference"] == "sha256:image"
+    assert lock["model_access"] == {
+        "name": "test-model",
+        "base_url": "https://endpoint.example",
+    }
     assert set(lock["commands"]) == set(manifest.arms)
     assert lock["skill_snapshots"]["treatment"]["skills_ref"]["hash"]
 
@@ -173,6 +214,10 @@ def test_dry_run_writes_lock_without_running_gym(tmp_path: Path) -> None:
         patch(
             "benchmarks.agent_skills.scripts.run_experiment.git_state",
             return_value={"revision": "a" * 40, "dirty": False},
+        ),
+        patch(
+            "benchmarks.agent_skills.scripts.run_experiment.resolve_model_access",
+            return_value={"name": "test-model", "base_url": "https://endpoint.example"},
         ),
         patch("benchmarks.agent_skills.scripts.run_experiment.subprocess.run") as resumed_run,
     ):
@@ -200,6 +245,10 @@ def test_resume_forwards_gym_resume_for_existing_arm_outputs(tmp_path: Path) -> 
             "benchmarks.agent_skills.scripts.run_experiment.resolve_image_digest",
             return_value="sha256:image",
         ),
+        patch(
+            "benchmarks.agent_skills.scripts.run_experiment.resolve_model_access",
+            return_value={"name": "test-model", "base_url": "https://endpoint.example"},
+        ),
     ):
         run_experiment(
             manifest,
@@ -226,6 +275,10 @@ def test_resume_forwards_gym_resume_for_existing_arm_outputs(tmp_path: Path) -> 
         patch(
             "benchmarks.agent_skills.scripts.run_experiment.git_state",
             return_value={"revision": "a" * 40, "dirty": False},
+        ),
+        patch(
+            "benchmarks.agent_skills.scripts.run_experiment.resolve_model_access",
+            return_value={"name": "test-model", "base_url": "https://endpoint.example"},
         ),
         patch("benchmarks.agent_skills.scripts.run_experiment.subprocess.run") as run,
     ):
@@ -277,6 +330,22 @@ def test_detects_project_aware_uv_ancestor() -> None:
         return_value=process,
     ):
         assert unsafe_uv_project_ancestor() is False
+
+
+def test_model_access_reads_env_yaml_key() -> None:
+    with patch(
+        "benchmarks.agent_skills.scripts.run_experiment.load_env_yaml",
+        return_value={
+            "anthropic_model_name": "allowed-model",
+            "anthropic_base_url": "https://endpoint.example",
+        },
+    ):
+        access = resolve_model_access(load_manifest(MANIFEST_PATH).model)
+
+    assert access == {
+        "name": "allowed-model",
+        "base_url": "https://endpoint.example",
+    }
 
 
 def test_comparison_rejects_partial_arm() -> None:

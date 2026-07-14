@@ -35,6 +35,8 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 
 
 _GIT_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RUNTIME_ENV_FILENAME = ".nemo_gym_runtime_env"
 LOG = logging.getLogger(__name__)
 
 
@@ -110,7 +112,7 @@ class ClaudeCodeSandboxRunner:
                 await sandbox.start()
                 with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_sandbox_") as temp_dir:
                     archive_path = Path(temp_dir) / "claude_config.tar.gz"
-                    await asyncio.to_thread(self._archive_config, config_dir, archive_path)
+                    await asyncio.to_thread(self._archive_config, config_dir, archive_path, env)
                     await sandbox.upload(archive_path, remote_archive)
 
                 setup_result = await sandbox.exec(
@@ -133,8 +135,7 @@ class ClaudeCodeSandboxRunner:
                 if not _GIT_REVISION_RE.fullmatch(base_revision):
                     raise RuntimeError(f"Sandbox workspace returned an invalid Git revision: {base_revision!r}")
 
-                command_env = {**env, "CLAUDE_CONFIG_DIR": remote_config_dir}
-                run_result = await self._run_agent_command(sandbox, command, command_env)
+                run_result = await self._run_agent_command(sandbox, command, remote_config_dir)
                 if run_result.error_type is not None:
                     detail = (run_result.stderr or run_result.stdout or "").strip()
                     raise RuntimeError(
@@ -230,7 +231,7 @@ class ClaudeCodeSandboxRunner:
         self,
         sandbox: AsyncSandbox,
         command: list[str],
-        env: dict[str, str],
+        remote_config_dir: str,
     ) -> SandboxExecResult:
         stdout_path = "/tmp/nemo_gym_claude.stdout"
         stderr_path = "/tmp/nemo_gym_claude.stderr"
@@ -238,18 +239,19 @@ class ClaudeCodeSandboxRunner:
         stdout_pipe = "/tmp/nemo_gym_claude.stdout.pipe"
         stderr_pipe = "/tmp/nemo_gym_claude.stderr.pipe"
         limit = self._max_output_bytes
+        runtime_env_path = shlex.quote(str(PurePosixPath(remote_config_dir) / _RUNTIME_ENV_FILENAME))
+        agent_command = f". {runtime_env_path} && {shlex.join(command)}"
         wrapped_command = (
             f"rm -f {stdout_pipe} {stderr_pipe}; mkfifo {stdout_pipe} {stderr_pipe} || exit $?; "
             f"({{ head -c {limit}; cat >/dev/null; }} < {stdout_pipe} > {stdout_path}) & out_reader=$!; "
             f"({{ head -c {limit}; cat >/dev/null; }} < {stderr_pipe} > {stderr_path}) & err_reader=$!; "
-            f"{{ {shlex.join(command)}; }} > {stdout_pipe} 2> {stderr_pipe}; agent_status=$?; "
+            f"{{ {agent_command}; }} > {stdout_pipe} 2> {stderr_pipe}; agent_status=$?; "
             "wait $out_reader; wait $err_reader; "
             f"rm -f {stdout_pipe} {stderr_pipe}; printf '%s' $agent_status > {status_path}"
         )
         wrapper_result = await sandbox.exec(
             wrapped_command,
             cwd=self._workspace,
-            env=env,
             timeout_s=self._timeout_s,
             user=self._user,
         )
@@ -308,12 +310,25 @@ class ClaudeCodeSandboxRunner:
                 raise RuntimeError(f"Sandbox workspace contains forbidden auto-discovery paths: {paths}")
 
     @staticmethod
-    def _archive_config(config_dir: Path, archive_path: Path) -> None:
+    def _archive_config(
+        config_dir: Path,
+        archive_path: Path,
+        runtime_env: dict[str, str],
+    ) -> None:
         if not config_dir.is_dir():
             raise ValueError(f"Claude Code config directory does not exist: {config_dir}")
         with tarfile.open(archive_path, mode="w:gz") as archive:
             for child in sorted(config_dir.iterdir()):
                 archive.add(child, arcname=child.name, recursive=True)
+            env_path = archive_path.parent / _RUNTIME_ENV_FILENAME
+            lines = []
+            for key, value in sorted(runtime_env.items()):
+                if not _ENV_NAME_RE.fullmatch(key):
+                    raise ValueError(f"Invalid sandbox environment variable name: {key!r}")
+                lines.append(f"export {key}={shlex.quote(value)}")
+            env_path.write_text("\n".join(lines) + "\n")
+            env_path.chmod(0o600)
+            archive.add(env_path, arcname=_RUNTIME_ENV_FILENAME)
 
     @staticmethod
     def _config_setup_command(remote_config_dir: str, remote_archive: str) -> str:

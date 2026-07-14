@@ -35,12 +35,13 @@ agent_skills_claude_code_agent:
         type: resources_servers
         name: agent_skills
       concurrency: 4
-      model: claude-sonnet-4-6
+      model: ${anthropic_model_name}
       anthropic_api_key: ${anthropic_api_key}
-      anthropic_base_url: null
+      anthropic_base_url: ${oc.select:anthropic_base_url,null}
       max_turns: 60
       timeout: 1800
       bare: false
+      disallowed_tools: TaskCreate,TaskUpdate,TaskList,TaskGet
       sandbox_provider: sandbox
       sandbox_spec:
         image: ${agent_skills_sandbox_image}

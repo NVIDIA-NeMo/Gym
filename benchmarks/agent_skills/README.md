@@ -4,6 +4,12 @@ This benchmark measures whether a coding-agent skill improves task completion wh
 
 The first task evaluates `nemo-gym-create-environment`: the agent must create a native SQL-generation resources server from existing task data.
 
+## Configure model access
+
+Set `anthropic_api_key` in the local `env.yaml`. Claude Code uses Anthropic's public endpoint when `anthropic_base_url` is omitted; set that optional field for an Anthropic-compatible custom endpoint. Gym resolves both values into the agent config and passes them to the sandbox at runtime. Credentials are not stored in the fixture image.
+
+Set `anthropic_model_name` in `env.yaml` to a model that the key and endpoint are authorized to access. The experiment manifest reads that key through `model.env_key`. A recognized key can still receive `403 key not allowed to access model` when it requests a disallowed model.
+
 ## Build the fixture image
 
 Build from the Gym repository root and pin the Gym revision used by both arms. The revision must be reachable from `NVIDIA-NeMo/Gym` (push the branch before building, or override `GYM_REPOSITORY`):
@@ -67,6 +73,8 @@ results/agent-skills/create-environment-v1/
 ```
 
 Use `--allow-dirty` only for development; the lock records that the source checkout was dirty.
+
+The checked-in smoke manifest uses 30 turns and a 10-minute agent timeout. The full manifest uses 40 turns and 20 minutes.
 
 ## Manual arm commands
 

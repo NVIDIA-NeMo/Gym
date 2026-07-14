@@ -153,7 +153,7 @@ class SandboxPatchVerifier:
                 self._require_success(check_dir_result, "create hidden check directory")
                 await self._upload_hidden_files(sandbox)
                 protect_result = await sandbox.exec(
-                    f"chmod -R a-w {shlex.quote(self._check_cwd)}",
+                    f"chmod -R a+rX,a-w {shlex.quote(self._check_cwd)}",
                     cwd="/tmp",
                     timeout_s=self._timeout_s,
                     user=self._user,

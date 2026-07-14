@@ -23,6 +23,7 @@ from benchmarks.agent_skills.scripts.compare_variants import (
     compare_rollouts,
     load_jsonl,
     render_report,
+    rollout_key,
 )
 from nemo_gym.skills import load_skill_directory
 
@@ -39,12 +40,21 @@ class DatasetConfig(BaseModel):
 class AgentConfig(BaseModel):
     name: str
     sandbox_image: str
+    max_turns: int = Field(default=40, ge=1)
+    timeout: int = Field(default=1200, ge=1)
 
 
 class ModelConfig(BaseModel):
-    name: str
+    name: str | None = None
+    env_key: str | None = "anthropic_model_name"
     temperature: float = 0.2
     max_output_tokens: int = Field(default=16_384, ge=1)
+
+    @model_validator(mode="after")
+    def validate_model_source(self) -> "ModelConfig":
+        if not self.name and not self.env_key:
+            raise ValueError("Model config requires name or env_key")
+        return self
 
 
 class SamplingConfig(BaseModel):
@@ -105,6 +115,35 @@ def resolve_repo_path(path: str) -> Path:
 
 def load_manifest(path: Path) -> ExperimentManifest:
     return ExperimentManifest.model_validate(yaml.safe_load(path.read_text()))
+
+
+def load_env_yaml() -> dict[str, Any]:
+    cwd_path = Path.cwd() / "env.yaml"
+    path = cwd_path if cwd_path.exists() else REPO_ROOT / "env.yaml"
+    if not path.is_file():
+        raise ValueError(f"Environment config does not exist: {path}")
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Environment config must be a YAML mapping: {path}")
+    return data
+
+
+def resolve_model_access(model_config: ModelConfig) -> dict[str, str | None]:
+    env_config = load_env_yaml()
+    model_name = model_config.name
+    if model_config.env_key:
+        env_model = env_config.get(model_config.env_key)
+        if model_name is None:
+            model_name = env_model
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError(
+            f"Model name is unset; configure {model_config.env_key!r} in env.yaml "
+            "or set model.name in the experiment manifest"
+        )
+    base_url = env_config.get("anthropic_base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ValueError("anthropic_base_url in env.yaml must be a string or null")
+    return {"name": model_name, "base_url": base_url}
 
 
 def unsafe_uv_project_ancestor() -> bool:
@@ -232,6 +271,7 @@ def build_arm_command(
     output_dir: Path,
     skill_snapshot: dict[str, Any] | None,
     execution_image: str,
+    execution_model: str,
 ) -> list[str]:
     rollout_path = output_dir / arm_name / "rollouts.jsonl"
     rollout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +297,9 @@ def build_arm_command(
         str(manifest.model.max_output_tokens),
         f"+agent_skills_sandbox_image={execution_image}",
         f"+{AGENT_CONFIG_PATH}.bare={str(arm.bare).lower()}",
-        f"+{AGENT_CONFIG_PATH}.model={manifest.model.name}",
+        f"+{AGENT_CONFIG_PATH}.model={execution_model}",
+        f"+{AGENT_CONFIG_PATH}.max_turns={manifest.agent.max_turns}",
+        f"+{AGENT_CONFIG_PATH}.timeout={manifest.agent.timeout}",
     ]
     if skill_snapshot is not None:
         command.append(f"+skills.path={skill_snapshot['bundle_path']}")
@@ -273,6 +315,7 @@ def write_lock(
     snapshots: dict[str, dict[str, Any]],
     commands: dict[str, list[str]],
     execution_image: str,
+    model_access: dict[str, str | None],
     benchmark_config: Path,
     allow_dirty: bool,
 ) -> dict[str, Any]:
@@ -297,6 +340,7 @@ def write_lock(
             "reference": manifest.agent.sandbox_image,
             "execution_reference": execution_image,
         },
+        "model_access": model_access,
         "arm_order": arm_order,
         "skill_snapshots": snapshots,
         "commands": commands,
@@ -321,6 +365,33 @@ def validate_skills_provenance(
     if any(value != expected_hash for value in observed_hashes):
         raise ValueError(
             f"Arm {arm_name!r} skills provenance mismatch: expected {expected_hash}, observed {observed_hashes}"
+        )
+
+
+def validate_execution_health(rows: list[dict[str, Any]], *, arm_name: str) -> None:
+    failures = []
+    for row in rows:
+        return_code = row.get("sandbox_return_code")
+        error_type = row.get("sandbox_error_type")
+        workspace_patch = row.get("workspace_patch") or ""
+        if error_type is None and (return_code == 0 or workspace_patch.strip()):
+            continue
+        task_id, rollout_index = rollout_key(row)
+        response_text = (row.get("response") or {}).get("output") or []
+        failures.append(
+            {
+                "task_id": task_id,
+                "rollout_index": rollout_index,
+                "sandbox_return_code": return_code,
+                "sandbox_error_type": error_type,
+                "status": row.get("status"),
+                "response_output": str(response_text)[:500],
+            }
+        )
+    if failures:
+        raise RuntimeError(
+            f"Arm {arm_name!r} contains sandbox execution failures; "
+            f"refusing to report them as model scores: {failures}"
         )
 
 
@@ -354,6 +425,8 @@ def run_experiment(
             raise RuntimeError("Cannot resume: Git revision changed")
         if current_git["dirty"] and not allow_dirty:
             raise RuntimeError("Cannot resume from a dirty Git checkout without --allow-dirty")
+        if resolve_model_access(manifest.model) != lock["model_access"]:
+            raise RuntimeError("Cannot resume: model name or endpoint changed")
         arm_order = list(lock["arm_order"])
         snapshots = dict(lock["skill_snapshots"])
         commands = {name: list(command) for name, command in lock["commands"].items()}
@@ -362,6 +435,7 @@ def run_experiment(
             raise RuntimeError(f"Experiment output already exists: {output_dir}")
         benchmark_config = validate_dataset_binding(manifest)
         execution_image = resolve_execution_image(manifest.agent.sandbox_image)
+        model_access = resolve_model_access(manifest.model)
         snapshots = snapshot_arm_skills(manifest, output_dir)
         arm_order = list(manifest.arms)
         random.Random(manifest.sampling.seed).shuffle(arm_order)
@@ -373,6 +447,7 @@ def run_experiment(
                 output_dir=output_dir,
                 skill_snapshot=snapshots.get(arm_name),
                 execution_image=execution_image,
+                execution_model=str(model_access["name"]),
             )
             for arm_name in arm_order
         }
@@ -384,6 +459,7 @@ def run_experiment(
             snapshots=snapshots,
             commands=commands,
             execution_image=execution_image,
+            model_access=model_access,
             benchmark_config=benchmark_config,
             allow_dirty=allow_dirty,
         )
@@ -399,20 +475,16 @@ def run_experiment(
     if dry_run:
         return None
 
-    control_path = output_dir / manifest.comparison.control / "rollouts.jsonl"
-    treatment_path = output_dir / manifest.comparison.treatment / "rollouts.jsonl"
-    control_rows = load_jsonl(control_path)
-    treatment_rows = load_jsonl(treatment_path)
-    validate_skills_provenance(
-        control_rows,
-        arm_name=manifest.comparison.control,
-        snapshot=snapshots.get(manifest.comparison.control),
-    )
-    validate_skills_provenance(
-        treatment_rows,
-        arm_name=manifest.comparison.treatment,
-        snapshot=snapshots.get(manifest.comparison.treatment),
-    )
+    arm_rows = {arm_name: load_jsonl(output_dir / arm_name / "rollouts.jsonl") for arm_name in manifest.arms}
+    for arm_name, rows in arm_rows.items():
+        validate_execution_health(rows, arm_name=arm_name)
+        validate_skills_provenance(
+            rows,
+            arm_name=arm_name,
+            snapshot=snapshots.get(arm_name),
+        )
+    control_rows = arm_rows[manifest.comparison.control]
+    treatment_rows = arm_rows[manifest.comparison.treatment]
     comparison = compare_rollouts(
         control_rows,
         treatment_rows,

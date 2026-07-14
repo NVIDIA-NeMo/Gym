@@ -144,12 +144,15 @@ def test_run_stages_config_executes_agent_and_captures_patch(tmp_path: Path) -> 
     assert fake.stopped is True
     assert "settings.json" in fake.uploaded_members
     assert "skills/example/SKILL.md" in fake.uploaded_members
+    assert ".nemo_gym_runtime_env" in fake.uploaded_members
     assert result.stdout == '{"type":"result"}\n'
     assert result.workspace_patch == patch
     assert result.base_revision == BASE_REVISION
     agent_call = fake.exec_calls[3]
     assert agent_call["cwd"] == "/workspace/nemo-gym"
-    assert agent_call["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/nemo_gym_claude_config"
+    assert "env" not in agent_call
+    assert ". /tmp/nemo_gym_claude_config/.nemo_gym_runtime_env" in agent_call["command"]
+    assert "ANTHROPIC_API_KEY" not in agent_call["command"]
     assert "claude -p -- 'create probe.txt'" in agent_call["command"]
     assert "head -c 52428800" in agent_call["command"]
     assert "--no-textconv" in fake.exec_calls[5]["command"]

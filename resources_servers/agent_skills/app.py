@@ -124,7 +124,21 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
         metadata = body.verifier_metadata
         task_id = metadata.get("task_id")
         suite_id = metadata.get("check_suite_id")
-        response_data = body.model_dump(exclude={"workspace_patch"})
+        response_data = body.model_dump(
+            exclude={
+                "workspace_patch",
+                "task_id",
+                "check_suite_id",
+                "status",
+                "correctness",
+                "completeness",
+                "convention_compliance",
+                "verifier_base_revision",
+                "verifier_elapsed_seconds",
+                "details",
+                "reward",
+            }
+        )
 
         if not isinstance(suite_id, str) or suite_id not in self.config.check_suites:
             return AgentSkillsVerifyResponse(
