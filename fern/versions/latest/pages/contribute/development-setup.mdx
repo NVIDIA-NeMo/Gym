@@ -44,36 +44,32 @@ gym env resolve                                # Dump config as NeMo Gym sees it
 
 ## CI/CD Requirements
 
-All contributions must pass these automated checks:
+All PRs must pass the following automated checks before merging.
 
-**Required Checks**:
-- **Unit Tests**: All existing tests must pass
-- **Build Docs**: Documentation must build without errors
-- **Copyright Check**: All files must have proper copyright headers
-- **DCO Signing**: All commits must be signed off
-- **Pre-commit Hooks**: Code formatting and linting
+### Code Linting
 
-**Test Requirements**:
-- At least one test per server you contribute
-- Tests must run using `gym env test --resources-server your_server`
-- Use pytest for async testing patterns
+**Workflow:** `.github/workflows/code-linting.yml`
 
-### Build Docs CI Failures
+Runs `pre-commit run --all-files --show-diff-on-failure` across the full repository. Hooks enforced:
 
-If the build-docs check fails:
+| Hook | What it checks |
+|------|----------------|
+| `end-of-file-fixer` | Python files end with a newline |
+| `trailing-whitespace` | No trailing whitespace in Python files |
+| `ruff` (lint + imports) | Python linting and import order, with auto-fix |
+| `ruff-format` | Code formatting |
+| `no-underscore-md` | No underscores in Markdown filenames |
+| `add-verified-flag` | New resources server YAML configs get `verified: false` injected automatically |
+| `update-readme-table` | Root `README.md` environment table kept in sync |
 
-1. **Test documentation locally**: Preview the Fern docs by running `fern docs dev` from the repository root.
+The `add-verified-flag` hook runs on commit — any new resources server YAML is committed with `verified: false`. A maintainer flips it to `true` after the benchmark has been baselined and reviewed.
 
-2. **Common issues**:
-   - Missing docstrings in public functions
-   - Broken markdown links in README or tutorials
-   - Invalid MDX syntax
+### Copyright Check
 
-### Copyright Header Errors
+**Workflow:** `.github/workflows/copyright-check.yml`
 
-**Error**: "Found files with missing copyright"
+Every new file must include the Apache 2.0 copyright header:
 
-**Solution**: Add this header to all new Python files:
 ```python
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -90,6 +86,87 @@ If the build-docs check fails:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ```
+
+### Fern Docs Check
+
+**Workflow:** `.github/workflows/fern-docs-ci.yml`
+
+Runs `npm run check` inside `fern/` to validate the documentation config. Triggers on PRs that touch `fern/**`. To test locally:
+
+```bash
+fern docs dev
+```
+
+### Smart Unit Test Selection
+
+**Workflow:** `.github/workflows/unit-tests.yml`
+
+The CI classifies changed files and runs the appropriate test scope:
+
+| Changed files | Test scope |
+|--------------|------------|
+| Only `**.md`, `docs/**`, `fern/**`, `LICENSE`, `benchmarks/**` | **Skip** — no tests run |
+| Only `resources_servers/**`, `responses_api_agents/**`, `responses_api_models/**` | **Server-only** — tests run for changed servers only |
+| Anything else (core library, CI, scripts, etc.) | **Full suite** — all tests run |
+
+Priority is `other > server > doc`: a PR touching both a server file and a core file triggers the full suite.
+
+**Core library tests** (full suite):
+```bash
+pytest tests/unit_tests/ -m "not sandbox"
+pytest tests/unit_tests/ -m sandbox
+```
+
+**Server-only tests:** the CI extracts changed server names from the diff and runs `gym env test --resources-server <name>` for each.
+
+### Server Suite (sharded)
+
+When the full suite runs, server tests are split across **8 parallel shards**:
+
+```
+ng_test_all +fail_on_total_and_test_mismatch=true +delete_venvs_after_each_test=true +num_shards=8 +shard_index=<0-7>
+```
+
+`fail_on_total_and_test_mismatch=true` means **every resources server module must have at least one test** (`tests/test_app.py`). A server missing tests fails its shard. All 8 shards must pass.
+
+### Data Validation
+
+When `gym env test` runs — via either the server-only path or the sharded suite — it validates each resources server's example data:
+
+| File | Requirement |
+|------|-------------|
+| `data/example.jsonl` | Must exist with **exactly 5 rows** |
+| `data/example_metrics.json` | Must exist; `"Number of examples"` must equal `5` |
+| `data/example_rollouts.jsonl` | Must exist with **exactly 5 rollouts** |
+| `data/` directory | Must contain **no `*conflict*` files** (git merge artifacts) |
+
+Missing files print an error with the exact command to generate them.
+
+### Config Assertions
+
+Checked when the server loads during `gym env test`:
+
+- `domain` is required in every resources server YAML config
+- Train and validation datasets must include a `license` field
+
+---
+
+### Full Test Suite on `main`
+
+**Workflow:** `.github/workflows/full-test-suite.yml`
+
+Runs on every push to `main` with no change detection — always runs everything:
+
+- **Core tests** — same pytest markers as PR CI
+- **Server suite** — same 8-shard run with `fail_on_total_and_test_mismatch=true`
+- **Wheel install test** — builds the wheel, installs in a fresh venv, starts a mock inference endpoint, and runs `ng_help`, `ng_dump_config`, `ng_init_resources_server`, `ng_run`, and `ng_collect_rollouts` end-to-end
+- **Slack notification** — posts to the team channel if any job fails
+
+---
+
+### Post-Merge: `verified` Flag
+
+After a PR merges, the environment is not surfaced as verified until a maintainer baselines the benchmark and flips `verified: true` in the YAML. See [Adding a Benchmark](./environments/adding-a-benchmark) for baselining requirements.
 
 ---
 
