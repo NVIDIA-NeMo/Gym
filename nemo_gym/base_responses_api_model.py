@@ -23,12 +23,11 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import orjson
-from fastapi import APIRouter, Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
-from fastapi.routing import APIRoute
 from pydantic import BaseModel, model_validator
 from starlette.background import BackgroundTask
 
@@ -208,6 +207,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
 
+        # Model call capture middleware must be the final middleware added so
+        # 1. It is run first on request, the closest to the original request sent to the endpoint
+        # 2. It is run last on response, so it can capture the response closest to what is sent back.
+        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if self._capture_config.observability_enabled:
+            self.setup_model_call_capture_middleware(app)
+
         app.post("/v1/chat/completions")(self.chat_completions)
 
         app.post("/v1/responses")(self.responses)
@@ -218,89 +224,63 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # model server directly.
         app.post("/v1/messages")(self.messages)
 
-        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if self._capture_config.observability_enabled:
-            self.setup_model_call_capture(app)
-
         return app
 
-    def setup_model_call_capture(self, app: FastAPI) -> None:
+    def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
         server = self
         self._store = CaptureStore(self._capture_config.model_call_capture_dir)
 
-        # This class is within this closure so it has access to `self._store`
-        class ModelCallCaptureRoute(APIRoute):
-            def get_route_handler(self) -> Callable:
-                original_route_handler = super().get_route_handler()
+        # This function is within this closure so it has access to `self._store`
+        @app.middleware("http")
+        async def model_call_capture_middleware(request: Request, call_next) -> Response:
+            rollout_id = request.path_params.get("rollout_id")
+            request.state.model_call_record_dict = {
+                "rollout_id": rollout_id,
+                "timestamp_start": perf_counter(),
+                "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
+            }
 
-                async def custom_route_handler(request: Request) -> Response:
-                    rollout_id = request.path_params.get("rollout_id")
-                    request.state.model_call_record_dict = {
-                        "rollout_id": rollout_id,
-                        "timestamp_start": perf_counter(),
-                        "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
-                    }
+            # Grab the request body. The body is only loaded once here.
+            req_body = await request.body()
 
-                    # Grab the request body. The body is only loaded once here.
-                    req_body = await request.body()
+            response = await call_next(request)
 
-                    response = await original_route_handler(request)
+            if not rollout_id:
+                return response
 
-                    if not rollout_id:
-                        return response
+            request.state.model_call_record_dict["timestamp_end"] = perf_counter()
+            request.state.model_call_record_dict["status_code"] = response.status_code
+            # TODO @bxyu-nvidia: These orjson.loads can be offloaded to the background task to not block the response
+            request.state.model_call_record_dict["raw_request"] = orjson.loads(req_body)
+            request.state.model_call_record_dict["raw_response"] = orjson.loads(response.body)
 
-                    request.state.model_call_record_dict["timestamp_end"] = perf_counter()
-                    request.state.model_call_record_dict["status_code"] = response.status_code
-                    # TODO @bxyu-nvidia: These orjson.loads can be offloaded to the background task to not block the response
-                    request.state.model_call_record_dict["raw_request"] = orjson.loads(req_body)
-                    request.state.model_call_record_dict["raw_response"] = orjson.loads(response.body)
+            # TODO @bxyu-nvidia
+            # if isinstance(response, StreamingResponse):
+            #     pass
+            # else:
+            #     pass
 
-                    # TODO @bxyu-nvidia
-                    # if isinstance(response, StreamingResponse):
-                    #     pass
-                    # else:
-                    #     pass
+            # Record in the background to not block the response
+            task = BackgroundTask(
+                server._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict)
+            )
 
-                    # Record in the background to not block the response
-                    task = BackgroundTask(
-                        server._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict)
-                    )
+            # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+            assert not response.background
+            response.background = task
 
-                    # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
-                    assert not response.background
-                    response.background = task
-
-                    return response
-
-                return custom_route_handler
-
-        model_call_capture_router = APIRouter(route_class=ModelCallCaptureRoute)
+            return response
 
         # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
         # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
-        model_call_capture_router.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
-            self.chat_completions_with_call_capture
-        )
-        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(
-            self.chat_completions_with_call_capture
-        )
+        app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.chat_completions_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(self.chat_completions_with_call_capture)
 
-        model_call_capture_router.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
-            self.responses_with_call_capture
-        )
-        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(
-            self.responses_with_call_capture
-        )
+        app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
 
-        model_call_capture_router.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
-            self.messages_with_call_capture
-        )
-        model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(
-            self.messages_with_call_capture
-        )
-
-        # Include router at end to capture the routes above
-        app.include_router(model_call_capture_router)
+        app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
 
     @abstractmethod
     async def chat_completions(
