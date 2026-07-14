@@ -275,7 +275,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 return custom_route_handler
 
         model_call_capture_router = APIRouter(route_class=ModelCallCaptureRoute)
-        app.include_router(model_call_capture_router)
 
         # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
         # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
@@ -299,6 +298,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         model_call_capture_router.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(
             self.messages_with_call_capture
         )
+
+        # Include router at end to capture the routes above
+        app.include_router(model_call_capture_router)
 
     @abstractmethod
     async def chat_completions(
