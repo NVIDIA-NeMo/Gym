@@ -1,0 +1,51 @@
+# Agent modules tutorial — MCQA + simple_agent with working_memory and skill_library modules.
+#
+# Start (from repo root, after configuring env.yaml — see tutorial doc):
+#
+#   gym env start \
+#     --config benchmarks/agent_modules_tutorial/config.yaml \
+#     --resources-server agent_modules_tutorial_mcqa \
+#     --model-type openai_model
+#
+# Evaluate:
+#
+#   cp -r benchmarks/skills/variant_a /tmp/agent_modules_skills_variant_a
+#   gym eval run --no-serve \
+#     +agent_name=agent_modules_tutorial_simple_agent \
+#     +input_jsonl_fpath=benchmarks/agent_modules_tutorial/data/tiny.jsonl \
+#     +output_jsonl_fpath=results/agent_modules_tutorial_rollouts.jsonl \
+#     +skills.path=/tmp/agent_modules_skills_variant_a \
+#     +limit=2 +num_repeats=1
+
+config_paths:
+  - resources_servers/mcqa/configs/mcqa.yaml
+
+agent_modules_tutorial_mcqa:
+  _inherit_from: mcqa
+  resources_servers:
+    mcqa:
+      grading_mode: lenient_answer_colon_md
+
+agent_modules_tutorial_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agent_modules_tutorial_mcqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      modules:
+        - type: working_memory
+          name: answer_format_prompt
+          config:
+            path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+        - type: skill_library
+          name: tutorial_skills
+          config:
+            injection_mode: context
+            adaptation:
+              enabled: true
+              target_skill: cot_enhanced
+              reward_threshold: 1.0

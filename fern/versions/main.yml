@@ -47,6 +47,9 @@ navigation:
       - folder: ./latest/pages/infrastructure
         title: "Infrastructure"
         title-source: frontmatter
+      - folder: ./latest/pages/researchnotes
+        title: "Research Notes"
+        title-source: frontmatter
       - folder: ./latest/pages/reference
         title: "Reference"
         title-source: frontmatter

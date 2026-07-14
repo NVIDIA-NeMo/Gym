@@ -1,0 +1,66 @@
+---
+title: "The Agent–Environment Boundary"
+description: ""
+---
+*Research note, 2026-07-03. On the agent–environment boundary in agentic RL: competing views in the literature, systems that embody each, and trade-offs for NeMo Gym.*
+
+## The question
+
+An LLM agent system is a composite: a **model** (token distribution), a **harness** (orchestration — prompts, tool parsing, compaction, retries, subagents), and a **world** (repo, browser, OS, user). RL needs an agent–environment boundary to define the policy, actions, and transition dynamics — but the composite admits more than one cut:
+
+- **Policy-level:** agent = model; actions = tokens; harness + world = environment
+- **System-level:** agent = harness + model; actions = tool calls; world = environment
+
+Both cuts claim the RL formalism. The disagreement is real and largely unstated in systems papers.
+
+## Three views
+
+### 1. The gradient boundary (policy-level): agent = model
+
+Everything downstream of token emission — tool parsing, compaction, subagent spawning, retries — is transition dynamics `p(s'|s,a)`.
+
+**Sutton & Barto (§3.1):** anything that cannot be changed *arbitrarily* by the agent is outside it. The model sets sampled tokens; it only *influences* what the harness does with them.
+
+**Examples:** OpenAI Gym / MuJoCo; [Polar](https://arxiv.org/abs/2605.24220) / [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) (gradient boundary at the model API); SkyRL, PRIME-RL (harness reimplemented inside the framework's env).
+
+**Why systems pick this:** universality (every agent has a model API); signal fidelity (token IDs + logprobs only at inference server); train/deploy parity when proxying the production harness.
+
+### 2. The agent boundary (system-level): agent = harness + model
+
+The environment begins at the world.
+
+**Positions:** Russell & Norvig — agent = architecture + program; options / hierarchical RL — harness is an option machine; Silver's agent-state argument — context construction `S_t^a = f(H_t)` is part of the agent; AlphaZero — agent = network + search; Anthropic [Building Effective Agents](https://www.anthropic.com/research/building-effective-agents); embodied AI — harness partially constitutes cognition.
+
+### 3. The hierarchical boundary (both at once)
+
+[ArCHer](https://arxiv.org/abs/2402.19446), [SWEET-RL](https://arxiv.org/abs/2503.15478), and [Agent Lightning](https://arxiv.org/abs/2508.03680) use a **two-level MDP**: outer turn-level MDP at the agent boundary with inner token-level MDP per turn. Sutton & Barto: *"the agent–environment boundary can be located at different places for different purposes."*
+
+## Terminology discipline
+
+| Term | Meaning | In an LLM agent system |
+| ---- | ------- | ---------------------- |
+| **Policy** | Distribution being differentiated | The model |
+| **Agent** | System that acts | Harness + model |
+| **Environment** | Observations and reward | World (+ harness *relative to the policy*) |
+
+"Training the agent" usually means training the **policy**. Papers that treat the harness as environment mean *relative to the policy*. NeMo Gym docs should adopt this discipline.
+
+## Trade-offs (summary)
+
+| | Proxied gradient (Polar) | Framework-owned gradient | Agent boundary |
+| - | - | - | - |
+| Integration cost | ~Zero (proxy base URL) | Reimplement harness | Instrument agent code |
+| Learnable surface | Token policy only | Token policy only | Harness decisions optimizable |
+| Failure mode | Dialect-fitting; reward at wrong granularity | Train/deploy harness drift | Credit-assignment complexity |
+
+## Implications for NeMo Gym
+
+1. **Name the boundary** each environment implements: policy API vs tool interface vs whole-program MDP.
+2. **Gradient boundary is instrumentation**, not ontology — requires token IDs + logprobs from a cooperative inference server.
+3. **Hierarchical view is the likely end-state** for teams that own harness and model — [Agent Modules](/researchnotes/agent-modules) recover optimizable harness surface (prompts, playbooks, skills) while token training stays on the inner boundary.
+4. **Watch dialect-fitting** — large RL gains on a foreign harness may be learning the action protocol, not capability.
+
+## Related reading
+
+- [Agent Modules](/researchnotes/agent-modules) — first-class harness artifacts and `prepare`/`observe` lifecycle
+- [System Design](/infrastructure/engineering-notes/system-design) — Processor / Agent / Environment roles in Gym

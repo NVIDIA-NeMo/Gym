@@ -1,0 +1,23 @@
+# Example: simple_agent with an Agent-side working_memory module.
+#
+# The working_memory module injects instructions at Agent activation time and stamps
+# agent_module_refs on rollout results. Pair with a resources server config
+# that supplies tools and verify logic.
+#
+#   gym env start --config responses_api_agents/simple_agent/configs/simple_agent_with_prompt_module.yaml ...
+#
+simple_agent_with_prompt_module:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      modules:
+        - type: working_memory
+          name: answer_format_prompt
+          config:
+            path: benchmarks/prompts/eval/aai/mcq-4choices.yaml
