@@ -36,7 +36,7 @@ from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsReq
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallCaptureConfig,
-    merge_model_call_capture_into_record,
+    maybe_rollout_id_from_run_body,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
@@ -476,7 +476,7 @@ class RolloutCollectionHelper(BaseModel):
 
         return input_rows, rows, results, result_strs
 
-    async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+    async def run_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         output_fpath = Path(config.output_jsonl_fpath)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
@@ -549,7 +549,9 @@ class RolloutCollectionHelper(BaseModel):
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_config.should_capture_model_calls:
-                merge_model_call_capture_into_record(result, [capture_config.model_call_capture_dir])
+                result["ng_model_call_capture"] = store.aggregate(
+                    rollout_id=maybe_rollout_id_from_run_body(row)
+                ).model_dump()
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)

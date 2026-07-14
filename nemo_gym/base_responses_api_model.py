@@ -119,6 +119,15 @@ class ModelCallRecord(BaseModel):
     raw_response: Optional[Dict[str, Any]]
 
 
+class AggregateModelCallRecords(BaseModel):
+    # Any other typically useful aggregate information can be added here
+    records: List[ModelCallRecord]
+
+    @classmethod
+    def from_records(cls, records: List[ModelCallRecord]) -> "AggregateModelCallRecords":
+        return cls(records=records)
+
+
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
@@ -176,6 +185,10 @@ class CaptureStore:
 
     def clear(self) -> None:
         rmtree(self.root, ignore_errors=True)
+
+    def aggregate(self, rollout_id: str) -> AggregateModelCallRecords:
+        records = self.read(rollout_id)
+        return AggregateModelCallRecords.from_records(records)
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -422,49 +435,3 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise e
 
         return response
-
-
-# --- Run-level capture helpers (rollout-collection side) ---
-
-
-def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
-    for directory in capture_dirs:
-        store = CaptureStore(directory)
-        if store.path_for(rollout_id).exists():
-            return store
-    return None
-
-
-def merge_model_call_capture_into_record(
-    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
-) -> dict[str, Any]:
-    """Attach captured model-call observability data to a rollout record in place.
-
-    Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
-    shape is identical for every agent harness. Adds
-    ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
-    records. Raw request and response payloads remain in the capture store unless ``include_payloads``
-    is true. No-op when no capture exists. The harness output and reward are not modified.
-    """
-    if not capture_dirs:
-        return record
-
-    rollout_id = maybe_rollout_id_from_run_body(record)
-    if rollout_id is None:
-        return record
-
-    store = _store_for_rollout(rollout_id, capture_dirs)
-    if store is None:
-        return record
-
-    calls = store.read(rollout_id)
-    if not calls:
-        return record
-
-    exclude = None if include_payloads else {"request", "response"}
-    record["ng_model_call_capture"] = {
-        "rollout_id": rollout_id,
-        "calls": [call.model_dump(exclude=exclude) for call in calls],
-    }
-
-    return record

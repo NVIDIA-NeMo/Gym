@@ -36,7 +36,6 @@ from nemo_gym.base_responses_api_model import (
     ModelCallRecord,
     SimpleResponsesAPIModel,
     maybe_rollout_id_from_run_body,
-    merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -322,7 +321,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
-def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path: Path):
+def test_store_aggregate_sanity(tmp_path: Path):
     store = CaptureStore(tmp_path)
 
     record1 = _create_test_model_call_record()
@@ -337,33 +336,13 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path: Path):
 
     store.record(record1)
 
-    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"temperature": 0.95}}
-    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    aggregate_record = store.aggregate(
+        rollout_id=maybe_rollout_id_from_run_body({"_ng_task_index": 0, "_ng_rollout_index": 0})
+    )
 
-    capture = record["ng_model_call_capture"]
-    assert set(capture) == {"rollout_id", "calls"}
-    assert capture["rollout_id"] == "0-0"
-    assert capture["calls"][0]["response"]["usage"]["output_tokens"] == 3
-    assert "request" in capture["calls"][0] and "response" in capture["calls"][0]
-    assert record["response"]["temperature"] == 0.95 and record["reward"] == 1.0
-
-
-def test_merge_capture_noop_without_capture(tmp_path: Path):
-    rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
-    merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
-    assert "ng_model_call_capture" not in rec
-    merge_model_call_capture_into_record(rec, [])  # no dirs
-    assert "ng_model_call_capture" not in rec
-
-
-def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path: Path):
-    store = CaptureStore(tmp_path)
-    store.path_for("9-9").write_bytes(b"{not-json}\n")
-    record = {"_ng_task_index": 9, "_ng_rollout_index": 9}
-
-    merge_model_call_capture_into_record(record, [])
-    with pytest.raises(orjson.JSONDecodeError):
-        merge_model_call_capture_into_record(record, [tmp_path])
+    assert len(aggregate_record.records) == 1
+    assert aggregate_record.records[0].rollout_id == "0-0"
+    assert aggregate_record.records[0].response.usage.output_tokens == 3
 
 
 def test_store_clear(tmp_path: Path, monkeypatch: MonkeyPatch):

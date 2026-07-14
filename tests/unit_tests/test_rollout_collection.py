@@ -543,7 +543,7 @@ class TestRolloutCollection:
         clear_captures = MagicMock()
         merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "aggregate", merge_capture)
 
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -674,10 +674,8 @@ class TestRolloutCollection:
             }
         )
         clear_captures = MagicMock()
-        merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
         monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -695,13 +693,13 @@ class TestRolloutCollection:
                 future.set_result((examples[0], {"response": {"usage": {}}}))
                 return [future]
 
-        await Helper().run_from_config(config)
+        results = await Helper().run_from_config(config)
 
-        capture_dirs = [capture_dir]
         clear_captures.assert_called_once()
-        merge_capture.assert_called_once()
-        assert merge_capture.call_args.args[1] == capture_dirs
         assert "Clearing previously captured model calls" in capsys.readouterr().out
+
+        assert len(results) == 1
+        assert "ng_model_call_capture" in results[0]
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
