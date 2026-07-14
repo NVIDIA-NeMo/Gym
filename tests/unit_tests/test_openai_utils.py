@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+    McpCall,
+    McpListTools,
+)
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
@@ -111,3 +116,10 @@ class TestNeMoGymResponseHostedMcpItems:
         )
         assert listing.tools == [{"name": "python"}]
         assert approval.name == "python"
+
+    def test_hosted_mcp_items_inherit_upstream_types(self) -> None:
+        # These must inherit the upstream openai typing (only relaxing the fields
+        # NVIDIA-hosted endpoints omit/widen) rather than redefine it from scratch.
+        assert issubclass(NeMoGymResponseMcpCall, McpCall)
+        assert issubclass(NeMoGymResponseMcpListTools, McpListTools)
+        assert issubclass(NeMoGymResponseMcpApprovalRequest, McpApprovalRequest)
