@@ -51,3 +51,9 @@ Serve multiple request-time configs (e.g. reasoning on/off) from one Local vLLM 
 </Card>
 
 </Cards>
+
+## Embeddings
+
+Every Model Server exposes an OpenAI-compatible `POST /v1/embeddings` route, so memory- and retrieval-based agents can route embedding calls through Gym instead of calling a provider directly. The [OpenAI](/model-server/openai) and [Inference Providers](/model-server/inference-providers) backends implement it as a passthrough to the provider's `/v1/embeddings` (this covers OpenAI, NVIDIA's hosted endpoint, and any other OpenAI-compatible provider); backends without an embeddings model return `501`.
+
+An embedding model is usually distinct from the policy model, so wire it as a separate Model Server instance (referenced via `ModelServerRef`), following the existing one-server-one-model pattern.

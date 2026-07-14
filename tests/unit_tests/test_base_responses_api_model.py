@@ -14,6 +14,8 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
@@ -27,6 +29,14 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import ServerClient
 
 
+class StubResponsesAPIModel(SimpleResponsesAPIModel):
+    async def chat_completions(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymChatCompletion:
+        raise NotImplementedError
+
+    async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        raise NotImplementedError
+
+
 class TestBaseResponsesAPIModel:
     def test_BaseResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
@@ -34,15 +44,17 @@ class TestBaseResponsesAPIModel:
 
     def test_SimpleResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
-
-        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
-            async def chat_completions(
-                self, request: NeMoGymResponseCreateParamsNonStreaming
-            ) -> NeMoGymChatCompletion:
-                raise NotImplementedError
-
-            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-                raise NotImplementedError
-
-        model = TestSimpleResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
+        model = StubResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
         model.setup_webserver()
+
+    def test_embeddings_default_not_implemented(self) -> None:
+        # A policy-only server exposes /v1/embeddings but the base default rejects it with 501,
+        # since it has no embeddings backend to pass the request through to.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+        model = StubResponsesAPIModel(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(model.setup_webserver())
+
+        response = client.post("/v1/embeddings", json={"input": "hello", "model": "text-embedding-3-small"})
+
+        assert response.status_code == 501
+        assert "does not support the embeddings endpoint" in response.json()["detail"]

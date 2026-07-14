@@ -15,8 +15,9 @@
 import inspect
 from abc import abstractmethod
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from openai.types import CreateEmbeddingResponse
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.openai_utils import (
@@ -56,6 +57,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # model server directly.
         app.post("/v1/messages")(self.messages)
 
+        # OpenAI-compatible embeddings. Servers backed by an embeddings-capable provider
+        # (e.g. openai_model, inference_provider) override embeddings(); the base default
+        # returns 501 so a policy-only server advertises the route but rejects the call.
+        app.post("/v1/embeddings")(self.embeddings)
+
         return app
 
     @abstractmethod
@@ -67,6 +73,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
+
+    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+        """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
+
+        Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
+        ``inference_provider``) override this to pass ``body`` through to the provider.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the embeddings endpoint.",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.

@@ -99,6 +99,39 @@ class TestApp:
             model="dummy_model",
         )
 
+    async def test_embeddings(self) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+
+        mock_embedding_data = {
+            "data": [{"embedding": [0.1, 0.2, 0.3], "index": 0, "object": "embedding"}],
+            "model": "dummy_model",
+            "object": "list",
+            "usage": {"prompt_tokens": 3, "total_tokens": 3},
+        }
+
+        called_args = {}
+
+        async def mock_create_embeddings(**kwargs):
+            nonlocal called_args
+            called_args = kwargs
+            return mock_embedding_data
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(side_effect=mock_create_embeddings)
+
+        # The configured model overrides whatever the caller passes, and encoding_format is forced
+        # to "float" (the CreateEmbeddingResponse schema is List[float] and cannot carry base64).
+        response = client.post(
+            "/v1/embeddings",
+            json={"input": "hello world", "model": "override_model", "encoding_format": "base64"},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+        assert called_args.get("model") == "dummy_model"
+        assert called_args.get("input") == "hello world"
+        assert called_args.get("encoding_format") == "float"
+
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server()
         app = server.setup_webserver()
