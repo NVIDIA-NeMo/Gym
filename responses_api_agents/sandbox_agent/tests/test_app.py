@@ -49,20 +49,19 @@ def test_config_defaults():
     assert cfg.sandbox_python == "python3"
 
 
-def test_gym_runner_script_boots_gym_and_collects():
+def test_gym_runner_config_and_script():
     agent = _make_agent(
         mode="gym_runner",
         nested_config_paths=["a.yaml", "b.yaml"],
         nested_agent_name="nested_math",
         nested_agent_port=12345,
     )
-    path, script, cmd = agent._runner()
-    assert path == "/work/runner.py"
-    assert "+config_paths=[a.yaml,b.yaml]" in script
-    assert "http://127.0.0.1:12345" in script
+    script, runner_config, cmd = agent._runner()
+    assert runner_config["config_paths"] == ["a.yaml", "b.yaml"]
+    assert runner_config["agent_name"] == "nested_math"
+    assert runner_config["agent_port"] == 12345
     assert "ng_collect_rollouts" in script
-    assert "+agent_name=nested_math" in script
-    compile(script, "<runner>", "exec")
+    compile(script, "<gym_runner>", "exec")
 
 
 def test_gym_runner_skips_gym_tar():
@@ -75,18 +74,19 @@ def test_gym_runner_skips_gym_tar():
         tar.assert_not_called()
 
 
-def test_runner_substitutes_agent_symbols():
+def test_runner_config_carries_agent_symbols():
     agent = _make_agent(
         agent_module="responses_api_agents.opencode_agent.app",
         agent_class="OpenCodeAgent",
         agent_config_class="OpenCodeAgentConfig",
         sandbox_python="/deps/bin/python3",
     )
-    path, script, cmd = agent._runner()
-    assert path == "/work/runner.py"
-    assert "responses_api_agents.opencode_agent.app" in script
-    assert "OpenCodeAgent" in script
-    assert "OpenCodeAgentConfig" in script
+    script, runner_config, cmd = agent._runner()
+    assert runner_config["agent_module"] == "responses_api_agents.opencode_agent.app"
+    assert runner_config["agent_class"] == "OpenCodeAgent"
+    assert runner_config["agent_config_class"] == "OpenCodeAgentConfig"
+    assert "runner_config.json" in script
+    compile(script, "<agent_runner>", "exec")
     assert cmd == "/deps/bin/python3 /work/runner.py"
 
 
@@ -136,3 +136,21 @@ def test_gym_tar_built_on_init():
     ):
         agent = SandboxAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         assert agent._gym_tar == "/tmp/fake.tar.gz"
+
+
+def test_gym_source_prebuilt_path_and_url():
+    with (
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar") as build,
+    ):
+        prebuilt = SandboxAgent(
+            config=_config(gym_source="/tmp/prebuilt.tar.gz"), server_client=MagicMock(spec=ServerClient)
+        )
+        assert str(prebuilt._gym_tar) == "/tmp/prebuilt.tar.gz"
+        assert prebuilt._gym_source_url is None
+        remote = SandboxAgent(
+            config=_config(gym_source="https://example.com/gym.tar.gz"), server_client=MagicMock(spec=ServerClient)
+        )
+        assert remote._gym_tar is None
+        assert remote._gym_source_url == "https://example.com/gym.tar.gz"
+        build.assert_not_called()
