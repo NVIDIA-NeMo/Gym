@@ -45,7 +45,7 @@ from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.cvdp_agent.in_sandbox_runner import agent_key, deps_recipe_key, harvest, render_runner
+from responses_api_agents.cvdp_agent.sandbox_runner import agent_key, deps_recipe_key, harvest, load_runner_source
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
@@ -224,12 +224,13 @@ class CvdpGenericAgent(SimpleResponsesAPIAgent):
                 "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
                 "NV_SYSTEM_PROMPT": self.config.system_prompt or "",
                 "NV_TRAJ_DIR": traj,
+                "NV_AGENT_MODULE": self.config.agent_server_module,
+                "NV_AGENT_CLASS": self.config.agent_server_class,
+                "NV_AGENT_CFG_CLASS": self.config.agent_config_class,
             },
             files={
                 f"{traj}/instruction.txt": instruction,
-                f"{traj}/agent_runner.py": render_runner(
-                    self.config.agent_server_module, self.config.agent_server_class, self.config.agent_config_class
-                ),
+                f"{traj}/agent_runner.py": load_runner_source(),
                 **files,
             },
             provider_options=provider_options,
