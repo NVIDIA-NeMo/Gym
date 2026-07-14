@@ -45,9 +45,8 @@ def _make_agent(**cfg_kwargs) -> SandboxAgent:
 def test_config_defaults():
     cfg = _config()
     assert cfg.mode == "agent_only_runner"
-    assert cfg.grade_in_box is False
-    assert cfg.grade_metadata_key == "sandbox_eval"
-    assert cfg.patch_workdir is None
+    assert cfg.sandbox_image == "python:3.12-slim"
+    assert cfg.sandbox_python == "python3"
 
 
 def test_agent_only_runner_substitutes_delegate_symbols():

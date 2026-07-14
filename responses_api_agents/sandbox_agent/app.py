@@ -16,7 +16,7 @@
 
 Two modes:
   agent_only_runner: import another agent's responses() in the sandbox and use an external
-    resources server. No gym servers in the sandbox.
+    resources server for scoring. No gym servers in the sandbox.
   gym_runner: start Nemo Gym servers in the sandbox and run the task e2e inside.
     Wraps environments without a clean responses/verify split.
 """
@@ -65,7 +65,7 @@ async def stage_and_run_eval(
     reward_file: str,
     timeout_s: int,
 ) -> float:
-    """Stage eval files into the live sandbox, run the eval command, and read back the reward file."""
+    """Stage eval files into the live sandbox, run the eval command, and read the reward."""
     with tempfile.TemporaryDirectory() as td:
         for target, content in eval_files.items():
             local = Path(td) / uuid4().hex
@@ -137,18 +137,10 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
 
     sandbox_provider: dict[str, Any]
     sandbox_image: str = "python:3.12-slim"
-    image_from_metadata_key: Optional[str] = None
-    # metadata key naming a per-task in-box dir to point the delegate's repo_dir at
-    workspace_from_metadata_key: Optional[str] = None
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     setup_commands: list[str] = Field(default_factory=list)
     sandbox_python: str = "python3"
 
-    # grade in the box right after the solve, tests are staged only post-solve
-    grade_in_box: bool = False
-    # in-box workdir whose `git diff` is captured into response metadata as model_patch
-    patch_workdir: Optional[str] = None
-    grade_metadata_key: str = "sandbox_eval"
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
 
@@ -286,24 +278,19 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             return 0.0
 
     async def _run_in_sandbox(self, request, body) -> NeMoGymResponse:
-        image = self.config.sandbox_image
+        # per-task shape comes from reserved row metadata keys: docker_image (box image),
+        # workdir (delegate repo_dir), sandbox_eval (in-box grading spec), patch_workdir (git diff capture)
         meta = getattr(body, "metadata", None) or {}
-        if self.config.image_from_metadata_key and meta.get(self.config.image_from_metadata_key):
-            image = meta[self.config.image_from_metadata_key]
+        image = meta.get("docker_image") or self.config.sandbox_image
 
         runner_path, runner_script, runner_cmd = self._runner()
         # the delegate must never see the eval spec, strip it from its request copy
         delegate_body = body.model_copy(deep=True)
         if getattr(delegate_body, "metadata", None):
-            delegate_body.metadata = {
-                k: v for k, v in delegate_body.metadata.items() if k != self.config.grade_metadata_key
-            }
+            delegate_body.metadata = {k: v for k, v in delegate_body.metadata.items() if k != "sandbox_eval"}
         delegate_config = dict(self.config.delegate_config)
-        workdir = (
-            meta.get(self.config.workspace_from_metadata_key) if self.config.workspace_from_metadata_key else None
-        )
-        if workdir:
-            delegate_config = delegate_config | {"repo_dir": workdir}
+        if meta.get("workdir"):
+            delegate_config = delegate_config | {"repo_dir": meta["workdir"]}
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
@@ -351,14 +338,14 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 await self._provider.download_file(handle, "/work/response.json", local)
                 resp = NeMoGymResponse.model_validate(json.loads(local.read_text()))
 
-            if self.config.patch_workdir:
-                wd = self.config.patch_workdir
+            if meta.get("patch_workdir"):
+                wd = meta["patch_workdir"]
                 r = await self._provider.exec(
                     handle, f"git -C {wd} add -A . && git -C {wd} diff --cached", timeout_s=120
                 )
                 resp.metadata = (resp.metadata or {}) | {"model_patch": r.stdout or ""}
 
-            grade_raw = meta.get(self.config.grade_metadata_key) if self.config.grade_in_box else None
+            grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
             if grade_spec:
                 reward = await self._grade_in_box(handle, grade_spec)
