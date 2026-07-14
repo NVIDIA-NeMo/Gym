@@ -21,7 +21,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from responses_api_agents.swe_agents.switchyard_trace import (
+from nemo_gym.switchyard_trace import (
     SwitchyardTraceError,
     map_switchyard_tools,
     reconstruct_switchyard_rollout,

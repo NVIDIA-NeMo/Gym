@@ -65,7 +65,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict, get_response_json, raise_for_status, request
-from responses_api_agents.swe_agents.switchyard_trace import SwitchyardTrace, reconstruct_switchyard_rollout
+from nemo_gym.switchyard_trace import SwitchyardTrace, reconstruct_switchyard_rollout
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 

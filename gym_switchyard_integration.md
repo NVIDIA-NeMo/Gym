@@ -259,8 +259,10 @@ never partially annotated.
 
 ## Gym retrieval and adaptation
 
-Add a small module at
-`responses_api_agents/swe_agents/switchyard_trace.py`. Keep network orchestration
+Add a small module at `nemo_gym/switchyard_trace.py`. It is shared
+infrastructure: it depends only on Switchyard's record schema and Gym's
+converter — nothing harness-specific — so any agent server can reuse it for
+Switchyard trace collection. Keep network orchestration
 in `SWEBenchWrapper.run`; keep schema validation and conversion in the module.
 
 After `SWEBenchWrapper.responses` returns, `run` already reads the serialized
@@ -391,12 +393,13 @@ of this MVP.
      container only — the opencode harness and the eval container are untouched);
    - retrieve and apply the reconstructed trace in `run`;
    - add `switchyard_trace_error`.
-2. `responses_api_agents/swe_agents/switchyard_trace.py`
-   - DTOs, validation, tool mapping, and reconstruction.
+2. `nemo_gym/switchyard_trace.py`
+   - DTOs, validation, tool mapping, and reconstruction — harness-neutral
+     shared infrastructure.
 3. `responses_api_agents/swe_agents/tests/test_app.py`
    - configuration and URL validation, UUID creation, TOML/config-dict routing,
      retrieval integration, and masking behavior.
-4. `responses_api_agents/swe_agents/tests/test_switchyard_trace.py`
+4. `tests/unit_tests/test_switchyard_trace.py`
    - focused adapter and validation tests.
 
 Do not change `nemo_gym/rollout_collection.py` or generic model-server code.

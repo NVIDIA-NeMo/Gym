@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.switchyard_trace import SwitchyardTrace, SwitchyardTraceError
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -63,7 +64,6 @@ from responses_api_agents.swe_agents.app import (
     runner_ray_remote,
     update_and_read_metrics,
 )
-from responses_api_agents.swe_agents.switchyard_trace import SwitchyardTrace, SwitchyardTraceError
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
