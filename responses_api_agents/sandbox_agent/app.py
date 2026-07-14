@@ -65,7 +65,7 @@ async def stage_and_run_eval(
     reward_file: str,
     timeout_s: int,
 ) -> float:
-    """Stage eval files into the live sandbox, run the eval command, and read the reward."""
+    """Stage eval files into the sandbox, run them and get the reward."""
     with tempfile.TemporaryDirectory() as td:
         for target, content in eval_files.items():
             local = Path(td) / uuid4().hex
@@ -77,7 +77,7 @@ async def stage_and_run_eval(
         await provider.download_file(handle, reward_file, local)
         return float(local.read_text().strip() or 0.0)
 
-
+## Run an agent harness implemented in another agent server responses() in the sandbox.
 AGENT_RUNNER = """
 import asyncio, json, sys
 sys.path.insert(0, "/gym_mount")
@@ -106,23 +106,40 @@ open("/work/response.json", "w").write(resp.model_dump_json())
 print("RUNNER_DONE")
 """
 
-NESTED_GYM_RUNNER = """
-set -e
-export NEMO_GYM_POLICY_BASE_URL="$(cat /work/model_url.txt)"
-cd /gym
-nohup ng_run "+config_paths=[{config_paths}]" > /work/gym.log 2>&1 &
-for i in $(seq 1 150); do
-  curl -s -m 2 http://127.0.0.1:{agent_port}/health > /dev/null && break
-  sleep 2
-done
-curl -s -m {timeout} -X POST http://127.0.0.1:{agent_port}/run \\
-  -H "content-type: application/json" -d @/work/request.json > /work/response.json
-echo RUNNER_DONE
+## Start and run Nemo Gym in container
+GYM_RUNNER = """
+import subprocess, time, urllib.request
+
+model_url = open("/work/model_url.txt").read().strip()
+overrides = ["+policy_base_url=" + model_url + "/v1"] + {overrides}
+subprocess.Popen(
+    ["ng_run", "+config_paths=[{config_paths}]"] + overrides,
+    stdout=open("/work/gym.log", "w"), stderr=subprocess.STDOUT,
+)
+for _ in range(150):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:{agent_port}/health", timeout=2)
+        break
+    except Exception:
+        time.sleep(2)
+
+subprocess.run(
+    [
+        "ng_collect_rollouts",
+        "+input_jsonl_fpath=/work/input.jsonl",
+        "+output_jsonl_fpath=/work/rollouts.jsonl",
+        "+agent_name={agent_name}",
+    ]
+    + overrides,
+    stdout=open("/work/collect.log", "w"), stderr=subprocess.STDOUT,
+    timeout={timeout}, check=True,
+)
+print("RUNNER_DONE")
 """
 
 
 class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 64
     mode: Literal["agent_only_runner", "gym_runner"] = "agent_only_runner"
@@ -133,6 +150,8 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
     agent_config: dict[str, Any] = Field(default_factory=dict)
 
     nested_config_paths: list[str] = Field(default_factory=list)
+    nested_overrides: list[str] = Field(default_factory=list)
+    nested_agent_name: Optional[str] = None
     nested_agent_port: int = 11001
 
     sandbox_provider: dict[str, Any]
@@ -161,7 +180,6 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     def _build_gym_tar(self) -> Path:
         root = Path(__file__).resolve().parent.parent.parent
-        # ship only what the in-box agent imports to keep sandbox uploads small
         agent_pkg = "/".join((self.config.agent_module or "responses_api_agents").split(".")[:-1])
         tar_path = Path(tempfile.gettempdir()) / f"gym_src_{uuid4().hex}.tar.gz"
         subprocess.run(
@@ -216,22 +234,20 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 agent_class=self.config.agent_class,
                 agent_config_class=self.config.agent_config_class,
             )
-            return "/work/runner.py", script, f"{self.config.sandbox_python} /work/runner.py"
-        script = NESTED_GYM_RUNNER.format(
-            config_paths=",".join(self.config.nested_config_paths),
-            agent_port=self.config.nested_agent_port,
-            timeout=self.config.rollout_timeout,
-        )
-        return "/work/runner.sh", script, "bash /work/runner.sh"
-
-    async def responses(
-        self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        return await self._run_in_sandbox(request, body)
+        else:
+            script = GYM_RUNNER.format(
+                config_paths=",".join(self.config.nested_config_paths),
+                overrides=json.dumps(self.config.nested_overrides),
+                agent_name=self.config.nested_agent_name,
+                agent_port=self.config.nested_agent_port,
+                timeout=self.config.rollout_timeout,
+            )
+        return "/work/runner.py", script, f"{self.config.sandbox_python} /work/runner.py"
 
     async def run(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
+        if self.config.mode == "gym_runner":
+            async with self.sem:
+                return await self._run_nested(request, body)
         async with self.sem:
             cookies = request.cookies
 
@@ -277,27 +293,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             LOG.warning("in-box grading failed, reward=0", exc_info=True)
             return 0.0
 
-    async def _run_in_sandbox(self, request, body) -> NeMoGymResponse:
-        # per-task shape comes from reserved row metadata keys: docker_image (box image),
-        # workdir (agent repo_dir), sandbox_eval (in-box grading spec), patch_workdir (git diff capture)
-        meta = getattr(body, "metadata", None) or {}
-        image = meta.get("docker_image") or self.config.sandbox_image
-
-        runner_path, runner_script, runner_cmd = self._runner()
-        # the in-box agent must never see the eval spec, strip it from its request copy
-        agent_body = body.model_copy(deep=True)
-        if getattr(agent_body, "metadata", None):
-            agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
-        agent_config = dict(self.config.agent_config)
-        if meta.get("workdir"):
-            agent_config = agent_config | {"repo_dir": meta["workdir"]}
-        model_url = self._sandbox_model_url(request)
-        files = {
-            "/work/model_url.txt": model_url,
-            "/work/request.json": agent_body.model_dump_json(),
-            "/work/agent_config.json": json.dumps(agent_config),
-            runner_path: runner_script,
-        }
+    async def _provision_box(self, image: str, files: dict[str, str], model_url: str):
         spec = SandboxSpec(image=image, **dict(self.config.sandbox_spec))
         handle = await self._provider.create(spec)
         try:
@@ -327,16 +323,73 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                 )
                 if "NET_FAIL" in (net.stdout or ""):
-                    # fail fast instead of letting the harness retry an unreachable endpoint for hours
                     raise RuntimeError(f"model endpoint {pm.group(1)}:{pm.group(2)} unreachable from sandbox")
+            return handle
+        except Exception:
+            await self._close_box(handle)
+            raise
+
+    async def _close_box(self, handle) -> None:
+        try:
+            await self._provider.close(handle)
+        except Exception:
+            LOG.warning("sandbox close failed", exc_info=True)
+
+    async def _download_json(self, handle, path: str) -> Any:
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / "out"
+            await self._provider.download_file(handle, path, local)
+            return json.loads(local.read_text())
+
+    async def _run_nested(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
+        meta = (body.responses_create_params or {}).get("metadata") or {}
+        image = meta.get("docker_image") or self.config.sandbox_image
+        runner_path, runner_script, runner_cmd = self._runner()
+        model_url = self._sandbox_model_url(request)
+        files = {
+            "/work/model_url.txt": model_url,
+            "/work/input.jsonl": body.model_dump_json() + "\n",
+            runner_path: runner_script,
+        }
+        handle = await self._provision_box(image, files, model_url)
+        try:
+            r = await self._provider.exec(handle, runner_cmd, timeout_s=self.config.rollout_timeout)
+            if "RUNNER_DONE" not in (r.stdout or ""):
+                LOG.warning("runner incomplete: %s", (r.stderr or r.stdout or "")[-6000:])
+            rows = await self._download_json(handle, "/work/rollouts.jsonl")
+            return BaseVerifyResponse.model_validate(rows)
+        finally:
+            await self._close_box(handle)
+
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        meta = getattr(body, "metadata", None) or {}
+        image = meta.get("docker_image") or self.config.sandbox_image
+
+        runner_path, runner_script, runner_cmd = self._runner()
+        agent_body = body.model_copy(deep=True)
+        if getattr(agent_body, "metadata", None):
+            agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
+        agent_config = dict(self.config.agent_config)
+        if meta.get("workdir"):
+            agent_config = agent_config | {"repo_dir": meta["workdir"]}
+        model_url = self._sandbox_model_url(request)
+        files = {
+            "/work/model_url.txt": model_url,
+            "/work/request.json": agent_body.model_dump_json(),
+            "/work/agent_config.json": json.dumps(agent_config),
+            runner_path: runner_script,
+        }
+        handle = await self._provision_box(image, files, model_url)
+        try:
             r = await self._provider.exec(handle, runner_cmd, timeout_s=self.config.rollout_timeout)
             if "RUNNER_DONE" not in (r.stdout or ""):
                 LOG.warning("runner incomplete: %s", (r.stderr or r.stdout or "")[-6000:])
 
-            with tempfile.TemporaryDirectory() as td:
-                local = Path(td) / "response.json"
-                await self._provider.download_file(handle, "/work/response.json", local)
-                resp = NeMoGymResponse.model_validate(json.loads(local.read_text()))
+            resp = NeMoGymResponse.model_validate(await self._download_json(handle, "/work/response.json"))
 
             if meta.get("patch_workdir"):
                 wd = meta["patch_workdir"]

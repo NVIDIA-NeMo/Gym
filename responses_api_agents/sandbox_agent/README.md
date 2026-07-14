@@ -4,11 +4,13 @@ Runs any Gym environment inside a sandbox.
 
 ## Modes
 
-- agent_only_runner: imports another agent's `responses()` inside the sandbox via a small
-  runner. The harness code executes unchanged, only its model base URL is patched to a
-  sandbox-reachable address. No Gym servers in the sandbox.
-- gym_runner: starts full NeMo Gym inside the sandbox and forwards the task to its
-  agent `/run` endpoint. For wrapping environments without a clean responses/verify split.
+- agent_only_runner: imports the configured agent's `responses()` inside the sandbox via
+  a small runner. The harness code executes unchanged, only its model base URL is patched
+  to a sandbox-reachable address. No Gym servers in the sandbox.
+- gym_runner: starts full NeMo Gym inside the sandbox (`nested_config_paths`) and posts
+  the task to its agent `/run` endpoint, unwrapping the verify payload so the reward
+  lands in response metadata as `sandbox_reward`. For wrapping environments without a
+  clean responses/verify split.
 
 ## Per-task metadata keys
 
