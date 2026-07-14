@@ -14,11 +14,7 @@
 # limitations under the License.
 import hashlib
 import json
-import os
 import re
-import time
-import traceback
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -38,11 +34,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import (
-    NEMO_GYM_LOG_DIR_KEY_NAME,
-    get_first_server_config_dict,
-    get_global_config_dict,
-)
+from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymEasyInputMessage,
@@ -51,11 +43,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
+
+
+def _qid(text: str) -> str:
+    """Short stable id for a question, for [browsecomp] debug logs."""
+    return hashlib.sha256((text or "").encode()).hexdigest()[:10]
 
 
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
@@ -66,21 +61,22 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     nudge_steps: bool = True
     max_context_tokens: int = 196608
     context_reset_pct: float = 0.3
+    # Absolute token threshold for context reset. When > 0 it OVERRIDES
+    # max_context_tokens * context_reset_pct. 50000 = the token-based reset
+    # standard (matches the bc_frankie_bash_tool baselines).
+    context_reset_tokens: int = 0
     context_reset_keep_rounds: int = 3
-    max_reset_count: Optional[int] = None
     max_run_retries: int = 1
+    # Cap on the number of context resets per trajectory (None = unlimited).
+    max_reset_count: Optional[int] = None
+    # When set, save a JSONL snapshot of the full conversation at every context
+    # reset and at the end of the trajectory, under
+    # {snap_dir}/sample_{task_index}/attempt_{attempt}_{reset_<N>|final}.jsonl.
+    # Off when None. (ported from gym-gitlab fe9845ee)
     snap_dir: Optional[str] = None
-    # When True, on /v1/responses entry, look for a per-sample checkpoint file
-    # ({sample_id}.ckpt.json under the trajectories directory) and restore agent
-    # state from it. The checkpoint is overwritten atomically at the end of every
-    # completed step iteration; on successful completion of the trajectory it is
-    # deleted. Lets a slurm restart resume from the last completed step instead
-    # of redoing the whole sample.
-    resume_from_trajectory: bool = True
-    # vLLM-specific optimization: before each model call, hit the model server's
-    # /tokenize endpoint to get the prompt's token count. If it exceeds the reset
-    # threshold, skip the model call entirely and reset context — saving the cost
-    # of generating an output that would just be discarded.
+    # Estimate prompt tokens via the vLLM /tokenize endpoint BEFORE the model
+    # call to decide context reset, instead of paying for a full generation and
+    # discarding it. (ported from gym-gitlab b66e37c6)
     save_model_call_using_vllm_tokenize_endpoint: bool = False
 
 
@@ -98,27 +94,48 @@ class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
     config: BrowsecompAgentConfig
-
     _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
 
     def setup_webserver(self):
-        res = super().setup_webserver()
-
+        app = super().setup_webserver()
+        # For the /tokenize-based pre-call token estimation we need a direct
+        # client to the policy model's vLLM /tokenize endpoint. Built only when
+        # the feature is enabled. (ported from gym-gitlab b66e37c6)
         if self.config.save_model_call_using_vllm_tokenize_endpoint:
             global_config = get_global_config_dict()
             policy_model_config_dict = get_first_server_config_dict(global_config, self.config.model_server.name)
-
-            # The logic below is fixed to only vllm_model! Other models like openai_model and local_vllm_model don't work.
-
-            # Just call the first base_url endpoint with the tokenize request.
             base_urls = policy_model_config_dict["base_url"]
             base_url = base_urls if isinstance(base_urls, str) else base_urls[0]
-
             self._policy_model_openai_client = NeMoGymAsyncOpenAI(
                 base_url=base_url, api_key=policy_model_config_dict["api_key"]
             )
+        return app
 
-        return res
+    @staticmethod
+    def _reset_threshold(config: "BrowsecompAgentConfig") -> int:
+        """Token count past which the context is reset. Absolute
+        context_reset_tokens (50k standard) takes precedence; otherwise fall back
+        to max_context_tokens * context_reset_pct. 0 disables reset."""
+        if config.context_reset_tokens:
+            return int(config.context_reset_tokens)
+        if config.max_context_tokens and config.context_reset_pct:
+            return int(config.max_context_tokens * config.context_reset_pct)
+        return 0
+
+    @staticmethod
+    def _last_message_text(response: NeMoGymResponse) -> str:
+        """Text of the most-recent assistant message item that has non-empty content, walking
+        back from the end of the trajectory. Mirrors bc_frankie (browsecomp_agent.py:1054-1059):
+        the empty-answer retry keys on the LAST content-bearing assistant turn, NOT the
+        concatenation of every assistant turn (NeMoGymResponse.output_text). So a final
+        think-only turn triggers a retry even when an earlier turn emitted a real answer.
+        Empty string if no assistant message produced content."""
+        for item in reversed(response.output):
+            if getattr(item, "type", None) == "message":
+                text = "".join(c.text for c in item.content if getattr(c, "type", None) == "output_text")
+                if text:
+                    return text
+        return ""
 
     async def responses(
         self,
@@ -131,308 +148,48 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        task_index, attempt = None, None
-        if self.config.snap_dir:
-            task_index = body.metadata.pop("task_index")
-            attempt = body.metadata.pop("attempt")
-            body.metadata = body.metadata or {}
+        qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in body.input], default=str))
 
         new_outputs = []
+        full_trajectory = []  # never-trimmed; mirrors new_outputs appends across resets
         usage = None
         step = 0
-        num_tool_calls = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
-        reset_threshold = 0
+        reset_threshold = self._reset_threshold(self.config)
+
+        # --- snapshot keys + per-trajectory counters (ported from gym-gitlab fe9845ee) ---
+        task_index, attempt = None, None
+        if self.config.snap_dir and body.metadata:
+            task_index = body.metadata.pop("task_index", None)
+            attempt = body.metadata.pop("attempt", None)
         reset_count = 0
+        reset_steps = []  # step numbers at which a context reset fired (for the trajectory header)
+        num_tool_calls = 0
         max_reset_count = self.config.max_reset_count
-        if self.config.max_context_tokens and self.config.context_reset_pct:
-            reset_threshold = int(self.config.max_context_tokens * self.config.context_reset_pct)
 
-        missing_end_think_count = 0
+        while True:
+            step += 1
 
-        # Per-step wall times since the last loop/start print; cleared after each loop log.
-        step_times: List[float] = []
-        # Step indices at which the context was reset, since the last loop/start print.
-        context_reset_steps: List[int] = []
+            if self.config.keep_rounds is not None and new_outputs:
+                new_outputs = self._compact_old_tool_messages(new_outputs)
 
-        user_query = [i for i in body.input if i.role == "user"][0].content
-        user_query = user_query if isinstance(user_query, str) else user_query[0]["text"]
+            new_body = body.model_copy(update={"input": body.input + new_outputs})
 
-        time_taken = time.monotonic()
-        time_taken_model_call = 0.0
-        time_taken_tool_call = 0.0
-        max_output_tokens = 0
-
-        def print_log(label):
-            q = body.input[0].content if body.input else ""
-            last = new_outputs[-1] if new_outputs else None
-            if step_times:
-                stats = (
-                    f"n={len(step_times)} "
-                    f"min={min(step_times):.2f}s "
-                    f"avg={sum(step_times) / len(step_times):.2f}s "
-                    f"max={max(step_times):.2f}s"
-                )
-                series = "[" + ", ".join(f"{t:.2f}" for t in step_times) + "]"
-            else:
-                stats = "n=0"
-                series = "[]"
-            ctx = ", ".join(str(s) for s in context_reset_steps) if context_reset_steps else "none"
-            print(
-                f"[browsecomp {label} step={step}]\n"
-                f"  step_times: {stats}\n"
-                f"  step_times_s: {series}\n"
-                f"  context_cleared_at: {ctx}\n"
-                f"  missing_end_think: {missing_end_think_count}\n"
-                f"  q:    {q}\n"
-                f"  last: {getattr(last, 'type', 'none')} → {last}",
-                flush=True,
-            )
-
-        # --- Per-rollout-attempt trajectory log: one JSONL file per (sample, attempt) ---
-        user_msg_content = next((m.content for m in body.input if getattr(m, "role", None) == "user"), "")
-        sample_id = hashlib.sha1(user_msg_content.encode("utf-8")).hexdigest()[:12] if user_msg_content else "anon"
-        log_dir = Path(get_global_config_dict().get(NEMO_GYM_LOG_DIR_KEY_NAME) or "nemo_gym_logs")
-        traj_dir = log_dir / "trajectories"
-        traj_dir.mkdir(parents=True, exist_ok=True)
-        # Fresh filename per attempt: timestamp with microseconds disambiguates retries of the same sample.
-        attempt_stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
-        traj_path = traj_dir / f"{sample_id}__{attempt_stamp}.jsonl"
-        traj_f = traj_path.open("w", encoding="utf-8")
-        prev_event_ts = time.monotonic()
-
-        def log_event(event, **extra):
-            nonlocal prev_event_ts
-            now = time.monotonic()
-            rec = {
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "step": step,
-                "event": event,
-                "dt_s": round(now - prev_event_ts, 3),
-                **extra,
-            }
-            traj_f.write(json.dumps(rec, default=str) + "\n")
-            traj_f.flush()
-            prev_event_ts = now
-
-        log_event("start", sample_id=sample_id, question=user_msg_content)
-
-        # --- Per-sample JSON checkpoint (one file per sample, overwritten each step) ---
-        ckpt_path = traj_dir / f"{sample_id}.ckpt.json"
-
-        def save_ckpt() -> None:
-            """Atomically dump the minimum state needed to resume after a crash."""
-            try:
-                tmp = ckpt_path.with_name(ckpt_path.name + ".tmp")
-                payload = {
-                    "step": step,
-                    "new_outputs": [o.model_dump(exclude_none=True) for o in new_outputs],
-                    "missing_end_think_count": missing_end_think_count,
-                    "num_tool_calls": num_tool_calls,
-                    "reset_count": reset_count,
-                    "usage": usage.model_dump(exclude_none=True) if usage is not None else None,
-                }
-                with tmp.open("w", encoding="utf-8") as f:
-                    json.dump(payload, f, default=str)
-                os.replace(tmp, ckpt_path)
-            except Exception as e:
-                log_event("checkpoint_save_failed", error_type=type(e).__name__, error_msg=str(e))
-
-        if self.config.resume_from_trajectory and ckpt_path.exists():
-            try:
-                ckpt = json.loads(ckpt_path.read_text(encoding="utf-8"))
-                new_outputs = [self._parse_output_item(d) for d in ckpt.get("new_outputs") or []]
-                step = int(ckpt.get("step") or 0)
-                missing_end_think_count = int(ckpt.get("missing_end_think_count") or 0)
-                num_tool_calls = int(ckpt.get("num_tool_calls") or 0)
-                reset_count = int(ckpt.get("reset_count") or 0)
-                saved_usage = ckpt.get("usage")
-                if saved_usage is not None:
-                    usage = NeMoGymResponseUsage.model_validate(saved_usage)
-                log_event(
-                    "resumed",
-                    from_step=step,
-                    n_outputs=len(new_outputs),
-                    missing_end_think_count=missing_end_think_count,
-                    num_tool_calls=num_tool_calls,
-                    reset_count=reset_count,
-                )
-                print(
-                    f"[browsecomp resumed sample={sample_id} from_step={step} "
-                    f"n_outputs={len(new_outputs)} reset_count={reset_count}]",
-                    flush=True,
-                )
-            except Exception as e:
-                # Corrupted checkpoint — start fresh, leave the file alone for inspection.
-                log_event("resume_failed", error_type=type(e).__name__, error_msg=str(e))
-
-        print_log("start")
-        step_start = time.monotonic()
-
-        try:
-            while True:
-                step += 1
-                step_iter_start = time.monotonic()
-
-                if self.config.keep_rounds is not None and new_outputs:
-                    new_outputs = self._compact_old_tool_messages(new_outputs)
-
-                new_body = body.model_copy(update={"input": body.input + new_outputs})
-
-                # --- Optional pre-call tokenize check (vLLM-specific): avoid wasted model call ---
-                # If enabled, hit the model server's /tokenize endpoint to count prompt tokens
-                # before generation. If over threshold, reset context immediately and skip the
-                # model call. This violates Gym's abstractions (only works on vLLM-style models
-                # exposing /tokenize) but saves the cost of generating an output we'd discard.
-                if self.config.save_model_call_using_vllm_tokenize_endpoint:
-                    pre_prompt_tokens = await self._count_prompt_tokens(new_body)
-                    if (
-                        reset_threshold
-                        and pre_prompt_tokens > reset_threshold
-                        and (max_reset_count is None or reset_count < max_reset_count)
-                    ):
-                        reset_count += 1
-                        log_event(
-                            "context_reset",
-                            source="tokenize",
-                            reset_count=reset_count,
-                            prompt_tokens=pre_prompt_tokens,
-                        )
-                        print(
-                            f"Step {step} hit {reset_count} reset(s) inside the tokenize flow at "
-                            f"prompt_tokens={pre_prompt_tokens}",
-                            flush=True,
-                        )
-                        if self.config.snap_dir:
-                            self._save_snapshot(
-                                messages=body.input + new_outputs,
-                                task_index=task_index,
-                                attempt=attempt,
-                                reset_count=reset_count,
-                                is_final=False,
-                            )
-                        # Adaptive shrink: try keep_rounds, keep_rounds-1, ... 0,
-                        # accept the largest n whose resulting prompt fits under
-                        # the threshold
-                        chosen_outputs = None
-                        post_prompt_tokens = pre_prompt_tokens
-                        for n in range(self.config.context_reset_keep_rounds, -1, -1):
-                            cand = self._extract_last_rounds(new_outputs, n=n)
-                            cand_body = body.model_copy(update={"input": body.input + cand})
-                            post_prompt_tokens = await self._count_prompt_tokens(cand_body)
-                            if post_prompt_tokens <= reset_threshold:
-                                chosen_outputs = cand
-                                log_event("context_reset_shrink", kept_rounds=n, post_prompt_tokens=post_prompt_tokens)
-                                break
-                        if chosen_outputs is None:
-                            # System prompt + user query alone exceed the reset
-                            # threshold. There's no way to make this sample fit
-                            log_event("context_reset_shrink_failed", post_prompt_tokens=post_prompt_tokens)
-                            raise RuntimeError(
-                                f"Context reset failed: prompt is {post_prompt_tokens} tokens "
-                                f"(threshold {reset_threshold}) even with all tool history dropped. "
-                                f"sample_id={sample_id} step={step}"
-                            )
-                        new_outputs = chosen_outputs
-                        context_reset_steps.append(step)
-                        save_ckpt()
-                        continue
-
-                # --- Model call (with per-call retry on empty <think>-only output) ---
-                model_call_start = time.monotonic()
-                returned_valid_response = False
-                for retry_idx in range(self.config.max_run_retries):
-                    log_event("model_call_begin", retry=retry_idx)
-                    model_response = await self.server_client.post(
-                        server_name=self.config.model_server.name,
-                        url_path="/v1/responses",
-                        json=new_body,
-                        cookies=model_server_cookies,
-                    )
-                    # We raise for status here since we expect model calls to always work.
-                    await raise_for_status(model_response)
-                    model_response_json = await get_response_json(model_response)
-                    model_server_cookies = model_response.cookies
-                    try:
-                        model_response = NeMoGymResponse.model_validate(model_response_json)
-                    except ValidationError as e:
-                        raise RuntimeError(
-                            f"Received an invalid response from model server: {json.dumps(model_response_json)}"
-                        ) from e
-
-                    # Retry if the model only produced <think> content with no final answer.
-                    raw_output_text = model_response.output_text
-                    cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
-                    if (
-                        not model_response.incomplete_details
-                        or model_response.incomplete_details.reason == "content_filter"
-                    ) and (cleaned_output_text or any(o for o in model_response.output if o.type == "function_call")):
-                        returned_valid_response = True
-                        break
-
-                    missing_end_think_count += 1
-                    print(
-                        f"A model call is missing the end think ({missing_end_think_count} for this sample)",
-                        flush=True,
-                    )
-                    log_event(
-                        "model_call_retry",
-                        reason="empty_after_think_strip",
-                        retry=retry_idx,
-                        raw_output_text_len=len(raw_output_text),
-                    )
-                model_call_dur = time.monotonic() - model_call_start
-                time_taken_model_call += model_call_dur
-                if model_response.usage and model_response.usage.output_tokens:
-                    max_output_tokens = max(max_output_tokens, model_response.usage.output_tokens)
-
-                # If we retried all the way through and still didn't get a valid response, exit.
-                if not returned_valid_response:
-                    log_event("model_response_invalid_break", retries=self.config.max_run_retries)
-                    print(
-                        f"Exited the agent loop due to no valid model response after "
-                        f"{self.config.max_run_retries} retries (step={step})",
-                        flush=True,
-                    )
-                    break
-
-                prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
-                output_tokens = model_response.usage.output_tokens if model_response.usage else None
-                incomplete = model_response.incomplete_details.reason if model_response.incomplete_details else None
-                log_event(
-                    "model_call",
-                    duration_s=round(model_call_dur, 3),
-                    input_tokens=prompt_tokens,
-                    output_tokens=output_tokens,
-                    incomplete=incomplete,
-                    output=[o.model_dump(exclude_none=True) for o in model_response.output],
-                    input=(
-                        [m.model_dump(exclude_none=True) if hasattr(m, "model_dump") else m for m in new_body.input]
-                        if incomplete
-                        else None
-                    ),
-                )
-
-                # --- Post-call context-reset check (fallback when tokenize pre-flight wasn't enabled) ---
+            # --- Pre-call context reset via the vLLM /tokenize endpoint ---
+            # Estimate the prompt token count BEFORE generating; if over the
+            # threshold, reset now and skip the (otherwise wasted) generation.
+            # (ported from gym-gitlab b66e37c6)
+            if self.config.save_model_call_using_vllm_tokenize_endpoint:
+                pre_prompt_tokens = await self._count_prompt_tokens(new_body)
                 if (
                     reset_threshold
-                    and prompt_tokens > reset_threshold
+                    and pre_prompt_tokens > reset_threshold
                     and (max_reset_count is None or reset_count < max_reset_count)
                 ):
                     reset_count += 1
-                    log_event(
-                        "context_reset",
-                        source="model_call",
-                        reset_count=reset_count,
-                        prompt_tokens=prompt_tokens,
-                    )
-                    print(
-                        f"Step {step} hit {reset_count} reset(s) inside the model call flow at "
-                        f"prompt_tokens={prompt_tokens}",
-                        flush=True,
-                    )
+                    reset_steps.append(step)
                     if self.config.snap_dir:
                         self._save_snapshot(
                             messages=body.input + new_outputs,
@@ -441,258 +198,287 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             reset_count=reset_count,
                             is_final=False,
                         )
-                    if self.config.context_reset_keep_rounds > 0:
-                        new_outputs = self._extract_last_rounds(new_outputs)
-                    else:
-                        new_outputs = []
-                    context_reset_steps.append(step)
-                    save_ckpt()
+                    # Adaptive shrink: keep the largest number of recent rounds
+                    # whose resulting prompt still fits under the threshold.
+                    chosen = None
+                    for n in range(self.config.context_reset_keep_rounds, -1, -1):
+                        cand = self._extract_last_rounds(new_outputs, n=n)
+                        cand_body = body.model_copy(update={"input": body.input + cand})
+                        if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                            chosen = cand
+                            break
+                    new_outputs = chosen if chosen is not None else []
                     continue
 
-                output = model_response.output
-                new_outputs.extend(output)
+            model_response = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="/v1/responses",
+                json=new_body,
+                cookies=model_server_cookies,
+            )
+            # We raise for status here since we expect model calls to always work.
+            await raise_for_status(model_response)
+            model_response_json = await get_response_json(model_response)
+            model_server_cookies = model_response.cookies
+            try:
+                model_response = NeMoGymResponse.model_validate(model_response_json)
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                ) from e
 
-                if not usage:
-                    usage = model_response.usage
-                    model_response.usage = None
-
-                if usage and model_response.usage:
-                    usage.input_tokens += model_response.usage.input_tokens
-                    usage.output_tokens += model_response.usage.output_tokens
-                    usage.total_tokens += model_response.usage.total_tokens
-
-                    # TODO support more advanced token details
-                    usage.input_tokens_details.cached_tokens = 0
-                    usage.output_tokens_details.reasoning_tokens = 0
-
-                if model_response.incomplete_details:
-                    break
-
-                # --- If the model decided to answer (no tool calls), we are done ---
-                all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-                all_output_messages: List[NeMoGymResponseOutputMessage] = [
-                    o for o in output if o.type == "message" and o.role == "assistant"
-                ]
-                if not all_fn_calls and all_output_messages:
-                    break
-
-                # --- Execute tool calls (sequentially; timed individually) ---
-                tool_total_dur = 0.0
-                for output_function_call in all_fn_calls:
-                    num_tool_calls += 1
-                    log_event("tool_call_begin", name=output_function_call.name, args=output_function_call.arguments)
-                    tool_start = time.monotonic()
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=json.loads(output_function_call.arguments),
-                        cookies=resources_server_cookies,
+            # --- Check context reset threshold (post-call fallback; used when
+            # save_model_call_using_vllm_tokenize_endpoint is off) ---
+            prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
+            if (
+                reset_threshold
+                and prompt_tokens > reset_threshold
+                and (max_reset_count is None or reset_count < max_reset_count)
+            ):
+                reset_count += 1
+                reset_steps.append(step)
+                if self.config.snap_dir:
+                    self._save_snapshot(
+                        messages=body.input + new_outputs,
+                        task_index=task_index,
+                        attempt=attempt,
+                        reset_count=reset_count,
+                        is_final=False,
                     )
-                    # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
-                    resources_server_cookies = api_response.cookies
+                if self.config.context_reset_keep_rounds > 0:
+                    new_outputs = self._extract_last_rounds(new_outputs)
+                else:
+                    new_outputs = []
+                continue
 
-                    tool_output = (await api_response.content.read()).decode()
-                    tool_dur = time.monotonic() - tool_start
-                    tool_total_dur += tool_dur
-                    log_event(
-                        "tool_call",
-                        duration_s=round(tool_dur, 3),
-                        name=output_function_call.name,
-                        args=output_function_call.arguments,
-                        output=tool_output,
-                        output_len=len(tool_output),
-                    )
-                    if self.config.nudge_steps:
-                        turns_left = self.config.max_steps - step
-                        tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
+            output = model_response.output
+            new_outputs.extend(output)
+            full_trajectory.extend(output)
 
-                    tool_response = NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=output_function_call.call_id,
-                        output=tool_output,
-                    )
-                    new_outputs.append(tool_response)
+            if not usage:
+                usage = model_response.usage
+                model_response.usage = None
 
-                # --- Nudge the model at milestone steps ---
-                if self.config.nudge_steps and all_fn_calls:
-                    quarter = self.config.max_steps // 4
-                    half = self.config.max_steps // 2
-                    near_end = int(self.config.max_steps * 0.875)
-                    nudge_msg = None
-                    if step == quarter:
-                        nudge_msg = (
-                            "\n\n\n\n\n"
-                            "[SYSTEM NOTE: You have used %d out of %d turns. "
-                            "Please consider consolidating your findings and "
-                            "delivering an answer soon.]" % (step, self.config.max_steps)
-                        )
-                    elif step == half:
-                        nudge_msg = (
-                            "\n\n\n\n\n"
-                            "[SYSTEM NOTE: You have used %d out of %d turns — "
-                            "you are halfway through your budget. You should start "
-                            "formulating your final answer based on the research "
-                            "you have already done. Do not keep searching endlessly.]" % (step, self.config.max_steps)
-                        )
-                    elif step == near_end:
-                        nudge_msg = (
-                            "\n\n\n\n\n"
-                            "[SYSTEM NOTE: URGENT — You have used %d out of %d turns. "
-                            "You are almost out of turns. YOU MUST deliver your final "
-                            "answer NOW using the information you have already gathered. "
-                            "Do NOT make any more tool calls. Provide your best answer "
-                            "immediately in the required format with 'Exact Answer:' on "
-                            "a line by itself.]" % (step, self.config.max_steps)
-                        )
+            if usage and model_response.usage:
+                usage.input_tokens += model_response.usage.input_tokens
+                usage.output_tokens += model_response.usage.output_tokens
+                usage.total_tokens += model_response.usage.total_tokens
 
-                    if nudge_msg:
-                        last_tool = new_outputs[-1]
-                        new_output = last_tool.output + nudge_msg
-                        new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
 
-                time_taken_tool_call += tool_total_dur
+            if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                break
 
-                now = time.monotonic()
-                step_times.append(now - step_start)
-                step_start = now
+            # --- If the model decided to answer (no tool calls), we are done ---
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
+                break
 
-                step_total_dur = now - step_iter_start
-                # Per-step summary (to trajectory JSONL and stdout) — makes bottleneck
-                # analysis a one-grep operation.
-                log_event(
-                    "step_end",
-                    duration_s=round(step_total_dur, 3),
-                    model_s=round(model_call_dur, 3),
-                    tool_s=round(tool_total_dur, 3),
-                    n_tools=len(all_fn_calls),
-                    input_tokens=prompt_tokens,
-                    output_tokens=output_tokens,
+            # --- Execute tool calls ---
+            for output_function_call in all_fn_calls:
+                num_tool_calls += 1
+                api_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=f"/{output_function_call.name}",
+                    json=json.loads(output_function_call.arguments),
+                    cookies=resources_server_cookies,
                 )
-                print(
-                    f"[browsecomp step_end sample={sample_id} step={step}] "
-                    f"dur={step_total_dur:.1f}s "
-                    f"model={model_call_dur:.1f}s "
-                    f"tools={tool_total_dur:.1f}s "
-                    f"n_tools={len(all_fn_calls)} "
-                    f"input_tokens={prompt_tokens} "
-                    f"output_tokens={output_tokens} "
-                    f"missing_end_think={missing_end_think_count}",
-                    flush=True,
+                # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
+                resources_server_cookies = api_response.cookies
+
+                tool_output = (await api_response.content.read()).decode()
+                # bc_frankie parity: the resources server wraps every tool result in a one-field
+                # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
+                # model then sees a single escaped line instead of raw multi-line text. This was
+                # the last remaining materialized-prompt difference vs the bc_frankie harness.
+                # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
+                # and non-JSON payloads are left untouched.
+                try:
+                    parsed_tool_output = json.loads(tool_output)
+                    if (
+                        isinstance(parsed_tool_output, dict)
+                        and set(parsed_tool_output) == {"results_string"}
+                        and isinstance(parsed_tool_output["results_string"], str)
+                    ):
+                        tool_output = parsed_tool_output["results_string"]
+                except json.JSONDecodeError:
+                    pass
+                if api_response.status >= 400:
+                    print(
+                        f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
+                        f"status={api_response.status} body={tool_output[:300]}",
+                        flush=True,
+                    )
+                if self.config.nudge_steps:
+                    turns_left = self.config.max_steps - step
+                    tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
+
+                tool_response = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=output_function_call.call_id,
+                    output=tool_output,
                 )
+                new_outputs.append(tool_response)
+                full_trajectory.append(tool_response)
 
-                if step < 10:
-                    print_log("loop")
-                elif step % 10 == 0:
-                    print_log("loop")
-                    step_times.clear()
-                    context_reset_steps.clear()
+            # --- Nudge the model at milestone steps ---
+            if self.config.nudge_steps and all_fn_calls:
+                quarter = self.config.max_steps // 4
+                half = self.config.max_steps // 2
+                near_end = int(self.config.max_steps * 0.875)
+                nudge_msg = None
+                if step == quarter:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: You have used %d out of %d turns. "
+                        "Please consider consolidating your findings and "
+                        "delivering an answer soon.]" % (step, self.config.max_steps)
+                    )
+                elif step == half:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: You have used %d out of %d turns — "
+                        "you are halfway through your budget. You should start "
+                        "formulating your final answer based on the research "
+                        "you have already done. Do not keep searching endlessly.]" % (step, self.config.max_steps)
+                    )
+                elif step == near_end:
+                    nudge_msg = (
+                        "\n\n\n\n\n"
+                        "[SYSTEM NOTE: URGENT — You have used %d out of %d turns. "
+                        "You are almost out of turns. YOU MUST deliver your final "
+                        "answer NOW using the information you have already gathered. "
+                        "Do NOT make any more tool calls. Provide your best answer "
+                        "immediately in the required format with 'Exact Answer:' on "
+                        "a line by itself.]" % (step, self.config.max_steps)
+                    )
 
-                # Check if max steps is not None and if we have exhausted it.
-                if self.config.max_steps and step >= self.config.max_steps:
-                    break
+                if nudge_msg:
+                    last_tool = new_outputs[-1]
+                    new_output = last_tool.output + nudge_msg
+                    new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
+                    if full_trajectory:
+                        full_trajectory[-1] = new_outputs[-1]
 
-                # End of iteration — checkpoint reflects the post-step state.
-                save_ckpt()
+            # Check if max steps is not None and if we have exhausted it.
+            if self.config.max_steps and step >= self.config.max_steps:
+                print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
+                break
 
-            print_log("final")
-            log_event(
-                "final",
-                total_steps=step,
-                missing_end_think_count=missing_end_think_count,
-                num_tool_calls=num_tool_calls,
+        # --- Final trajectory snapshot (ported from gym-gitlab fe9845ee) ---
+        if self.config.snap_dir:
+            self._save_snapshot(
+                messages=body.input + new_outputs,
+                task_index=task_index,
+                attempt=attempt,
+                reset_count=None,
+                is_final=True,
+            )
+            # Full untrimmed conversation (bc_frankie parity: one trajectory.jsonl per sample).
+            self._save_trajectory(
+                input_messages=body.input,
+                full_trajectory=full_trajectory,
+                task_index=task_index,
+                attempt=attempt,
+                reset_steps=reset_steps,
                 reset_count=reset_count,
+                num_tool_calls=num_tool_calls,
             )
-
-            # record final context
-            if self.config.snap_dir:
-                self._save_snapshot(
-                    messages=body.input + new_outputs,
-                    task_index=task_index,
-                    attempt=attempt,
-                    reset_count=None,
-                    is_final=True,
-                )
-        except Exception as e:
-            err_input_source = locals().get("new_body")
-            if err_input_source is not None and hasattr(err_input_source, "input"):
-                err_input = err_input_source.input
-            else:
-                err_input = body.input
-            log_event(
-                "error",
-                error_type=type(e).__name__,
-                error_msg=str(e),
-                traceback=traceback.format_exc()[:4000],
-                input=[m.model_dump(exclude_none=True) if hasattr(m, "model_dump") else m for m in err_input],
-            )
-            raise
-        finally:
-            traj_f.close()
-
-        # Trajectory finished cleanly — drop the checkpoint so a future re-run starts fresh.
-        try:
-            ckpt_path.unlink(missing_ok=True)
-        except OSError:
-            pass  # best-effort; a stale ckpt won't be re-read because the driver caches this sample
 
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
 
-        print(
-            f"{user_query[:20]}... | FINISHED | Step {step} | Time: {time.monotonic() - time_taken:.2f}s (model {time_taken_model_call:.2f}s, tool {time_taken_tool_call:.2f}s) | Max output tokens: {max_output_tokens} | Missing end thinks: {missing_end_think_count}"
-        )
-
-        model_response.output = new_outputs
+        model_response.output = full_trajectory
         model_response.usage = usage
+        # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
+        # NeMoGymResponse(Response) has extra="allow", so these round-trip to /verify.
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
-        model_response.metadata = {"missing_end_think_count": str(missing_end_think_count)}
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        question_text = getattr(body, "question", None) or ""
+        rcp_input = body.responses_create_params.input
+        if isinstance(rcp_input, str):
+            rcp_input = [NeMoGymEasyInputMessage(role="user", content=rcp_input)]
+        qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str))
+        print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}", flush=True)
 
-        # prepare for recording
-        if self.config.snap_dir:
-            body.responses_create_params.metadata = dict(body.responses_create_params.metadata or {})
-            body.responses_create_params.metadata["task_index"] = str(body._ng_task_index)
-            body.responses_create_params.metadata["attempt"] = str(0)
+        try:
+            seed_session_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/seed_session",
+                json=body.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(seed_session_response)
+            cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path="/v1/responses",
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = response.cookies
+            last_verify_response = None
+            for attempt in range(self.config.max_run_retries):
+                # Seed snapshot keys so responses() can name per-reset/-final files.
+                # (ported from gym-gitlab fe9845ee)
+                if self.config.snap_dir:
+                    body.responses_create_params.metadata = dict(body.responses_create_params.metadata or {})
+                    body.responses_create_params.metadata["task_index"] = str(getattr(body, "_ng_task_index", qid))
+                    body.responses_create_params.metadata["attempt"] = str(attempt)
+                response = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path="/v1/responses",
+                    json=body.responses_create_params,
+                    cookies=cookies,
+                )
+                await raise_for_status(response)
+                cookies = response.cookies
 
-        response_json = await get_response_json(response)
+                # Retry if the model's LAST content-bearing turn was empty after <think>-strip.
+                # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
+                # output_text — a final think-only turn retries even if an earlier turn had text.)
+                response_json = await get_response_json(response)
+                raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
+                cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
+                # Need to get last_verify_response if all attempts are exhausted
+                if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                    print(
+                        f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
+                        f"reason=empty_output_after_think_strip",
+                        flush=True,
+                    )
+                    continue
 
-        verify_request = BrowsecompAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
+                verify_request = BrowsecompAgentVerifyRequest.model_validate(
+                    body.model_dump() | {"response": response_json}
+                )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
 
-        return BrowsecompAgentVerifyResponse.model_validate(
-            await get_response_json(verify_response)
-            | {"missing_end_think_count": response_json["metadata"]["missing_end_think_count"]}
-        )
+                last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                    await get_response_json(verify_response)
+                )
+                break
+
+            reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
+            outcome = "success" if (reward is not None and reward > 0) else "failure"
+            print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
+
+            return last_verify_response
+        except Exception as e:
+            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
+            raise
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
@@ -721,40 +507,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
         return messages
 
-    @staticmethod
-    def _parse_output_item(d: dict):
-        """Turn a serialized output-item dict (from a checkpoint JSON) back into its Pydantic model."""
-        t = d.get("type")
-        if t == "reasoning":
-            return NeMoGymResponseReasoningItem.model_validate(d)
-        if t == "function_call":
-            return NeMoGymResponseFunctionToolCall.model_validate(d)
-        if t == "message":
-            return NeMoGymResponseOutputMessage.model_validate(d)
-        if t == "function_call_output":
-            return NeMoGymFunctionCallOutput.model_validate(d)
-        raise ValueError(f"Unknown output item type in checkpoint: {t!r}")
-
-    async def _count_prompt_tokens(self, body) -> int:
-        """Hit vLLM's /tokenize endpoint and return the prompt token count"""
-        converter = VLLMConverter(return_token_id_information=False)
-        chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
-        chat_completion_create_params = chat_completion_create_params.model_dump()
-
-        # Same projection as vllm_model/app.py:384.
-        tokenize_body_dict = {}
-        for key in ("model", "messages", "tools", "chat_template_kwargs"):
-            if key in chat_completion_create_params:
-                tokenize_body_dict[key] = chat_completion_create_params[key]
-
-        tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
-        return len(tokenize_response["tokens"])
-
     def _extract_last_rounds(self, new_outputs, n=None):
         """
         Extract the last n complete tool-call rounds from new_outputs.
         A round = one or more function_call items + their corresponding
         function_call_output items. Returns a flat list preserving order.
+        n defaults to context_reset_keep_rounds; the /tokenize adaptive-shrink
+        path passes smaller n to find a window that fits under the threshold.
         """
         if n is None:
             n = self.config.context_reset_keep_rounds
@@ -788,18 +547,61 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         return result
 
     def _save_snapshot(self, messages, task_index, attempt, reset_count, is_final):
+        """Save a JSONL snapshot of the full conversation at a context reset or
+        at trajectory end, keyed by task_index/attempt. Lets us inspect the
+        pre-reset context (otherwise lost when history is trimmed).
+        (ported from gym-gitlab fe9845ee)"""
         sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
-        if not sample_dir.exists():
-            sample_dir.mkdir(parents=True)
-
+        sample_dir.mkdir(parents=True, exist_ok=True)
         if is_final:
             sample_path = f"{sample_dir}/attempt_{attempt}_final.jsonl"
         else:
             sample_path = f"{sample_dir}/attempt_{attempt}_reset_{reset_count}.jsonl"
-
         with open(sample_path, "w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(msg.model_dump_json() + "\n")
+
+    def _save_trajectory(
+        self, input_messages, full_trajectory, task_index, attempt, reset_steps, reset_count, num_tool_calls
+    ):
+        """Save the FULL untrimmed conversation for one sample to
+        {snap_dir}/sample_{task_index}/attempt_{attempt}_trajectory.jsonl.
+        Line 1 = metadata header; remaining lines = input prefix + every model/tool item, in order
+        (never trimmed at context resets). (bc_frankie parity: one trajectory.jsonl per sample.)"""
+        sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        path = f"{sample_dir}/attempt_{attempt}_trajectory.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "type": "metadata",
+                        "task_index": task_index,
+                        "attempt": attempt,
+                        "reset_count": reset_count,
+                        "num_tool_calls": num_tool_calls,
+                        "reset_steps": reset_steps,
+                    }
+                )
+                + "\n"
+            )
+            for msg in list(input_messages) + full_trajectory:
+                f.write(msg.model_dump_json() + "\n")
+
+    async def _count_prompt_tokens(self, body) -> int:
+        """Hit the policy model's vLLM /tokenize endpoint and return the prompt
+        token count (used to decide context reset without a full generation).
+        (ported from gym-gitlab b66e37c6)"""
+        converter = VLLMConverter(return_token_id_information=False)
+        chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
+        chat_completion_create_params = chat_completion_create_params.model_dump()
+        # Same projection as vllm_model/app.py's tokenize path.
+        tokenize_body_dict = {}
+        for key in ("model", "messages", "tools", "chat_template_kwargs"):
+            if key in chat_completion_create_params:
+                tokenize_body_dict[key] = chat_completion_create_params[key]
+        tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
+        return len(tokenize_response["tokens"])
 
 
 if __name__ == "__main__":
