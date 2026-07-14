@@ -115,7 +115,9 @@ def _request(**overrides) -> AgentSkillsVerifyRequest:
 
 
 @pytest.mark.asyncio
-async def test_patch_verifier_applies_patch_and_runs_hidden_check() -> None:
+async def test_patch_verifier_applies_patch_and_runs_hidden_check(tmp_path: Path) -> None:
+    path_backed_check = tmp_path / "path_backed.py"
+    path_backed_check.write_text("assert True\n")
     fake = FakeSandbox(
         [
             _result(),  # clean status
@@ -139,6 +141,7 @@ async def test_patch_verifier_applies_patch_and_runs_hidden_check() -> None:
         check_command="pytest -q hidden_tests",
         timeout_s=30,
         hidden_files={"hidden_tests/test_probe.py": "def test_probe(): assert True\n"},
+        hidden_file_paths={"hidden_tests/path_backed.py": path_backed_check},
         sandbox_factory=lambda provider, spec: fake,
     )
 
@@ -149,9 +152,11 @@ async def test_patch_verifier_applies_patch_and_runs_hidden_check() -> None:
     assert fake.uploaded_patch == PATCH
     assert "pytest -q hidden_tests" in fake.exec_calls[-1]
     assert fake.exec_kwargs[-1]["cwd"] == "/tmp/nemo_gym_hidden_checks"
-    assert fake.exec_kwargs[-1]["user"] == "nobody"
-    assert fake.exec_kwargs[-1]["env"]["NEMO_GYM_WORKSPACE"] == "/workspace/nemo-gym"
+    assert fake.exec_kwargs[-1]["user"] == "root"
+    assert "su -s /bin/sh nobody" in fake.exec_calls[-1]
+    assert "NEMO_GYM_WORKSPACE=/workspace/nemo-gym" in fake.exec_calls[-1]
     assert fake.uploaded_files["/tmp/nemo_gym_hidden_checks/hidden_tests/test_probe.py"].startswith("def test_probe")
+    assert fake.uploaded_files["/tmp/nemo_gym_hidden_checks/hidden_tests/path_backed.py"] == "assert True\n"
     apply_event = next(
         index
         for index, event in enumerate(fake.events)
@@ -184,6 +189,35 @@ async def test_patch_verifier_rejects_fixture_revision_mismatch() -> None:
     assert fake.stopped is True
 
 
+@pytest.mark.parametrize(
+    ("check_user", "expected"),
+    [
+        ("root", "NEMO_GYM_WORKSPACE=/workspace/nemo-gym pytest"),
+        (65534, 'su -s /bin/sh "$(getent passwd 65534 | cut -d: -f1)"'),
+    ],
+)
+def test_hidden_check_wrapper_supports_same_and_numeric_users(check_user, expected) -> None:
+    verifier = SandboxPatchVerifier(
+        provider={"fake": {}},
+        spec=SandboxSpec(image="test"),
+        workspace="/workspace/nemo-gym",
+        check_command="pytest",
+        timeout_s=30,
+        user="root",
+        check_user=check_user,
+    )
+
+    command = verifier._bounded_check_command(
+        stdout_path="/tmp/stdout",
+        stderr_path="/tmp/stderr",
+        status_path="/tmp/status",
+        stdout_pipe="/tmp/stdout.pipe",
+        stderr_pipe="/tmp/stderr.pipe",
+    )
+
+    assert expected in command
+
+
 def _server() -> AgentSkillsResourcesServer:
     config = AgentSkillsResourcesServerConfig(
         host="0.0.0.0",
@@ -210,7 +244,10 @@ async def test_resources_server_returns_component_score() -> None:
     verification = PatchVerificationResult(
         passed=True,
         status="pass",
-        stdout="ok",
+        stdout=(
+            '{"status":"summary","scores":{"task_success":1.0,"correctness":1.0,'
+            '"completeness":0.75,"convention_compliance":1.0}}\n'
+        ),
         stderr="",
         return_code=0,
         verifier_base_revision=BASE_REVISION,
@@ -224,10 +261,38 @@ async def test_resources_server_returns_component_score() -> None:
 
     assert result.reward == 1.0
     assert result.correctness == 1.0
+    assert result.completeness == 0.75
+    assert result.convention_compliance == 1.0
     assert result.status == "pass"
     assert result.verifier_elapsed_seconds == 2.5
-    assert result.details["stdout"] == "ok"
+    assert '"status":"summary"' in result.details["stdout"]
     assert "workspace_patch" not in result.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_resources_server_reward_uses_overall_task_success() -> None:
+    server = _server()
+    verification = PatchVerificationResult(
+        passed=False,
+        status="check_failed",
+        stdout=(
+            '{"status":"summary","scores":{"task_success":0.0,"correctness":1.0,'
+            '"completeness":0.0,"convention_compliance":1.0}}\n'
+        ),
+        stderr="",
+        return_code=1,
+        verifier_base_revision=BASE_REVISION,
+        elapsed_seconds=1.0,
+    )
+    verifier = MagicMock()
+    verifier.verify = AsyncMock(return_value=verification)
+
+    with patch("resources_servers.agent_skills.app.SandboxPatchVerifier", return_value=verifier):
+        result = await server.verify(_request())
+
+    assert result.reward == 0.0
+    assert result.correctness == 1.0
+    assert result.completeness == 0.0
 
 
 @pytest.mark.asyncio
@@ -251,3 +316,15 @@ async def test_resources_server_converts_verifier_exception_to_failure() -> None
     assert result.reward == 0.0
     assert result.status == "verifier_error"
     assert result.details["reason"] == "sandbox unavailable"
+
+
+@pytest.mark.asyncio
+async def test_resources_server_converts_missing_hidden_file_to_failure(tmp_path: Path) -> None:
+    server = _server()
+    server.config.check_suites["suite"].hidden_file_paths = {"run_checks.py": str(tmp_path / "missing.py")}
+
+    result = await server.verify(_request())
+
+    assert result.reward == 0.0
+    assert result.status == "verifier_error"
+    assert "do not exist" in result.details["reason"]

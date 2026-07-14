@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -40,6 +43,7 @@ class AgentSkillCheckSuiteConfig(BaseModel):
     check_command: str
     workspace: str = "/workspace/nemo-gym"
     hidden_files: dict[str, str] = Field(default_factory=dict)
+    hidden_file_paths: dict[str, str] = Field(default_factory=dict)
     check_cwd: str = "/tmp/nemo_gym_hidden_checks"
     timeout: int = 1800
     user: str | int | None = "root"
@@ -70,6 +74,8 @@ class AgentSkillsVerifyResponse(BaseVerifyResponse):
     check_suite_id: str | None = None
     status: str
     correctness: float
+    completeness: float = 0.0
+    convention_compliance: float = 0.0
     verifier_base_revision: str | None = None
     verifier_elapsed_seconds: float | None = None
     details: dict[str, Any] = Field(default_factory=dict)
@@ -86,6 +92,8 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
         return {
             "task_success": float(result.get("reward", 0) > 0),
             "correctness": float(result.get("correctness", 0)),
+            "completeness": float(result.get("completeness", 0)),
+            "convention_compliance": float(result.get("convention_compliance", 0)),
         }
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -100,14 +108,14 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
             highest_k_metrics(
                 agent_metrics,
                 "pass@1[avg-of-{k}]",
-                score_names=["task_success", "correctness"],
+                score_names=["task_success", "correctness", "completeness", "convention_compliance"],
             )
         )
         key.update(
             highest_k_metrics(
                 agent_metrics,
                 "pass@{k}",
-                score_names=["task_success", "correctness"],
+                score_names=["task_success", "correctness", "completeness", "convention_compliance"],
             )
         )
         return key
@@ -140,35 +148,38 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
             )
 
         suite = self.config.check_suites[suite_id]
-        global_config = self.server_client.global_config_dict
-        provider = resolve_provider_config(self.config.sandbox_provider, global_config)
-        provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
-        spec = sandbox_spec_from_mapping(
-            suite.sandbox_spec,
-            default_workdir=suite.workspace,
-            default_metadata=provider_metadata,
-            metadata={
-                "nemo_gym_resources_server": "agent_skills",
-                "check_suite_id": suite_id,
-                "task_id": str(task_id or "unknown")[:63],
-            },
-        )
-        verifier = SandboxPatchVerifier(
-            provider=provider,
-            spec=spec,
-            workspace=spec.workdir or suite.workspace,
-            check_command=suite.check_command,
-            timeout_s=suite.timeout,
-            hidden_files=suite.hidden_files,
-            check_cwd=suite.check_cwd,
-            user=suite.user,
-            check_user=suite.check_user,
-            max_patch_bytes=suite.max_patch_bytes,
-            max_log_chars=suite.max_log_chars,
-            cleanup_timeout_s=self.config.cleanup_timeout,
-        )
-
         try:
+            global_config = self.server_client.global_config_dict
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config)
+            provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            spec = sandbox_spec_from_mapping(
+                suite.sandbox_spec,
+                default_workdir=suite.workspace,
+                default_metadata=provider_metadata,
+                metadata={
+                    "nemo_gym_resources_server": "agent_skills",
+                    "check_suite_id": suite_id,
+                    "task_id": str(task_id or "unknown")[:63],
+                },
+            )
+            verifier = SandboxPatchVerifier(
+                provider=provider,
+                spec=spec,
+                workspace=spec.workdir or suite.workspace,
+                check_command=suite.check_command,
+                timeout_s=suite.timeout,
+                hidden_files=suite.hidden_files,
+                hidden_file_paths={
+                    relative_path: self._resolve_hidden_file_path(source_path)
+                    for relative_path, source_path in suite.hidden_file_paths.items()
+                },
+                check_cwd=suite.check_cwd,
+                user=suite.user,
+                check_user=suite.check_user,
+                max_patch_bytes=suite.max_patch_bytes,
+                max_log_chars=suite.max_log_chars,
+                cleanup_timeout_s=self.config.cleanup_timeout,
+            )
             async with self._semaphore:
                 result = await verifier.verify(
                     patch=body.workspace_patch,
@@ -185,14 +196,18 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
                 details={"reason": str(exc)},
             )
 
-        correctness = 1.0 if result.passed else 0.0
+        component_scores = self._parse_component_scores(result.stdout)
+        correctness = component_scores.get("correctness", float(result.passed))
+        task_success = float(result.passed and component_scores.get("task_success", 1.0) > 0)
         return AgentSkillsVerifyResponse(
             **response_data,
-            reward=correctness,
+            reward=task_success,
             task_id=task_id,
             check_suite_id=suite_id,
             status=result.status,
             correctness=correctness,
+            completeness=component_scores.get("completeness", 0.0),
+            convention_compliance=component_scores.get("convention_compliance", 0.0),
             verifier_base_revision=result.verifier_base_revision,
             verifier_elapsed_seconds=result.elapsed_seconds,
             details={
@@ -202,6 +217,30 @@ class AgentSkillsResourcesServer(SimpleResourcesServer):
                 "error_type": result.error_type,
             },
         )
+
+    @staticmethod
+    def _resolve_hidden_file_path(source_path: str) -> Path:
+        path = Path(source_path)
+        if path.is_absolute():
+            return path
+        cwd_path = Path.cwd() / path
+        return cwd_path if cwd_path.exists() else PARENT_DIR / path
+
+    @staticmethod
+    def _parse_component_scores(stdout: str) -> dict[str, float]:
+        for line in reversed(stdout.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("status") != "summary" or not isinstance(payload.get("scores"), dict):
+                continue
+            return {
+                str(name): float(value)
+                for name, value in payload["scores"].items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        return {}
 
 
 if __name__ == "__main__":

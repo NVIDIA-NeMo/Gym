@@ -60,6 +60,7 @@ class SandboxPatchVerifier:
         check_command: str,
         timeout_s: int | float,
         hidden_files: Mapping[str, str] | None = None,
+        hidden_file_paths: Mapping[str, Path] | None = None,
         check_cwd: str = "/tmp/nemo_gym_hidden_checks",
         user: str | int | None = "root",
         check_user: str | int | None = "nobody",
@@ -75,6 +76,16 @@ class SandboxPatchVerifier:
         self._hidden_files = {
             self._validate_hidden_path(path): contents for path, contents in (hidden_files or {}).items()
         }
+        self._hidden_file_paths = {
+            self._validate_hidden_path(path): Path(source) for path, source in (hidden_file_paths or {}).items()
+        }
+        duplicate_hidden_paths = set(self._hidden_files) & set(self._hidden_file_paths)
+        if duplicate_hidden_paths:
+            duplicates = ", ".join(sorted(duplicate_hidden_paths))
+            raise ValueError(f"Hidden check paths are defined more than once: {duplicates}")
+        missing_sources = [str(path) for path in self._hidden_file_paths.values() if not path.is_file()]
+        if missing_sources:
+            raise ValueError(f"Hidden check source files do not exist: {', '.join(missing_sources)}")
         self._check_cwd = self._validate_check_cwd(check_cwd, workspace)
         self._timeout_s = timeout_s
         self._user = user
@@ -189,9 +200,8 @@ class SandboxPatchVerifier:
         wrapper_result = await sandbox.exec(
             wrapped_command,
             cwd=self._check_cwd,
-            env={"NEMO_GYM_WORKSPACE": self._workspace},
             timeout_s=self._timeout_s,
-            user=self._check_user,
+            user=self._user,
         )
         if wrapper_result.error_type is not None:
             return wrapper_result, "", (wrapper_result.stderr or "")[: self._max_log_chars]
@@ -235,11 +245,19 @@ class SandboxPatchVerifier:
         status = shlex.quote(status_path)
         out_pipe = shlex.quote(stdout_pipe)
         err_pipe = shlex.quote(stderr_pipe)
+        check_command = f"NEMO_GYM_WORKSPACE={shlex.quote(self._workspace)} {self._check_command}"
+        if self._check_user is not None and self._check_user != self._user:
+            if isinstance(self._check_user, int):
+                user_arg = f'"$(getent passwd {self._check_user} | cut -d: -f1)"'
+            else:
+                user_arg = shlex.quote(self._check_user)
+            check_command = f"su -s /bin/sh {user_arg} -c {shlex.quote(check_command)}"
         return (
             f"rm -f {out_pipe} {err_pipe}; mkfifo {out_pipe} {err_pipe} || exit $?; "
+            f"chmod 622 {out_pipe} {err_pipe}; "
             f"({{ head -c {limit}; cat >/dev/null; }} < {out_pipe} > {stdout}) & out_reader=$!; "
             f"({{ head -c {limit}; cat >/dev/null; }} < {err_pipe} > {stderr}) & err_reader=$!; "
-            f"{{ {self._check_command}; }} > {out_pipe} 2> {err_pipe}; check_status=$?; "
+            f"{{ {check_command}; }} > {out_pipe} 2> {err_pipe}; check_status=$?; "
             "wait $out_reader; wait $err_reader; "
             f"rm -f {out_pipe} {err_pipe}; printf '%s' $check_status > {status}"
         )
@@ -277,13 +295,16 @@ class SandboxPatchVerifier:
         return (revision_result.stdout or "").strip()
 
     async def _upload_hidden_files(self, sandbox: AsyncSandbox) -> None:
-        if not self._hidden_files:
+        if not self._hidden_files and not self._hidden_file_paths:
             return
         with tempfile.TemporaryDirectory(prefix="nemo_gym_hidden_checks_") as temp_dir:
             root = Path(temp_dir)
             for index, (relative_path, contents) in enumerate(self._hidden_files.items()):
                 local_path = root / f"hidden-{index}"
                 local_path.write_text(contents)
+                remote_path = str(PurePosixPath(self._check_cwd) / relative_path)
+                await sandbox.upload(local_path, remote_path)
+            for relative_path, local_path in self._hidden_file_paths.items():
                 remote_path = str(PurePosixPath(self._check_cwd) / relative_path)
                 await sandbox.upload(local_path, remote_path)
 
