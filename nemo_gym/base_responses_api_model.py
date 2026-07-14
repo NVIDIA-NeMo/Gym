@@ -23,7 +23,7 @@ from abc import abstractmethod
 from pathlib import Path
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Union
 
 import orjson
 from fastapi import Body, FastAPI, Request, Response
@@ -112,9 +112,10 @@ class ModelCallRecord(BaseModel):
     response: Optional[NeMoGymResponse]  # Only present if the call succeeded
     error_response: Optional[str]  # Only present if the call failed
 
-    # Raw information that is always logged
-    raw_request: Dict[str, Any]
-    raw_response: Dict[str, Any]
+    # Raw information that is only logged if it differs from the standard request and response types
+    # e.g. if it is the /v1/responses route, this will be None
+    raw_request: Optional[Dict[str, Any]]
+    raw_response: Optional[Dict[str, Any]]
 
 
 class CaptureStore:
@@ -249,9 +250,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
             }
 
-            # Grab the request body. The body is only loaded once here.
-            req_body = await request.body()
-
             response = await call_next(request)
 
             # Grab the rollout_id here after the route handler has run to populate the path_params
@@ -263,9 +261,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request.state.model_call_record_dict["rollout_id"] = rollout_id
             request.state.model_call_record_dict["timestamp_end"] = perf_counter()
             request.state.model_call_record_dict["status_code"] = response.status_code
-            # TODO @bxyu-nvidia: These orjson.loads can be offloaded to the background task to not block the response
-            request.state.model_call_record_dict["raw_request"] = orjson.loads(req_body)
-            request.state.model_call_record_dict["raw_response"] = orjson.loads(response.body)
 
             # TODO @bxyu-nvidia
             # if isinstance(response, StreamingResponse):
@@ -305,7 +300,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    async def messages(self, request: Request, body: dict = Body()):
+    async def messages(self, request: Request, body: dict = Body()) -> Union[StreamingResponse, Dict[str, Any]]:
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
 
         Translates the inbound Anthropic Messages request to the Responses API, delegates to this
@@ -346,6 +341,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         request.state.model_call_record_dict["request"] = (
             _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body_dict)
         )
+        request.state.model_call_record_dict["raw_request"] = body_dict
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
@@ -353,9 +349,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request.state.model_call_record_dict["response"] = _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_response(
                 body, response
             )
+            request.state.model_call_record_dict["raw_response"] = response.model_dump()
             request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
             request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["raw_response"] = None
             request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
@@ -369,14 +367,19 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Directly use the input body since it's already in Responses format
         request.state.model_call_record_dict["request"] = body
+        # The raw request is identical to the response, so we dedupe
+        request.state.model_call_record_dict["raw_request"] = None
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self._invoke_responses(request, body)
             request.state.model_call_record_dict["response"] = response
+            # The raw response is identical to the response, so we dedupe
+            request.state.model_call_record_dict["raw_response"] = None
             request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
             request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["raw_response"] = None
             request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
@@ -388,6 +391,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         request.state.model_call_record_dict["route"] = "/v1/messages"
 
         request.state.model_call_record_dict["request"] = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        request.state.model_call_record_dict["raw_request"] = body
 
         assert not request.state.model_call_record_dict["request"].stream, (
             "Model call capture for /v1/messages to /v1/responses converstion with streaming is currently not supported!"
@@ -401,9 +405,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 request.state.model_call_record_dict["request"],
                 model=request.state.model_call_record_dict["request"].model,
             )
+            request.state.model_call_record_dict["raw_response"] = response
             request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
             request.state.model_call_record_dict["response"] = None
+            request.state.model_call_record_dict["raw_response"] = None
             request.state.model_call_record_dict["error_response"] = format_exc()
 
             raise e
