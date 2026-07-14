@@ -1,0 +1,32 @@
+{
+  "n": 3,
+  "overall": {
+    "reward": 0.4219,
+    "rougeL": 0.4219,
+    "rouge1": 0.4846,
+    "rouge2": 0.1872,
+    "rougeLsum": 0.4219,
+    "bleu": 0.095,
+    "meteor": 0.3641
+  },
+  "by_dimension": {
+    "multi_turn": {
+      "reward": 0.4615,
+      "rougeL": 0.4615,
+      "rouge1": 0.4615,
+      "rouge2": 0.1818,
+      "rougeLsum": 0.4615,
+      "bleu": 0.1313,
+      "meteor": 0.1961
+    },
+    "on_scene_dialogue": {
+      "reward": 0.4022,
+      "rougeL": 0.4022,
+      "rouge1": 0.4962,
+      "rouge2": 0.1899,
+      "rougeLsum": 0.4022,
+      "bleu": 0.0768,
+      "meteor": 0.4481
+    }
+  }
+}
