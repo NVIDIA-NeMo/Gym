@@ -44,15 +44,18 @@ sandbox:
       retry_max_delay_s: 45.0
       command_retries: 0
       close_timeout_s: 30
-    # Job attribution merged into every sandbox's metadata (Kubernetes labels on the
-    # sandbox), so cluster operators can attribute sandboxes to a team/user/workload
-    # (e.g. filter the OpenSandbox list API by `team=...`). Unset fields auto-detect
+    # Job attribution merged into every sandbox's metadata. OpenSandbox propagates
+    # metadata as Kubernetes labels on the sandbox resources, so sandboxes are
+    # attributable both via the OpenSandbox list API and at the cluster level, e.g.
+    # `kubectl get pods -l nemo-gym.nvidia.com/team=my-team`. Unset fields auto-detect
     # from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD, then Slurm job env vars
     # (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME), then the OS login name
     # for `user`; unresolvable fields are omitted. Explicit sandbox_spec.metadata and
     # default_metadata keys always win over attribution keys.
     attribution:
       enabled: true
+      # Kubernetes prefixed-key namespace for the injected label keys; "" for bare keys.
+      key_prefix: nemo-gym.nvidia.com/
       # team: my-team
       # user: my-user
       # workload: my-benchmark
