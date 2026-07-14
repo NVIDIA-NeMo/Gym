@@ -57,12 +57,10 @@ Concurrent collection jobs with overlapping indices must use separate capture di
 ```python
 from nemo_gym.base_responses_api_model import (
     CaptureStore,
-    aggregate_model_call_metrics,
 )
 
 store = CaptureStore("/data/model-calls")
 calls = store.read(rollout_id)
-totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It

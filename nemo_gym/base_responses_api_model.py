@@ -424,22 +424,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return response
 
 
-# --- Observability records derived from captured exchanges ---
-
-
-def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
-    """Aggregate token and latency values from model-call records."""
-
-    return {
-        "num_calls": len(calls),
-    }
-
-
-def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
-    """Aggregate model-call metrics for one rollout id."""
-    return aggregate_model_call_records(store.read(rollout_id))
-
-
 # --- Run-level capture helpers (rollout-collection side) ---
 
 
@@ -489,7 +473,6 @@ def merge_model_call_capture_into_record(
     exclude = None if include_payloads else {"request", "response"}
     record["ng_model_call_capture"] = {
         "rollout_id": rollout_id,
-        "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
 
