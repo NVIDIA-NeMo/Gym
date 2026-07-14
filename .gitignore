@@ -237,3 +237,9 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Converted benchmark datasets + eval artifacts written next to them at runtime
+# (*_prepare.jsonl / *_metrics.json). Regenerable via datasets/convert_pivotrl_to_gym.py.
+# Code in datasets/ (converter, tests, mercor_collection.yaml) stays tracked.
+datasets/*.jsonl
+datasets/*_metrics.json
