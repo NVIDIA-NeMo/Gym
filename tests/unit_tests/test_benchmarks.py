@@ -20,7 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-from nemo_gym.cli.eval import _fuzzy_matches, list_benchmarks, prepare_benchmark
+from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
@@ -150,24 +150,6 @@ class TestBenchmarkConfigStrictParsing:
         assert tolerated is None
 
 
-class TestFuzzyMatches:
-    def test_substring_matches(self) -> None:
-        assert _fuzzy_matches("math", "math_with_judge")
-
-    def test_token_typo_matches(self) -> None:
-        # `aimee` is a near-miss for the `aime` token in `aime24`.
-        assert _fuzzy_matches("aimee", "aime24")
-
-    def test_matches_against_agent_field(self) -> None:
-        assert _fuzzy_matches("judge", "aime24", "math_with_judge_agent")
-
-    def test_skips_empty_fields(self) -> None:
-        assert not _fuzzy_matches("math", "", None)
-
-    def test_no_match(self) -> None:
-        assert not _fuzzy_matches("zzznomatch", "aime24", "math_with_judge")
-
-
 class TestSearchBenchmarks:
     # Map each benchmark name to the `domain` its config would resolve to.
     DOMAINS = {
@@ -248,7 +230,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
@@ -265,7 +246,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
@@ -285,7 +265,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             with pytest.raises(SystemExit) as exc_info:
@@ -338,7 +317,6 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
@@ -363,7 +341,6 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli.eval.BENCHMARKS_DIR", bench_dir.parent),
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()

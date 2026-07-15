@@ -661,11 +661,26 @@ class TestJsonFlag:
 
 
 class TestSearch:
-    def test_search_routes_to_list_with_query(self, monkeypatch: MonkeyPatch) -> None:
-        # `gym search <query>` reuses the benchmarks listing, passing the query as the `query` config key.
+    def test_search_query_only_defaults_to_benchmarks(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
         assert target == "nemo_gym.cli.eval:list_benchmarks"
         assert overrides == ["+query=math"]
+
+    @pytest.mark.parametrize(
+        "component_type, expected_target",
+        [
+            ("benchmarks", "nemo_gym.cli.eval:list_benchmarks"),
+            ("environments", "nemo_gym.cli.env:list_environments"),
+            ("agents", "nemo_gym.cli.agents:list_agents"),
+            ("models", "nemo_gym.cli.models:list_models"),
+        ],
+    )
+    def test_search_type_routes_to_that_listing(self, monkeypatch, component_type, expected_target) -> None:
+        # `gym search <type> <query>` runs that type's listing, filtered by the query.
+        target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
+        assert target == expected_target
+        assert overrides == ["+query=swe"]
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])

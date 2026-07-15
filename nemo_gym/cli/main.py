@@ -144,11 +144,34 @@ RESOURCES_SERVER = Flag(
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
 
-# Positional search query for `gym search`; surfaced to the listing command as the `query` config key.
-QUERY = Flag(
-    register=lambda p: p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
+# `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
+# chosen listing command as the reserved `query` config key; the type only picks which command to run
+# (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
+_SEARCHABLE_TYPES = {
+    "benchmarks": "nemo_gym.cli.eval:list_benchmarks",
+    "environments": "nemo_gym.cli.env:list_environments",
+    "agents": "nemo_gym.cli.agents:list_agents",
+    "models": "nemo_gym.cli.models:list_models",
+}
+
+SEARCH_TERMS = Flag(
+    register=lambda p: (
+        p.add_argument(
+            "component_type",
+            nargs="?",
+            choices=list(_SEARCHABLE_TYPES),
+            help="Component type to search (default: benchmarks).",
+        ),
+        p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
+    ),
     translate_to_hydra=lambda args: [f"+query={args.query}"] if getattr(args, "query", None) else [],
 )
+
+
+def _search(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default benchmarks),
+    which filters itself to the `query` config key already in `overrides`."""
+    dispatch(_SEARCHABLE_TYPES[getattr(args, "component_type", None) or "benchmarks"], overrides)
 
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
@@ -340,9 +363,9 @@ COMMANDS = {
         flags=(JSON, DISCOVERY_SEARCH_DIR),
     ),
     "search": Command(
-        target="nemo_gym.cli.eval:list_benchmarks",
-        summary="Search available components (currently benchmarks) by name; like `list` filtered to a query.",
-        flags=(QUERY, JSON, DISCOVERY_SEARCH_DIR),
+        target=_search,
+        summary="Search a component type (default benchmarks) by name; like `list` filtered to a query.",
+        flags=(SEARCH_TERMS, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "dataset upload": Command(
         target=_dataset_upload,

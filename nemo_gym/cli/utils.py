@@ -12,6 +12,40 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import difflib
+from typing import Optional
+
+
+def print_no_matches(component_type: str, query: Optional[str]) -> None:
+    """Print the standard 'nothing to show' message for a `gym list`/`gym search` command.
+
+    ``component_type`` is the plural noun (``benchmarks``, ``environments``, ...). Keeps the message
+    and styling identical across every listing.
+    """
+    import rich
+
+    if query:
+        rich.print(f"[yellow]No {component_type} match '{query}'.[/yellow]")
+    else:
+        rich.print(f"[yellow]No {component_type} found.[/yellow]")
+
+
+def fuzzy_matches(query: str, *fields: str) -> bool:
+    """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware).
+
+    The shared matcher behind `gym search <type> <query>` across every component type.
+    """
+    needle = query.lower()
+    for field in fields:
+        if not field:
+            continue
+        haystack = field.lower()
+        if needle in haystack:
+            return True
+        tokens = haystack.replace("_", " ").replace("-", " ").split()
+        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
+            return True
+    return False
 
 
 def print_rich_table(table) -> None:
