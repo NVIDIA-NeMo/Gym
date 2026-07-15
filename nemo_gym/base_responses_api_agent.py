@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import Body, FastAPI
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -62,7 +63,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
-    def resolve_model_call_path(self, base_url_or_path: str, body: Any) -> str:
+    def resolve_model_call_path(self, base_url_or_path: str, body: BaseModel | Mapping[str, Any] | None) -> str:
         if not self._capture_config.should_capture_model_calls:
             return base_url_or_path
 
