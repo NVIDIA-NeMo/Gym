@@ -22,7 +22,7 @@ they can share it without depending on each other. Reads configs only; never sta
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError
@@ -74,6 +74,21 @@ def merge_by_name(per_root: Iterable[Dict[str, _T]]) -> Dict[str, _T]:
         for name, entry in entries.items():
             merged.setdefault(name, entry)
     return merged
+
+
+def discover_components(
+    subdir: str,
+    dir_scanning_fn: Callable[[Path], Dict[str, _T]],
+    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
+) -> Dict[str, _T]:
+    """Run ``dir_scanning_fn`` on ``subdir`` of every :func:`component_search_roots` root and merge the results.
+
+    The shared body of ``discover_environments``/``discover_agents``/``discover_models``/
+    ``discover_benchmarks``: each passes its ``<type>/`` subdir and a single-directory scan function, and
+    gets user-shadows-built-in merging (via :func:`merge_by_name`) for free. ``search_dirs`` is one dir or
+    a list.
+    """
+    return merge_by_name(dir_scanning_fn(root / subdir) for root in component_search_roots(search_dirs))
 
 
 # Fills unset `???`/`${...}` values during listing: they reference runtime-only values (API keys,

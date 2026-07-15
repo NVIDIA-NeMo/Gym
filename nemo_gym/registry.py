@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import component_search_roots, merge_by_name, read_config_metadata
+from nemo_gym.discovery import discover_components, read_config_metadata
 
 
 ENVIRONMENTS_SUBDIR = "environments"
@@ -84,6 +84,4 @@ def discover_environments(
     (``search_dirs`` + cwd + built-ins), merged so user environments shadow same-named built-ins.
     ``search_dirs`` is one dir or a list.
     """
-    return merge_by_name(
-        _discover_environments_in_dir(root / ENVIRONMENTS_SUBDIR) for root in component_search_roots(search_dirs)
-    )
+    return discover_components(ENVIRONMENTS_SUBDIR, _discover_environments_in_dir, search_dirs)

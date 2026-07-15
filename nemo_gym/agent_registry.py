@@ -44,7 +44,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import component_search_roots, merge_by_name
+from nemo_gym.discovery import discover_components
 
 
 AGENTS_SUBDIR = "responses_api_agents"
@@ -171,4 +171,4 @@ def discover_agents(
     root (``search_dirs`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
     ``search_dirs`` is one dir or a list.
     """
-    return merge_by_name(_discover_agents_in_dir(root / AGENTS_SUBDIR) for root in component_search_roots(search_dirs))
+    return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir, search_dirs)

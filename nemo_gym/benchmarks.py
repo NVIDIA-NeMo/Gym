@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BenchmarkDatasetConfig
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, component_search_roots, merge_by_name
+from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
@@ -138,6 +138,11 @@ def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     return sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
 
 
+def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
+    return _load_benchmarks_from_config_paths(_benchmark_config_paths(benchmarks_dir))
+
+
 def discover_benchmarks(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
 
@@ -145,10 +150,7 @@ def discover_benchmarks(search_dirs: Optional[Union[Path, Sequence[Path]]] = Non
     (``search_dirs`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
     ``search_dirs`` is one dir or a list.
     """
-    return merge_by_name(
-        _load_benchmarks_from_config_paths(_benchmark_config_paths(root / BENCHMARKS_SUBDIR))
-        for root in component_search_roots(search_dirs)
-    )
+    return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir, search_dirs)
 
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.
