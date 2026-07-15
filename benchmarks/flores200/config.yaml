@@ -1,0 +1,19 @@
+config_paths:
+  - resources_servers/wmt_translation/configs/wmt_translation.yaml
+
+flores200_wmt_translation_resources_server:
+  _inherit_from: wmt_translation
+
+flores200_wmt_translation_simple_agent:
+  _inherit_from: wmt_translation_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: flores200_wmt_translation_resources_server
+      datasets:
+      - name: flores200
+        type: benchmark
+        jsonl_fpath: benchmarks/flores200/data/flores200_devtest_benchmark.jsonl
+        prompt_config: benchmarks/flores200/prompts/default.yaml
+        prepare_script: benchmarks/flores200/prepare.py
+        license: CC-BY-SA 4.0

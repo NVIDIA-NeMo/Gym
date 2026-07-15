@@ -5,6 +5,6 @@ jinja2>=3.1
 python-docx>=1.1
 python-pptx>=1.0
 openpyxl>=3.1
-pdfminer.six>=20240706
+pdfminer.six>=20251230
 trafilatura>=1.12
 PyMuPDF>=1.24

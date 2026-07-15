@@ -53,6 +53,12 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Generate library reference
+        env:
+          FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}
+        working-directory: ./fern
+        run: npm run generate:library
+
       - name: Publish Docs
         env:
           FERN_TOKEN: ${{ secrets.DOCS_FERN_TOKEN }}

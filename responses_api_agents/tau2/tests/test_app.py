@@ -123,6 +123,7 @@ class TestApp:
                 "created": 0,
                 "model": "dummy_model",
                 "object": "chat.completion",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             },
         )
 
@@ -145,6 +146,7 @@ class TestApp:
             d["result"].pop("agent_messages", None)
             d["result"].pop("agent_steps", None)
             d["result"].pop("max_agent_steps", None)
+            d["result"].pop("num_steps", None)
             d["result"].pop("duration")
             d["result"].pop("end_time")
             d["result"].pop("id")

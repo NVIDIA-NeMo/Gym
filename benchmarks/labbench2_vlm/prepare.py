@@ -16,8 +16,8 @@
 
 Wraps the existing per-tag prepare logic in
 ``resources_servers/labbench2_vlm/prepare_data.py`` and writes a single
-combined Gym benchmark JSONL covering all four subtasks
-(figqa2-img, figqa2-pdf, tableqa2-img, tableqa2-pdf).
+combined Gym benchmark JSONL covering all subtasks
+(figqa2-img, figqa2-pdf, tableqa2-img, tableqa2-pdf, protocolqa2).
 
 Media files are downloaded into ``resources_servers/labbench2_vlm/data/media/``
 so they resolve against the agent's ``media_base_dir`` (inherited from
@@ -42,7 +42,7 @@ MEDIA_DIR = RS_DATA_DIR / "media"
 
 
 def prepare() -> Path:
-    """Download media + questions and combine all four tags into one JSONL."""
+    """Download media + questions and combine all tags into one JSONL."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 

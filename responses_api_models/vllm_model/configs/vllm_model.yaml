@@ -10,3 +10,4 @@ policy_model:
       uses_interleaved_reasoning: true
       chat_template_kwargs: null
       extra_body: null
+      default_headers: {}

@@ -21,15 +21,63 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, cast
+
+from stirrup.clients.utils import to_openai_messages
+from stirrup.core.models import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
 
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionMessageParam,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
+
+
+def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Return provider-valid history for OpenAI-compatible model calls.
+
+    NeMoUserMessage intentionally presents tool results to the agent as user
+    turns during normal execution. OpenAI-compatible chat completions APIs,
+    however, require assistant messages with tool_calls to be followed by
+    matching tool-role messages, so provider-bound serialization must restore
+    those tool results first.
+    """
+    pending_tool_call_ids: set[str] = set()
+    restored: list[ChatMessage] = []
+
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
+            restored.append(message)
+            continue
+
+        if isinstance(message, NeMoUserMessage) and message.tool_call_id in pending_tool_call_ids:
+            restored.append(
+                ToolMessage(
+                    content=message.content,
+                    name=message.name,
+                    success=message.success,
+                    args_was_valid=message.args_was_valid,
+                    tool_call_id=message.tool_call_id,
+                    tool_start_time=message.tool_start_time,
+                    tool_end_time=message.tool_end_time,
+                )
+            )
+            pending_tool_call_ids.discard(message.tool_call_id)
+            continue
+
+        restored.append(message)
+
+    return restored
+
+
+def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChatCompletionMessageParam]:
+    """Serialize Stirrup history for an OpenAI-compatible provider."""
+    return cast(list[NeMoGymChatCompletionMessageParam], to_openai_messages(restore_tool_messages_for_model(messages)))
 
 
 def convert_stirrup_history_to_output_items(
@@ -46,9 +94,7 @@ def convert_stirrup_history_to_output_items(
 
     for turn in history:
         for msg in turn:
-            msg_type = type(msg).__name__
-
-            if msg_type == "SystemMessage":
+            if isinstance(msg, SystemMessage):
                 input_items.append(
                     NeMoGymEasyInputMessage(
                         role="system",
@@ -56,7 +102,17 @@ def convert_stirrup_history_to_output_items(
                     )
                 )
 
-            elif msg_type == "UserMessage":
+            elif isinstance(msg, NeMoUserMessage) and msg.tool_call_id:
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=msg.tool_call_id,
+                        output=content,
+                        type="function_call_output",
+                    )
+                )
+
+            elif isinstance(msg, UserMessage):
                 content_text = ""
                 if isinstance(msg.content, str):
                     content_text = msg.content
@@ -67,7 +123,7 @@ def convert_stirrup_history_to_output_items(
 
                 input_items.append(NeMoGymEasyInputMessage(role="user", content=content_text))
 
-            elif msg_type == "AssistantMessage":
+            elif isinstance(msg, AssistantMessage):
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(
@@ -88,7 +144,11 @@ def convert_stirrup_history_to_output_items(
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        call_id = tc.id if hasattr(tc, "id") else f"call-{uuid.uuid4().hex[:8]}"
+                        call_id = (
+                            getattr(tc, "tool_call_id", None)
+                            or getattr(tc, "id", None)
+                            or f"call-{uuid.uuid4().hex[:8]}"
+                        )
                         output_items.append(
                             NeMoGymResponseFunctionToolCall(
                                 id=f"fc-{uuid.uuid4().hex[:8]}",
@@ -100,7 +160,7 @@ def convert_stirrup_history_to_output_items(
                             )
                         )
 
-            elif msg_type == "ToolMessage":
+            elif isinstance(msg, ToolMessage):
                 call_id = msg.tool_call_id if hasattr(msg, "tool_call_id") else f"call-{uuid.uuid4().hex[:8]}"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
@@ -127,7 +187,7 @@ def extract_deliverable_text(history: List[List[Any]], finish_params: Any) -> st
 
     for turn in reversed(history):
         for msg in reversed(turn):
-            if type(msg).__name__ == "AssistantMessage":
+            if isinstance(msg, AssistantMessage):
                 content = msg.content if isinstance(msg.content, str) else ""
                 if content and content not in parts:
                     parts.append(content)

@@ -15,13 +15,14 @@
 """
 labbench2 VLM benchmark resource server.
 
-Supports figqa2-img, figqa2-pdf, tableqa2-img, tableqa2-pdf.
+Supports figqa2-img, figqa2-pdf, tableqa2-img, tableqa2-pdf, and protocolqa2.
 
 JSONL rows store lightweight media references (``verifier_metadata.media_dir``)
 instead of inline base64.  The custom ``labbench2_vlm_agent`` embeds images/PDFs
-at rollout time via ``embed_media_into_row`` before sending to the model.
+(or extracted PDF text) at rollout time via ``embed_media_into_row`` before
+sending to the model.
 verify() scores the model's free-text answer against the GOLD ideal using an
-LLM judge.
+LLM judge. protocolqa2 rows may include ``reference_passage`` for the judge prompt.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ class LabbenchVLMConfig(BaseResourcesServerConfig):
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
     judge_prompt_template_fpath: str = "prompt_templates/judge.txt"
+    judge_prompt_template_protocol_fpath: str = "prompt_templates/judge_protocol.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
 
@@ -151,6 +153,8 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
         with open(self.config.judge_prompt_template_fpath) as f:
             self._judge_prompt = f.read().strip()
+        with open(self.config.judge_prompt_template_protocol_fpath) as f:
+            self._judge_prompt_protocol = f.read().strip()
 
     async def verify(self, body: LabbenchVLMVerifyRequest) -> LabbenchVLMVerifyResponse:
         meta = body.verifier_metadata or {}
@@ -158,10 +162,17 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         question = _extract_question(body.responses_create_params)
         generated = _extract_generated_answer(body.response)
 
+        tag = str(meta.get("tag", ""))
+        is_protocol = tag.startswith("protocolqa2")
+        reference_passage = str(meta.get("reference_passage", ""))
+
         is_equal, evaluation = await self._judge(
             question=question,
             expected_answer=ideal,
             generated_answer=generated,
+            prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
+            include_reference_passage=is_protocol,
+            reference_passage=reference_passage,
         )
 
         reward = 1.0 if is_equal else 0.0
@@ -172,14 +183,29 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         )
 
     async def _judge(
-        self, *, question: str, expected_answer: str, generated_answer: str
+        self,
+        *,
+        question: str,
+        expected_answer: str,
+        generated_answer: str,
+        prompt_template: str,
+        include_reference_passage: bool = False,
+        reference_passage: str = "",
     ) -> tuple[bool, JudgeEvaluation]:
         cfg = self.config
-        user_prompt = self._judge_prompt.format(
-            question=question,
-            expected_answer=expected_answer,
-            generated_answer=generated_answer,
-        )
+        if include_reference_passage:
+            user_prompt = prompt_template.format(
+                question=question,
+                expected_answer=expected_answer,
+                generated_answer=generated_answer,
+                reference_passage=reference_passage,
+            )
+        else:
+            user_prompt = prompt_template.format(
+                question=question,
+                expected_answer=expected_answer,
+                generated_answer=generated_answer,
+            )
 
         params = cfg.judge_responses_create_params.model_copy(deep=True)
         params.input = [NeMoGymEasyInputMessage(role="user", content=user_prompt)]

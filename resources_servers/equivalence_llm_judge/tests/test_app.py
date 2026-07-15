@@ -186,6 +186,39 @@ class TestApp:
         res = await rs.verify(req)
         assert res.reward == approx(0.0)
 
+    async def test_missing_assistant_text_uses_configured_failure_message(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        cfg = config.model_copy(deep=True)
+        cfg.msg_extraction_failure = "[CUSTOM EXTRACTION FAILURE]"
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("[[A!=B]]")))
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="r",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            expected_answer="x",
+        )
+
+        res = await rs.verify(req)
+
+        judge_prompt = res.judge_evaluations[0].responses_create_params.input[-1].content
+        assert cfg.msg_extraction_failure in judge_prompt
+        assert res.reward == approx(0.0)
+
     async def test_swap_fails_uses_configured_reward(self, config: LLMJudgeResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         cfg = config.model_copy(deep=True)

@@ -22,6 +22,7 @@ from resources_servers.asr_with_pc.app import (
     calculate_per,
     evaluate_asr,
     evaluate_asr_pc,
+    evaluate_hallucination,
     extract_punctuation,
     normalize_whitespace,
     preprocess_asr_text,
@@ -357,3 +358,284 @@ class TestAggregateMetrics:
         full_score = ASRWithPCResourcesServer._score_fn({"is_correct": True, "per": 0.0, "pred_text": "hello"})
         assert empty_score["no_answer"] == 1.0
         assert full_score["no_answer"] == 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# evaluate_hallucination tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestEvaluateHallucination:
+    def test_normal_speech_rate_not_hallucinating(self) -> None:
+        # 50 chars over 5 seconds = 600 chars/min — well below 1500 threshold.
+        result = evaluate_hallucination("anything", "x" * 50, audio_duration=5.0)
+        assert result["hallucination_rate"] == 0.0
+        assert result["is_correct"] is True
+        assert result["char_rate"] == pytest.approx(600.0)
+
+    def test_excessive_char_rate_flagged_as_hallucination(self) -> None:
+        # 200 chars over 5 seconds = 2400 chars/min — above 1500 threshold.
+        result = evaluate_hallucination("", "x" * 200, audio_duration=5.0)
+        assert result["hallucination_rate"] == 1.0
+        assert result["is_correct"] is False
+        assert result["char_rate"] == pytest.approx(2400.0)
+
+    def test_missing_duration_returns_safe_default(self) -> None:
+        result = evaluate_hallucination("ref", "hyp", audio_duration=None)
+        assert result["hallucination_rate"] == 0.0
+        assert result["char_rate"] == 0.0
+        assert result["is_correct"] is True
+        assert result["error"] == "missing_audio_duration"
+
+    def test_zero_duration_returns_safe_default(self) -> None:
+        result = evaluate_hallucination("ref", "hyp", audio_duration=0.0)
+        assert result["error"] == "missing_audio_duration"
+        assert result["is_correct"] is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hallucination + ASR_LEADERBOARD server-level dispatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestHallucinationDispatch:
+    async def test_hallucination_short_hyp_is_correct(self) -> None:
+        """Empty expected_answer + 50 chars / 5s → is_correct, hallucination_rate=0."""
+        server = _make_server(task_type="Hallucination")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("x" * 50),
+            expected_answer="",
+            audio_duration=5.0,
+        )
+        result = await server.verify(body)
+        assert result.reward == 1.0
+        assert result.is_correct is True
+        assert result.hallucination_rate == 0.0
+        assert result.char_rate == pytest.approx(600.0)
+
+    async def test_hallucination_long_hyp_is_flagged(self) -> None:
+        """200 chars / 5s = 2400 chars/min → hallucination_rate=1.0, is_correct=False."""
+        server = _make_server(task_type="Hallucination")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("x" * 200),
+            expected_answer="",
+            audio_duration=5.0,
+        )
+        result = await server.verify(body)
+        assert result.reward == 0.0
+        assert result.is_correct is False
+        assert result.hallucination_rate == 1.0
+
+    async def test_hallucination_missing_duration_is_correct(self) -> None:
+        server = _make_server(task_type="Hallucination")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("x" * 200),
+            expected_answer="",
+            audio_duration=None,
+        )
+        result = await server.verify(body)
+        # Missing duration falls back to is_correct=True.
+        assert result.is_correct is True
+        assert result.hallucination_rate == 0.0
+
+
+class TestAsrLeaderboardDispatch:
+    async def test_primary_wer_matches_evaluate_asr(self) -> None:
+        """Primary WER against expected_answer mirrors ``evaluate_asr``."""
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("one hundred dollars"),
+            expected_answer="one hundred dollars",
+            reference_fields=["text_tn", "text_itn"],
+            text_tn="$100",
+            text_itn="one hundred dollars",
+        )
+        result = await server.verify(body)
+        # Primary metric: hyp matches expected_answer → wer == 0.
+        primary = evaluate_asr("one hundred dollars", "one hundred dollars")
+        assert result.wer == pytest.approx(primary["wer"])
+        assert result.is_correct is True
+        # Per-reference fields surfaced via ConfigDict(extra="allow").
+        dump = result.model_dump()
+        assert "wer_tn" in dump
+        assert "wer_itn" in dump
+        assert "is_correct_tn" in dump
+        assert "is_correct_itn" in dump
+        # text_itn matches the hypothesis exactly → wer_itn == 0, is_correct_itn == True.
+        assert dump["wer_itn"] == pytest.approx(0.0)
+        assert dump["is_correct_itn"] is True
+        # text_tn ("$100") normalizes equivalently to "one hundred dollars" via
+        # whisper-normalizer numeric expansion → also high agreement.
+        assert dump["is_correct_tn"] is True
+
+    async def test_high_wer_reference_marked_incorrect(self) -> None:
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("totally unrelated transcription"),
+            expected_answer="hello world",
+            reference_fields=["text_alt"],
+            text_alt="hello world",
+        )
+        result = await server.verify(body)
+        dump = result.model_dump()
+        # ``text_alt`` has the ``text_`` prefix → suffix is ``alt``.
+        assert "wer_alt" in dump
+        assert dump["wer_alt"] > 0.0
+        assert dump["is_correct_alt"] is False
+
+    async def test_non_text_prefixed_field_uses_full_name(self) -> None:
+        """Field names without the 'text_' prefix pass through unchanged as the suffix."""
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("hello world"),
+            expected_answer="hello world",
+            reference_fields=["alternate"],
+            alternate="hello world",
+        )
+        result = await server.verify(body)
+        dump = result.model_dump()
+        # No "text_" prefix → suffix is the full field name.
+        assert "wer_alternate" in dump
+        assert dump["is_correct_alternate"] is True
+
+    async def test_missing_reference_field_raises(self) -> None:
+        """A reference_fields entry that isn't on the request must raise."""
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("hi"),
+            expected_answer="hi",
+            reference_fields=["text_missing"],
+        )
+        with pytest.raises(ValueError, match="reference_fields entry 'text_missing'"):
+            await server.verify(body)
+
+    async def test_no_reference_fields_runs_primary_only(self) -> None:
+        """ASR_LEADERBOARD without reference_fields should still produce primary WER."""
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        body = ASRWithPCVerifyRequest(
+            responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
+            response=_make_response("hello world"),
+            expected_answer="hello world",
+        )
+        result = await server.verify(body)
+        assert result.wer == 0.0
+        assert result.is_correct is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mixed-task_type aggregation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestMixedTaskTypeAggregation:
+    def test_hallucination_rate_aggregates_as_mean(self) -> None:
+        """Hallucination rollouts → ``hallucination_rate`` aggregates as sample mean."""
+        server = _make_server(task_type="Hallucination")
+        # Three tasks: rates 1.0, 0.0, 0.0 → mean 1/3 ≈ 33.33% (after *100).
+        rollouts = [
+            [
+                {
+                    "is_correct": False,
+                    "per": 0.0,
+                    "pred_text": "long",
+                    "hallucination_rate": 1.0,
+                    "text": "",
+                    "wer_c": None,
+                    "wer_pc": None,
+                }
+            ],
+            [
+                {
+                    "is_correct": True,
+                    "per": 0.0,
+                    "pred_text": "short",
+                    "hallucination_rate": 0.0,
+                    "text": "",
+                    "wer_c": None,
+                    "wer_pc": None,
+                }
+            ],
+            [
+                {
+                    "is_correct": True,
+                    "per": 0.0,
+                    "pred_text": "short",
+                    "hallucination_rate": 0.0,
+                    "text": "",
+                    "wer_c": None,
+                    "wer_pc": None,
+                }
+            ],
+        ]
+        metrics = server.compute_metrics(rollouts)
+        # compute_pass_majority_metrics emits hallucination_rate via _score_fn:
+        # mean across tasks @ k=1 → (1.0 + 0.0 + 0.0)/3 = 0.3333..., then *100.
+        assert metrics["pass@1[avg-of-1]/hallucination_rate"] == pytest.approx(100.0 / 3.0)
+
+    def test_per_reference_wer_corpus_level(self) -> None:
+        """ASR_LEADERBOARD per-reference WERs aggregate corpus-level via jiwer."""
+        server = _make_server(task_type="ASR_LEADERBOARD")
+        # Two tasks, one rollout each. Both predict "hello world" exactly.
+        # text_tn matches one row, mismatches the other.
+        rollouts = [
+            [
+                {
+                    "is_correct": True,
+                    "per": 0.0,
+                    "wer_c": None,
+                    "wer_pc": None,
+                    "text": "hello world",
+                    "pred_text": "hello world",
+                    "text_tn": "hello world",
+                    "wer_tn": 0.0,
+                    "is_correct_tn": True,
+                }
+            ],
+            [
+                {
+                    "is_correct": True,
+                    "per": 0.0,
+                    "wer_c": None,
+                    "wer_pc": None,
+                    "text": "hello world",
+                    "pred_text": "hello world",
+                    "text_tn": "totally different words",
+                    "wer_tn": 1.0,
+                    "is_correct_tn": False,
+                }
+            ],
+        ]
+        metrics = server.compute_metrics(rollouts)
+        # Corpus WER for the canonical "text"/"pred_text" — both perfect → 0.
+        assert metrics["corpus_wer@k=1"] == pytest.approx(0.0)
+        # Per-reference corpus WER built from text_tn → has nontrivial WER.
+        assert "wer_tn@k=1" in metrics
+        assert metrics["wer_tn@k=1"] > 0.0
+
+    def test_get_key_metrics_surfaces_per_reference_wer(self) -> None:
+        """``wer_<suffix>`` from compute_metrics flows up under headline names."""
+        server = _make_server()
+        agent_metrics = {
+            "pass@1[avg-of-2]/accuracy": 80.0,
+            "pass@2/accuracy": 85.0,
+            "corpus_wer@k=2": 12.0,
+            "wer_c@k=2": 9.0,
+            "wer_pc@k=2": 14.0,
+            "per@k=2": 22.0,
+            "wer_tn@k=2": 15.0,
+            "wer_itn@k=2": 11.0,
+        }
+        key = server.get_key_metrics(agent_metrics)
+        assert key["wer"] == 12.0
+        assert key["wer_tn"] == 15.0
+        assert key["wer_itn"] == 11.0
+        # Reserved suffixes (c, pc) stay under their canonical headline names.
+        assert key["wer_c"] == 9.0
+        assert key["wer_pc"] == 14.0

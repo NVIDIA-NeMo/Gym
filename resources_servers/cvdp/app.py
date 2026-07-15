@@ -61,6 +61,8 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent Apptainer jobs
     sif_cache_dir: str = ""  # Defaults to ~/.cache/nemo-gym/sif
+    harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
+    container_tmp_bind_path: str = ""  # If set, redirect in-container temp (e.g. /tmp) to per-rollout host storage
 
 
 # ----------------------------
@@ -325,6 +327,26 @@ def _build_env_args(environment: Any, dot_env: Optional[Dict[str, str]] = None) 
     return env_args
 
 
+def _build_runtime_tmp_env_args(container_tmp_path: str) -> List[str]:
+    """
+    Force simulator temp and lock files into writable per-rollout container storage.
+    """
+    runtime_env = {
+        "TMPDIR": container_tmp_path,
+        "TMP": container_tmp_path,
+        "TEMP": container_tmp_path,
+        "TEMPDIR": container_tmp_path,
+        "XCELIUM_TMPDIR": container_tmp_path,
+        "CDS_LOCK": f"{container_tmp_path}/.cdslock",
+        # imc/Java can still hit /tmp unless java.io.tmpdir is forced.
+        "JAVA_TOOL_OPTIONS": f"-Djava.io.tmpdir={container_tmp_path}",
+    }
+    env_args: List[str] = []
+    for key, value in runtime_env.items():
+        env_args += ["--env", f"{key}={value}"]
+    return env_args
+
+
 def _build_command(entrypoint: Any, command: Any) -> List[str]:
     """Build the command list from compose entrypoint + command fields."""
     cmd_parts: List[str] = []
@@ -546,12 +568,18 @@ class CVDPResourcesServer(SimpleResourcesServer):
               rundir/              (execution output, bound as /code/rundir)
         """
         context_files = context_files or {}
-        with tempfile.TemporaryDirectory(prefix=f"cvdp_{task_id}_") as workdir:
+        tmp_root = self.config.harness_workspace_dir.strip()
+        if tmp_root:
+            os.makedirs(tmp_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"cvdp_{task_id}_", dir=tmp_root or None) as workdir:
             workdir_path = Path(workdir)
 
             # Create all mount dirs — mirrors repository.create_folders()
             for d in ["rtl", "verif", "docs", "src", "rundir"]:
                 (workdir_path / d).mkdir()
+            # Optional per-rollout temp storage; cleaned when TemporaryDirectory exits.
+            if self.config.container_tmp_bind_path:
+                (workdir_path / "rundir" / "tmp").mkdir(parents=True, exist_ok=True)
 
             # Write harness files — mirrors repository.restore_files()
             compose_content: Optional[str] = None
@@ -572,16 +600,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
             if compose_content is None:
                 return 1, "No docker-compose.yml found in harness_files", []
 
-            # Write companion RTL files from input.context — mirrors
-            # repository.restore_files(self.context) which writes pre-existing
-            # RTL (e.g. floor_to_seven_segment.sv) that the model doesn't
-            # generate but iverilog needs for compilation.
+            # Write companion files from input.context — mirrors
+            # repository.restore_files(self.context). Preserves the full
+            # target path (e.g. verif/tb_foo.sv -> workdir/verif/tb_foo.sv).
             for filepath, code in context_files.items():
-                rel = Path(filepath)
-                if rel.parts[0] == "rtl":
-                    dest = (workdir_path / "rtl").joinpath(*rel.parts[1:])
-                else:
-                    dest = workdir_path / "rtl" / rel.name
+                dest = workdir_path / filepath
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -589,21 +612,16 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 except Exception:
                     print(f"Failed to write context file: {filepath}")
 
-            # Write model-generated RTL files (overwrites context files for target slots)
+            # Write model-generated files (overwrites context files for target slots).
+            # Preserves the full target path, matching CVDP's restore_files().
             for filepath, code in rtl_files.items():
-                rel = Path(filepath)
-                if rel.parts[0] == "rtl":
-                    dest = (workdir_path / "rtl").joinpath(*rel.parts[1:])
-                else:
-                    dest = workdir_path / "rtl" / rel.name
+                dest = workdir_path / filepath
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
                         f.write(code)
                 except Exception:
                     print(f"Failed to write file: {filepath}")
-
-                # print(f"DEBUG: wrote model generated RTL files: {filepath}")
 
             # Run each service — mirrors repository.obj_harness()
             compose_data = yaml.safe_load(compose_content)
@@ -659,6 +677,9 @@ class CVDPResourcesServer(SimpleResourcesServer):
         bind_args = _build_bind_args(path, svc["volumes"])
         dot_env = _load_dot_env(path)
         env_args = _build_env_args(svc["environment"], dot_env)
+        if self.config.container_tmp_bind_path:
+            bind_args += ["--bind", f"{path}/rundir/tmp:{self.config.container_tmp_bind_path}"]
+            env_args += _build_runtime_tmp_env_args(self.config.container_tmp_bind_path)
         cmd_parts = _build_command(svc["entrypoint"], svc["command"])
 
         # Fix working_dir paths that don't exist under Apptainer's bind mounts.

@@ -27,6 +27,7 @@ from resources_servers.cvdp.app import (
     _build_bind_args,
     _build_command,
     _build_env_args,
+    _build_runtime_tmp_env_args,
     _load_dot_env,
     _parse_compose_service,
     _parse_model_response,
@@ -274,6 +275,27 @@ class TestBuildEnvArgs:
         # dot_env SIM comes first, then compose SIM overrides
         sim_values = [a for a in args if a.startswith("SIM=")]
         assert sim_values[-1] == "SIM=verilator"
+
+
+class TestBuildRuntimeTmpEnvArgs:
+    def test_emits_expected_env_flags(self):
+        args = _build_runtime_tmp_env_args("/tmp")
+        # Pairs of "--env" "KEY=value" — assert each expected pair appears.
+        flags = [args[i + 1] for i in range(0, len(args), 2) if args[i] == "--env"]
+        assert "TMPDIR=/tmp" in flags
+        assert "TMP=/tmp" in flags
+        assert "TEMP=/tmp" in flags
+        assert "TEMPDIR=/tmp" in flags
+        assert "XCELIUM_TMPDIR=/tmp" in flags
+        assert "CDS_LOCK=/tmp/.cdslock" in flags
+        assert "JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/tmp" in flags
+
+    def test_uses_custom_path(self):
+        args = _build_runtime_tmp_env_args("/scratch/run/tmp")
+        flags = [args[i + 1] for i in range(0, len(args), 2) if args[i] == "--env"]
+        assert "TMPDIR=/scratch/run/tmp" in flags
+        assert "CDS_LOCK=/scratch/run/tmp/.cdslock" in flags
+        assert "JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/scratch/run/tmp" in flags
 
 
 class TestLoadDotEnv:

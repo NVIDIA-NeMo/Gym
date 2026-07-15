@@ -18,8 +18,14 @@
 
 name: Fern docs (check)
 
+# Triggers on push to mirrored PR branches (`pull-request/<n>`) created by
+# the FW-CI mirror bot. This runs in the trusted base-repo context, so
+# DOCS_FERN_TOKEN is available even for fork PRs — same pattern as
+# build-docs.yml.
 on:
-  pull_request:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
     paths:
       - 'fern/**'
       - '.github/workflows/fern-docs-ci.yml'

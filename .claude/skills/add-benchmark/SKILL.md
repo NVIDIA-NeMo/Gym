@@ -32,10 +32,10 @@ Before starting, determine which type of benchmark you're adding:
 
 ### Step 1: Scaffold the server
 
-Run `ng_init_resources_server` to generate the directory structure:
+Run `gym env init` to generate the directory structure:
 
 ```bash
-ng_init_resources_server +entrypoint=resources_servers/my_benchmark
+gym env init --resources-server my_benchmark
 ```
 
 This creates:
@@ -77,10 +77,10 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 **`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
 
 ```bash
-ng_upload_dataset_to_gitlab \
-    +dataset_name=my_benchmark \
-    +version=0.0.1 \
-    +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl
+gym dataset upload --storage gitlab \
+    --name my_benchmark \
+    --revision 0.0.1 \
+    --input resources_servers/my_benchmark/data/my_dataset.jsonl
 ```
 
 Requires MLflow credentials in `env.yaml` (or passed via CLI):
@@ -94,12 +94,16 @@ mlflow_tracking_token: <your-gitlab-api-token>
 **Validate** your data:
 ```bash
 # Validate example data (for PR submission)
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=/tmp/prepare +mode=example_validation
+gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
+    --output-dir /tmp/prepare \
+    --mode example_validation
 
 # Download and prepare train/validation from GitLab
-ng_prepare_data "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml]" \
-    +output_dirpath=data/my_benchmark +mode=train_preparation +should_download=true +data_source=gitlab
+gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
+    --output-dir data/my_benchmark \
+    --mode train_preparation \
+    --download \
+    +data_source=gitlab
 ```
 
 ### Step 3: Implement verify()
@@ -162,7 +166,7 @@ Both fields must coexist: `jsonl_fpath` is the local download destination, `gitl
 
 ```bash
 # Run server tests (creates isolated .venv, slow on first run)
-ng_test +entrypoint=resources_servers/my_benchmark
+gym env test --resources-server my_benchmark
 
 # Run core library tests to check nothing broke
 pytest tests/unit_tests/ -x
@@ -174,14 +178,18 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 
 ```bash
 # Start servers
-ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
+    --model-type openai_model
 
 # Quick test with example data
-ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
-  +input_jsonl_fpath=resources_servers/my_benchmark/data/example.jsonl \
-  +output_jsonl_fpath=results/example_rollouts.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent my_benchmark_simple_agent \
+  --input resources_servers/my_benchmark/data/example.jsonl \
+  --output results/example_rollouts.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 16384 \
+  --temperature 1.0
 
 # Inspect results
 ```
@@ -196,17 +204,17 @@ Run against multiple models to validate correctness. Recommended suite:
 
 ```bash
 # Collect rollouts
-ng_collect_rollouts +agent_name=my_benchmark_simple_agent \
-  +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
-  +output_jsonl_fpath=results/rollouts.jsonl \
-  +num_repeats=5 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent my_benchmark_simple_agent \
+  --input resources_servers/my_benchmark/data/my_dataset.jsonl \
+  --output results/rollouts.jsonl \
+  --num-repeats 5 \
+  --max-output-tokens 16384 \
+  --temperature 1.0
 
 # Compute per-task pass rates
-ng_reward_profile +input_jsonl_fpath=resources_servers/my_benchmark/data/my_dataset.jsonl \
-  +rollouts_jsonl_fpath=results/rollouts.jsonl \
-  +output_jsonl_fpath=results/profiled.jsonl \
-  +pass_threshold=1.0
+gym eval profile --inputs resources_servers/my_benchmark/data/my_dataset.jsonl \
+  --rollouts results/rollouts.jsonl
 
 # Aggregate metrics (pass@1 = avg_reward, pass@k from max_reward)
 python scripts/print_aggregate_results.py +jsonl_fpath=results/profiled.jsonl

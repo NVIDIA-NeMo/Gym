@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -101,10 +102,6 @@ class NSToolsRunRequest(BaseRunRequest):
     # Per-sample verifier selection (optional, falls back to default_verifier)
     verifier_type: Optional[str] = None
 
-    # Fields for math_with_judge verifier
-    question: Optional[str] = None
-    expected_answer: Optional[str] = None
-
 
 class NSToolsVerifyRequest(NSToolsRunRequest, BaseVerifyRequest):
     pass
@@ -138,6 +135,22 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+
+        # Wire shutdown() into the lifespan so a normal server stop reaps the
+        # python_tool sidecar and ToolManager. The base runner only starts
+        # Uvicorn and never calls it, otherwise leaving the sidecar bound to
+        # its fixed port.
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan_wrapper
 
         # Initialize nemo_skills ToolManager if tools are configured
         if self.config.nemo_skills_tools:
@@ -400,44 +413,48 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
-        metrics = self._aggregate_timing_metrics(session_id)
-        if self.config.verbose_tool_logging:
-            logger.info(
-                f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
-                f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
-                f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
-                f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
+        try:
+            metrics = self._aggregate_timing_metrics(session_id)
+            if self.config.verbose_tool_logging:
+                logger.info(
+                    f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
+                    f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
+                    f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
+                    f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
+                )
+
+            # Select verifier
+            verifier_type = body.verifier_type or self.config.default_verifier
+
+            if verifier_type not in self.config.verifiers:
+                raise ValueError(
+                    f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
+                )
+
+            verifier_ref = self.config.verifiers[verifier_type]
+
+            # Delegate to the verifier
+            response = await self.server_client.post(
+                server_name=verifier_ref.name,
+                url_path="/verify",
+                json=body.model_dump(),
             )
 
-        # Select verifier
-        verifier_type = body.verifier_type or self.config.default_verifier
+            result = await response.json()
 
-        if verifier_type not in self.config.verifiers:
-            raise ValueError(
-                f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
+            # Hard fail if no reward in response
+            if "reward" not in result:
+                raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
+
+            return NSToolsVerifyResponse(
+                **body.model_dump(),
+                reward=result["reward"],
+                delegated_response=result,
+                **metrics,
             )
-
-        verifier_ref = self.config.verifiers[verifier_type]
-
-        # Delegate to the verifier
-        response = await self.server_client.post(
-            server_name=verifier_ref.name,
-            url_path="/verify",
-            json=body.model_dump(),
-        )
-
-        result = await response.json()
-
-        # Hard fail if no reward in response
-        if "reward" not in result:
-            raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
-
-        return NSToolsVerifyResponse(
-            **body.model_dump(),
-            reward=result["reward"],
-            delegated_response=result,
-            **metrics,
-        )
+        finally:
+            if self.tool_manager is not None and session_id:
+                await self.tool_manager.cleanup_request(session_id)
 
     # --------------------------------------------------------
     # Cleanup
@@ -450,13 +467,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
-            logger.info(f"Terminating python_tool server (PID: {self._python_tool_process.pid})")
+            pid: int = self._python_tool_process.pid
+            logger.info(f"Terminating python_tool server (PID: {pid})")
             self._python_tool_process.terminate()
             try:
                 self._python_tool_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 logger.warning("python_tool server did not terminate gracefully, killing...")
                 self._python_tool_process.kill()
+                # Reap the child after SIGKILL so it doesn't linger as <defunct>.
+                try:
+                    self._python_tool_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error(f"python_tool server (PID: {pid}) did not exit after SIGKILL; may leak as a zombie")
             self._python_tool_process = None
 
 

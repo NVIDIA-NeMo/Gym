@@ -1,5 +1,14 @@
 # rdkit_chemistry Resources Server
 
+> **⚠️ Deprecated.** The scoring path in this server never depended on chemistry;
+> it has been generalized into the domain-agnostic
+> [`litmus_agent`](../litmus_agent) resources server (answer extraction + a
+> swappable reward-rule taxonomy, plus an optional sandbox-backed Python
+> code-execution tool). New work should target `litmus_agent`; export legacy
+> chemistry rows there via its `property_type` → `answer_type` back-compat
+> mapping. `rdkit_chemistry` is retained only for existing runs and will not
+> receive new features.
+
 ## Overview
 
 This resources server verifies chemistry question answering over RDKit-computable
@@ -10,10 +19,10 @@ molecular properties drawn from the ChEMBL database.
 - Methods: `direct` (parametric knowledge only) and `mcp-python` (model may call a
   Python tool with RDKit available to compute the answer)
 - Dataset prompt format: user message containing a natural-language question, a
-  SMILES string, and a format instruction; the model must respond with a single
-  integer or binary `0`/`1` flag
+  SMILES string, and a format instruction; the model must respond with a numeric
+  value in the requested answer format
 
-Questions cover four property types:
+Questions cover five property types:
 
 | Property type | Examples | Expected response |
 |---|---|---|
@@ -21,10 +30,12 @@ Questions cover four property types:
 | `bool` | PassesRo5, PassesVeber | `0` or `1` |
 | `presence` | HasAmide | `0` or `1` |
 | `fragment` | fr_Al_COO, fr_Al_OH | Single integer |
+| `float` | MolWt, TPSA, QED | Floating point number |
 
 ## Reward Signal
 
-All property types use exact match: 1.0 if `round(predicted) == round(actual)`, else 0.0.
+Discrete property types use exact match: 1.0 if `round(predicted) == round(actual)`, else 0.0.
+Float properties use tight numeric equality.
 When no parseable number can be extracted from the response, `reward = 0.0`.
 
 ## Server Composition
@@ -50,21 +61,27 @@ Each JSONL row:
 - `chembl_id`: ChEMBL molecule identifier
 - `smiles`: canonical SMILES string
 - `method`: `direct` or `mcp-python`
+- `answer_format`: optional string key `fmt_00` through `fmt_30`, selecting the
+  regex used to extract the final answer
 
 See `data/example.jsonl` for concrete examples.
+
+Legacy rows without `answer_format` are still accepted. For those rows,
+`use_box_format: true` maps to boxed extraction and `use_box_format: false`
+maps to double-parentheses extraction. When `answer_format` is present, it
+takes precedence over `use_box_format`.
 
 ## Example Usage
 
 ```bash
-config_paths="resources_servers/rdkit_chemistry/configs/rdkit_chemistry.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
+gym env start \
+    --resources-server rdkit_chemistry \
+    --model-type openai_model
 
-ng_run "+config_paths=[${config_paths}]"
-
-ng_collect_rollouts \
-    +agent_name=rdkit_chemistry_agent \
-    +input_jsonl_fpath=resources_servers/rdkit_chemistry/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent rdkit_chemistry_agent \
+    --input resources_servers/rdkit_chemistry/data/example.jsonl \
+    --output resources_servers/rdkit_chemistry/data/example_rollouts.jsonl
 ```
 
 ## Licensing
