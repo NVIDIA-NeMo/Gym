@@ -245,3 +245,40 @@ class TestTrajectoryToOutputItems:
         msgs = [None, "string", {"role": "assistant", "content": "ok"}]
         out = _trajectory_to_output_items(msgs, 0)
         assert len(out) == 1
+
+
+class TestRolloutCorrelation:
+    """The prefixed self-call path makes responses() build AIAgent with the same model URL prefix."""
+
+    def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
+        from fastapi.testclient import TestClient
+
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        seen: dict = {}
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                seen["base_url"] = kwargs.get("base_url")
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        client = TestClient(agent.setup_webserver())
+
+        assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
+        assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
+
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        assert seen["base_url"] == "http://h:1/v1"
