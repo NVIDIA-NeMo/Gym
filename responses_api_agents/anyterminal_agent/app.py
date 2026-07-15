@@ -366,7 +366,7 @@ def _build_provider(params: AnyTerminalInstanceConfig):
     if name != "docker":
         return params.sandbox_provider
     return DockerProvider(
-        create_config=DockerCreateConfig(
+        create=DockerCreateConfig(
             network=params.docker_network,
             extra_run_args=[
                 "-v",

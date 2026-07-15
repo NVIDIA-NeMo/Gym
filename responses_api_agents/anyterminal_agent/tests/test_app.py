@@ -31,7 +31,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
-from nemo_gym.sandbox.providers.docker import DockerSandboxProvider
+from nemo_gym.sandbox.providers.docker import DockerProvider
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
@@ -350,7 +350,7 @@ class TestBuildProvider:
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
-        assert isinstance(_build_provider(cfg), DockerSandboxProvider)
+        assert isinstance(_build_provider(cfg), DockerProvider)
 
     def test_apptainer_binds_are_wired(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"apptainer": {}})
@@ -371,13 +371,13 @@ class TestBuildProvider:
     def test_docker_provider_selected(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"docker": {}})
         provider = _build_provider(cfg)
-        assert isinstance(provider, DockerSandboxProvider)
+        assert isinstance(provider, DockerProvider)
 
     def test_docker_run_args_include_mounts(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"docker": {}})
         provider = _build_provider(cfg)
-        assert any(str(cfg.persistent_dir) in a for a in provider._run_args)
-        assert any(str(cfg.verifier_dir) in a for a in provider._run_args)
+        assert any(str(cfg.persistent_dir) in a for a in provider._create_config.extra_run_args)
+        assert any(str(cfg.verifier_dir) in a for a in provider._create_config.extra_run_args)
 
     def test_unknown_provider_returned_as_is(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"opensandbox": {"foo": "bar"}})
