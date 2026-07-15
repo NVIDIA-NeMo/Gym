@@ -190,6 +190,29 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    opencode_compaction_enabled: bool = Field(
+        default=False,
+        description=(
+            "If True (opencode harness only), enable opencode's auto-compaction "
+            "(context summarization). Each compaction event starts a new "
+            "on-policy segment (segment_index in the dumped completion JSON) "
+            "since the post-compaction prompt is not a token-level continuation "
+            "of what came before; see get_all_session_trajectories_from_completions "
+            "and SWEBenchVerifyResponse.responses."
+        ),
+    )
+
+    opencode_context_limit_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Testing knob (opencode harness only): override the model's registered "
+            "context window (fork default 131072) so compaction triggers after a "
+            "handful of turns instead of ~99K tokens of real usage. Leave unset in "
+            "production — this shrinks the agent's real usable context, not just "
+            "the compaction threshold."
+        ),
+    )
+
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
@@ -298,7 +321,14 @@ class SWEBenchMetrics(BaseModel):
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
-    subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    # Every on-policy-contiguous trajectory produced by this task: one entry
+    # per (session, segment) — main session segments plus every subagent
+    # session's segments, flat, in no particular order. `response` (inherited,
+    # required by core BaseVerifyResponse) is the main session's last segment,
+    # kept for consumers that haven't moved to `responses` yet. All entries
+    # share this task's single terminal `reward` — there is no per-segment
+    # verifier signal, only one `git diff` eval per task.
+    responses: List[NeMoGymResponse] = Field(default_factory=list)
 
 
 ########################################
@@ -2046,6 +2076,12 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 "} && "
             )
 
+        context_limit_export_cmd = (
+            f"export OPENCODE_CONTEXT_LIMIT={self.config.opencode_context_limit_tokens} && "
+            if self.config.opencode_context_limit_tokens is not None
+            else ""
+        )
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -2057,6 +2093,8 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
             f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            f"export ENABLE_COMPACTION={'1' if self.config.opencode_compaction_enabled else '0'} && "
+            f"{context_limit_export_cmd}"
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2349,27 +2387,76 @@ class RunOpenHandsAgent(BaseModel):
             recursive=True,
         )
         # When subagents are enabled (opencode) we get multiple sessions, each
-        # writing its own per-turn JSONs. Group by session_id (from the file
-        # payload) and copy each session's most recent turn — that file's
-        # `messages` field carries the full cumulative history for the session.
+        # writing its own per-turn JSONs. When compaction is also enabled, a
+        # single session can span multiple on-policy segments (segment_index —
+        # see language-model.ts _nextSegment): each compaction event rewrites
+        # the session's prompt, so a segment's own most-recent turn file is the
+        # only one whose cumulative `messages` is still a valid contiguous
+        # trajectory for that segment. Group by (session_id, segment_index) —
+        # not session_id alone — and copy each group's most recent turn.
+        # segment_index absent (pre-compaction-support dumps) collapses to 0.
+        #
+        # We also stamp `prefix_message_count` — the message count of the
+        # GROUP'S OWN first turn — onto the copied file. This is the correct
+        # input/output split point for run(): a naive "split at the first
+        # assistant-like message" (split_responses_input_output_items) is
+        # only valid for a segment's very first live turn ever; a compaction
+        # call's `messages` is mostly a RESENT prior-segment history (not
+        # this segment's own generation) and would otherwise get double-
+        # counted as freshly-generated output both here and in the segment
+        # that originally produced it.
         if completion_candidates:
-            latest_per_session: dict[str, str] = {}
-            session_mtime: dict[str, float] = {}
+            latest_per_group: dict[tuple[str, int], str] = {}
+            group_mtime: dict[tuple[str, int], float] = {}
+            group_min_turn: dict[tuple[str, int], int] = {}
+            group_prefix_count: dict[tuple[str, int], int] = {}
+            # segment_boundary_reason is only non-null on the SPECIFIC turn a
+            # boundary occurs on (e.g. "post_compaction" marks just the first
+            # turn of the new segment — see language-model.ts _nextSegment).
+            # Every later turn in that same segment reverts to null. Since we
+            # report from the group's LAST turn (below), that would silently
+            # lose the real boundary reason for any multi-turn segment — pull
+            # it from the group's FIRST turn instead, alongside prefix_count.
+            group_boundary_reason: dict[tuple[str, int], Optional[str]] = {}
             for path_str in completion_candidates:
                 sess_id = "main"
+                segment_index = 0
+                turn = 0
+                msg_count = 0
+                boundary_reason = None
                 try:
                     with open(path_str, "r") as f:
                         payload = json.load(f)
-                    if isinstance(payload, dict) and payload.get("session_id"):
-                        sess_id = str(payload["session_id"])
+                    if isinstance(payload, dict):
+                        if payload.get("session_id"):
+                            sess_id = str(payload["session_id"])
+                        segment_index = int(payload.get("segment_index") or 0)
+                        turn = int(payload.get("turn") or 0)
+                        msg_count = len(payload.get("messages") or [])
+                        boundary_reason = payload.get("segment_boundary_reason")
                 except (OSError, json.JSONDecodeError):
                     pass
+                group = (sess_id, segment_index)
                 mtime = os.path.getmtime(path_str)
-                if mtime > session_mtime.get(sess_id, -1):
-                    session_mtime[sess_id] = mtime
-                    latest_per_session[sess_id] = path_str
-            for path_str in latest_per_session.values():
-                shutil.copy2(path_str, llm_completions_dir / Path(path_str).name)
+                if mtime > group_mtime.get(group, -1):
+                    group_mtime[group] = mtime
+                    latest_per_group[group] = path_str
+                if group not in group_min_turn or turn < group_min_turn[group]:
+                    group_min_turn[group] = turn
+                    group_prefix_count[group] = msg_count
+                    group_boundary_reason[group] = boundary_reason
+            for group, path_str in latest_per_group.items():
+                dest_path = llm_completions_dir / Path(path_str).name
+                try:
+                    with open(path_str, "r") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, dict):
+                        payload["prefix_message_count"] = group_prefix_count.get(group, 0)
+                        payload["segment_boundary_reason"] = group_boundary_reason.get(group)
+                    with open(dest_path, "w") as f:
+                        json.dump(payload, f)
+                except (OSError, json.JSONDecodeError):
+                    shutil.copy2(path_str, dest_path)
 
         shutil.rmtree(eval_dir_on_host, ignore_errors=True)
         try:
@@ -2806,11 +2893,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return messages, tools
 
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
-        """Extract the main session's trajectory for the API response.
+        """Extract the main session's trajectory for the single Responses-API
+        return value (`responses()` must return exactly one NeMoGymResponse —
+        that's the HTTP contract, not a Gym choice).
 
         When opencode subagents are enabled there are multiple session_id
-        files; we return the main session (no parent_session_id). All other
-        per-session files stay on disk for offline training pickup.
+        files; we return the main session (no parent_session_id). When
+        compaction is also enabled, the main session can have multiple
+        on-policy segments — this returns its LAST segment (the live
+        continuation), matching pre-compaction behavior when there's only
+        ever one. `get_all_session_trajectories_from_completions` (used by
+        `run()` to build `SWEBenchVerifyResponse.responses`) surfaces every
+        session AND every segment as independent trajectories; this method's
+        single-segment return is only the public-facing summary.
+
+        Selection relies on completion filenames sorting by turn number
+        (zero-padded in language-model.ts), and turn numbers increasing
+        monotonically across segment boundaries within a session — so the
+        lexically-last main-session file is always its last segment's last
+        turn, with no segment-aware logic needed here.
 
         Returns (messages, tools, prefix_message_count). `prefix_message_count`
         is the number of chat messages the live model saw on its first call
@@ -2860,17 +2961,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return messages, tools, first_prefix_count
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
-        """All per-session trajectories on disk (opencode subagent capture).
+        """All per-(session, segment) trajectories on disk (opencode subagent +
+        compaction capture).
 
-        Returns one entry per session_id with its full message history, tools,
-        and parent_session_id link. Empty list when no session-tagged dumps
-        exist (e.g. openhands path).
+        A session can span multiple on-policy segments when compaction is
+        enabled (see language-model.ts _nextSegment): each compaction event
+        rewrites the session's prompt, so turns before vs. after it are not
+        token-contiguous and must be surfaced as independent trajectories.
+        `_openhands_dir_copy_from_host` already keeps one file per
+        (session_id, segment_index) group on disk — segment_index absent
+        (pre-compaction-support dumps) collapses to 0, so a plain session
+        (no compaction) still yields exactly one entry, same as before.
+
+        Returns one entry per (session_id, segment_index) with its full
+        message history, tools, parent_session_id link, boundary reason, and
+        `prefix_message_count` — the message count of the GROUP'S OWN first
+        turn (stamped by `_openhands_dir_copy_from_host`), i.e. the correct
+        input/output split point for `run()`. Empty list when no
+        session-tagged dumps exist (e.g. openhands path).
         """
         out: list[dict] = []
         completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
         if not completions_dir.exists():
             return out
-        by_session: dict[str, dict] = {}
+        by_group: dict[tuple[str, int], dict] = {}
         for fpath in sorted(completions_dir.glob("*.json")):
             try:
                 with open(fpath, "r") as f:
@@ -2880,13 +2994,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             sess_id = data.get("session_id")
             if not sess_id:
                 continue
-            by_session[sess_id] = data
-        for sess_id, data in by_session.items():
+            segment_index = int(data.get("segment_index") or 0)
+            by_group[(sess_id, segment_index)] = data
+        for (sess_id, segment_index), data in by_group.items():
             messages, tools = self._materialize_trajectory(data)
             out.append(
                 {
                     "session_id": sess_id,
                     "parent_session_id": data.get("parent_session_id"),
+                    "segment_index": segment_index,
+                    "segment_boundary_reason": data.get("segment_boundary_reason"),
+                    "prefix_message_count": data.get("prefix_message_count"),
                     "messages": messages,
                     "tools": tools,
                 }
@@ -3631,18 +3749,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
+        # `run()` rebuilds `params`/`trajectories_dir` from
+        # metadata["instance_config"] and reads every (session, segment) off
+        # disk itself to build SWEBenchVerifyResponse.responses — no need to
+        # duplicate that here; this metadata dict only carries what `run()`
+        # can't otherwise reconstruct.
         metadata: dict[str, str] = {
             "input": json.dumps([i.model_dump() for i in input_items]),
             "metrics": params.metrics_fpath.read_text(),
             "instance_config": params.model_dump_json(),
         }
-        if params.opencode_subagents_enabled:
-            subagent_trajectories = [
-                entry
-                for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
-                if entry.get("parent_session_id")
-            ]
-            metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3669,19 +3785,77 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "tools": [t.model_dump() for t in response.tools] if response.tools else [],
             }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
-            subagent_trajectories = None
-            if "subagent_trajectories" in metadata:
-                subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+            reconstructed_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
+
+            # Rebuild every on-policy-contiguous (session, segment) trajectory
+            # from the same completion files `_inner_responses` already read —
+            # `run()` has no direct handle on `params`/`trajectories_dir`, so
+            # reconstruct both from the round-tripped instance_config instead
+            # of threading a second copy of this data through .metadata.
+            trajectories_dir = reconstructed_config.persistent_dir / "trajectories"
+            responses: List[NeMoGymResponse] = []
+            for entry in self.get_all_session_trajectories_from_completions(
+                trajectories_dir, reconstructed_config.instance_id
+            ):
+                # prefix_message_count (stamped by _openhands_dir_copy_from_host)
+                # is this GROUP'S OWN first-turn message count — the correct
+                # split point. A role-based split (split_responses_input_output_items)
+                # is only valid for a segment's very first live turn ever: a
+                # compaction call's `messages` mostly RESENDS a prior segment's
+                # history as this turn's prompt, and a naive role-based split
+                # would misclassify that resent history as freshly-generated
+                # output here too — double-counting it against the segment
+                # that actually generated it. Fall back to the role-based
+                # split only for pre-migration dumps that lack the field.
+                prefix_count = entry.get("prefix_message_count")
+                if prefix_count is not None:
+                    entry_output = self._vllm_converter.chat_completions_messages_to_responses_items(
+                        entry["messages"][prefix_count:]
+                    )
+                else:
+                    entry_items = self._vllm_converter.chat_completions_messages_to_responses_items(
+                        entry["messages"]
+                    )
+                    _, entry_output = split_responses_input_output_items(entry_items)
+                entry_tools = [
+                    FunctionTool.model_validate(tool["function"] | {"type": "function"})
+                    for tool in entry.get("tools") or []
+                ]
+                responses.append(
+                    NeMoGymResponse(
+                        id=(
+                            f"swebench-{reconstructed_config.instance_id}-"
+                            f"{entry['session_id']}-seg{entry['segment_index']}"
+                        ),
+                        created_at=int(time.time()),
+                        model=response.model,
+                        object="response",
+                        output=entry_output,
+                        parallel_tool_calls=response.parallel_tool_calls,
+                        tool_choice=response.tool_choice,
+                        tools=entry_tools,
+                        metadata={
+                            "session_id": entry["session_id"],
+                            "parent_session_id": entry.get("parent_session_id") or "",
+                            "segment_index": str(entry["segment_index"]),
+                            "segment_boundary_reason": entry.get("segment_boundary_reason") or "",
+                        },
+                    )
+                )
+            responses.sort(key=lambda r: (r.metadata["session_id"], int(r.metadata["segment_index"])))
+            if not responses:
+                # openhands / pre-session-tagging dumps carry no session_id at
+                # all — get_all_session_trajectories_from_completions returns
+                # empty in that case. Fall back to the single main response.
+                responses = [response]
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
+                responses=responses,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
-                instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
-                    metadata["instance_config"]
-                ).model_dump(),
-                subagent_trajectories=subagent_trajectories,
+                instance_config=reconstructed_config.model_dump(),
             )
 
 

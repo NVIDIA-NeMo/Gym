@@ -269,9 +269,17 @@ For `denovoswe`, the agent script also wipes the original source and re-injects 
 
 When `opencode_subagents_enabled: true`, the wrapper exports `ENABLE_SUBAGENTS=1` so opencode's `task` tool is available and the main agent can spawn subagent sessions. Each session (main and subagent) writes its own per-turn trajectory files, tagged with `session_id` / `parent_session_id`, under `llm_completions/<instance_id>/*.json`.
 
-- `_openhands_dir_copy_from_host` groups completion files by `session_id` and copies only the most recent turn per session back to the host (that file's `messages` carries the full cumulative history for the session).
-- `get_openhands_trajectory_from_completions` (used to build the API response's `output`) selects the **main** session — the one with no `parent_session_id` — falling back to the last file on disk for payloads that predate session tagging (the OpenHands path).
-- `get_all_session_trajectories_from_completions` returns every session found on disk. `SWEBenchWrapper._inner_responses` filters this to sessions that *do* have a `parent_session_id` (i.e. subagent sessions only) and surfaces them as `subagent_trajectories` in the response metadata / `run()` output — see [Output format](#output-format).
+- `_openhands_dir_copy_from_host` groups completion files by `(session_id, segment_index)` (see [Compaction](#compaction) below for what a segment is) and copies only the most recent turn per group back to the host (that file's `messages` carries the full cumulative history for the group).
+- `get_openhands_trajectory_from_completions` (used to build the single Responses-API return value) selects the **main** session's **last segment** — the session with no `parent_session_id`, its most recent turn — falling back to the last file on disk for payloads that predate session tagging (the OpenHands path).
+- `get_all_session_trajectories_from_completions` returns every `(session_id, segment_index)` group found on disk, with each group's messages still in chat-completions format. `SWEBenchWrapper.run()` rebuilds `params`/`trajectories_dir` from the round-tripped `instance_config` metadata, converts every group's `messages` into Responses-API items via `chat_completions_messages_to_responses_items`, and surfaces them all — main session segments and subagent session segments alike, flat, sharing the task's one terminal reward — as `SWEBenchVerifyResponse.responses` (a `List[NeMoGymResponse]`). `response` (singular, inherited from core `BaseVerifyResponse`) stays the main session's last segment for consumers that only read the single-response field — see [Output format](#output-format).
+
+### Compaction
+
+`opencode_compaction_enabled: true` flips on opencode's auto-compaction (context summarization via `compaction.ts`) and exports `ENABLE_COMPACTION=1`. `compaction.prune` (a separate mechanism that silently blanks old tool outputs in place with no session-level boundary) is always forced off in `bench/cli.ts`, regardless of this flag — it isn't segment-tracked and would corrupt on-policy contiguity within a segment undetected.
+
+A compaction event rewrites the session's prompt (summarizes/replaces prior history), so turns before vs. after it are **not token-contiguous** — the invariant nemo-rl asserts on `prompt_token_ids` (prefix-match across consecutive turns) would otherwise break. To handle this, `session/llm.ts` tags the compaction summarization call itself with an `x-turn-kind: compaction` header (set whenever `agent.name === "compaction"`), and `language-model.ts`'s `_nextSegment` uses it to bump a per-session `segment_index`: the compaction call becomes its own single-turn segment, and the turn immediately after it starts a new segment too (its prompt conditions on the rewritten/summarized history, not a continuation of anything before). Ordinary turns with no compaction in between stay in the same segment. This also transparently covers **reactive** compaction (triggered by a genuine context-overflow error, which fires regardless of `compaction.auto` — see `session/processor.ts`'s `ContextOverflowError` handling) since it goes through the same `agent.name === "compaction"` path.
+
+Every dumped turn JSON carries `segment_index` and `segment_boundary_reason` (`null` | `"compaction"` | `"post_compaction"`); absent on pre-compaction-support dumps, which Python-side readers treat as segment 0.
 
 ### Termination
 
@@ -290,10 +298,6 @@ There is **no explicit `finish` tool** in the opencode bench path — by design.
 - **Tool errors** — caught by opencode's processor.ts as usual; appended as tool-result messages.
 - **Loop crash / opencode subprocess exit ≠ 0** — covered by the *Termination* section above.
 - **SIF wall-clock timeout** — covered by the *Termination* section above.
-
-### Compaction (deferred)
-
-`compaction.auto: false` is hard-coded into the bench config so the loop runs without summarization for now — the user-facing requirement is "main agent loop in opencode without compaction" while keeping the design flexible to enable it later via opencode's existing `compaction.ts`. Token-ID continuity over a compaction event is a future RL-design problem.
 
 ---
 
@@ -586,7 +590,8 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 ```jsonc
 {
   "responses_create_params": { /* full input incl. system+user prompts the agent saw */ },
-  "response":               { /* output messages + tool calls */ },
+  "response":               { /* output messages + tool calls; main session's LAST segment — kept for consumers that only read the single-response field */ },
+  "responses": [ /* every on-policy-contiguous trajectory: main session segments + subagent session segments, flat. Each is a NeMoGymResponse whose .metadata carries session_id/parent_session_id/segment_index/segment_boundary_reason as strings. All share this task's one reward below — see Compaction and Subagents */ ],
   "reward": 1.0,            // 1.0 iff resolved, else 0.0
   "resolved": true,
   "patch_exists": true,
@@ -641,8 +646,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "total_model_call_time": 301.7,
   "final_eval_apptainer_spinup_time":  9.7,
   "final_eval_time": 87.2,
-  "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ },
-  "subagent_trajectories": null // (opencode only, when opencode_subagents_enabled) list of {session_id, parent_session_id, messages, tools}
+  "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ }
 }
 ```
 

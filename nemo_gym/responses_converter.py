@@ -418,6 +418,26 @@ class ResponsesConverter(BaseModel):
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
         return self._parse_think_tags(content)
 
+    @staticmethod
+    def _chat_completion_content_parts_to_responses(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Some Chat Completions content parts use `type: text` / `type: image_url`; 
+        Responses input content parts use `input_text` / `input_image`. Mirrors the reverse mapping in `_format_message`."""
+        converted_parts = []
+        for part in parts:
+            match part.get("type"):
+                case "text":
+                    converted_parts.append({"type": "input_text", "text": part["text"]})
+                case "image_url":
+                    image_url = part.get("image_url", {})
+                    if isinstance(image_url, dict):
+                        url, detail = image_url.get("url", ""), image_url.get("detail", "auto")
+                    else:
+                        url, detail = image_url, "auto"
+                    converted_parts.append({"type": "input_image", "image_url": url, "detail": detail})
+                case _:
+                    raise NotImplementedError(f"Unsupported chat completion content part type: {part.get('type')}")
+        return converted_parts
+
     def chat_completions_messages_to_responses_items(
         self, messages: List[Dict[str, Any]]
     ) -> List[NeMoGymResponseOutputItem]:
@@ -428,6 +448,8 @@ class ResponsesConverter(BaseModel):
             if role in ("user", "system", "developer"):
                 if message["content"] is None:
                     message["content"] = ""
+                elif isinstance(message["content"], list):
+                    message["content"] = self._chat_completion_content_parts_to_responses(message["content"])
                 output_items.append(NeMoGymEasyInputMessage.model_validate(message))
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))

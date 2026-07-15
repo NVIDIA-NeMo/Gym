@@ -12,7 +12,11 @@ swe_agents:
       agent_max_turns: 100
       # Pinned NeMo-Gym opencode fork (adds bench/cli.ts + the nemo-gym LanguageModelV3 provider).
       agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
-      agent_framework_commit: sdd/dev
+      # TODO(sdevare): sdd/compaction-segments validation branch — adds
+      # opencode-compaction on-policy segment tracking (segment_index /
+      # SWEBenchVerifyResponse.responses). Revert to sdd/dev (or merge and
+      # pin a commit) once validated.
+      agent_framework_commit: sdd/compaction-segments
 
       # Container configuration (same SIFs as the openhands path)
       container_formatter: ???
@@ -22,6 +26,13 @@ swe_agents:
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
       opencode_subagents_enabled: true
+      opencode_compaction_enabled: true
+      # TESTING ONLY — forces compaction to trigger well before ~99K tokens
+      # of real usage (usable = context - output/4 = ~24K here). 12K was too
+      # aggressive: agents got stuck compacting almost every turn instead of
+      # making real task progress. Remove/unset for real training runs — this
+      # also shrinks the agent's real usable context, not just the threshold.
+      opencode_context_limit_tokens: 32000
 
       dataset_path: ???
 
