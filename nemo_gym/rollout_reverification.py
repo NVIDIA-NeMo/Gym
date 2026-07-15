@@ -94,6 +94,8 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=None, description="Maximum number of samples to re-verify in parallel."
     )
     limit: Optional[int] = Field(default=None, description="Maximum number of examples to re-verify.")
+    # to do - block overwriting it
+    agent_to_resources_server_mapping: Optional[Dict[str, str]] = Field(default=None, description="Mapping of agent names to resources server names.")
 
 
 # to do add validation if I decide to do it here
@@ -108,8 +110,38 @@ def _resolve_input_path(input_path: str | Path) -> Path:
         )
     return _input_path
 
-
+from omegaconf import DictConfig
+from collections import defaultdict
 class RolloutReverificationHelper(BaseModel):
+    def _build_agent_to_resources_server_mapping(self, gcd) -> Dict[str, str]:
+        mapping = {}
+        # first pass - assuming there is response_api_agents in the config
+        for name in gcd:
+            block = gcd[name]
+            if isinstance(block, (dict, DictConfig)) and "responses_api_agents" in block:
+                impl = next(iter(block["responses_api_agents"].values()))
+                rs = (impl.get("resources_server") or {}).get("name")
+                if rs:
+                    mapping[name] = rs
+        if mapping:
+            return mapping
+        # Second pass (Case A): no agents in the config (resources-only, e.g. mcqa_resources_server.yaml).
+        # The rollout rows still carry agent names that were never started, so fall back to the
+        # single resources server for EVERY requested key.
+        resources_server_names = [
+        name for name in gcd
+        if isinstance(gcd[name], (dict, DictConfig)) and "resources_servers" in gcd[name]
+    ]
+        if len(resources_server_names) == 1:
+            only = resources_server_names[0]
+            return defaultdict(lambda: only)   # any key → the one resources server instance
+        if not resources_server_names:
+            raise ConfigError("reverify: no resources server found in the config.")
+        raise ConfigError(
+            f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
+            "route by. Use a config with agent blocks."
+        )
+
     def _validate_input_paths(self, config: RolloutReverificationConfig) -> None:
         materialized_inputs_jsonl_fpath = Path(config.materialized_inputs_jsonl_fpath)
         rollouts_jsonl_fpath = Path(config.rollouts_jsonl_fpath)
@@ -144,6 +176,7 @@ class RolloutReverificationHelper(BaseModel):
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
         server_client = ServerClient.load_from_global_config(head_server_config)
+        
 
         # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
         if not is_global_aiohttp_client_setup():
@@ -153,18 +186,24 @@ class RolloutReverificationHelper(BaseModel):
 
         return server_client
 
+    def get_resources_server_names_mapping(self, config: RolloutReverificationConfig) -> None:
+        print(config)
+        return None
+
     def _run_reverification_payloads(
         self,
         payloads: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Semaphore | nullcontext[None] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
-        resource_server_client = self.setup_resource_server_client(head_server_config)
+        server_client = self.setup_resource_server_client(head_server_config)
+        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
         semaphore = semaphore or nullcontext[None]()
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await resource_server_client.post(
-                    server_name=row[AGENT_REF_KEY_NAME]["name"], url_path="/verify", json=row
+                rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+                res = await server_client.post(
+                    server_name=rs_name, url_path="/verify", json=row
                 )
                 try:
                     await raise_for_status(res)
@@ -205,6 +244,7 @@ class RolloutReverificationHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        self.get_resources_server_names_mapping(config)
 
         self._validate_input_paths(config)
 
@@ -227,6 +267,7 @@ class RolloutReverificationHelper(BaseModel):
         rows: List[Dict] = []
         results: List[Dict] = []
         result_strs: List[List[str]] = []
+        # to do - get server name from config
         for future in self._run_reverification_payloads(payloads_to_reverify, semaphore=semaphore):
             row, result = await future
 
