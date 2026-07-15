@@ -140,7 +140,9 @@ def _responses_create_params_to_model_kwargs(
     tool_choice = default_tool_choice if default_tool_choice is not None else params.get("tool_choice")
     if tool_choice == "bash":
         model_kwargs["tool_choice"] = _bash_tool_choice()
-    elif tool_choice is not None:
+    elif tool_choice is not None and tool_choice != "auto":
+        # Don't propagate "auto" — it would overwrite a more specific default
+        # in the mini-swe-agent base config (e.g. swebench.yaml: tool_choice: required).
         model_kwargs["tool_choice"] = tool_choice
 
     return model_kwargs
@@ -452,8 +454,14 @@ def _run_eval_v2(
         env.execute("git apply --check patch.diff")
         env.execute("git apply patch.diff")
 
-    eval_script = test_spec.eval_script.replace("#!/bin/bash", "")
-    result = env.execute(eval_script, is_eval=True)
+    # Write the eval script as a file in the container so the #!/bin/bash shebang is
+    # honored. Without this, the sandbox exec runs via sh (not bash), and SWEbench's
+    # `set -uxo pipefail` fails on sh/dash.
+    eval_script = test_spec.eval_script
+    script_path = f"/tmp/_eval_{run_id}.sh"
+    env.execute(f"cat > {script_path} << 'EVEOF'\n{eval_script}\nEVEOF")
+    env.execute(f"chmod +x {script_path}")
+    result = env.execute(script_path, is_eval=True)
     test_output = result["output"]
     returncode = result["returncode"]
     print(f"[EVAL]{test_spec.instance_id} returncode: {returncode}", flush=True)
@@ -736,7 +744,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             top_p = (
                 body.responses_create_params.top_p
                 if body.responses_create_params.top_p is not None
-                else default_model_kwargs["top_p"]
+                else default_model_kwargs.get("top_p", 1.0)
             )
             model_kwargs = _responses_create_params_to_model_kwargs(
                 responses_create_params_dict,
