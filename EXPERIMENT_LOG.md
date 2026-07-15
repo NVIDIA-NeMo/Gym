@@ -192,7 +192,13 @@ Every per-trial trajectory (`.../harbor_agent/jobs/.../agent/trajectory.json`) i
 ### 5-run average (matching the model-card methodology)
 
 - First attempt: `--num-repeats 5` (445 rollouts) at concurrency 178 on **4** vLLM replicas. Aborted — the cluster could not schedule 4 GB300s (GPU capacity dropped: "Insufficient nvidia.com/gpu" + some nodes reporting unhealthy GPUs / `UnexpectedAdmissionError`). Reverted to the proven **2**-replica deployment.
-- Per user: running TB2.1 **5 times sequentially** against the same 2-GPU deployment (concurrency 89 each), via driver script `/tmp/seq5.sh` → `results/seq5/rollouts_run{1..5}.jsonl` + `scores.txt`. Run 1 launched ("Querying with 89 concurrent requests"). Monitor `bzzo4wyrd`. Will report the 5 pass@1 scores + mean/std vs the model-card 59.3.
+- Per user: running TB2.1 **5 times sequentially** against the same 2-GPU deployment (concurrency 89 each).
+- First attempt (single reused driver via `/tmp/seq5.sh`) crawled and the vLLM engines wedged. **Root cause (user's insight): reusing one driver + abrupt kills accumulate stuck state.** Two concrete mechanisms found:
+  1. **Killing a run mid-flight leaves its in-flight LLM requests queued on vLLM** (saw 8 running / 113 waiting from a killed run) → new requests queue behind zombies → apparent wedge.
+  2. **My own short-timeout vLLM health probes wedge the engine**: a `curl -m 20/70` that times out abandons the connection, but vLLM keeps processing the request; several such abandoned probes pile up and stall the engine. (Confirmed by the wedge flip-flopping to whichever pod I probed.)
+  - The pods themselves are fine; the model's first inference is slow (hybrid attn/conv → Triton JIT of `_causal_conv1d_fwd_kernel` etc.), so probes need long timeouts or, better, none.
+- **Fix (per user "create a new driver for every run")**: each run is now its own **k8s Job** (`hemild-tb21-run-N`) with a fresh pod → fresh Ray + fresh gym servers, no cross-run accumulation. Shared **gym venv on Lustre** (`.../gym-venv`) so fresh pods start without rebuilding. Runs go to completion (never killed); vLLM stays up and drains cleanly between runs. Restarted vLLM fresh (cleared the zombie backlog); verified 2 replicas health-ready **without POST-probing**; let the run's own traffic (2h client timeout) warm the pods.
+- Run 1 Job launched → "Querying with 89 concurrent requests". Monitor `bp3t37fae`. Output `results/seq5/rollouts_run{1..5}.jsonl`; scores computed per-run. Will report 5 pass@1 + mean/std vs model-card 59.3.
 
 ##### Run v2 checkpoint (33/89, ~36 min in)
 
