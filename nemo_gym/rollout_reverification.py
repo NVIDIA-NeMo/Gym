@@ -13,19 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import glob as glob_module
 import json
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
-from itertools import repeat
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import orjson
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -35,9 +32,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_wandb_run,
 )
-from nemo_gym.rollout_collection import _failures_path_for
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -52,6 +47,16 @@ from nemo_gym.server_utils import (
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+
+
+def _rollout_verify_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    summary = {
+        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+    }
+    return {k: v for k, v in summary.items() if v is not None}
 
 
 class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
@@ -85,6 +90,9 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, description="Maximum number of samples to re-verify in parallel."
+    )
     limit: Optional[int] = Field(default=None, description="Maximum number of examples to re-verify.")
 
 
@@ -113,7 +121,7 @@ class RolloutReverificationHelper(BaseModel):
             raise ConfigPathNotFoundError(f"Rollouts JSONL file {rollouts_jsonl_fpath} does not exist!")
 
     def _yield_inputs_and_rollouts_paired(
-        self, materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path
+        self, materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
     ) -> Iterator[Tuple[Dict, Dict]]:
         inputs_by_key = {}
         with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -123,18 +131,16 @@ class RolloutReverificationHelper(BaseModel):
         # to do - change to use namedtuple
         # to do - tqdm or other progress bar already used in Gym
         with open(rollouts_jsonl_fpath) as r_f:
-            for line in r_f:  # never holds the whole file
+            for i, line in enumerate(r_f):  # never holds the whole file
+                if limit and i >= limit:
+                    break
                 rollout_row = orjson.loads(line)
                 input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
                 if input_row is None:
                     raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
                 yield (input_row, rollout_row)
 
-    def _count_file_lines(self, fpath: Path) -> int:
-        with open(fpath) as f:
-            return sum(1 for _ in f)
-
-    def setup_server_client(
+    def setup_resource_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
         server_client = ServerClient.load_from_global_config(head_server_config)
@@ -147,15 +153,12 @@ class RolloutReverificationHelper(BaseModel):
 
         return server_client
 
-    def _run_examples(
+    def _run_reverification_payloads(
         self,
-        examples: List[Dict],
+        payloads: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
     ) -> Iterator[Future]:  # pragma: no cover
-        """
-        We provide this function as a lower level interface for running rollout collection.
-        """
         resource_server_client = self.setup_resource_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
@@ -169,71 +172,44 @@ class RolloutReverificationHelper(BaseModel):
                 except Exception:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
-                            "[rollout_collection] /run failed "
+                            "[rollout_reverification] /verify failed "
                             f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            f"row={json.dumps(_rollout_verify_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
                     raise
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
+            map(_post_subroutine, payloads),
+            desc="Collecting reverification results",
             miniters=10,
-            total=len(examples),
+            total=len(payloads),
             maxinterval=60,
         )
 
-    def _prepare_rows_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        range_iterator = repeat(0)
-        if config.limit:
-            range_iterator = range(config.limit)
-            print(f"Limiting the number of rows to {config.limit}")
+    def map_input_and_rollout_rows_to_payload(self, input_row: Dict, rollout_row: Dict) -> Dict:
+        return input_row | {"response": rollout_row["response"]}
+
+    def _prepare_payloads_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # to do - what about agent name?
 
         materialized_inputs_jsonl_fpath = _resolve_input_path(config.materialized_inputs_jsonl_fpath)
         rollouts_jsonl_fpath = _resolve_input_path(config.rollouts_jsonl_fpath)
         # to do - add validation for output_fpath and failures_fpath
-        output_fpath = Path(config.output_jsonl_fpath)
-        failures_fpath = _failures_path_for(output_fpath)
 
-        for input_row, rollout_row in self._yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath
-        ):
-            payload = input_row | {"response": rollout_row["response"]}
-
-        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = self._count_file_lines(
-            rollouts_jsonl_fpath
-        )  # to do Assume only one agent for now, so counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
-        results_file = output_fpath.open("ab")
-        failures_file = failures_fpath.open("ab")
-        for future in self._run_examples(input_rows, semaphore=semaphore):
-            row, result = await future
-
-            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-            if SKILLS_REF_KEY_NAME in row:
-                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
-
-            rows.append(row)
-            results.append(result)
-            serialized = orjson.dumps(result)
-            result_strs.append([serialized])
+        payloads = [
+            self.map_input_and_rollout_rows_to_payload(ir, rr)
+            for ir, rr in self._yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath)
+        ]  # can be written better
+        return payloads
 
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
-        materialized_inputs_jsonl_fpath = Path(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = Path(config.rollouts_jsonl_fpath)
         output_fpath = Path(config.output_jsonl_fpath)
 
         self._validate_input_paths(config)
 
-        rows_to_reverify = self._prepare_rows_from_config(config)
+        payloads_to_reverify = self._prepare_payloads_from_config(config)
         # semaphore = nullcontext()  # to do add semaphore if I decide to do it here
 
         from nemo_gym.rollout_collection import _failures_path_for
@@ -242,10 +218,13 @@ class RolloutReverificationHelper(BaseModel):
         failures_fpath = _failures_path_for(output_fpath)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        rows: List[Dict] = []
+        results: List[Dict] = []
+        result_strs: List[List[str]] = []
+        for future in self.run_examples(payloads_to_reverify, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -260,7 +239,7 @@ class RolloutReverificationHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
+            result_strs.append(serialized)
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -280,7 +259,7 @@ class RolloutReverificationHelper(BaseModel):
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * len(results) / len(input_rows)
+            current_pct = 100 * len(results) / len(payloads_to_reverify)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
@@ -293,10 +272,10 @@ class RolloutReverificationHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
-
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+        # to do - add upload to wandb later
+        # if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
+        #     print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
+        #     get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
@@ -315,9 +294,8 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
-Fully materialized inputs: {config.materialized_jsonl_fpath}
-Rollouts: {output_fpath}
-Aggregate metrics: {aggregate_metrics_fpath}""")
+        Re-verified rollouts: {output_fpath}
+        Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results
 
@@ -327,7 +305,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         rows: List[Dict],
         output_fpath: Path,
     ) -> Optional[Path]:
-        """Call /aggregate_metrics on each agent server after rollouts complete.
+        """Call /aggregate_metrics on each resource server after rollouts complete.
 
         Writes a single _aggregate_metrics.json with one entry per agent (same shape
         as the old _agent_metrics.json). Returns the file path.
@@ -343,7 +321,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 continue
             agent_results.setdefault(agent_name, []).append(result)
 
-        server_client = self.setup_server_client()
+        resource_server_client = self.setup_resource_server_client()
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage
@@ -356,11 +334,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 stripped.append(entry)
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await server_client.post(
+            agg_response = await resource_server_client.post(
                 server_name=agent_name,
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
+
             await raise_for_status(agg_response)
             agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
 
@@ -400,51 +379,15 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                     if isinstance(v, primitive_types)
                 }
             )
-
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        # to do - add upload to wandb later
+        # if get_wandb_run():  # pragma: no cover
+        #     get_wandb_run().log(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
         metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         return metrics_fpath
-
-    def run_examples(
-        self,
-        examples: List[Dict],
-        head_server_config: Optional[BaseServerConfig] = None,
-        semaphore: Optional[Semaphore] = None,
-    ) -> Iterator[Future]:  # pragma: no cover
-        """
-        We provide this function as a lower level interface for running rollout collection.
-        """
-        server_client = self.setup_server_client(head_server_config)
-        semaphore = semaphore or nullcontext()
-
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                    raise
-                return row, await get_response_json(res)
-
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
-            miniters=10,
-            total=len(examples),
-            maxinterval=60,
-        )
 
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
@@ -458,122 +401,3 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             )
 
         return server_client
-
-
-class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
-    """
-    Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
-
-    Reads every JSONL file matching `input_glob`, computes aggregate metrics by POSTing to each
-    agent server's `/aggregate_metrics` endpoint over the global union of records, and writes a
-    single `<output_jsonl_fpath stem>_aggregate_metrics.json` next to the rollouts. By default
-    also concatenates all shards into `output_jsonl_fpath`.
-
-    Examples:
-
-    ```bash
-    gym eval aggregate \
-        "+config_paths=[benchmarks/aime24/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-        +input_glob='results/rollouts-rs*-chunk*.jsonl' \
-        +output_jsonl_fpath=results/rollouts.jsonl
-    ```
-    """
-
-    input_glob: str = Field(
-        description=(
-            "Glob pattern or comma-separated list of glob patterns matching the rollout shards "
-            "to aggregate (e.g. 'results/rollouts-rs*-chunk*.jsonl' or "
-            "'results/run1/rollouts.jsonl,results/run2/rollouts.jsonl'). Whitespace around "
-            "commas is stripped. Duplicate matches across patterns are deduplicated."
-        )
-    )
-    output_jsonl_fpath: str = Field(
-        description=(
-            "Path used to derive the aggregate-metrics output location "
-            "('<stem>_aggregate_metrics.json' next to this path) and, when merge_shards=True, "
-            "the merged-rollouts file."
-        ),
-    )
-    merge_shards: bool = Field(
-        default=True,
-        description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
-    )
-
-
-def loads_jsonl_line(raw, fpath, line_no: int):
-    """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
-    try:
-        return orjson.loads(raw)
-    except orjson.JSONDecodeError as e:
-        raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
-
-
-def _expand_input_glob(input_glob: str) -> List[str]:
-    """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
-
-    Examples:
-      'results/rollouts.jsonl' -> ['results/rollouts.jsonl'] (if it exists)
-      'a/*.jsonl, b/*.jsonl'   -> matches of both patterns, deduplicated
-    """
-    patterns = [p.strip() for p in input_glob.split(",") if p.strip()]
-    seen: Dict[str, None] = {}  # preserve insertion order while deduping
-    for pattern in patterns:
-        for path in sorted(glob_module.glob(pattern)):
-            seen.setdefault(path, None)
-    return list(seen)
-
-
-class RolloutAggregationHelper(BaseModel):
-    async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
-        input_paths = _expand_input_glob(config.input_glob)
-        if not input_paths:
-            raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
-        print(f"Aggregating {len(input_paths)} shard(s):")
-        for p in input_paths:
-            print(f"  - {p}")
-
-        results: List[Dict] = []
-        for shard_path in input_paths:
-            with open(shard_path, "rb") as f:
-                for line_no, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    results.append(loads_jsonl_line(line, shard_path, line_no))
-        print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
-
-        # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
-        results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
-
-        output_fpath = Path(config.output_jsonl_fpath)
-        output_fpath.parent.mkdir(parents=True, exist_ok=True)
-
-        if config.merge_shards:
-            print(f"Merging shards into {output_fpath}")
-            with output_fpath.open("wb") as out:
-                for r in results:
-                    out.write(orjson.dumps(r) + b"\n")
-
-        # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
-        helper = RolloutCollectionHelper()
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
-
-        print(f"""Finished rollout aggregation! View results at:
-Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
-Aggregate metrics: {aggregate_metrics_fpath}""")
-
-        return aggregate_metrics_fpath
-
-
-# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
-# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
-
-
-__getattr__ = moved_attr_getter(
-    __name__,
-    {
-        "collect_rollouts": "nemo_gym.cli.eval",
-        "aggregate_rollouts": "nemo_gym.cli.eval",
-    },
-)
