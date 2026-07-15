@@ -61,7 +61,7 @@ sandbox_opencode_swe:
               npm: "@ai-sdk/openai-compatible"
               options:
                 baseURL: __SANDBOX_MODEL_URL__/v1
-                apiKey: gym
+                apiKey: gym  # pragma: allowlist secret
               models:
                 policy_model:
                   interleaved:
