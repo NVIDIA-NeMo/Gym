@@ -13,24 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
-import difflib
 import importlib
 import re
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nemo_gym.cli.utils import did_you_mean
 from nemo_gym.discovery import component_search_roots
 
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
-
-
-def _did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
-    return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
 class _GymArgumentParser(argparse.ArgumentParser):
@@ -47,7 +41,7 @@ class _GymArgumentParser(argparse.ArgumentParser):
             choices = re.findall(r"'([^']+)'", match.group(2))
             if not choices:
                 choices = [choice.strip() for choice in match.group(2).split(",")]
-            message += _did_you_mean(typo, choices)
+            message += did_you_mean(typo, choices)
         super().error(message)
 
 
@@ -144,6 +138,15 @@ RESOURCES_SERVER = Flag(
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
 
+# `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
+# component (surfaced as the reserved `component_name` config key) instead of listing all.
+NAME = Flag(
+    register=lambda p: p.add_argument(
+        "name", nargs="?", metavar="NAME", help="Inspect a single component by name instead of listing all."
+    ),
+    translate_to_hydra=lambda args: [f"+component_name={args.name}"] if getattr(args, "name", None) else [],
+)
+
 # `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
 # chosen listing command as the reserved `query` config key; the type only picks which command to run
 # (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
@@ -236,7 +239,7 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
         ]
 
     raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{_did_you_mean(typo, candidates)} "
+        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{did_you_mean(typo, candidates)} "
         f"See available {flag} configs in {available}."
     )
 
@@ -345,28 +348,28 @@ GROUPS = {
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks",
-        summary="List available benchmarks.",
-        flags=(JSON, DISCOVERY_SEARCH_DIR),
+        summary="List or inspect available benchmarks.",
+        flags=(NAME, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list environments": Command(
         target="nemo_gym.cli.env:list_environments",
-        summary="List available environments by name.",
-        flags=(JSON, DISCOVERY_SEARCH_DIR),
+        summary="List or inspect available environments.",
+        flags=(NAME, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
-        summary="List agent harnesses and how each composes (Pattern A vs self-contained B).",
-        flags=(JSON, DISCOVERY_SEARCH_DIR),
+        summary="List or inspect available agent harnesses.",
+        flags=(NAME, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list models": Command(
         target="nemo_gym.cli.models:list_models",
-        summary="List model servers by the value to pass to --model-type.",
-        flags=(JSON, DISCOVERY_SEARCH_DIR),
+        summary="List or inspect available model servers.",
+        flags=(NAME, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "list resources-servers": Command(
         target="nemo_gym.cli.resources_servers:list_resources_servers",
-        summary="List resources servers (selectable with --resources-server) by name.",
-        flags=(JSON, DISCOVERY_SEARCH_DIR),
+        summary="List or inspect available resources servers.",
+        flags=(NAME, JSON, DISCOVERY_SEARCH_DIR),
     ),
     "search": Command(
         target=_search,
@@ -671,7 +674,7 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        hints = "".join(_did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        hints = "".join(did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
     if args.version:

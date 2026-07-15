@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.agent_registry import AgentEntry
@@ -86,3 +87,44 @@ class TestListAgents:
         out = capsys.readouterr().out
         assert "swe_agents" in out and "Agents matching" in out
         assert "simple_agent" not in out
+
+    def test_inspect_agent_by_name(self, capsys) -> None:
+        with (
+            patch(
+                "nemo_gym.cli.agents.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "swe_agents"}),
+            ),
+            patch("nemo_gym.cli.agents.discover_agents", return_value=_AGENTS),
+        ):
+            list_agents()
+        out = capsys.readouterr().out
+        assert "The swe_agents agent" in out
+        assert "composition: self-contained (B)" in out
+        assert "variants: swebench_openhands" in out
+        assert "SWE tasks" in out  # description
+        assert "Usage example:" not in out  # thin view
+
+    def test_inspect_unknown_agent_exits(self, capsys) -> None:
+        with (
+            patch(
+                "nemo_gym.cli.agents.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "swe_agent"}),
+            ),
+            patch("nemo_gym.cli.agents.discover_agents", return_value=_AGENTS),
+        ):
+            with pytest.raises(SystemExit):
+                list_agents()
+        out = capsys.readouterr().out
+        assert "Unknown agent 'swe_agent'" in out and "swe_agents" in out
+
+    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys) -> None:
+        # Real discovery (via --search-dir): the path line must be the agent dir's absolute path.
+        agent_dir = tmp_path / "responses_api_agents" / "my_agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "app.py").write_text("")
+        with patch(
+            "nemo_gym.cli.agents.get_global_config_dict",
+            return_value=_mock_global_config({"component_name": "my_agent", "search_dir": [str(tmp_path)]}),
+        ):
+            list_agents()
+        assert f"path: {agent_dir.resolve()}" in capsys.readouterr().out

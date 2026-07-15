@@ -955,10 +955,14 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        assert cli_main._did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        assert cli_main._did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
@@ -1135,3 +1139,10 @@ class TestListEnvironmentsRouting:
         # key, read centrally from the resolved config — like --json/--query.
         _, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
         assert overrides == ["+search_dir=[/a,/b]"]
+
+    def test_name_positional_becomes_component_name_override(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym list <type> <name>` reaches the listing command as the reserved `component_name` config key,
+        # switching it into inspect mode.
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == ["+component_name=calendar"]

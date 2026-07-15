@@ -17,9 +17,16 @@ import json
 from rich.table import Table
 
 from nemo_gym.agent_registry import discover_agents
-from nemo_gym.cli.utils import fuzzy_matches, print_no_matches, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     SEARCH_DIR_KEY_NAME,
@@ -28,11 +35,33 @@ from nemo_gym.global_config import (
 )
 
 
+def _inspect_agent(name: str, agents: dict, global_config_dict) -> None:
+    """Render the ``gym list agents <name>`` inspect view for one agent (thin: no usage example)."""
+    entry = agents.get(name)
+    if entry is None:
+        exit_unknown_component(name, agents, "agent")
+        return
+
+    details = {
+        "path": str(entry.path.resolve()),
+        "composition": "self-contained (B)" if entry.self_contained else "composable (A)",
+    }
+    if entry.variants:
+        details["variants"] = ", ".join(sorted(entry.variants))
+
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="agent",
+        description=entry.description,
+        details=details,
+    )
+
+
 def list_agents() -> None:
-    """List discovered agent harnesses and how each composes: freely wireable into a separate environment
-    (Pattern A) vs. self-contained harnesses that run with their own config (Pattern B). Optionally filtered
-    by a `query` (the `gym search agents` entry point). ``--search-dir`` adds extra roots on top of the cwd
-    and built-ins.
+    """List discovered agent harnesses and how each composes (Pattern A vs. self-contained B), or inspect one
+    by name (``gym list agents <name>``). Optionally filtered by a `query` (the `gym search agents` entry
+    point). ``--search-dir`` adds extra roots on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -42,6 +71,11 @@ def list_agents() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     agents = discover_agents(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
+
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_agent(name, agents, global_config_dict)
+        return
 
     # `gym search agents <query>` reuses this command, narrowing to fuzzy matches on name + variant names.
     query = global_config_dict.get(QUERY_KEY_NAME)

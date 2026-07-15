@@ -27,10 +27,12 @@ so it's safe to call even when those aren't set.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
+
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components, read_config_metadata
+from nemo_gym.discovery import discover_components, iter_server_configs, read_config_metadata
 
 
 ENVIRONMENTS_SUBDIR = "environments"
@@ -85,3 +87,42 @@ def discover_environments(
     ``search_dirs`` is one dir or a list.
     """
     return discover_components(ENVIRONMENTS_SUBDIR, _discover_environments_in_dir, search_dirs)
+
+
+def read_environment_details(config_path: Path) -> Dict[str, object]:
+    """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
+
+    Returns ``domain``, ``description`` (via :func:`~nemo_gym.discovery.read_config_metadata`), plus
+    ``value``, ``resources_servers`` (names), ``agent`` (the agent type), and dataset ``names`` read from
+    the config's server blocks. Never raises: an unreadable config yields empty/None fields.
+    """
+    domain, description = read_config_metadata(config_path)
+    try:
+        raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)
+    except Exception:
+        raw = None
+
+    value: Optional[str] = None
+    resources_servers: List[str] = []
+    agent: Optional[str] = None
+    datasets: List[str] = []
+    for group_key, server_name, server_config in iter_server_configs(raw):
+        if group_key == "resources_servers":
+            resources_servers.append(server_name)
+            if value is None and server_config.get("value"):
+                value = str(server_config["value"])
+        elif group_key == "responses_api_agents":
+            if agent is None:
+                agent = server_name
+            for dataset in server_config.get("datasets") or []:
+                if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
+                    datasets.append(str(dataset["name"]))
+
+    return {
+        "domain": domain,
+        "description": description,
+        "value": value,
+        "resources_servers": resources_servers,
+        "agent": agent,
+        "datasets": datasets,
+    }
