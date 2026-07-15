@@ -107,18 +107,33 @@ class ApptainerSandbox:
                 self.container_image,
                 self.instance_name,
             ]
-            await _run_subprocess(cmd, timeout_s=300)
+            try:
+                await _run_subprocess(cmd, timeout_s=300)
+                self.started = True
 
-            await self.exec(
-                f"mkdir -p {shlex.quote(self.scratch_path)} && touch {shlex.quote(self.todos_path)}",
-                timeout_s=30,
+                await self._exec_checked(
+                    f"mkdir -p {shlex.quote(self.scratch_path)} && touch {shlex.quote(self.todos_path)}",
+                    timeout_s=30,
+                )
+
+                if self.extra_setup_command and not self.setup_done:
+                    await self._exec_checked(self.extra_setup_command, timeout_s=600)
+                    self.setup_done = True
+            except Exception:
+                if self.started:
+                    await self.stop()
+                raise
+
+    async def _exec_checked(self, command: str, timeout_s: int) -> ExecResult:
+        result = await self.exec(command, timeout_s=timeout_s)
+        if result.timed_out:
+            raise RuntimeError(f"sandbox command timed out after {timeout_s}s: {command}")
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"sandbox command failed (exit={result.exit_code}): {command}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
-
-            if self.extra_setup_command and not self.setup_done:
-                await self.exec(self.extra_setup_command, timeout_s=600)
-                self.setup_done = True
-
-            self.started = True
+        return result
 
     async def exec(self, command: str, timeout_s: Optional[int] = None) -> ExecResult:
         timeout_s = timeout_s if timeout_s is not None else self.exec_timeout_s
@@ -146,6 +161,8 @@ class ApptainerSandbox:
                 )
             except Exception:
                 pass
+            finally:
+                self.started = False
         try:
             shutil.rmtree(self.scratch_dir, ignore_errors=True)
         except Exception:
@@ -272,7 +289,7 @@ class LocalSandbox:
 
     async def exec(self, command: str, timeout_s: Optional[int] = None) -> ExecResult:
         timeout_s = timeout_s if timeout_s is not None else self.exec_timeout_s
-        cmd = ["bash", "-lc", command]
+        cmd = ["bash", "-c", command]
         return await _exec_with_timeout(
             cmd,
             timeout_s=timeout_s,

@@ -192,17 +192,24 @@ def _resolve_under_codebase(path: str, codebase_path: str = "/codebase") -> Opti
     Returns None if the model tries to escape the working tree (absolute
     paths outside `codebase_path`, or `..` segments that would walk above it).
     """
+    codebase_path = _normpath(codebase_path)
     if not path:
         return codebase_path
     if path.startswith("/"):
         normalized = _normpath(path)
-        if normalized != codebase_path and not normalized.startswith(codebase_path + "/"):
+        if not _is_under_path(normalized, codebase_path):
             return None
         return normalized
     normalized = _normpath(f"{codebase_path}/{path}")
-    if not normalized.startswith(codebase_path):
+    if not _is_under_path(normalized, codebase_path):
         return None
     return normalized
+
+
+def _is_under_path(path: str, parent: str) -> bool:
+    if parent == "/":
+        return path.startswith("/")
+    return path == parent or path.startswith(parent + "/")
 
 
 def _normpath(path: str) -> str:

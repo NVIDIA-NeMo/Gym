@@ -140,6 +140,9 @@ class TestPathResolution:
     def test_double_dot_escaping_returns_none(self) -> None:
         assert tools_mod._resolve_under_codebase("../../etc/passwd") is None
 
+    def test_relative_path_to_sibling_prefix_returns_none(self) -> None:
+        assert tools_mod._resolve_under_codebase("../codebase_evil/secret.txt") is None
+
     def test_absolute_path_outside_codebase_returns_none(self) -> None:
         assert tools_mod._resolve_under_codebase("/etc/passwd") is None
 
@@ -151,6 +154,7 @@ class TestPathResolution:
         root = "/tmp/vcqa_local/working_tree"
         assert tools_mod._resolve_under_codebase("src/foo.py", root) == f"{root}/src/foo.py"
         assert tools_mod._resolve_under_codebase("../../etc/passwd", root) is None
+        assert tools_mod._resolve_under_codebase("../working_tree_evil/secret.txt", root) is None
         assert tools_mod._resolve_under_codebase("/etc/passwd", root) is None
         assert tools_mod._resolve_under_codebase(f"{root}/src/foo.py", root) == f"{root}/src/foo.py"
 
@@ -826,6 +830,43 @@ def test_apptainer_sandbox_make_instance_name_is_unique() -> None:
     a, b = make_instance_name(), make_instance_name()
     assert a != b
     assert a.startswith("vcqa-")
+
+
+async def test_apptainer_sandbox_cleans_up_instance_when_setup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_calls: list[list[str]] = []
+    exec_commands: list[str] = []
+
+    async def fake_run_subprocess(cmd: list[str], timeout_s: int) -> ExecResult:
+        run_calls.append(cmd)
+        return ExecResult(exit_code=0, stdout="", stderr="")
+
+    async def fake_exec_with_timeout(cmd: list[str], *, timeout_s: int, cwd: str | None) -> ExecResult:
+        assert cwd is None
+        exec_commands.append(cmd[-1])
+        if cmd[-1] == "setup fails":
+            return ExecResult(exit_code=1, stdout="", stderr="boom")
+        return ExecResult(exit_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox_mod, "_run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(sandbox_mod, "_exec_with_timeout", fake_exec_with_timeout)
+
+    sandbox = ApptainerSandbox(
+        instance_name="vcqa-test",
+        container_image="docker://debian:bookworm-slim",
+        working_tree=tmp_path,
+        scratch_dir=tmp_path / "scratch",
+        extra_setup_command="setup fails",
+    )
+
+    with pytest.raises(RuntimeError, match="sandbox command failed"):
+        await sandbox.start()
+
+    assert exec_commands[-1] == "setup fails"
+    assert any(cmd == ["apptainer", "instance", "stop", "vcqa-test"] for cmd in run_calls)
+    assert sandbox.cleaned_up is True
+    assert sandbox.started is False
 
 
 def test_sandbox_stop_is_idempotent_when_never_started(tmp_path: Path) -> None:
