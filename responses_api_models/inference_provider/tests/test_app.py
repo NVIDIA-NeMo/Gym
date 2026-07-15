@@ -45,7 +45,7 @@ def _make_server(**overrides):
     )
     defaults.update(overrides)
     config = InferenceProviderConfig(**defaults)
-    return InferenceProvider(config=config, server_client=MagicMock(spec=ServerClient))
+    return InferenceProvider(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
 def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None, usage=None):
