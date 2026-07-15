@@ -14,7 +14,7 @@ components:
       - text
       hooks: null
       max_agent_steps: 6
-      raise_on_tool_invocation_failure: false
+      raise_on_tool_invocation_failure: true
       required_variables: null
       state_schema: {}
       streaming_callback: null
