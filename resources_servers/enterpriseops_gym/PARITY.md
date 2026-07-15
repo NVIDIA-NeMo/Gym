@@ -77,7 +77,41 @@ self-hosted serving (vLLM, greedy + fixed seed).
 through a hosted gateway; ~20% of tasks are flaky. Report mean@k (k≥5 → ±0.7 pp) rather
 than single-run scores.
 
-## 5. Operational findings (upstream-relevant)
+## 5. Cross-stack validation (k=5 on dedicated vLLM serving)
+
+The performance sweep ([PERF.md](PERF.md)) doubles as an independent k=5 replication on a
+different stack: Nemotron 3 Nano FP8 (reasoning enabled, ~13k output tokens/task) on
+4×H100 vLLM, with **both harnesses on the identical chat-completions endpoint** — a
+designed falsification test of §4's serving-path attribution. Panel: 641 tasks present in
+all 10 passes. Success is flat across concurrency in both harnesses (Cochran's Q 5.40 /
+4.32, df=4, n.s.), licensing the five levels as quasi-repeats (within-pairs span
+concurrency levels, which affects both harnesses identically).
+
+| Metric | Gateway (§4) | vLLM, same endpoint |
+|---|---:|---:|
+| Within-harness flip rate | ~6.3% | 14.7% |
+| Between-harness flip rate | 9.80% | 16.24% |
+| Harness excess | +3.49 pp (p<0.002) | **+1.57 pp** (p<0.0025) |
+| Excess relative to noise floor | 55% | **11%** |
+
+**The §4 attribution survives its falsification test**: removing the API serving-path
+confound collapsed the cross-harness trajectory effect from 55% to 11% of the noise floor
+(3.49 → 1.57 pp absolute, despite a 2.3× noisier base). The small residual is real and
+remains direction-free: mean Δp̂ +0.62 pp, **112 tasks favor the port vs 106 native**
+(sign p = 0.735), per-level McNemar all p ≥ 0.14 with alternating discordance direction,
+task-difficulty correlation r = 0.811.
+
+**Formal equivalence (TOST)**: macro 24.94% (port) vs 24.35% (native); Δ 90% CI
+[−0.82, +1.97] pp lies within a ±2 pp margin → **statistically equivalent within ±2 pp at
+α = 0.05**.
+
+**New calibration for reasoning models**: on this stack only 59% of tasks are
+deterministic-and-agreeing across all 10 runs (vs 78% on the gateway) and 41% are flaky
+(vs 20%) — ~30× more sampled tokens per task gives batch-numerics divergence ~30× more
+opportunities to flip a trajectory. Single-run scores for reasoning models on this
+benchmark are correspondingly noisier; report mean@5.
+
+## 6. Operational findings (upstream-relevant)
 
 - Most EOG MCP containers leak ~5 file descriptors per task lifecycle; at the default
   ulimit (1024) a container serves ~200 tasks before seeding fails with
