@@ -248,6 +248,16 @@ sandbox = [
     # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
     # License: Apache 2.0
     "opensandbox>=0.1.9",
+
+    # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
+    # License: Apache 2.0 https://pypi.org/project/daytona/
+    "daytona>=0.179.0",
+
+    # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
+    # CodeBuild/S3/SSM/Secrets Manager calls.
+    # Updated: Tue Jun 03, 2026 with boto3>=1.34
+    # License: Apache 2.0 https://github.com/boto/boto3/blob/develop/LICENSE
+    "boto3>=1.34",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
@@ -508,7 +518,8 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "environments/*/prepare.py",
+    "environments/*",
+    "scripts/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]

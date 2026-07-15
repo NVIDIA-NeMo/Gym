@@ -140,6 +140,7 @@ jobs:
       app-id: ${{ vars.BOT_ID }}
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
+      gh-release-use-changelog-builder: true
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
       restrict-to-admins: true
     secrets: inherit  # pragma: allowlist secret

@@ -24,6 +24,7 @@ over the older Docker/Singularity mini-SWE integration.
     - [Run One-Example Smoke](#run-one-example-smoke)
     - [Expected Outputs](#expected-outputs)
     - [Repeated Rollouts](#repeated-rollouts)
+  - [Running SWE-bench on ECS Fargate](#running-swe-bench-on-ecs-fargate)
   - [Sandbox Environment Adapter](#sandbox-environment-adapter)
     - [Environment Lifecycle](#environment-lifecycle)
   - [Contributing](#contributing)
@@ -327,25 +328,33 @@ tool. The successful smoke kept `tool_choice=auto` and lowered
 
 ### Prerequisites
 
-- A NeMo Gym development environment with this agent's requirements installed.
-  From the repo root:
+- A NeMo Gym development environment. From the repo root:
 
 ```bash
 uv sync --extra dev --extra sandbox
-uv pip install mini-swe-agent==2.1.0 swebench==4.1.0
 ```
 
-  `uv sync --extra dev --extra sandbox` installs `nemo-gym[dev,sandbox]`
-  (including the OpenSandbox SDK) into the root venv, so the manual step only
-  adds this agent's extra runtime dependencies. Do **not** run
+  This installs `nemo-gym[dev,sandbox]` (including the OpenSandbox SDK) into the
+  root venv, which is all `gym env start` needs. `gym env start` builds this
+  agent's own per-server venv from
+  `responses_api_agents/mini_swe_agent_2/requirements.txt` (installing
+  `mini-swe-agent`, `swebench`, and a compatible `openai`), so you do not
+  install those yourself.
+
+  Do **not** install `mini-swe-agent`/`swebench` into the root venv (e.g.
+  `uv pip install mini-swe-agent==2.1.0 swebench==4.1.0`). `mini-swe-agent`
+  allows a newer `openai` than `nemo-gym` pins (`openai<=2.7.2`), so installing
+  it upgrades the root venv's `openai`. `gym env start` then pins every
+  per-server venv to the root venv's `openai` version, which conflicts with
+  `nemo-gym`'s pin and fails to resolve (`... nemo-gym depends on openai<=2.7.2
+  ... you require openai==2.44.0 ... unsatisfiable`). If this happens, reset the
+  root venv with `uv sync --extra dev --extra sandbox`.
+
+  Also do not run
   `uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt`
-  from the repo root: that file pins `nemo-gym` via a `../../` editable path
-  that pip/uv resolve relative to the current working directory, so from the
-  repo root it points one level above the repo and fails with
-  `... does not appear to be a Python project`. That requirements file is meant
-  to be installed with the agent directory as the working directory, which is
-  exactly what `gym env start` does automatically when it builds the agent's
-  per-server virtual environment.
+  from the repo root: its `../../` editable path resolves relative to the
+  current working directory, so from the repo root it points above the repo and
+  fails with `... does not appear to be a Python project`.
 
 - Access to an OpenSandbox deployment reachable from the server process.
 - A policy model endpoint compatible with `responses_api_models/vllm_model`.
@@ -475,6 +484,56 @@ The agent writes per-instance mini-swe-agent configs and result artifacts under
 Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
 to bound tool and verification execution. If you launch from a custom
 Kubernetes wrapper, add any outer per-sample guard there.
+
+## Running SWE-bench on ECS Fargate
+
+Swap OpenSandbox for ECS Fargate by adding the ECS provider config to your
+`+config_paths` — the agent config (`configs/mini_swe_agent_2.yaml`), agent loop,
+and SWE-bench verifier are unchanged. For provider setup (AWS infra/SSM,
+credentials, the `:52222` network requirement, and automatic image mirroring via
+`auto_mirror`) see the ECS Fargate provider page under `infrastructure/sandbox`.
+SWE-bench task images are pulled into the ECR mirror on first use, so no manual
+image staging is needed.
+
+Each input row needs the SWE-bench instance fields shown under
+[Dataset Information](#dataset-information) plus `subset` (`verified`), `split`
+(`test`), and `responses_create_params`.
+
+**Golden smoke (no model)** — `run_golden=true` applies the gold patch and runs
+the verifier in-sandbox, so the model is never called:
+
+```bash
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=true
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_golden.jsonl \
+    +limit=1 +num_repeats=1 +num_samples_in_parallel=1
+```
+
+A resolved instance returns reward `1.0` with `tests_status` populated.
+
+**Real rollout** — drop `run_golden` and point the model server at a live
+OpenAI-compatible endpoint (`policy_model_name` is the model id sent upstream):
+
+```bash
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++policy_base_url=https://<endpoint>/v1 ++policy_api_key=<key> ++policy_model_name=<model-id>
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_rollout.jsonl \
+    +limit=8 +num_repeats=1 +num_samples_in_parallel=8 \
+    '+responses_create_params={max_output_tokens: 16384, temperature: 0.6, top_p: 0.95}'
+```
+
+Reasoning models often only accept the default `temperature` (`1`) and reject a
+custom `top_p`; in that case use
+`'+responses_create_params={temperature: 1, max_output_tokens: 16384}'` and keep
+`max_output_tokens` large enough for reasoning tokens.
 
 ## Sandbox Environment Adapter
 
