@@ -183,6 +183,17 @@ gym eval run \
 
 Infra used: vLLM Qwen3.6-27B on **2× GB300** replicas (1 GPU each; started at 1 replica, scaled to 2 after the single engine wedged under the 89-request burst) behind a ClusterIP Service; gym/Ray driver pod (24 CPU, `harbor_ray_task_num_cpus: 0.25` to fit 89 concurrent Harbor jobs); OpenSandbox reached over the istio ambient multi-cluster mesh at `opensandbox-cell-1.opensandbox-system:80` (server-proxy mode, no public endpoint).
 
+## Follow-up — ATIF traces + 5-run average
+
+### ATIF traces: yes
+
+Every per-trial trajectory (`.../harbor_agent/jobs/.../agent/trajectory.json`) is **`schema_version: ATIF-v1.5`** (Agent Trajectory Interchange Format) — agent metadata (`terminus-2-nemo-gym` / `Qwen/Qwen3.6-27B` / temp 1.0), `steps` with `step_id`/`timestamp`/`source`/`model_name`/`message`/`reasoning_content`/`tool_calls`/`observation`/`metrics`, and `final_metrics` (prompt/completion/cached tokens). 89 ATIF trajectories for the completed run, on Lustre.
+
+### 5-run average (matching the model-card methodology)
+
+- First attempt: `--num-repeats 5` (445 rollouts) at concurrency 178 on **4** vLLM replicas. Aborted — the cluster could not schedule 4 GB300s (GPU capacity dropped: "Insufficient nvidia.com/gpu" + some nodes reporting unhealthy GPUs / `UnexpectedAdmissionError`). Reverted to the proven **2**-replica deployment.
+- Per user: running TB2.1 **5 times sequentially** against the same 2-GPU deployment (concurrency 89 each), via driver script `/tmp/seq5.sh` → `results/seq5/rollouts_run{1..5}.jsonl` + `scores.txt`. Run 1 launched ("Querying with 89 concurrent requests"). Monitor `bzzo4wyrd`. Will report the 5 pass@1 scores + mean/std vs the model-card 59.3.
+
 ##### Run v2 checkpoint (33/89, ~36 min in)
 
 - **Running pass@1 = 0.788** (26 pass / 7 fail), 0 error-flagged rollouts (no agent-timeout/context-length flags). Prefix-cache hit rate climbed to **90.9%** as transcripts share more prefix. 14 running / 0 waiting reqs (GPU not saturated — concurrency bounded by how many episodes are mid-generation vs mid-tool-exec at any instant).
