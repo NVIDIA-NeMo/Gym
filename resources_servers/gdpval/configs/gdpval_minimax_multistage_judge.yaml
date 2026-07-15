@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPVal overlay: MULTI-STAGE ELO comparison mode judged by a LOCAL, SELF-HOSTED
+# MiniMax-M3. You serve MiniMax-M3 yourself (vendor `vllm/vllm-openai:minimax-m3`
+# container); gym does NOT spawn it — gym talks to your OpenAI-compatible /v1
+# endpoint. This is the self-hosted judge overlay (see
+# gdpval_minimax_selfhosted_judge.yaml) PLUS comparison mode with the reference
+# models + ELO anchors the multi-stage driver fits against.
+#
+# ── STEP 1: serve MiniMax-M3 yourself (see gdpval_minimax_selfhosted_judge.yaml
+#            for the full container command), then:
+#   export MINIMAX_BASE_URL=http://$HEAD_IP:8000/v1   # must include /v1
+#   export MINIMAX_MODEL=minimax-m3                   # match --served-model-name
+#   curl -s "$MINIMAX_BASE_URL/models"                # confirm it's up
+#
+# ── STEP 2: run multi-stage ELO through the benchmark's driver. `--benchmark
+#            gdpval` loads the multistage orchestrator + policy model + dataset;
+#            this overlay swaps in comparison mode + the MiniMax judge; the
+#            ++multistage.* flags opt into staged ELO:
+#
+#   export PERSIST_DELIVERABLES_DIR=/abs/path/to/eval_deliverables_cache
+#   gym eval run \
+#     --model-type vllm_model --benchmark gdpval --split benchmark \
+#     --config resources_servers/gdpval/configs/gdpval_minimax_multistage_judge.yaml \
+#     --output results/gdpval_minimax_multistage.jsonl \
+#     ++multistage.enabled=true \
+#     ++multistage.stages='[{num_tasks: 5}, {num_tasks: 15, num_models: 4}]' \
+#     ++num_repeats=2
+#
+# This is the ultra-v3 GDPVal shape: stage 1 judges 5 tasks vs. ALL 9 references
+# for a coarse ELO; stage 2 judges 15 tasks vs. the 4 anchors nearest the stage-1
+# estimate for a tight final fit. ++num_repeats=2 gives 2 independent rollouts per
+# task in EVERY stage, pooled into each stage's BT fit (there is NO per-stage
+# repeats key — one inside a stage dict is silently ignored). The headline
+# comparison/eval_elo is the last stage's fit (per-stage values under
+# comparison/stage_<k>/*). Add ++multistage.seed=<int> for reproducible task
+# sampling / reference selection, and RERUN_INCOMPLETE=true (same
+# PERSIST_DELIVERABLES_DIR + seed + stage shape) to resume an interrupted run —
+# changing the stage shape invalidates the resume journal, num_repeats does not.
+#
+# NOTE ON MEDIA: MiniMax-M3 reads images + video but has NO audio tower, so audio
+# deliverables are dropped with a warning (everything else is still graded).
+
+# --- Repoint the judge proxy at your self-hosted MiniMax-M3 endpoint ---------
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      # Your MiniMax-M3 server's OpenAI-compatible endpoint. Must include /v1.
+      openai_base_url: ${oc.env:MINIMAX_BASE_URL,http://127.0.0.1:8000/v1}
+      openai_api_key: ${oc.env:MINIMAX_API_KEY,sk-local}
+      # Must match the server's --served-model-name (defaults to the HF id).
+      openai_model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+      openai_default_headers: {}
+
+# --- Comparison mode + references + single MiniMax-M3 judge -------------------
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      reward_mode: comparison
+      # Reference models the anchored Bradley-Terry MLE ELO is fit against. The
+      # multi-stage driver picks the `num_models` nearest anchors per stage.
+      # This is the ultra-v3 "9-ref no-gold" set (human_gold and gptoss_20b are
+      # DELIBERATELY excluded — incomplete/missing deliverables inflate the fit).
+      # Paths are the real Lustre deliverables_cache dirs (gym runs on Lustre
+      # directly; the NEL /gdpval/refs/<name> values are container mounts).
+      reference_models:
+        deepseek_v4_pro:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/deepseek-ai/DeepSeek-V4-Pro/20260704_001255-8a81a5f8c6cd779b/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1299
+        glm51_fp8:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/zai-org/GLM-5.1-FP8/20260701_165504-891e2ab610b6245a/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1250
+        kimi_k26:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/moonshotai/Kimi-K2.6/20260701_165625-57da3f0a278c51e4/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1191
+        nemotron3_ultra:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/Nemotron-3-Ultra/20260701_150905-ad896daa1d10372d/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1160
+        qwen36_35b:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3.6-35B-A3B/20260701_165658-2201d1a5725f3dc4/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 1045
+        qwen35_397b:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3.5-397B-A17B/20260629_204422-486041cb0306a434/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 960
+        gptoss_120b:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/openai/gpt-oss-120b/20260703_170141-2024253d07358ee5/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 795
+        gemma4_26b:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/google/gemma-4-26B-A4B/20260701_142723-8f72499defe0d9ac/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 752
+        qwen3_30b_thinking:
+          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3-30B-A3B-Thinking-2507/20260701_165542-ae0139e80cda2f81/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          elo: 267
+      # Pairwise trials per (task x reference x repeat). 4 debiases position with
+      # swap/no-swap; lower to 2 for a faster smoke test.
+      num_comparison_trials: 4
+      # Single self-hosted MiniMax-M3 judge (no frontier panel).
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      judge_responses_create_params_overrides:
+        model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+      judge_panel: null
+      # A VLM can't decode an application/pdf data URL, so rasterize PDFs/Office
+      # docs to page images + extracted text.
+      judge_media_mode: images_and_text
+      judge_pdf_render_dpi: 144
+      judge_pdf_max_pages: 30
+      judge_pdf_include_text: true
+      # MiniMax-M3 reads video (native video_url blocks) but has no audio tower.
+      judge_handles_video: true
+      judge_handles_audio: false
+      on_missing_av_judge: warn

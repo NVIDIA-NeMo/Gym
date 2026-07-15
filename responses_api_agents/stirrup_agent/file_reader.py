@@ -277,6 +277,25 @@ def _pdf_bytes_to_image_text_blocks(
     return blocks or None
 
 
+def _av_block(mime: str, data: bytes, *, ext: str, file_type: str, openai_native: bool) -> dict[str, Any]:
+    """Build an audio/video content block in the judge's dialect.
+
+    Delegates to :mod:`resources_servers.gdpval.media_conversion` (imported
+    lazily so this module stays importable where that package isn't on the
+    path). Falls back to the legacy ``image_url`` data URL if the helper is
+    unavailable — correct for frontier judges, and a benign degradation for
+    self-hosted ones (which is only reachable when the gdpval package is
+    present anyway).
+    """
+    try:
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        return audio_video_block(mime, data, ext=ext, file_type=file_type, openai_native=openai_native)
+    except ImportError:
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
 def convert_deliverables_to_content_blocks(
     output_dir: str,
     *,
@@ -284,7 +303,8 @@ def convert_deliverables_to_content_blocks(
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
-    av_capable: bool = False,
+    audio_capable: bool = False,
+    video_capable: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
@@ -302,9 +322,15 @@ def convert_deliverables_to_content_blocks(
     ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
     extracted text, for image-only local VLM judges (e.g. a gym-spawned Kimi
     K2.6). *render_dpi*, *max_pages*, and *include_text* tune that rendering.
-    *av_capable* passes audio/video files through as native media data URLs (for
-    judges that read those modalities, e.g. MiniMax M3); otherwise they are
-    skipped.
+
+    *audio_capable* / *video_capable* forward audio / video files (respectively)
+    to judges that read that modality — tracked SEPARATELY because MiniMax-M3
+    reads video but not audio (a video-only judge keeps video, skips audio). An
+    unreadable modality's file is skipped. The AV block dialect follows
+    *media_mode*: ``native_pdf`` (frontier judges, e.g. Gemini) uses an
+    ``image_url`` data URL, while ``images_and_text`` (self-hosted vLLM judges)
+    uses the standard ``video_url`` / ``input_audio`` content types vLLM routes to
+    the media tower.
     """
     output_path = Path(output_dir)
     if not output_path.is_dir():
@@ -386,18 +412,21 @@ def convert_deliverables_to_content_blocks(
                 )
 
             elif ext in AUDIO_EXTS or ext in VIDEO_EXTS:
-                # Only forward AV to judges that read those modalities; image-only
-                # judges can't decode them, so skip silently otherwise.
-                if av_capable:
+                # Forward AV only to judges that read that SPECIFIC modality, gated
+                # independently: video needs *video_capable*, audio *audio_capable*
+                # — so MiniMax-M3 (video yes, audio no) keeps video and skips audio.
+                # Among frontier judges only Gemini reads AV. Gemini (native_pdf)
+                # accepts AV as an image_url data URL; self-hosted vLLM judges
+                # (images_and_text) need the standard video_url / input_audio types,
+                # which vLLM routes to the media tower.
+                is_video = ext in VIDEO_EXTS
+                if (video_capable if is_video else audio_capable):
                     mime = MIME_TYPES.get(ext, "application/octet-stream")
                     data = fpath.read_bytes()
-                    b64 = base64.b64encode(data).decode("ascii")
+                    file_type = "VIDEO" if is_video else "AUDIO"
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
                     blocks.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{b64}"},
-                        }
+                        _av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text)
                     )
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})

@@ -20,6 +20,8 @@ All tests skip gracefully when PyMuPDF (``fitz``) isn't installed.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 
@@ -99,6 +101,37 @@ class TestPdfRasterization:
         assert all(b["type"] == "image_url" for b in blocks)
 
 
+class TestAudioVideoBlock:
+    def test_frontier_dialect_is_image_url(self) -> None:
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        block = audio_video_block("video/mp4", b"vid", ext="mp4", file_type="VIDEO", openai_native=False)
+        assert block["type"] == "image_url"
+        assert block["image_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_vllm_video_is_video_url(self) -> None:
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        block = audio_video_block("video/mp4", b"vid", ext="mp4", file_type="VIDEO", openai_native=True)
+        assert block["type"] == "video_url"
+        assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_vllm_audio_is_input_audio(self) -> None:
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        block = audio_video_block("audio/wav", b"snd", ext=".wav", file_type="AUDIO", openai_native=True)
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["format"] == "wav"
+        assert base64.b64decode(block["input_audio"]["data"]) == b"snd"
+
+    def test_audio_format_token_maps_extensions(self) -> None:
+        from resources_servers.gdpval.media_conversion import audio_format_token
+
+        assert audio_format_token(".mp3") == "mp3"
+        assert audio_format_token("wav") == "wav"
+        assert audio_format_token(".UNKNOWN") == "unknown"
+
+
 class TestComparisonImagesAndText:
     def test_build_file_section_rasterizes_pdf(self, tmp_path) -> None:
         from resources_servers.gdpval.comparison import build_file_section
@@ -142,39 +175,41 @@ class TestComparisonImagesAndText:
         assert "not readable by this judge" in blocks[0]["text"]
 
     def test_get_file_image_text_blocks_audio_passthrough_when_av_capable(self, tmp_path) -> None:
+        # images_and_text == self-hosted vLLM judge -> OpenAI-standard input_audio,
+        # NOT an image_url wrapper (which vLLM won't route to the audio tower).
         from resources_servers.gdpval.comparison import get_file_image_text_blocks
 
         payload = b"ID3fakeaudio"
         (tmp_path / "clip.mp3").write_bytes(payload)
         blocks = get_file_image_text_blocks(
-            str(tmp_path), "clip.mp3", render_dpi=72, max_pages=10, include_text=True, av_capable=True
+            str(tmp_path), "clip.mp3", render_dpi=72, max_pages=10, include_text=True, audio_capable=True
         )
         assert len(blocks) == 1
-        assert blocks[0]["type"] == "image_url"
-        url = blocks[0]["image_url"]["url"]
-        assert url.startswith("data:audio/mp3;base64,")
+        assert blocks[0]["type"] == "input_audio"
+        assert blocks[0]["input_audio"]["format"] == "mp3"
+        assert base64.b64decode(blocks[0]["input_audio"]["data"]) == payload
 
     def test_get_file_image_text_blocks_video_passthrough_when_av_capable(self, tmp_path) -> None:
+        # Self-hosted vLLM judge -> OpenAI-standard video_url data URL.
         from resources_servers.gdpval.comparison import get_file_image_text_blocks
 
         payload = b"\x00\x00\x00\x18ftypmp42"
         (tmp_path / "clip.mp4").write_bytes(payload)
         blocks = get_file_image_text_blocks(
-            str(tmp_path), "clip.mp4", render_dpi=72, max_pages=10, include_text=True, av_capable=True
+            str(tmp_path), "clip.mp4", render_dpi=72, max_pages=10, include_text=True, video_capable=True
         )
         assert len(blocks) == 1
-        assert blocks[0]["type"] == "image_url"
-        url = blocks[0]["image_url"]["url"]
+        assert blocks[0]["type"] == "video_url"
+        url = blocks[0]["video_url"]["url"]
         assert url.startswith("data:video/mp4;base64,")
 
     def test_build_file_section_av_passthrough_when_av_capable(self, tmp_path) -> None:
         from resources_servers.gdpval.comparison import build_file_section
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
-        section = build_file_section(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        section = build_file_section(str(tmp_path), media_mode="images_and_text", audio_capable=True)
         assert any(
-            b.get("type") == "image_url" and b.get("image_url", {}).get("url", "").startswith("data:audio/mp3;base64,")
-            for b in section
+            b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in section
         )
         assert not any("not readable by this judge" in b.get("text", "") for b in section)
 
@@ -217,27 +252,66 @@ class TestRubricImagesAndText:
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=False)
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", audio_capable=False)
         assert blocks == []
 
     def test_convert_deliverables_audio_passthrough_when_av_capable(self, tmp_path) -> None:
+        # images_and_text == self-hosted vLLM judge -> input_audio (not image_url).
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", audio_capable=True)
         assert any(
-            b.get("type") == "image_url"
-            and b.get("image_url", {}).get("url", "").startswith("data:audio/mpeg;base64,")
-            for b in blocks
+            b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in blocks
         )
 
     def test_convert_deliverables_video_passthrough_when_av_capable(self, tmp_path) -> None:
+        # Self-hosted vLLM judge -> video_url data URL.
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", av_capable=True)
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", video_capable=True)
+        assert any(
+            b.get("type") == "video_url" and b.get("video_url", {}).get("url", "").startswith("data:video/mp4;base64,")
+            for b in blocks
+        )
+
+    def test_convert_deliverables_video_capable_stubs_audio(self, tmp_path) -> None:
+        # MiniMax-M3 case: reads video but NOT audio -> video passes through as a
+        # native block, audio is dropped (skipped) even in the same directory.
+        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+
+        (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        (tmp_path / "voice.mp3").write_bytes(b"ID3fakeaudio")
+        blocks = convert_deliverables_to_content_blocks(
+            str(tmp_path), media_mode="images_and_text", video_capable=True, audio_capable=False
+        )
+        assert any(b.get("type") == "video_url" for b in blocks)
+        assert not any(b.get("type") == "input_audio" for b in blocks)
+        # The audio file is skipped entirely (only its name marker, if any).
+        assert not any(b.get("type") == "input_audio" for b in blocks)
+
+    def test_get_file_image_text_blocks_video_capable_stubs_audio(self, tmp_path) -> None:
+        # Same asymmetry via the comparison path: audio -> marker, not a block.
+        from resources_servers.gdpval.comparison import get_file_image_text_blocks
+
+        (tmp_path / "voice.mp3").write_bytes(b"ID3fakeaudio")
+        blocks = get_file_image_text_blocks(
+            str(tmp_path), "voice.mp3", render_dpi=72, max_pages=10, include_text=True, video_capable=True
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "text"
+        assert "not readable by this judge" in blocks[0]["text"]
+
+    def test_convert_deliverables_native_mode_av_uses_image_url(self, tmp_path) -> None:
+        # native_pdf == frontier judge (Gemini) -> AV stays an image_url data URL.
+        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+
+        (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="native_pdf", video_capable=True)
         assert any(
             b.get("type") == "image_url"
             and b.get("image_url", {}).get("url", "").startswith("data:video/mp4;base64,")
             for b in blocks
         )
+        assert not any(b.get("type") in ("video_url", "input_audio") for b in blocks)

@@ -70,6 +70,59 @@ def _data_url(mime_type: str, data: bytes) -> str:
     return f"data:{mime_type};base64,{b64}"
 
 
+# Audio container tokens the OpenAI/vLLM ``input_audio`` block expects in its
+# ``format`` field. Keyed by extension (with or without leading dot).
+_AUDIO_FORMATS = {
+    "wav": "wav",
+    "mp3": "mp3",
+    "m4a": "m4a",
+    "flac": "flac",
+    "ogg": "ogg",
+    "aac": "aac",
+    "aiff": "aiff",
+}
+
+
+def audio_format_token(ext: str) -> str:
+    """Map a file extension to the ``format`` token for an ``input_audio`` block."""
+    key = ext.lower().lstrip(".")
+    return _AUDIO_FORMATS.get(key, key or "wav")
+
+
+def audio_video_block(
+    mime_type: str,
+    data: bytes,
+    *,
+    ext: str,
+    file_type: str,
+    openai_native: bool,
+) -> Dict[str, Any]:
+    """Build one content block for an audio/video file, in the judge's dialect.
+
+    Two judge dialects accept media differently:
+
+    - **Gemini** (the only frontier judge that reads audio/video — GPT and Claude
+      cannot) accepts media, including audio and video, as an ``image_url``
+      **data URL** via the proxy. That is the historical GDPVal behavior and
+      stays the default (*openai_native* False).
+    - **Self-hosted vLLM judges** (e.g. MiniMax-M3, which reads both audio and
+      video) only route media through the standard OpenAI content types: video as
+      ``video_url`` and audio as ``input_audio`` (raw base64 + a ``format``
+      token). An ``image_url``-wrapped mp4/wav is NOT sent to the model's
+      video/audio tower by vLLM, so those judges need *openai_native* True.
+
+    *file_type* is ``"AUDIO"`` or ``"VIDEO"``; *ext* is the file extension (used
+    only for the audio ``format`` token).
+    """
+    if not openai_native:
+        return {"type": "image_url", "image_url": {"url": _data_url(mime_type, data)}}
+    if file_type == "AUDIO":
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"type": "input_audio", "input_audio": {"data": b64, "format": audio_format_token(ext)}}
+    # VIDEO → vLLM-standard video_url data URL.
+    return {"type": "video_url", "video_url": {"url": _data_url(mime_type, data)}}
+
+
 def pdf_bytes_to_image_blocks(
     pdf_bytes: bytes,
     *,

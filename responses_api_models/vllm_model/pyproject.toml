@@ -23,7 +23,7 @@ dependencies = [
 
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
+requires = ["setuptools>=61"]
 
 [tool.setuptools.packages.find]
 where = [".."]

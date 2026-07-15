@@ -1215,6 +1215,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
 
+                # Fall back to no repeat_index dir for backwards compatibility with older runs.
+                if not Path(deliverables_dir).is_dir():
+                    deliverables_dir = str(
+                    (Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute()
+                )
+                
+
             # Per-request opt-in to judge an already-cached deliverable instead of
             # re-running the policy. Unlike server-wide judge_only, it falls back
             # to a normal rollout when no deliverable is cached yet.

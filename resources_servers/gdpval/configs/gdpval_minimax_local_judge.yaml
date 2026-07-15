@@ -1,6 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# ⚠️  DOES NOT CURRENTLY START ON BLACKWELL / GB200 — KEPT FOR REFERENCE ONLY.
+#     Use gdpval_minimax_selfhosted_judge.yaml instead: serve MiniMax-M3 yourself
+#     from the vendor `vllm/vllm-openai:minimax-m3` container (still a LOCAL,
+#     self-hosted judge — just not spawned by gym) and point gym at its /v1
+#     endpoint.
+#
+#     The bundled `vllm/models/minimax_m3/nvidia/` plugin hardcodes FlashInfer
+#     CuTe-DSL kernels (gemma_rmsnorm, fused MoE, MLA) with no fallback. On
+#     GB200 these hit the nvidia-cutlass-dsl 4.5.2 JIT bug ("Expected an MLIR
+#     object (got OpResultList)", vllm#45392) and abort the engine during the
+#     profiling pass. The plugin is designed to run inside the vendor container,
+#     where the FlashInfer/cutlass-dsl/CUDA combo is matched; reproducing it in a
+#     gym-built venv is fighting its design. This overlay is left as a record of
+#     the gym-spawned attempt (and would work if/when the venv kernel combo is
+#     fixed), but it is NOT the supported path.
+#
 # GDPVal judge overlay: swap the default remote frontier-judge panel for a
 # gym-spawned, LOCAL, MULTIMODAL MiniMax-M3 judge served in vLLM. MiniMax-M3
 # reads images AND audio/video, so it can score every GDPVal deliverable
@@ -23,17 +39,23 @@
 #      engine, disables the frontier panel (`judge_panel: null`), and switches
 #      deliverable presentation to `images_and_text` so PDFs/Office docs are sent
 #      as page images + extracted text (a local VLM can't decode a raw PDF data
-#      URL). Because MiniMax-M3 is audio/video-capable, `judge_handles_audio_
-#      video: true` keeps AV deliverables as native media (not filename stubs).
+#      URL). MiniMax-M3 reads VIDEO (not audio), so `judge_handles_video: true`
+#      keeps video deliverables as native media (not filename stubs); audio is
+#      dropped with a warning.
 #
 # The benchmark's default `gdpval_judge_model` (an OpenAI proxy) stays defined
 # but UNUSED. It boots a cheap idle FastAPI proxy (no GPU); for a fully clean
 # run drop it with `~gdpval_judge_model` on the CLI.
 #
-# Serving shape: TP=8 / DP=1. On GB200 (4 GPUs/node) the TP group spans two
-# nodes, so VLLM_RAY_DP_PACK_STRATEGY is `span` below. See the standalone serving
-# config for more on sizing the TP group to your node layout, and set IFACE_NAME
-# for multi-node NCCL/GLOO.
+# Serving shape: DP=2 / TP=4 / PP=1 across TWO 4-GPU GB200 nodes — two full
+# replicas (one per node), TP=4 node-local, load-balanced behind one endpoint
+# (~2x judge throughput). gym's local_vllm_model cannot span a single TP group
+# across nodes, so TP stays within a node; `strict` (STRICT_PACK) packs each
+# TP=4 replica onto one node, and DP=2 lands one replica per node (the ~414GB
+# MXFP8 checkpoint fits on 4×~192GB GB200 GPUs per replica). NOTE: use `strict`,
+# not `span` — span is only for a replica that must cross nodes. Requires
+# vLLM >= 0.24.0. See the standalone serving config for the full rationale, and
+# set IFACE_NAME for the NCCL/GLOO fabric NIC.
 
 # --- Local multimodal judge engine (gym-spawned vLLM) ----------------------
 gdpval_judge_model_local:
@@ -47,25 +69,31 @@ gdpval_judge_model_local:
       hf_home: null
 
       vllm_serve_env_vars:
-        # TP=8 spans two 4-GPU GB200 nodes → `span`. Use `strict` only when the
-        # whole instance fits on a single node.
-        VLLM_RAY_DP_PACK_STRATEGY: span
+        # Each TP=4 replica fits on one node → `strict` (STRICT_PACK packs each
+        # replica onto a single node; DP=2 lands one replica per node). NOT
+        # `span` — span is only for a replica that must cross nodes.
+        VLLM_RAY_DP_PACK_STRATEGY: strict
         NCCL_SOCKET_IFNAME: ${oc.env:NCCL_SOCKET_IFNAME,${oc.env:IFACE_NAME,eth0}}
         GLOO_SOCKET_IFNAME: ${oc.env:GLOO_SOCKET_IFNAME,${oc.env:IFACE_NAME,eth0}}
         VLLM_ENGINE_READY_TIMEOUT_S: "3600"
         RAY_CGRAPH_get_timeout: "600"
 
       vllm_serve_kwargs:
-        data_parallel_size: 1
-        tensor_parallel_size: 8
+        data_parallel_size: 2
+        tensor_parallel_size: 4
         pipeline_parallel_size: 1
         block_size: 128
+        # Bound context so KV cache is sane (M3 defaults to ~1M tokens).
+        max_model_len: 131072
         gpu_memory_utilization: 0.90
         served_model_name: [MiniMaxAI/MiniMax-M3]
         trust_remote_code: true
         enable_auto_tool_choice: true
         tool_call_parser: minimax_m3
         reasoning_parser: minimax_m3
+        # Vision/video encoder FlashAttention has no Blackwell (SM100) kernel and
+        # crashes during profiling; TORCH_SDPA bypasses it. See vllm#38411.
+        mm_encoder_attn_backend: TORCH_SDPA
         # `-cc.pass_config.fuse_allreduce_rms=False` from the vendor command.
         # Drop this block if your vLLM build rejects the nested form.
         compilation_config:
@@ -96,6 +124,8 @@ gdpval_resources_server:
       # are short and you have context headroom.
       judge_pdf_max_pages: 30
       judge_pdf_include_text: true
-      # MiniMax-M3 reads audio/video → keep those deliverables as native media
-      # blocks instead of filename-only stubs.
-      judge_handles_audio_video: true
+      # MiniMax-M3 reads VIDEO (not audio) → keep video deliverables as native
+      # media blocks instead of filename-only stubs. Audio has no tower on M3, so
+      # judge_handles_audio stays false and audio is dropped with a warning.
+      judge_handles_video: true
+      judge_handles_audio: false

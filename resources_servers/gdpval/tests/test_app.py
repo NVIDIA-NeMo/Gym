@@ -275,7 +275,12 @@ class TestApp:
             reward_mode="rubric",
             judge_panel=[
                 {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
-                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini", "handles_audio_video": True},
+                {
+                    "name": "gemini-3.1-pro",
+                    "model": "gcp/google/gemini",
+                    "handles_audio": True,
+                    "handles_video": True,
+                },
             ],
         )
 
@@ -300,6 +305,100 @@ class TestApp:
             await server.verify(body)
 
         assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_video_no_capable_judge_errors(self, tmp_path) -> None:
+        """A VIDEO task with NO video-capable judge raises when
+        on_missing_av_judge='error' rather than silently grading video-blind."""
+        deliv = tmp_path / "task_task-1" / "repeat_0"
+        deliv.mkdir(parents=True)
+        (deliv / "demo.mp4").write_bytes(b"\x00")
+
+        server = _server(
+            reward_mode="rubric",
+            on_missing_av_judge="error",
+            judge_panel=[
+                {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
+                {"name": "claude-opus-4.8", "model": "anthropic/claude"},
+            ],
+        )
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverables_dir=str(deliv))
+
+        with (
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            pytest.raises(ValueError, match="no configured judge can read video"),
+        ):
+            await server.verify(body)
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_video_no_capable_judge_warn_falls_back(self, tmp_path) -> None:
+        """With on_missing_av_judge='warn' (default) a VIDEO task still grades with
+        the full (video-blind) panel instead of raising."""
+        deliv = tmp_path / "task_task-1" / "repeat_0"
+        deliv.mkdir(parents=True)
+        (deliv / "demo.mp4").write_bytes(b"\x00")
+
+        server = _server(
+            reward_mode="rubric",
+            judge_panel=[{"name": "gpt-5.5", "model": "openai/gpt-5.5"}],
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverables_dir=str(deliv))
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch(
+                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                return_value=[],
+            ),
+        ):
+            await server.verify(body)
+
+        assert [j.name for j in captured["judges"]] == ["gpt-5.5"]
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_audio_no_capable_judge_warns_but_grades(self, tmp_path) -> None:
+        """AUDIO is always best-effort: even with on_missing_av_judge='error', an
+        audio task with no audio-capable judge does NOT raise — audio is dropped
+        with a warning and the rest of the deliverable is still graded."""
+        deliv = tmp_path / "task_task-1" / "repeat_0"
+        deliv.mkdir(parents=True)
+        (deliv / "narration.mp3").write_bytes(b"\x00")
+
+        server = _server(
+            reward_mode="rubric",
+            on_missing_av_judge="error",  # audio ignores this; only video is guarded
+            judge_panel=[{"name": "gpt-5.5", "model": "openai/gpt-5.5"}],
+        )
+
+        captured: dict = {}
+
+        async def fake_score_with_rubric(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverables_dir=str(deliv))
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch(
+                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                return_value=[],
+            ),
+        ):
+            await server.verify(body)
+
+        assert [j.name for j in captured["judges"]] == ["gpt-5.5"]
 
     @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:
@@ -552,7 +651,12 @@ class TestApp:
             num_comparison_trials=2,
             judge_panel=[
                 {"name": "gpt-5.5", "model": "openai/gpt-5.5"},
-                {"name": "gemini-3.1-pro", "model": "gcp/google/gemini", "handles_audio_video": True},
+                {
+                    "name": "gemini-3.1-pro",
+                    "model": "gcp/google/gemini",
+                    "handles_audio": True,
+                    "handles_video": True,
+                },
                 {"name": "claude-opus-4.8", "model": "anthropic/claude"},
             ],
         )

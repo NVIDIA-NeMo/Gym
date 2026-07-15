@@ -256,7 +256,8 @@ def get_file_image_text_blocks(
     render_dpi: int,
     max_pages: int,
     include_text: bool,
-    av_capable: bool = False,
+    audio_capable: bool = False,
+    video_capable: bool = False,
 ) -> list[dict]:
     """``images_and_text`` variant of :func:`get_file_content_block`.
 
@@ -264,12 +265,17 @@ def get_file_image_text_blocks(
     (preconverted) Office docs are rasterized to per-page PNG image blocks with
     the extracted text attached, instead of being sent as an ``application/pdf``
     data URL the judge can't decode. Native images and text files pass through
-    unchanged. Audio/video files pass through as native media data URLs when
-    *av_capable* (the local judge natively reads those modalities, e.g. MiniMax
-    M3); otherwise they are replaced with a one-line marker. Returns a list of
-    0+ content blocks.
+    unchanged.
+
+    Audio and video are gated INDEPENDENTLY because judges differ per modality:
+    a video file passes through only when *video_capable*, an audio file only
+    when *audio_capable* — so a MiniMax-M3 judge (video yes, audio no) keeps video
+    but stubs audio. Passed-through media uses the vLLM-standard ``video_url`` /
+    ``input_audio`` content types (not the ``image_url`` wrapper used for frontier
+    judges, which vLLM won't route to the video/audio tower). An unreadable
+    modality is replaced with a one-line marker. Returns a list of 0+ blocks.
     """
-    from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+    from resources_servers.gdpval.media_conversion import audio_video_block, pdf_bytes_to_blocks
 
     file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     info = FILE_TYPE_MAP.get(file_extension)
@@ -308,13 +314,27 @@ def get_file_image_text_blocks(
                 return [{"type": "text", "text": f"[no PDF render available for {file_name}]"}]
             return []
 
-        # Audio/video: pass through as a native media data URL when the judge
-        # can read those modalities; otherwise advertise the file by name.
-        if file_type in ("AUDIO", "VIDEO") and not av_capable:
-            return [{"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}]
+        # Audio/video: forward with the vLLM-standard content type when the judge
+        # can read that specific modality; otherwise advertise the file by name.
+        # This ``images_and_text`` path is only ever a self-hosted vLLM judge, so
+        # AV is emitted as ``video_url`` / ``input_audio`` (not the ``image_url``
+        # wrapper frontier judges use), which is what vLLM routes to the media
+        # tower. Audio and video are gated separately (MiniMax-M3: video yes,
+        # audio no).
+        if file_type in ("AUDIO", "VIDEO"):
+            can_read = video_capable if file_type == "VIDEO" else audio_capable
+            if not can_read:
+                return [
+                    {"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}
+                ]
+            info = FILE_TYPE_MAP.get(file_extension) or {}
+            mime = info.get("mime_type") or "application/octet-stream"
+            data = _load_media(full_path)
+            return [
+                audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)
+            ]
 
-        # Text, native images, and (av_capable) audio/video pass through exactly
-        # as in native mode.
+        # Text and native images pass through exactly as in native mode.
         block = get_file_content_block(file_dir, file_name)
         return [block] if block is not None else []
     except Exception as e:
@@ -329,7 +349,8 @@ def build_file_section(
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
-    av_capable: bool = False,
+    audio_capable: bool = False,
+    video_capable: bool = False,
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
@@ -342,9 +363,10 @@ def build_file_section(
     ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
     extracted text, for image-only local VLM judges (see
     :func:`get_file_image_text_blocks`). *render_dpi*, *max_pages*, and
-    *include_text* tune the ``images_and_text`` rendering. *av_capable* keeps
-    audio/video files as native media blocks (vs stubbing them) when the judge
-    reads those modalities.
+    *include_text* tune the ``images_and_text`` rendering. *audio_capable* /
+    *video_capable* keep audio / video files (respectively) as native media
+    blocks (vs stubbing them) when the judge reads that modality — they are
+    independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -373,7 +395,8 @@ def build_file_section(
                 render_dpi=render_dpi,
                 max_pages=max_pages,
                 include_text=include_text,
-                av_capable=av_capable,
+                audio_capable=audio_capable,
+                video_capable=video_capable,
             )
             if blocks:
                 section.extend(blocks)
@@ -550,7 +573,10 @@ class Judge:
     model: str
     create_overrides: Optional[dict] = None
     weight: float = 1.0
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked separately: a MiniMax-M3 judge reads
+    # video but not audio.
+    handles_audio: bool = False
+    handles_video: bool = False
 
 
 def run_trials(
