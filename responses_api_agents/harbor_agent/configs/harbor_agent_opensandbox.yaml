@@ -3,16 +3,25 @@
 # Runs Terminal-Bench 2.1 tasks with the stock Terminus-2 harness while task
 # containers execute remotely on an OpenSandbox cluster via
 # `custom_envs/nemo_gym_sandbox/environment.py:NemoGymSandboxEnvironment`.
-# Swap the `sandbox_provider` block to target any other NeMo Gym sandbox
-# provider (docker, daytona, apptainer, ecs_fargate) without code changes.
 #
-# Required environment variables:
-#   OPENSANDBOX_DOMAIN            e.g. opensandbox-server.opensandbox-system.svc.cluster.local
-#   OPENSANDBOX_API_KEY           any placeholder when the server runs in insecure mode
-#   TERMINAL_BENCH_2_1_TASKS_DIR  checkout of https://github.com/harbor-framework/terminal-bench-2-1
-#                                 (the `tasks/` subdirectory). The pinned harbor release predates the
-#                                 hub registry that hosts terminal-bench-2-1, so the dataset is
-#                                 consumed as a local Harbor dataset.
+# Provider-neutral, mini_swe_agent_2 style: the sandbox provider is referenced
+# by name (`sandbox_provider: ${sandbox}`) and its definition lives in a
+# separate provider config, so swapping providers is swapping that `--config`
+# path (no edits here):
+#
+#   AGENT=responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox.yaml
+#   PROVIDER=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   gym eval run \
+#       --config $AGENT --config $PROVIDER --config $MODEL \
+#       --agent harbor_agent --split benchmark \
+#       --input <one-row-per-task>.jsonl --output rollouts.jsonl
+#
+# Required environment variables (consumed by the $PROVIDER config):
+#   OPENSANDBOX_DOMAIN   e.g. opensandbox-server.opensandbox-system.svc.cluster.local
+#   OPENSANDBOX_API_KEY  any placeholder when the server runs in insecure mode
+# Plus, for the local Terminal-Bench 2.1 dataset:
+#   TERMINAL_BENCH_2_1_TASKS_DIR  checkout of harbor-framework/terminal-bench-2-1 (the tasks/ dir)
 harbor_agent:
   responses_api_agents:
     harbor_agent:
@@ -52,32 +61,9 @@ harbor_agent:
       harbor_environment_type: null
       harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
       harbor_environment_kwargs:
-        sandbox_provider:
-          opensandbox:
-            connection:
-              domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
-              api_key: ${oc.env:OPENSANDBOX_API_KEY}
-              protocol: http
-              request_timeout_s: 300
-              use_server_proxy: true
-            create:
-              request_timeout_s: 1200
-              timeout_s: 1200
-              skip_health_check: true
-              retries: 6
-              retry_delay_s: 5.0
-              retry_max_delay_s: 90.0
-            probe:
-              timeout_s: 60
-              deadline_s: 300
-              stable_count: 2
-              stable_delay_s: 1.0
-            operations:
-              retries: 5
-              retry_delay_s: 1.0
-              retry_max_delay_s: 45.0
-              command_retries: 0
-              close_timeout_s: 30
+        # Reference the `sandbox` block from the included provider config
+        # (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
+        sandbox_provider: ${sandbox}
         sandbox_metadata:
           harbor-benchmark: terminal-bench-2-1
         # Server-side safety net; trials are bounded by the agent/verifier
@@ -85,10 +71,13 @@ harbor_agent:
         sandbox_ttl_s: 21600
         sandbox_ready_timeout_s: 900
         default_exec_timeout_s: 14400
-        # Uniform per-sandbox resources for all tasks. Remove these to run with
-        # each task.toml's own resources instead.
+        # Uniform per-sandbox resources for all tasks. disk_gib is derived from
+        # override_storage_mb; 30 GiB avoids kubelet ephemeral-storage evictions
+        # on disk-heavy tasks (image builds, dataset downloads) that overrun the
+        # 10 GiB task.toml default. Remove these to use each task.toml's values.
         override_cpus: 4
         override_memory_mb: 16384
+        override_storage_mb: 30720
 
       model_server:
         type: responses_api_models
