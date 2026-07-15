@@ -63,6 +63,11 @@ from responses_api_agents.haystack_agent.chat_generator import (
 __all__ = ["HaystackAgent", "NeMoGymResponsesChatGenerator"]
 
 
+# Request-body fields the Haystack pipeline owns; never forwarded to the model call. Everything
+# else the row set (temperature, max_output_tokens, ...) is forwarded as ``generation_kwargs``.
+_PIPELINE_OWNED_FIELDS = {"input", "tools", "instructions", "stream"}
+
+
 class HaystackAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -130,6 +135,10 @@ class HaystackAgent(SimpleResponsesAPIAgent):
 
         messages = responses_input_to_messages(body.input)
 
+        # Forward the row's sampling params to every model call. Haystack threads generation_kwargs
+        # to the generator, where _build_params applies it after the static kwargs (so request wins).
+        generation_kwargs = body.model_dump(exclude_unset=True, exclude=_PIPELINE_OWNED_FIELDS)
+
         # Run the shared pipeline. Install a request-scoped generator state (seeded with this
         # request's cookies) so concurrent rollouts don't clobber each other's cookies/usage. The
         # generator reads/writes this state through contextvars; because Haystack awaits its
@@ -137,7 +146,9 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         run_state = chat_generator._GenRunState(cookies=request.cookies)
         token = chat_generator._current_run_state.set(run_state)
         try:
-            result = await self._pipeline.run_async({self.config.agent_component_name: {"messages": messages}})
+            result = await self._pipeline.run_async(
+                {self.config.agent_component_name: {"messages": messages, "generation_kwargs": generation_kwargs}}
+            )
         finally:
             chat_generator._current_run_state.reset(token)
         all_messages = result[self.config.agent_component_name]["messages"]
