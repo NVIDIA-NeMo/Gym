@@ -40,8 +40,11 @@ sandbox:
       stable_delay_s: 1.0
     operations:
       retries: 5
-      retry_delay_s: 1.0
-      retry_max_delay_s: 45.0
+      retry_delay_s: 0.5
+      # Fast retries: the transient errors on a cross-cluster/LB path (stale
+      # half-closed connection reuse -> RemoteProtocolError, proxy 500) clear on
+      # an immediate retry, so a long backoff just wastes wall-clock.
+      retry_max_delay_s: 8.0
       command_retries: 3
       close_timeout_s: 30
       # Exec via a background command + short status/log polls instead of one
@@ -49,6 +52,9 @@ sandbox:
       # proxy, which may sit behind a load balancer (e.g. an AWS NLB on an
       # istio east-west gateway) that silently drops a stream held open longer
       # than its idle/duration cap. Short polling requests are never long enough
-      # to be reaped.
+      # to be reaped. Poll every 5s to keep the request count (and thus transient
+      # error opportunities) low.
       background_exec: true
+      # Poll fast at first (short tmux commands finish in <1s) then back off.
+      background_poll_initial_s: 0.25
       background_poll_interval_s: 2.0

@@ -413,6 +413,10 @@ class OpenSandboxOperationConfig:
     # silently dropped, hanging the client. Background+poll issues only short
     # requests, so no single connection must survive longer than the LB allows.
     background_exec: bool = False
+    # Poll interval starts at background_poll_initial_s and backs off toward
+    # background_poll_interval_s, so short commands are detected quickly while
+    # long ones do not spam requests.
+    background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
 
     def __post_init__(self) -> None:
@@ -428,6 +432,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.close_timeout_s must be > 0")
         if self.background_poll_interval_s <= 0:
             raise ValueError("operations.background_poll_interval_s must be > 0")
+        if self.background_poll_initial_s <= 0:
+            raise ValueError("operations.background_poll_initial_s must be > 0")
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -955,6 +961,12 @@ class OpenSandboxProvider:
             float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
         )
 
+        # Adaptive poll interval: poll fast at first so quick commands (the many
+        # short tmux keystrokes/pane-captures an agent issues) are detected almost
+        # immediately, then back off toward the configured max so a genuinely long
+        # command does not spam requests. Frequent early polls also keep the
+        # connection warm, reducing stale-connection reuse errors.
+        poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         status = None
         while True:
             status = await self._await_sdk_operation(
@@ -971,7 +983,8 @@ class OpenSandboxProvider:
                     f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
                     f"execution_id={execution_id!r}"
                 )
-            await asyncio.sleep(self._operations.background_poll_interval_s)
+            await asyncio.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
 
         logs = await self._await_sdk_operation(
             lambda: handle.raw.commands.get_background_command_logs(execution_id),
