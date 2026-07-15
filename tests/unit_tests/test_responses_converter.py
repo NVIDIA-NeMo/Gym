@@ -288,6 +288,62 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.tools[0]["function"]["name"] == "get_weather"
 
 
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: ResponsesConverter, tools_kwargs: dict):
+    # vLLM rejects tool_choice without tools ("When using `tool_choice`, `tools` must be set."),
+    # so requests with absent or empty tools must not carry tool_choice / parallel_tool_calls.
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            **tools_kwargs,
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert "tools" not in dumped
+    assert "tool_choice" not in dumped
+    assert "parallel_tool_calls" not in dumped
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                model="my-model",
+                tool_choice="required",
+                **tools_kwargs,
+            )
+        )
+
+
+def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": True,
+                }
+            ],
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert dumped["tool_choice"] == "auto"
+    assert len(params.tools) == 1
+
+
 def test_responses_to_chat_completion_token_id_information_path():
     converter = ResponsesConverter(return_token_id_information=True)
     params = converter.responses_to_chat_completion_create_params(
