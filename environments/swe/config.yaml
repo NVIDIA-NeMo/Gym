@@ -1,0 +1,97 @@
+anyswe:
+  resources_servers:
+    anyswe:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Grades SWE task patches in fresh sandboxes with the official SWE-bench evaluation scripts.
+      value: Software engineering agent capabilities.
+      max_pass_to_pass: 20
+      eval_timeout: 1800
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            protocol: http
+            use_server_proxy: true
+            request_timeout_s: 1800
+sandbox_opencode_swe:
+  responses_api_agents:
+    sandbox_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: opencode CLI harness solving SWE-bench tasks inside per-instance OpenSandbox images.
+      value: Software engineering agent capabilities with in-sandbox grading.
+      resources_server:
+        type: resources_servers
+        name: anyswe
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 64
+      agent_module: responses_api_agents.opencode_agent.app
+      agent_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_config:
+        resources_server:
+          type: resources_servers
+          name: anyswe
+        concurrency: 1
+        command: opencode
+        model: nvinf/policy_model
+        thinking: true
+        timeout: 3600
+        opencode_version: 1.17.8
+        repo_dir: /testbed
+        extra_args:
+          - --dangerously-skip-permissions
+        system_prompt: |
+          You are a software engineering agent. The repository is checked out at /testbed with the
+          bug already reproduced there. Investigate the issue described by the user, edit the code
+          under /testbed to fix it, and do not modify tests. Work only with your bash tool.
+        opencode_config:
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+          provider:
+            nvinf:
+              npm: "@ai-sdk/openai-compatible"
+              options:
+                baseURL: __SANDBOX_MODEL_URL__/v1
+                apiKey: gym
+              models:
+                policy_model:
+                  interleaved:
+                    field: reasoning
+                  limit:
+                    context: 262144
+                    output: 262144
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            protocol: http
+            use_server_proxy: true
+            request_timeout_s: 1800
+      sandbox_image: ubuntu:24.04
+      sandbox_spec:
+        ttl_s: 7200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 30
+      setup_commands:
+        - "command -v curl > /dev/null 2>&1 || (apt-get -qq update && apt-get -y -qq install curl ca-certificates > /dev/null 2>&1) || (yum -y -q install curl ca-certificates > /dev/null 2>&1) || true"
+        - "mkdir -p /deps && curl -fsSL https://github.com/astral-sh/python-build-standalone/releases/download/20241219/cpython-3.12.8+20241219-x86_64-unknown-linux-gnu-install_only.tar.gz | tar xz -C /deps --strip-components=1"
+        - "/deps/bin/python3 -m pip -q install nemo-gym"
+        - "curl -fsSL https://opencode.ai/install | VERSION=1.17.8 bash; command -v opencode >/dev/null 2>&1 || ln -sf $HOME/.opencode/bin/opencode /usr/local/bin/opencode"
+      sandbox_python: /deps/bin/python3
+      rollout_timeout: 4200
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/swe/data/example.jsonl
