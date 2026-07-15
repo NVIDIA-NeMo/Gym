@@ -1,0 +1,99 @@
+# Harbor agent wired to the NeMo Gym sandbox API (OpenSandbox provider).
+#
+# Runs Terminal-Bench 2.1 tasks with the stock Terminus-2 harness while task
+# containers execute remotely on an OpenSandbox cluster via
+# `custom_envs/nemo_gym_sandbox/environment.py:NemoGymSandboxEnvironment`.
+# Swap the `sandbox_provider` block to target any other NeMo Gym sandbox
+# provider (docker, daytona, apptainer, ecs_fargate) without code changes.
+#
+# Required environment variables:
+#   OPENSANDBOX_DOMAIN            e.g. opensandbox-server.opensandbox-system.svc.cluster.local
+#   OPENSANDBOX_API_KEY           any placeholder when the server runs in insecure mode
+#   TERMINAL_BENCH_2_1_TASKS_DIR  checkout of https://github.com/harbor-framework/terminal-bench-2-1
+#                                 (the `tasks/` subdirectory). The pinned harbor release predates the
+#                                 hub registry that hosts terminal-bench-2-1, so the dataset is
+#                                 consumed as a local Harbor dataset.
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses and environments.
+      value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
+      concurrency: 32
+
+      harbor_datasets:
+        terminal_bench:
+          local_dataset_path: ${oc.env:TERMINAL_BENCH_2_1_TASKS_DIR}
+
+      # One row per task; consumed by `gym eval run --split benchmark`.
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: responses_api_agents/harbor_agent/example/terminal_bench_2_1_input.jsonl
+          prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
+          prompt_config: null
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_kwargs:
+        collect_rollout_details: false
+        model_info:
+          max_input_tokens: 262144
+          max_output_tokens: 81920
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: null
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
+      harbor_environment_kwargs:
+        sandbox_provider:
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+              api_key: ${oc.env:OPENSANDBOX_API_KEY}
+              protocol: http
+              request_timeout_s: 300
+              use_server_proxy: true
+            create:
+              request_timeout_s: 1200
+              timeout_s: 1200
+              skip_health_check: true
+              retries: 6
+              retry_delay_s: 5.0
+              retry_max_delay_s: 90.0
+            probe:
+              timeout_s: 60
+              deadline_s: 300
+              stable_count: 2
+              stable_delay_s: 1.0
+            operations:
+              retries: 5
+              retry_delay_s: 1.0
+              retry_max_delay_s: 45.0
+              command_retries: 0
+              close_timeout_s: 30
+        sandbox_metadata:
+          harbor-benchmark: terminal-bench-2-1
+        # Server-side safety net; trials are bounded by the agent/verifier
+        # timeouts below.
+        sandbox_ttl_s: 21600
+        sandbox_ready_timeout_s: 900
+        default_exec_timeout_s: 14400
+        # Match the Qwen3.6 model-card harness setup (32 CPU / 48 GB per task).
+        # Remove these to run with each task.toml's own resources instead.
+        override_cpus: 32
+        override_memory_mb: 49152
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Match the Qwen3.6 model-card harness setup: 3h agent timeout.
+      harbor_agent_override_timeout: 10800
+      harbor_agent_max_timeout: null
+      harbor_verifier_override_timeout: null
+      harbor_verifier_max_timeout: null
+      harbor_timeout_multiplier: null
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"
