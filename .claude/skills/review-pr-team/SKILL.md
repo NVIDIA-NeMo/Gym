@@ -25,6 +25,8 @@ allowed-tools:
   - TaskGet
   - TaskUpdate
   - TaskStop
+  - EnterWorktree
+  - ExitWorktree
   - WebFetch
 ---
 
@@ -103,14 +105,48 @@ If invalid, ask the user for a valid PR number.
 
 ## Phase 1: Setup & Context
 
-### 1.1 Checkout PR
+### 1.1 Checkout PR in a dedicated worktree
+
+Run the review in its **own git worktree** — a sibling checkout — so the user's main
+working tree (and any in-progress edits, running servers, or branch they have checked out)
+is never disturbed. This mirrors `claude --worktree`: the whole review happens against an
+isolated copy of the repo, then the worktree is torn down in Phase 7.
+
+Fetch the PR head into a review branch, then create the sibling worktree for it:
 
 ```bash
+# Fetch the PR head into a local review branch (no checkout in the main worktree).
+# pull/$PRNUM/head works for fork-based PRs too.
 git fetch origin pull/$PRNUM/head:pr-$PRNUM-team-review
-git checkout pr-$PRNUM-team-review
+
+# Create a sibling worktree checked out to the review branch: <repo>-pr-<PRNUM>-team-review
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+WORKTREE_PATH="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-pr-$PRNUM-team-review"
+# If a stale worktree/branch from a previous run exists, remove it first:
+#   git worktree remove "$WORKTREE_PATH" --force 2>/dev/null; git branch -D pr-$PRNUM-team-review 2>/dev/null
+git worktree add "$WORKTREE_PATH" pr-$PRNUM-team-review
 ```
 
-(NeMo Gym has no git submodules — no `git submodule update` needed.)
+Record `$WORKTREE_PATH`. (NeMo Gym has no git submodules — no `git submodule update`
+needed.)
+
+**Switch the session into the worktree** so every subsequent tool call — and every agent
+you spawn in Phase 2 — operates against the isolated checkout, exactly like
+`claude --worktree`:
+
+- **If `EnterWorktree` is available** (preferred): call
+  `EnterWorktree(path="$WORKTREE_PATH")`. This switches the session's working directory
+  into the worktree and clears CWD-dependent caches, so the review — including agents
+  spawned afterward, which inherit this cwd — runs entirely inside it. Because the session
+  cwd is now the worktree, agents need no special path handling: their `Read`/`Grep`/`git`
+  calls already resolve against the isolated checkout.
+- **If `EnterWorktree` is NOT available** (fallback): treat `$WORKTREE_PATH` as the review
+  root. Do NOT `git checkout` in the main worktree. Fold `$WORKTREE_PATH` into the common
+  preamble (`WORKTREE_PATH`) and instruct every agent to run its local file/`git`
+  operations against that path (e.g. `git -C "$WORKTREE_PATH" ...`, and Read/Glob/Grep on
+  paths under it).
+
+Teardown of the worktree happens in Phase 7.
 
 ### 1.2 Gather PR metadata (parallel)
 
@@ -388,9 +424,13 @@ Instructions:
   the system. Review the code in that context, and anchor each finding to the affected
   component / data-flow stage.
 - Claim your task with TaskUpdate(status="in_progress") and mark it completed when done.
-- Use Read, Glob, Grep for local lookups (faster than gh CLI). The PR is checked out
-  on branch pr-$PRNUM-team-review.
-- Do NOT git checkout other commits — use `git show <sha>:<path>` for history lookups.
+- Use Read, Glob, Grep for local lookups (faster than gh CLI). The PR is checked out on
+  branch pr-$PRNUM-team-review in a dedicated worktree. If the session was switched into
+  the worktree (via EnterWorktree), your working directory already IS the worktree — use
+  ordinary relative paths. Otherwise the worktree root is $WORKTREE_PATH — run all local
+  file/`git` operations against it (`git -C "$WORKTREE_PATH" ...`; Read/Glob/Grep under it).
+- Do NOT git checkout other commits or switch the worktree's branch — use
+  `git show <sha>:<path>` for history lookups.
 - Include GitHub permalinks in ALL findings:
   https://github.com/NVIDIA-NeMo/Gym/blob/$HEAD_SHA/<path>#L<line>
 - External reference claims: when claiming "library X does Y" or citing upstream/OpenAI
@@ -989,17 +1029,33 @@ pending:
 
 ## Phase 7: Teardown
 
+### Shut down the agents
+
 **If `TeamCreate` was used**: call `TeamDelete` for each teammate by name/ID to close
-their panes. Then clean up the local review branch if the user wants:
-```bash
-git checkout $BASE_BRANCH && git branch -D pr-$PRNUM-team-review
-```
+their panes.
 
 **If `Agent` fallback was used**: send shutdown to each agent individually:
 ```
 SendMessage(to="<agent-name>", message={"type": "shutdown_request"})
 ```
-After all confirm, stop any remaining background tasks with `TaskStop` and clean up:
+After all confirm, stop any remaining background tasks with `TaskStop`.
+
+### Tear down the worktree
+
+Leave the session's cwd back where it started, then remove the review worktree so no
+sibling checkout is left lying around. Confirm with the user before deleting if there are
+uncommitted changes in the worktree you might want to keep.
+
+**If the session was switched into the worktree** (`EnterWorktree`): call
+`ExitWorktree(action="keep")` first to return to the original directory. (ExitWorktree
+will NOT remove a worktree entered via `path` — it only leaves it — so removal is the
+manual step below.)
+
+Then remove the worktree and its branch (both the `EnterWorktree` and the fallback path
+end here):
 ```bash
-git checkout $BASE_BRANCH && git branch -D pr-$PRNUM-team-review
+git worktree remove "$WORKTREE_PATH" --force
+git branch -D pr-$PRNUM-team-review
 ```
+(`--force` discards any scratch files agents left in the worktree; drop it and inspect
+first if the user may have staged work there.)
