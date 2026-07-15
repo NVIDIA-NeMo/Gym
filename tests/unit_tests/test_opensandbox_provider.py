@@ -397,6 +397,71 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
 
 
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """background_exec submits, polls status until finished, then reads logs."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls: list[tuple[str, FakeRunCommandOpts]] = []
+            self.status_calls: list[str] = []
+            self.log_calls: list[str] = []
+            self._status_sequence = [
+                SimpleNamespace(running=True, exit_code=None, error=None),
+                SimpleNamespace(running=False, exit_code=7, error=None),
+            ]
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.run_calls.append((command, opts))
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            return self._status_sequence[min(len(self.status_calls) - 1, len(self._status_sequence) - 1)]
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls.append(execution_id)
+            return SimpleNamespace(content="combined output", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-bg", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "make build", cwd="/repo", timeout_s=30)
+
+    assert result == opensandbox_provider.SandboxExecResult(
+        stdout="combined output", stderr=None, return_code=7, error_type=None
+    )
+    # Submitted once with background=True; polled twice (running -> finished); read logs once.
+    assert len(raw.commands.run_calls) == 1
+    assert raw.commands.run_calls[0][1].kwargs["background"] is True
+    assert raw.commands.status_calls == ["exec-42", "exec-42"]
+    assert raw.commands.log_calls == ["exec-42"]
+
+
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         create={"connect_poll_s": 0.01},

@@ -405,6 +405,15 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
+    # When True, run exec via a background command plus short status/log polls
+    # instead of one long-lived SSE stream. The streaming path holds a single
+    # connection open for the whole command; if that connection traverses a
+    # load balancer with a max idle/stream duration (e.g. an AWS NLB on an
+    # istio east-west gateway), a command that runs a while can have its stream
+    # silently dropped, hanging the client. Background+poll issues only short
+    # requests, so no single connection must survive longer than the LB allows.
+    background_exec: bool = False
+    background_poll_interval_s: float = 2.0
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -417,6 +426,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
+        if self.background_poll_interval_s <= 0:
+            raise ValueError("operations.background_poll_interval_s must be > 0")
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -871,6 +882,17 @@ class OpenSandboxProvider:
             )
         )
         effective_retries = self._command_retry_count() if retries is None else retries
+
+        if self._operations.background_exec:
+            return await self._exec_background(
+                handle,
+                effective_command,
+                opts_kwargs,
+                sdk_timeout_s=sdk_timeout_s,
+                total_timeout_s=timeout_s,
+                retries=effective_retries,
+            )
+
         execution = await self._await_sdk_operation(
             lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
             operation="command run",
@@ -887,6 +909,85 @@ class OpenSandboxProvider:
         if execution.exit_code is not None:
             return_code = execution.exit_code
         elif execution.error is not None:
+            return_code = 125
+            error_type = "sandbox"
+        else:
+            return_code = 0
+
+        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+
+    async def _exec_background(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        opts_kwargs: dict[str, Any],
+        *,
+        sdk_timeout_s: float | None,
+        total_timeout_s: int | float | None,
+        retries: int,
+    ) -> SandboxExecResult:
+        """Run a command as a background execution polled via short requests.
+
+        Avoids holding one long-lived SSE stream open for the whole command,
+        which a load balancer between the client and the OpenSandbox server can
+        silently drop. Submit (short) -> poll status (short) -> read logs (short).
+        """
+        _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
+        background_opts = dict(opts_kwargs)
+        background_opts["background"] = True
+
+        execution = await self._await_sdk_operation(
+            lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
+            operation="command run (background submit)",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=sdk_timeout_s,
+            retries=retries,
+        )
+        execution_id = getattr(execution, "id", None)
+        if not execution_id:
+            raise RuntimeError("OpenSandbox background command did not return an execution id")
+
+        loop = asyncio.get_running_loop()
+        # execd enforces the command timeout server-side; give the poll loop a
+        # little headroom before giving up client-side.
+        deadline = loop.time() + float(total_timeout_s) + 60.0 if total_timeout_s is not None else None
+        poll_timeout_s = (
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
+        )
+
+        status = None
+        while True:
+            status = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_command_status(execution_id),
+                operation="command status",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+            )
+            if not getattr(status, "running", False):
+                break
+            if deadline is not None and loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
+                    f"execution_id={execution_id!r}"
+                )
+            await asyncio.sleep(self._operations.background_poll_interval_s)
+
+        logs = await self._await_sdk_operation(
+            lambda: handle.raw.commands.get_background_command_logs(execution_id),
+            operation="command logs",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=poll_timeout_s,
+            retries=self._operations.retries,
+        )
+        stdout = getattr(logs, "content", None) or None
+        error_type = None
+        exit_code = getattr(status, "exit_code", None)
+        status_error = getattr(status, "error", None)
+        stderr = status_error or None
+        if exit_code is not None:
+            return_code = exit_code
+        elif status_error is not None:
             return_code = 125
             error_type = "sandbox"
         else:

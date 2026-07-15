@@ -42,5 +42,13 @@ sandbox:
       retries: 5
       retry_delay_s: 1.0
       retry_max_delay_s: 45.0
-      command_retries: 0
+      command_retries: 3
       close_timeout_s: 30
+      # Exec via a background command + short status/log polls instead of one
+      # long-lived SSE stream. OpenSandbox exec always traverses the server
+      # proxy, which may sit behind a load balancer (e.g. an AWS NLB on an
+      # istio east-west gateway) that silently drops a stream held open longer
+      # than its idle/duration cap. Short polling requests are never long enough
+      # to be reaped.
+      background_exec: true
+      background_poll_interval_s: 2.0
