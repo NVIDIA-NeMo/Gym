@@ -18,6 +18,8 @@ high-concurrency throughput comparison on dedicated GPU serving.
 
 ## Results
 
+![Throughput vs concurrency](assets/throughput_chart.png)
+
 | c | Port wall | Native wall | Native/Port | Port tasks/min | Native tasks/min |
 |---:|---:|---:|---:|---:|---:|
 | 8 | 2h 44m | 4h 40m | **1.71×** | 3.97 | 2.31 |
