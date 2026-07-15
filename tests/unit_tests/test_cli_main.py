@@ -674,6 +674,7 @@ class TestSearch:
             ("environments", "nemo_gym.cli.env:list_environments"),
             ("agents", "nemo_gym.cli.agents:list_agents"),
             ("models", "nemo_gym.cli.models:list_models"),
+            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers"),
         ],
     )
     def test_search_type_routes_to_that_listing(self, monkeypatch, component_type, expected_target) -> None:

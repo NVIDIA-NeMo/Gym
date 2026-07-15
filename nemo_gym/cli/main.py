@@ -152,6 +152,7 @@ _SEARCHABLE_TYPES = {
     "environments": "nemo_gym.cli.env:list_environments",
     "agents": "nemo_gym.cli.agents:list_agents",
     "models": "nemo_gym.cli.models:list_models",
+    "resources-servers": "nemo_gym.cli.resources_servers:list_resources_servers",
 }
 
 SEARCH_TERMS = Flag(
@@ -332,7 +333,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
 
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
-    "list": "List available components (benchmarks, environments, agents, models).",
+    "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
@@ -360,6 +361,11 @@ COMMANDS = {
     "list models": Command(
         target="nemo_gym.cli.models:list_models",
         summary="List model servers by the value to pass to --model-type.",
+        flags=(JSON, DISCOVERY_SEARCH_DIR),
+    ),
+    "list resources-servers": Command(
+        target="nemo_gym.cli.resources_servers:list_resources_servers",
+        summary="List resources servers (selectable with --resources-server) by name.",
         flags=(JSON, DISCOVERY_SEARCH_DIR),
     ),
     "search": Command(
