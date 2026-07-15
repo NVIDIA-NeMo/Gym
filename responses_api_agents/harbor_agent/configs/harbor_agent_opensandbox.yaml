@@ -30,7 +30,9 @@ harbor_agent:
       domain: agent
       description: Harbor integration for agent harnesses and environments.
       value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
-      concurrency: 32
+      # Full-benchmark concurrency: run all 89 TB 2.1 tasks at once (bounded by
+      # the gym eval --concurrency flag, the sandbox cluster, and vLLM batching).
+      concurrency: 89
 
       harbor_datasets:
         terminal_bench:
