@@ -157,15 +157,14 @@ class RolloutReverificationHelper(BaseModel):
         self,
         payloads: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
-        semaphore: Optional[Semaphore] = None,
+        semaphore: Semaphore | nullcontext[None] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
         resource_server_client = self.setup_resource_server_client(head_server_config)
-        semaphore = semaphore or nullcontext()
-
+        semaphore = semaphore or nullcontext[None]()
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 res = await resource_server_client.post(
-                    server_name=row["agent_ref"]["name"], url_path="/verify", json=row
+                    server_name=row[AGENT_REF_KEY_NAME]["name"], url_path="/verify", json=row
                 )
                 try:
                     await raise_for_status(res)
@@ -210,7 +209,11 @@ class RolloutReverificationHelper(BaseModel):
         self._validate_input_paths(config)
 
         payloads_to_reverify = self._prepare_payloads_from_config(config)
-        # semaphore = nullcontext()  # to do add semaphore if I decide to do it here
+        semaphore = nullcontext()
+        if config.num_samples_in_parallel:
+            print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
+            semaphore = Semaphore(config.num_samples_in_parallel)
+
 
         from nemo_gym.rollout_collection import _failures_path_for
 
@@ -224,7 +227,7 @@ class RolloutReverificationHelper(BaseModel):
         rows: List[Dict] = []
         results: List[Dict] = []
         result_strs: List[List[str]] = []
-        for future in self.run_examples(payloads_to_reverify, semaphore=semaphore):
+        for future in self._run_reverification_payloads(payloads_to_reverify, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]

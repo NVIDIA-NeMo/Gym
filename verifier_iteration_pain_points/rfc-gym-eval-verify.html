@@ -1,0 +1,162 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>gym eval reverify — RFC</title><style>
+body{font-family:Arial,Helvetica,sans-serif;font-size:11pt;line-height:1.45;max-width:800px;margin:40px auto;color:#111}
+h1.doctitle{font-size:22pt;margin-bottom:6px}
+h1{font-size:20pt;margin-top:28px} h2{font-size:16pt;margin-top:24px} h3{font-size:13pt;margin-top:18px} h4{font-size:11.5pt;margin-top:14px}
+code{font-family:'Courier New',monospace;font-size:10pt;background:#f1f1ef;padding:1px 4px;border-radius:3px}
+pre{background:#f1f1ef;border:1px solid #ddd;border-radius:6px;padding:10px 14px;overflow-x:auto}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;margin:12px 0} th,td{border:1px solid #999;padding:6px 10px;vertical-align:top;font-size:10.5pt}
+th{background:#efefec;text-align:left} a{color:#1155cc}
+</style></head><body><h1 class="doctitle">epic: recompute rewards from existing rollouts — <code>gym eval verify</code> (#987)</h1><p>Author: Martyna Patelka<br />
+GitHub: https://github.com/NVIDIA-NeMo/Gym/issues/987<br />
+Linear: https://linear.app/nvidia/issue/FEP-1195/can-you-recompute-reward-using-existing-rollout-and-a-new-verifier  </p>
+<h1>Background</h1>
+<h2>Pain points</h2>
+<h3>1. Rewards are frozen at collection time; any verifier change re-pays all policy inference</h3>
+<p>Rollout collection fuses two very differently priced halves into a single <code>/run</code> request: the
+expensive half (policy inference + the multi-step agent loop) and the cheap half (the verifier
+scoring the finished trajectory). The reward is written into <code>rollouts.jsonl</code> at collection time.
+If you then change a verifier hyperparameter — a grading mode, a threshold, a judge prompt — the
+only supported way to get new rewards is to re-run <code>gym eval run</code>, which re-pays all of the policy
+inference. </p>
+<p>For many stateless environments the data needed to re-verify is already on disk (<code>rollouts.jsonl</code> + <code>*_materialized_inputs.jsonl</code>),
+and every resources server exposes a plain HTTP <code>/verify</code> endpoint — but there is no command that replays
+stored rows through it.</p>
+<h3>2. Re-running judge failures means re-running inference</h3>
+<p>Re-running a full eval just to retry the judge wastes the expensive inference pass, which is already complete.
+With limited judge quota (e.g. rate-limited endpoints), re-running everything burns the budget on samples that already scored fine.</p>
+<p>Related issue: https://github.com/NVIDIA-NeMo/Gym/issues/1606</p>
+<h2>Architecture</h2>
+<h3>Artifacts on disk after a run</h3>
+<p>What <code>gym eval run</code> writes:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rollouts_materialized_inputs.jsonl</code></td>
+<td>final <code>/run</code> request rows; row identifier <code>(_ng_task_index, _ng_rollout_index)</code>; name of the agent server used for each row</td>
+</tr>
+<tr>
+<td><code>rollouts.jsonl</code></td>
+<td>one verify response per rollout; row identifier <code>(_ng_task_index, _ng_rollout_index)</code>; name of the agent server used for each row; the frozen rewards <strong>and</strong> the expensive <code>response</code></td>
+</tr>
+<tr>
+<td><code>rollouts_failures.jsonl</code></td>
+<td>one row per failed attempt (<code>_ng_failure_class</code>), today fed only by <code>stirrup_agent</code></td>
+</tr>
+<tr>
+<td><code>rollouts_aggregate_metrics.json</code> (unless <code>disable_aggregation</code> is set)</td>
+<td>per-agent metrics</td>
+</tr>
+</tbody>
+</table>
+<p>Together, <code>rollouts_materialized_inputs.jsonl</code> and <code>rollouts.jsonl</code> contain everything a stateless verifier needs and can be joined losslessly on
+<code>(_ng_task_index, _ng_rollout_index)</code>.</p>
+<h3>The stirrup precedent: one team already built this in NeMo Gym</h3>
+<p><code>stirrup_agent</code> is the <code>responses_api_agent</code> for GDPVal-style environments: the model spends a long, expensive
+multi-step session producing deliverable <em>files</em> (documents, spreadsheets), which the <code>gdpval</code>
+resources server then judges. The stirrup team solved it for
+themselves with three config flags (<code>execute_only</code>, <code>judge_only</code>, <code>rerun_incomplete</code>,
+<a href="https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/stirrup_agent/app.py#L821">stirrup_agent/app.py:821-858</a>) that split one
+environment's run into two phases:</p>
+<ul>
+<li><strong>Expensive phase.</strong> With <code>persist_deliverables_dir</code> set, every rollout saves its deliverables; <code>execute_only: true</code>
+  additionally skips judging entirely — generate now, score later.</li>
+<li><strong>Cheap phase.</strong> A later run with <code>judge_only: true</code> skips the agent entirely and scores the cached deliverables from <code>deliverables_dir</code>.</li>
+</ul>
+<h4>Comment</h4>
+<p>That is a working judge-only resume and verifier-iteration loop — for exactly one agent/environment
+pair. Its limits are what make it a precedent rather than a solution: the replay contract is
+stirrup's private deliverables tree (you must have set <code>persist_deliverables_dir</code> and other flags correctly <em>before</em> the original run — nothing recovers a run that didn't), not the rollout artifacts every Gym run already
+writes. The proposed solution below is the same two-phase idea, generalized:
+keyed on <code>rollouts.jsonl</code> + <code>*_materialized_inputs.jsonl</code> (available for any past run), no agent
+or model server in the loop, one implementation for every stateless environment.</p>
+<h1>Proposed solution</h1>
+<h2>New command: <code>gym eval reverify</code></h2>
+<p>Replay stored rollouts through resources-server <code>/verify</code> and write a fresh rollouts file plus
+recomputed aggregate metrics (unless disabled).</p>
+<h3>Iterate on a verifier hyperparameter (pain point 1)</h3>
+<p>One command, one terminal. First way of running it (A):</p>
+<pre><code class="language-bash">gym eval reverify \
+  --config resources_servers/mcqa/configs/mcqa.yaml \
+  &quot;++mcqa.resources_servers.mcqa.grading_mode=lenient_boxed&quot; \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_lenient.jsonl
+</code></pre>
+<p>This starts <strong>only</strong> the mcqa resources server with the overridden config.
+For convenience, the same config files previously used for <code>gym env start</code> will work too. Second way (B):</p>
+<pre><code class="language-bash">gym eval reverify  \
+  --config benchmarks/birdbench/config.yaml \
+  --inputs birdbench_results/birdbench_rollouts_materialized_inputs.jsonl \
+  --rollouts birdbench_results/birdbench_rollouts.jsonl \
+  --output birdbench_results/birdbench_rollouts_t120.jsonl \
+  ++birdbench_bird_sql_resources_server.resources_servers.bird_sql.sql_execution_timeout_s=120
+</code></pre>
+<p>It won't be possible to use the <code>--no-serve</code> flag.</p>
+<h3>Judge failures (pain point 2)</h3>
+<p>After fixing the judge, re-verify only the failed rows:</p>
+<pre><code class="language-bash">gym eval reverify \
+  --config resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml \
+  --judge-failed-only \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_recovered.jsonl
+</code></pre>
+<p>Successful rows are copied; rows with the judge-failure flag (to be added in https://github.com/NVIDIA-NeMo/Gym/issues/1606) are re-verified.</p>
+<h2>When reverify is not possible</h2>
+<p>For some resources servers this simple solution is not possible. For example,
+<code>aviary</code> calculates the reward as an aggregation over all steps, so reverify can't simply call <code>verify</code> with a request built from rollouts and materialized inputs.</p>
+<p>We need a way to mark which servers support reverify in the simple form added in this epic. For now an enum is enough: <code>reverify_mode</code> with two values, defaulting to <code>UNSUPPORTED</code>; servers where the simple form is correct flip it to <code>STATELESS</code>.</p>
+<p>A new class attribute, <code>reverify_mode</code>, plus a lightweight endpoint returning its value, can be used to
+decide whether reverify is possible:</p>
+<pre><code class="language-python">class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
+    config: BaseResourcesServerConfig
+    reverify_mode: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED # or only STATELESS for now
+
+    ....
+
+    @abstractmethod
+    async def verify(self, body: BaseVerifyRequest) -&gt; BaseVerifyResponse:
+        pass
+</code></pre>
+<h2>Force</h2>
+<p>A server whose <code>reverify_mode</code> is <code>UNSUPPORTED</code> can't guarantee correct re-verification. Sometimes we want to run
+it anyway — for example when approximate rewards are good enough for an exploratory run. The <code>--force</code> flag overrides the guard:</p>
+<pre><code class="language-bash">gym eval reverify --force ...
+</code></pre>
+<p>With <code>--force</code>, a warning is printed before the replay starts
+and repeated in the closing summary, and all output filenames are prefixed with <code>unsafe_</code>
+(e.g. <code>unsafe_rollouts_lenient.jsonl</code>, <code>unsafe_rollouts_lenient_aggregate_metrics.json</code>) so the
+artifacts stay clearly marked long after the console output is gone.</p>
+<h3>How to set it correctly for all servers?</h3>
+<p>There are 95 resources servers that need this value set, so the plan is: default everything to <code>UNSUPPORTED</code>, generate an AI-proposed list of <code>STATELESS</code> candidates, and then use human feedback from #swdl-nemo-gym-core-devs to sign off on the value for each server.</p>
+<h2>Points which need agreement</h2>
+<ol>
+<li>
+<p><strong>Per-agent routing.</strong>
+A rollouts file may mix rows from several agents. During rollout collection the appropriate agent is picked by <code>server_name=row["agent_ref"]["name"]</code> and each agent instance then sends requests to the single resources server named in its own config block. The simplified reverify config case (A) does not contain agent blocks, so it is not possible to distinguish between different resources servers. When multiple values of <code>["agent_ref"]["name"]</code> are present in the data, this config format is insufficient and should raise an error. Config case (B) preserves the agent config blocks, and each block names its resources server (<code>resources_server.name</code>), so rows can be routed directly: <code>row["agent_ref"]["name"]</code> → agent block → its resources server ref — no naming conventions needed. I'd like confirmation that this plan is correct, and agreement on whether multi-agent rollouts files are in scope for this issue.</p>
+</li>
+<li>
+<p><strong>Per-row calls.</strong> POST <code>/verify</code> directly; <code>/seed_session</code> is <strong>not</strong> called. Resources servers that need it for scoring are mostly not <code>STATELESS</code> anyway.</p>
+</li>
+</ol>
+<h1>Out of scope</h1>
+<ol>
+<li>
+<p><strong>Fully self-contained agents</strong> that don't use resources servers at all and own everything, including the verifier (e.g. SWE), won't have re-verification enabled.</p>
+</li>
+<li>
+<p><strong>Preventing inconsistent scores with <code>--judge-failed-only</code></strong>. When running:
+    <code>gym eval reverify \
+      --config ... \
+      --judge-failed-only \
+      ...</code>
+if the judge configuration is changed, only the re-verified rows reflect it, and the file might end up with inconsistent scores. This could be addressed by always dumping the config with the results and validating it when running reverify, but I would put it out of scope for this issue.</p>
+</li>
+</ol></body></html>
