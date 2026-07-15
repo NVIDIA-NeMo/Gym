@@ -1,19 +1,31 @@
 ---
 name: nemo-gym-docs
+license: Apache-2.0
 description: >
-  Maintain the NeMo Gym Fern docs site — add, update, move, or remove pages
-  under fern/. Use for any documentation change. Triggered by: "edit docs",
-  "add doc page", "update docs", "rename page", "fix broken link", "add
-  redirect", "preview docs", "publish docs", any request that touches `fern/`.
+  Maintain the NeMo Gym Fern docs site: add, update, move, or remove pages under
+  fern/. Use for any documentation change. Not for code or configuration changes
+  outside fern/. Triggered by: edit docs, add doc page, update docs, rename page,
+  fix broken link, add redirect, preview docs, publish docs.
+metadata:
+  author: NVIDIA <nemo-gym@nvidia.com>
+  tags:
+    - documentation
+    - fern
+    - mdx
+    - docs-site
 ---
 
 # NeMo Gym Docs Maintenance
 
-Unified skill for adding, updating, moving, and removing pages on the NeMo Gym Fern documentation site.
+## Purpose
+
+Add, update, move, and remove pages on the NeMo Gym Fern documentation site, and
+run the validation, preview, and publish workflows. All documentation content
+lives under `fern/`.
 
 ## Scope Rule
 
-**ALL docs edits happen under `fern/`.** All new pages — including release notes and migration guides — belong under `fern/`.
+All documentation edits happen under `fern/`. All new pages, including release notes and migration guides, belong under `fern/`.
 
 **Bleeding-edge tree + GA snapshots.** Gym keeps one bleeding-edge content tree at `fern/versions/latest/` (the folder name is historical — it's mounted under the `main` slug via `main.yml`) and one frozen GA snapshot per shipped release (currently `fern/versions/v0.2.1/`). All new edits land in `fern/versions/latest/`. The `latest.yml` file is a GA *alias* — a symlink to the current GA's yml — so `/latest/...` and `/<current-ga>/...` serve the same pages. Back-ports into a frozen GA snapshot are deliberate and rare; default to editing `fern/versions/latest/` only.
 
@@ -44,7 +56,7 @@ fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/
                                                        docs.nvidia.com/nemo/gym/latest/get-started/quickstart  (GA alias)
 ```
 
-## Operations
+## Instructions
 
 ### Add a Page
 
@@ -64,7 +76,7 @@ fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/
    ```
 
 3. If the parent folder is mounted in `main.yml` with `title-source: frontmatter`, the page is auto-discovered — no nav edit needed. Otherwise add a `- page:` entry under the right `section:` in `fern/versions/main.yml`.
-4. Do **not** mirror into the current GA snapshot folder (e.g., `v0.2.1/`) — frozen GA snapshots only get back-ports on explicit request.
+4. Do not mirror into the current GA snapshot folder (e.g., `v0.2.1/`); frozen GA snapshots only get back-ports on explicit request.
 
 ### Update a Page
 
@@ -85,6 +97,8 @@ fern/versions/v0.2.1/pages/get-started/quickstart.mdx  docs.nvidia.com/nemo/gym/
 ### Back-port to a GA Snapshot
 
 Only back-port when the user explicitly asks ("back-port to v0.2.1"). Apply the same change inside the GA snapshot's `pages/` folder (e.g., `fern/versions/v0.2.1/pages/`) and update its yml if needed. `latest.yml` is a symlink to the current GA's yml, so nav changes propagate automatically.
+
+## Examples
 
 ### Worked Example: Adding a Page
 
@@ -212,7 +226,7 @@ Tag push (docs/v*)                        → publish-fern-docs.yml → docs.nvi
 Manual dispatch                           → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
 ```
 
-The preview-comment + publish jobs require the `DOCS_FERN_TOKEN` repository or organization secret (from `fern token`).
+The preview-comment and publish jobs require the `DOCS_FERN_TOKEN` repository or organization secret (from `fern token`). It is managed as a CI secret and should not be committed to the repository or echoed in logs.
 
 ## Publishing to Production
 
