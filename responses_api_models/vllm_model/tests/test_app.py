@@ -678,7 +678,7 @@ class TestApp:
         get_global_config_dict_mock.return_value = dict()
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
@@ -1472,7 +1472,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
         )
-        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
 
         assert len(server._clients) == 2
@@ -3140,7 +3140,7 @@ class TestVLLMConverter:
             uses_reasoning_parser=False,
             chat_template_kwargs={"enable_thinking": True, "some_other_param": "value1"},
         )
-        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
 
         mock_chat_completion = NeMoGymChatCompletion(
@@ -3253,7 +3253,7 @@ class TestVLLMConverter:
             uses_reasoning_parser=False,
             extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10},
         )
-        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
 
         mock_chat_completion = NeMoGymChatCompletion(
@@ -3633,7 +3633,7 @@ def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
     )
-    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
 class TestTopLogprobsHandling:
