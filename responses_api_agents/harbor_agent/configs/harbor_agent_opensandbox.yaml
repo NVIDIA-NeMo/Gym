@@ -33,6 +33,11 @@ harbor_agent:
       # Full-benchmark concurrency: run all 89 TB 2.1 tasks at once (bounded by
       # the gym eval --concurrency flag, the sandbox cluster, and vLLM batching).
       concurrency: 89
+      # Each Harbor job is dispatched as a Ray task; the default 1 CPU/task caps
+      # in-flight jobs at (driver CPUs). Jobs are I/O-bound (remote sandbox +
+      # model server), so reserve a fraction of a CPU to actually reach the
+      # concurrency above on a modest driver. 0.25 -> ~4x driver CPU count.
+      harbor_ray_task_num_cpus: 0.25
 
       harbor_datasets:
         terminal_bench:
