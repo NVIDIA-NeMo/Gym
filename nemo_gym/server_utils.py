@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import socket
 import sys
 import time
 from abc import abstractmethod
@@ -49,7 +50,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -82,6 +83,19 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
+        default=60,
+        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
+        default=10,
+        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_probes: int = Field(
+        default=3,
+        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -101,6 +115,28 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+def _make_keepalive_socket_factory(
+    idle_seconds: int,
+    interval_seconds: int,
+    probes: int,
+):
+    def factory(addr_info) -> socket.socket:
+        family, type_, proto, _canonname, _sockaddr = addr_info
+        sock = socket.socket(family=family, type=type_, proto=proto)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", idle_seconds),
+            ("TCP_KEEPINTVL", interval_seconds),
+            ("TCP_KEEPCNT", probes),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        return sock
+
+    return factory
+
+
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
@@ -112,6 +148,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
+            socket_factory=_make_keepalive_socket_factory(
+                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            ),
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
