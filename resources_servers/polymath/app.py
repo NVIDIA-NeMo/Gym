@@ -39,6 +39,7 @@ import math
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from nemo_gym.judge import judge_failure_metrics
 from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
@@ -131,6 +132,7 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
                 answer_key="extracted_answer",
             )
         )
+        metrics.update(judge_failure_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -148,6 +150,10 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
+
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
 
         return key
 

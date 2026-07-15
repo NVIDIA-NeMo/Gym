@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -117,7 +118,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(JudgeFailureMixin, TavilySearchVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
     metrics: TavilySearchMetrics
 
@@ -395,20 +396,34 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             total_words=total_words,
         )
 
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = body.response.output_text
 
         if self.config.use_judge:
-            judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
+            judge_evaluation, judge_failure = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
         else:
-            judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+            judge_evaluation, judge_failure = self._verify_answer_with_regex(ground_truth, last_assistant_response), None
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+            judge_failed=judge_failure is not None,
+            judge_failure_reason=judge_failure,
         )
 
     ###### UTILITY FUNCTIONS ######
@@ -488,7 +503,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains.append(prop["value"])
         return exclude_domains
 
-    async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
+    async def _verify_answer_with_judge(
+        self, question: str, ground_truth: str, response: str
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -529,9 +546,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 judge_response=judge_response,
             )
 
-        judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
+        # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct outcome,
+        # not a wrong answer: record it instead of crashing the sample.
+        result, judge_failure = await run_judge(_get_judge_response(question, ground_truth, response))
+        if judge_failure is not None:
+            return (
+                JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0),
+                judge_failure,
+            )
+        judge_create_params, judge_response = result
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
-        return judge_evaluation
+        return judge_evaluation, None
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
         """Verify answer by checking if ground_truth (as regex) matches in response."""

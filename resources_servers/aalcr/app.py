@@ -22,6 +22,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_response_json
 
@@ -43,7 +44,7 @@ class AALCRVerifyRequest(BaseVerifyRequest):
     input_tokens_band: str
 
 
-class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
+class AALCRVerifyResponse(JudgeFailureMixin, AALCRVerifyRequest, BaseVerifyResponse):
     invalid_model_response: bool
     invalid_judge_response: Optional[bool] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
@@ -57,6 +58,24 @@ class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
 
 class AalcrResourcesServer(SimpleResourcesServer):
     config: AalcrResourcesServerConfig
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
+    async def _call_judge(self, judge_responses_create_params: dict) -> NeMoGymResponse:
+        http_response = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=judge_responses_create_params,
+        )
+        return NeMoGymResponse.model_validate(await get_response_json(http_response))
 
     async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:
         match body.input_tokens_band:
@@ -93,14 +112,24 @@ Reply only with CORRECT or INCORRECT."""
         judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
-        http_response = await self.server_client.post(
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=judge_responses_create_params,
-        )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(http_response))
+        # A failed judge call (auth, rate limit, timeout, HTTP error, empty response) is a
+        # distinct outcome, not a wrong answer: record it instead of silently scoring 0.
+        judge_response, judge_failure = await run_judge(self._call_judge(judge_responses_create_params))
+        judge_response_text = judge_response.output_text.strip() if judge_response is not None else ""
+        if judge_failure is not None or not judge_response_text:
+            reward = 0.0
+            return AALCRVerifyResponse(
+                **body.model_dump(),
+                reward=reward,
+                invalid_model_response=False,
+                invalid_judge_response=True,
+                judge_responses_create_params=judge_responses_create_params,
+                judge_response=judge_response,
+                judge_failed=True,
+                judge_failure_reason=judge_failure or "empty judge response",
+                **{input_tokens_band_key: reward},
+            )
 
-        judge_response_text = judge_response.output_text.strip()
         if judge_response_text == "CORRECT":
             invalid_judge_response = False
             reward = 1.0
