@@ -24,7 +24,7 @@ from pathlib import Path
 from shutil import rmtree
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Mapping, Optional, Union
 
 import orjson
 from fastapi import Body, FastAPI, Request, Response
@@ -116,7 +116,8 @@ class ModelCallRecord(BaseModel):
     # Raw information that is only logged if it differs from the standard request and response types
     # e.g. if it is the /v1/responses route, this will be None
     raw_request: Optional[Dict[str, Any]]
-    raw_response: Optional[Dict[str, Any]]
+    # List[str] for streaming responses
+    raw_response: Optional[Union[Dict[str, Any], List[str]]]
 
 
 class AggregateModelCallRecords(BaseModel):
@@ -289,6 +290,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             #     pass
 
             # Record in the background to not block the response
+            # The background task only runs after streaming has finished
             task = BackgroundTask(
                 server._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict)
             )
@@ -351,6 +353,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return await self.responses(body=params)
 
     # Model call capture methods
+    def _wrap_async_body_iterator_with_response_capture(
+        self, request: Request, streaming_response: StreamingResponse
+    ) -> None:
+        request.state.model_call_record_dict["raw_response"] = []
+        original_body_iterator = streaming_response.body_iterator
+
+        async def wrapper() -> AsyncGenerator[None, str]:
+            async for item in original_body_iterator:
+                request.state.model_call_record_dict["raw_response"].append(item)
+                yield item
+
+        # Modifies the streaming_response in-place
+        streaming_response.body_iterator = wrapper()
+
     async def chat_completions_with_call_capture(
         self, rollout_id: str, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
@@ -362,6 +378,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body_dict)
         )
         request.state.model_call_record_dict["raw_request"] = body_dict
+
+        assert not request.state.model_call_record_dict["request"].stream, (
+            "Model call capture for /v1/chat/completions with streaming is currently not supported!"
+        )
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
@@ -390,6 +410,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # The raw request is identical to the response, so we dedupe
         request.state.model_call_record_dict["raw_request"] = None
 
+        assert not request.state.model_call_record_dict["request"].stream, (
+            "Model call capture for /v1/responses with streaming is currently not supported!"
+        )
+
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self._invoke_responses(request, body)
@@ -413,19 +437,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         request.state.model_call_record_dict["request"] = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         request.state.model_call_record_dict["raw_request"] = body
 
-        assert not request.state.model_call_record_dict["request"].stream, (
-            "Model call capture for /v1/messages to /v1/responses converstion with streaming is currently not supported!"
-        )
-
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
             response = await self.messages(request, body)
-            request.state.model_call_record_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(
-                response,
-                request.state.model_call_record_dict["request"],
-                model=request.state.model_call_record_dict["request"].model,
-            )
-            request.state.model_call_record_dict["raw_response"] = response
+
+            if request.state.model_call_record_dict["request"].stream:
+                assert isinstance(response, StreamingResponse)
+
+                # TODO @bxyu-nvidia: Need to convert from Anthropic message stream to Response object to populate this
+                request.state.model_call_record_dict["response"] = None
+                self._wrap_async_body_iterator_with_response_capture(request, response)
+            else:
+                request.state.model_call_record_dict["response"] = _ANTHROPIC_CONVERTER.anthropic_to_responses(
+                    response,
+                    request.state.model_call_record_dict["request"],
+                    model=request.state.model_call_record_dict["request"].model,
+                )
+                request.state.model_call_record_dict["raw_response"] = response
+
             request.state.model_call_record_dict["error_response"] = None
         except Exception as e:
             request.state.model_call_record_dict["response"] = None
