@@ -283,12 +283,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request.state.model_call_record_dict["timestamp_end"] = perf_counter()
             request.state.model_call_record_dict["status_code"] = response.status_code
 
-            # TODO @bxyu-nvidia
-            # if isinstance(response, StreamingResponse):
-            #     pass
-            # else:
-            #     pass
-
             # Record in the background to not block the response
             # The background task only runs after streaming has finished
             task = BackgroundTask(
