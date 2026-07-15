@@ -36,6 +36,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -186,7 +187,7 @@ class JudgeEvaluation(BaseModel):
     verdict_label: Optional[str] = None
 
 
-class TextToSqlVerifyResponse(BaseVerifyResponse):
+class TextToSqlVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     """Verification response for text-to-SQL tasks."""
 
     uuid: Optional[str | int] = None
@@ -245,6 +246,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         judge_passed = False
         judge_evaluations = []
         extracted_sql = None
+        judge_failed = False
+        judge_failure_reason: Optional[str] = None
 
         if not generated:
             failure_reason = FailureCode.NO_SQL_EXTRACTED
@@ -313,8 +316,13 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                     reward = 0.0
 
         except Exception as e:
+            # A failed judge call (timeout, auth, rate limit, HTTP error) is a
+            # distinct outcome, not a wrong answer: flag it out of the accuracy
+            # denominator instead of silently scoring reward=0.
             failure_reason = FailureCode.UNKNOWN_ERROR
             reward = 0.0
+            judge_failed = True
+            judge_failure_reason = f"{type(e).__name__}: {e}"
             print(f"DEBUG: Unknown error in verify: {type(e).__name__} {e}", flush=True)
 
         payload = body.model_dump()
@@ -335,7 +343,19 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             judge_passed=judge_passed,
             failure_reason=failure_reason,
             judge_evaluations=judge_evaluations,
+            judge_failed=judge_failed,
+            judge_failure_reason=judge_failure_reason,
         )
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
 
     async def _generate_judge_evaluation(
         self,

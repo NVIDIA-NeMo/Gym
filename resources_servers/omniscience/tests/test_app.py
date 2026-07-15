@@ -365,6 +365,24 @@ class TestOmniscienceServer:
         assert result.reward == approx(0.0)
         assert result.extracted_answer == ""
 
+    async def test_verify_judge_failure_recorded(self, config: OmniscienceConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        model_response = self._make_model_response("1989")
+        request = OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="In what year did the Berlin Wall fall?",
+            expected_answer="1989",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+
     async def test_judge_prompt_contains_question_and_answer(self, config: OmniscienceConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server = OmniscienceServer(config=config, server_client=server_mock)

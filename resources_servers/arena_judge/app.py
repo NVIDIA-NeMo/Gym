@@ -56,6 +56,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -155,7 +156,7 @@ class ArenaJudgeVerifyRequest(ArenaJudgeRunRequest, BaseVerifyRequest):
     pass
 
 
-class ArenaJudgeVerifyResponse(BaseVerifyResponse):
+class ArenaJudgeVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     """Verify response carries raw judge outputs + parsed verdicts.
 
     The raw text fields (``judgement_gen_base`` / ``judgement_base_gen``)
@@ -219,15 +220,23 @@ class ArenaJudgeServer(SimpleResourcesServer):
 
         # Two judge calls in parallel — A=candidate/B=baseline (gen-base)
         # and swapped (base-gen).
-        (gen_base_text, gen_base_verdict), (base_gen_text, base_gen_verdict) = await asyncio.gather(
-            self._judge_once(category, question, candidate_answer, baseline_answer),
-            self._judge_once(category, question, baseline_answer, candidate_answer),
+        (gen_base_text, gen_base_verdict, gen_base_fail), (base_gen_text, base_gen_verdict, base_gen_fail) = (
+            await asyncio.gather(
+                self._judge_once(category, question, candidate_answer, baseline_answer),
+                self._judge_once(category, question, baseline_answer, candidate_answer),
+            )
         )
+
+        # A failed judge CALL (auth, rate limit, timeout, HTTP error) is a
+        # distinct outcome, not a wrong answer — flag it via the standard
+        # judge_failed field with reward 0.0. Parser-level invalid verdicts
+        # (no parseable label) keep the existing invalid_* flags.
+        judge_failure = gen_base_fail or base_gen_fail
 
         # Per-rollout binary reward from the gen-base direction.
         # Candidate wins (reward=1.0) if it strictly beats the baseline in
         # the gen-base call; ties and losses both score 0.
-        reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
+        reward = 0.0 if judge_failure is not None else (1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0)
 
         # ``body.model_dump()`` already carries ``category`` (declared
         # field). Drop it before spreading so the RESOLVED category
@@ -244,6 +253,8 @@ class ArenaJudgeServer(SimpleResourcesServer):
             category=category,
             invalid_gen_base=gen_base_verdict is None,
             invalid_base_gen=base_gen_verdict is None,
+            judge_failed=judge_failure is not None,
+            judge_failure_reason=judge_failure,
         )
 
     # ------------------------------------------------------------------
@@ -252,11 +263,13 @@ class ArenaJudgeServer(SimpleResourcesServer):
 
     async def _judge_once(
         self, category: str, question: str, answer_1: str, answer_2: str
-    ) -> tuple[str, Optional[str]]:
+    ) -> tuple[str, Optional[str], Optional[str]]:
         """Run a single judge call via /v1/chat/completions.
 
-        Returns (raw_text, parsed_verdict). Network or parse failures
-        return ("", None), treated as "invalid score" by the aggregate.
+        Returns (raw_text, parsed_verdict, failure_reason). A failed judge
+        CALL yields ("", None, "ErrType: msg") — recorded as judge_failed,
+        not a wrong answer. A successful call with no parseable label yields
+        (text, None, None), the existing "invalid verdict" outcome.
         """
         prompt = self._prompts[category]
         fill = {"question": question, "answer_1": answer_1, "answer_2": answer_2}
@@ -269,20 +282,22 @@ class ArenaJudgeServer(SimpleResourcesServer):
         request_params = self.config.judge_chat_completions_create_params.model_copy(deep=True)
         request_params.messages = messages
 
-        try:
+        async def _call() -> NeMoGymChatCompletion:
             response_obj = await self.server_client.post(
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=request_params,
             )
-            judge_response = NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
-        except Exception:
-            logger.exception("Judge call failed for category=%s; treating as invalid verdict.", category)
-            return "", None
+            return NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
+
+        judge_response, failure = await run_judge(_call())
+        if failure is not None:
+            logger.warning("Judge call failed for category=%s; recording judge failure: %s", category, failure)
+            return "", None, failure
 
         text = self._extract_chat_completion_text(judge_response)
         verdict = self._parse_verdict(text)
-        return text, verdict
+        return text, verdict, None
 
     # ------------------------------------------------------------------
     # Verdict / response helpers
@@ -379,6 +394,7 @@ class ArenaJudgeServer(SimpleResourcesServer):
         # Arena-Elo (MLE + 100-round bootstrap 95% CI) — the headline
         # metric for arena-hard-v2. Overall + per-category.
         metrics.update(self._compute_arena_elo_metrics(tasks))
+        metrics.update(judge_failure_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -392,6 +408,10 @@ class ArenaJudgeServer(SimpleResourcesServer):
                 key[name] = agent_metrics[name]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
+        # Judge-failure signal: count, rate, and the judge-success-only reward.
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
         return key
 
     # ------------------------------------------------------------------

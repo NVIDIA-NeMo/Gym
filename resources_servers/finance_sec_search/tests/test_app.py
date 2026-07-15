@@ -1008,7 +1008,7 @@ class TestVerify:
 
     @pytest.mark.asyncio
     async def test_verify_judge_call_failure(self, tmp_path) -> None:
-        """Judge HTTP call failure → reward 0.0, no crash."""
+        """Judge HTTP call failure → reward 0.0, recorded as a distinct judge failure."""
         server = self._create_server_with_judge(tmp_path)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
 
@@ -1018,6 +1018,8 @@ class TestVerify:
         req = self._make_verify_request(response, "$391.0 billion")
         res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
+        assert res.judge_failed is True
+        assert "judge unavailable" in res.judge_failure_reason
 
     @pytest.mark.asyncio
     async def test_verify_curly_braces_in_content(self, tmp_path) -> None:
