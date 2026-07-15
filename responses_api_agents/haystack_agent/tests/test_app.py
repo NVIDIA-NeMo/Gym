@@ -96,9 +96,9 @@ def _weather_tool():
     return create_tool_from_function(get_weather, name="get_weather", description="Get the weather for a city.")
 
 
-def _pipeline_yaml(raise_on_tool_invocation_failure: bool = False) -> str:
+def _pipeline_yaml(raise_on_tool_invocation_failure: bool = False, generation_kwargs: dict | None = None) -> str:
     agent = Agent(
-        chat_generator=NeMoGymResponsesChatGenerator(server_name="policy_model"),
+        chat_generator=NeMoGymResponsesChatGenerator(server_name="policy_model", generation_kwargs=generation_kwargs),
         tools=[_weather_tool()],
         system_prompt=SYSTEM_PROMPT,
         exit_conditions=["text"],
@@ -110,10 +110,19 @@ def _pipeline_yaml(raise_on_tool_invocation_failure: bool = False) -> str:
     return pipe.dumps()
 
 
-def _build_agent(tmp_path, monkeypatch: MonkeyPatch, model_responses: list[dict], *, raise_on_fail: bool = False):
+def _build_agent(
+    tmp_path,
+    monkeypatch: MonkeyPatch,
+    model_responses: list[dict],
+    *,
+    raise_on_fail: bool = False,
+    generation_kwargs: dict | None = None,
+):
     """Create a HaystackAgent whose loaded pipeline's generator uses a mocked model server."""
     pipeline_path = tmp_path / "pipeline.yaml"
-    pipeline_path.write_text(_pipeline_yaml(raise_on_tool_invocation_failure=raise_on_fail))
+    pipeline_path.write_text(
+        _pipeline_yaml(raise_on_tool_invocation_failure=raise_on_fail, generation_kwargs=generation_kwargs)
+    )
 
     client = MagicMock()
     client.post = AsyncMock(side_effect=[_make_response(p) for p in model_responses])
@@ -242,3 +251,51 @@ class TestApp:
         output_types = [item["type"] for item in res.json()["output"]]
         assert output_types[-1] == "message"
         assert "function_call_output" in output_types
+
+    async def test_responses_forwards_sampling_params(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        # The row's sampling params reach the model call; pipeline-owned fields (tools, instructions)
+        # are not forwarded.
+        server, client = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()])])
+        http = TestClient(server.setup_webserver())
+
+        res = http.post(
+            "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "weather in SF?"}],
+                "temperature": 0.9,
+                "max_output_tokens": 123,
+                "top_p": 0.5,
+                "instructions": "ignored: pipeline system_prompt is authoritative",
+                "tools": [
+                    {"type": "function", "name": "ignored_tool", "description": "x", "parameters": {}, "strict": False}
+                ],
+            },
+        )
+        assert res.status_code == 200
+
+        out_body = client.post.call_args_list[0].kwargs["json"]
+        assert out_body.temperature == 0.9
+        assert out_body.max_output_tokens == 123
+        assert out_body.top_p == 0.5
+        # instructions is dropped; tools stay the pipeline's, not the request's.
+        assert out_body.instructions is None
+        assert [tool["name"] for tool in out_body.tools] == ["get_weather"]
+
+    async def test_responses_request_param_overrides_static_generation_kwargs(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # The pipeline configures temperature=0.1; the request's temperature=0.9 wins.
+        server, client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[_envelope([_text_item()])],
+            generation_kwargs={"temperature": 0.1},
+        )
+        http = TestClient(server.setup_webserver())
+
+        res = http.post(
+            "/v1/responses",
+            json={"input": [{"role": "user", "content": "hi"}], "temperature": 0.9},
+        )
+        assert res.status_code == 200
+        assert client.post.call_args_list[0].kwargs["json"].temperature == 0.9
