@@ -8,6 +8,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
       return_token_id_information: false
       uses_reasoning_parser: true
 
+# ported from gym-gitlab b66e37c6: same as policy_model but does NOT feed reasoning back into history
 policy_model_no_interleaved_reasoning:
   _copy: policy_model
   responses_api_models:
@@ -20,6 +21,12 @@ browsecomp_benchmark_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
+      # Search/browse backend: "tavily" (default) or "exa". Override per-run with
+      # ++...browsecomp_advanced_harness.search_provider=exa (+ exa_api_key=[...]).
+      search_provider: tavily
+      # terminal mode: search/browse write pages to a per-session disk workspace
+      # and the read-only bash_command tool is exposed for the model to grep/read them.
+      workspace: per_session
       use_judge: true
       judge_model_server:
         type: responses_api_models
@@ -37,10 +44,16 @@ browsecomp_benchmark_agent:
       nudge_steps: true
       max_context_tokens: 196608
       context_reset_pct: 0.3
+      # token-based reset (50k standard); >0 overrides max_context_tokens*context_reset_pct
+      context_reset_tokens: 50000
       context_reset_keep_rounds: 3
+      max_run_retries: 3
       max_reset_count: null
-      max_run_retries: 5
+      # Set to a directory to record per-reset + final conversation snapshots
+      # under {snap_dir}/sample_{task_index}/attempt_{attempt}_*.jsonl. Off when null.
       snap_dir: null
+      # Estimate prompt tokens via the vLLM /tokenize endpoint before each model
+      # call to decide context reset (skips the otherwise-wasted generation).
       save_model_call_using_vllm_tokenize_endpoint: true
       resources_server:
         type: resources_servers
