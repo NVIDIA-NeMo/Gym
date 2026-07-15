@@ -1132,7 +1132,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 question, ground_truth, last_assistant_response
             )
         else:
-            judge_evaluation, judge_failure = self._verify_answer_with_regex(ground_truth, last_assistant_response), None
+            judge_evaluation, judge_failure = (
+                self._verify_answer_with_regex(ground_truth, last_assistant_response),
+                None,
+            )
 
         # num_tool_calls now comes from the agent loop (counts ALL tool calls,
         # including those made before context resets). Fall back to the old

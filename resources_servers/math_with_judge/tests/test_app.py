@@ -268,9 +268,7 @@ class TestApp:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
 
         question = "Simplify the expression x + 7 - 6"
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": question}]
-        )
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": question}])
         model_response = NeMoGymResponse(
             **self._create_response("resp_id", self._create_response_output_message("the answer is 42"))
         )

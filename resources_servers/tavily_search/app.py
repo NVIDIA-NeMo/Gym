@@ -416,7 +416,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 question, ground_truth, last_assistant_response
             )
         else:
-            judge_evaluation, judge_failure = self._verify_answer_with_regex(ground_truth, last_assistant_response), None
+            judge_evaluation, judge_failure = (
+                self._verify_answer_with_regex(ground_truth, last_assistant_response),
+                None,
+            )
         return TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),

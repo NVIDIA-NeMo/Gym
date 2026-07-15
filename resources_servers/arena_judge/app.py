@@ -220,11 +220,12 @@ class ArenaJudgeServer(SimpleResourcesServer):
 
         # Two judge calls in parallel — A=candidate/B=baseline (gen-base)
         # and swapped (base-gen).
-        (gen_base_text, gen_base_verdict, gen_base_fail), (base_gen_text, base_gen_verdict, base_gen_fail) = (
-            await asyncio.gather(
-                self._judge_once(category, question, candidate_answer, baseline_answer),
-                self._judge_once(category, question, baseline_answer, candidate_answer),
-            )
+        (
+            (gen_base_text, gen_base_verdict, gen_base_fail),
+            (base_gen_text, base_gen_verdict, base_gen_fail),
+        ) = await asyncio.gather(
+            self._judge_once(category, question, candidate_answer, baseline_answer),
+            self._judge_once(category, question, baseline_answer, candidate_answer),
         )
 
         # A failed judge CALL (auth, rate limit, timeout, HTTP error) is a
