@@ -270,26 +270,34 @@ class HermesAgent(SimpleResponsesAPIAgent):
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = str(self.config.model_server.name)
 
+        # hermes-agent @569b912 dropped use_streaming/persist_session and moved reasoning to
+        # reasoning_config and sampling to request_overrides.
         agent = AIAgent(
             base_url=base_url,
             api_key="gym",  # pragma: allowlist secret
             model=model_name,
-            use_streaming=False,
-            temperature=self.config.temperature,
-            insert_reasoning=True,
+            reasoning_config={"enabled": True},
+            request_overrides={"temperature": self.config.temperature},
             max_iterations=self.config.max_turns,
             enabled_toolsets=self.config.enabled_toolsets,
             disabled_toolsets=self.config.disabled_toolsets,
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
-            persist_session=False,
             save_trajectories=False,
         )
+        # That build streams even with no consumers, but gym's model server is non-streaming-only;
+        # _disable_streaming is the successor to the removed use_streaming=False.
+        agent._disable_streaming = True
         _original_build_api_kwargs = agent._build_api_kwargs
 
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
+            # hermes-agent 569b912 dropped the use_streaming constructor flag; without it the agent
+            # emits stream=true, but gym's model server only accepts non-streaming requests
+            # (NonStreaming schema -> HTTP 422 "stream: Input should be False"). Force it off here,
+            # which is what the no-stream-consumer / quiet_mode path already expects.
+            kw["stream"] = False
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
