@@ -35,7 +35,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -215,6 +216,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
+    model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
     command: str = "openclaw"
     model: str = "nvinf/nvidia/meta/llama-3.3-70b-instruct"
@@ -229,6 +231,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
+    context_window: int = 262144
+    max_output_tokens: int = 131072
     openclaw_version: Optional[str] = None
 
     @property
@@ -283,8 +287,42 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     def _build_openclaw_config(self, base: dict[str, Any]) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
+        if self.config.model_server:
+            providers = cfg.setdefault("models", {}).setdefault("providers", {})
+            nemo = providers.setdefault("nemo", {})
+            nemo.update(
+                {
+                    "api": "openai-completions",
+                    "baseUrl": self._resolve_model_base_url(),
+                    "apiKey": "EMPTY",  # pragma: allowlist secret
+                    "models": [
+                        {
+                            "id": self.config.model,
+                            "name": self.config.model,
+                            "api": "openai-completions",
+                            "reasoning": True,
+                            "input": ["text"],
+                            "contextWindow": self.config.context_window,
+                            "maxTokens": self.config.max_output_tokens,
+                        }
+                    ],
+                }
+            )
         self._merge_headless_tool_denies(cfg)
         return cfg
+
+    def _resolve_model_base_url(self) -> str:
+        if self.config.model_server is None:
+            return ""
+        config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        base_url = self.server_client._build_server_base_url(config).rstrip("/")
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+    def _effective_model(self) -> str:
+        return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
 
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"openclaw_{uuid4().hex[:8]}"
@@ -366,7 +404,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "--thinking",
                 self.config.thinking,
                 "--model",
-                self.config.model,
+                self._effective_model(),
                 "--message",
                 prompt,
                 *self.config.extra_args,

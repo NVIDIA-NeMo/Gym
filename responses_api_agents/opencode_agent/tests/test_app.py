@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -179,6 +179,21 @@ class TestEnv:
         assert env["XDG_DATA_HOME"] == "/tmp/data"
         assert env["FOO"] == "bar"
         assert "EMPTY" not in env
+
+    def test_model_server_builds_local_provider(self) -> None:
+        agent = _make_agent(
+            model="Qwen3.6-35B-A3B",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            env = agent._env("/tmp/data")
+            config = agent._build_opencode_config()
+
+        provider = config["provider"]["nemo"]
+        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert env["OPENAI_BASE_URL"] == "http://model/v1"
+        assert provider["options"]["baseURL"] == "http://model/v1"
+        assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
 
 
 class TestRepoDir:

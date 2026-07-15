@@ -52,6 +52,14 @@ class TestSanity:
         agent = HermesAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
         assert agent.sem._value == 4
 
+    def test_model_defaults_to_server_name(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        assert agent._model_name() == ""
+
+    def test_configured_model_overrides_server_name(self) -> None:
+        agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
+        assert agent._model_name() == "Qwen3.6-35B-A3B"
+
 
 class _FakeAgent:
     """Stand-in for AIAgent — only needs .interrupt() for the SIGTERM dispatch path."""

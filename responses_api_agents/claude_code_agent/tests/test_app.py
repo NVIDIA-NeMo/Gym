@@ -311,6 +311,11 @@ class TestRunForwardsSkillsPath:
 
 
 class TestRunClaudeCode:
+    def test_model_server_uses_anthropic_root(self) -> None:
+        agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            assert agent._resolve_base_url() == "http://model"
+
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/mcp.json")
         captured: dict = {}

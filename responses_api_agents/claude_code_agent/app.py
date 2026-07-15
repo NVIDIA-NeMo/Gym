@@ -262,12 +262,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def _resolve_base_url(self) -> str:
         if self.config.model_server:
-            cfg = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            return self.server_client._build_server_base_url(cfg)
+            return self._resolve_model_base_url().removesuffix("/v1")
         return self.config.anthropic_base_url or ""
+
+    def _resolve_model_base_url(self) -> str:
+        if self.config.model_server is None:
+            return ""
+        config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        base_url = self.server_client._build_server_base_url(config).rstrip("/")
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.

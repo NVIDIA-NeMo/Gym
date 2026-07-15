@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -237,6 +238,20 @@ class TestBuildOpenclawConfig:
         cfg = agent._build_openclaw_config({})
         assert "message" in cfg["tools"]["deny"]
         assert "custom" in cfg["tools"]["deny"]
+
+    def test_model_server_builds_local_provider(self) -> None:
+        agent = _make_agent(
+            model="Qwen3.6-35B-A3B",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        provider = cfg["models"]["providers"]["nemo"]
+        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert provider["baseUrl"] == "http://model/v1"
+        assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
+        assert provider["models"][0]["maxTokens"] == 131072
 
     def test_timeout_pads_empty_output(self) -> None:
         agent = _make_agent()

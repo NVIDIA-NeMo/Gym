@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -34,7 +35,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -158,6 +160,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
+    model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
     command: str = "pi"
     model: str = "nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct"
@@ -168,6 +171,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     models_config: dict[str, Any] = Field(default_factory=dict)
+    context_window: int = 262144
+    max_output_tokens: int = 131072
     pi_version: Optional[str] = None
 
     @property
@@ -211,13 +216,50 @@ class PiAgent(SimpleResponsesAPIAgent):
         env.update({k: v for k, v in self.config.env.items() if v})
         return env
 
+    def _resolve_model_base_url(self) -> str:
+        if self.config.model_server is None:
+            return ""
+        config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        base_url = self.server_client._build_server_base_url(config).rstrip("/")
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+    def _effective_model(self) -> str:
+        return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
+
+    def _build_models_config(self) -> dict[str, Any]:
+        config = copy.deepcopy(self.config.models_config)
+        if self.config.model_server is None:
+            return config
+        providers = config.setdefault("providers", {})
+        providers["nemo"] = {
+            "baseUrl": self._resolve_model_base_url(),
+            "api": "openai-completions",
+            "apiKey": "EMPTY",  # pragma: allowlist secret
+            "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+            "models": [
+                {
+                    "id": self.config.model,
+                    "reasoning": True,
+                    "input": ["text"],
+                    "contextWindow": self.config.context_window,
+                    "maxTokens": self.config.max_output_tokens,
+                }
+            ],
+        }
+        return config
+
     async def _run_pi(self, instruction: str, system_prompt: Optional[str]) -> tuple[list[Any], dict[str, int], str]:
-        provider, _, model_id = self.config.model.partition("/")
+        effective_model = self._effective_model()
+        provider, _, model_id = effective_model.partition("/")
         work_dir = self._workspace_root()
         home = work_dir / ".pi-home"
         (home / ".pi" / "agent").mkdir(parents=True, exist_ok=True)
-        if self.config.models_config:
-            (home / ".pi" / "agent" / "models.json").write_text(json.dumps(self.config.models_config, indent=2))
+        models_config = self._build_models_config()
+        if models_config:
+            (home / ".pi" / "agent" / "models.json").write_text(json.dumps(models_config, indent=2))
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
