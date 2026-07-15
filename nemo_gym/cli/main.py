@@ -299,6 +299,17 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(targets[args.storage], overrides)
 
 
+def _dataset_validate_eval(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error(f"unrecognized arguments: {' '.join(overrides)}")
+    from nemo_gym.eval_dataset_validation import print_eval_dataset_result, validate_eval_dataset
+
+    result = validate_eval_dataset(args.manifest)
+    print_eval_dataset_result(result, as_json=args.json)
+    if not result.passed:
+        raise SystemExit(1)
+
+
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
     "list": "List available components (benchmarks, agents, environments).",
@@ -404,6 +415,14 @@ COMMANDS = {
             _value_flag("mode", "mode", "Data preparation mode.", choices=("train_preparation", "example_validation")),
             _value_flag("output-dir", "output_dirpath", "Output directory for the prepared data."),
             _bool_flag("download", "should_download", "Download source datasets before collating."),
+        ),
+    ),
+    "dataset validate-eval": Command(
+        target=_dataset_validate_eval,
+        summary="Check a representative eval task set against an eval manifest.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("--manifest", required=True, help="Eval manifest YAML path.")),
+            Flag(register=lambda p: p.add_argument("--json", action="store_true", help="Output JSON.")),
         ),
     ),
     "env init": Command(

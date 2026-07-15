@@ -1,0 +1,42 @@
+# This manifest intentionally evaluates the current smoke fixture against the proposed eval-v0 bar.
+# `gym dataset validate-eval` should fail until a real held-out task set replaces dataset.path.
+schema_version: 1
+name: tales-eval-v0
+status: gap_analysis
+use_case: Evaluate multi-turn text-adventure agents across five heterogeneous game frameworks.
+
+dataset:
+  path: ../data/example.jsonl
+  task_id_fields: [framework, task_no, split, seed]
+
+split:
+  field: split
+  allowed: [test]
+
+quality:
+  min_tasks: 40
+  coverage:
+    - field: framework
+      required_values: [textworld, textworld_express, alfworld, scienceworld, jericho]
+      min_count_per_value: 6
+    - field: task_no
+      min_distinct: 6
+  edge_cases:
+    tag_field: eval_tags
+    required: [invalid_action_recovery, long_horizon, parser_ambiguity]
+  recommended_fields: [task_id, task_family, difficulty, source_revision, split_provenance]
+
+manual_review:
+  priority_rules:
+    - oracle or walkthrough does not reach success
+    - reward and task success disagree
+    - negative terminal reward
+    - parser loop or invalid-action loop
+  stratified_sample: at least one pass and one fail per framework, plus 10 percent of remaining rows
+
+baseline_plan:
+  models: [weak_open_model, target_nemotron, strong_reference_model]
+  repeats_per_task: 3
+  primary_metric: success_rate
+  secondary_metrics: [normalized_score, truncation_rate, invalid_action_rate, steps, tokens]
+  aggregation: macro average by framework and task family; never average raw rewards across frameworks

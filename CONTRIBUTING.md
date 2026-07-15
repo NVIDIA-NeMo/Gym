@@ -10,6 +10,10 @@ Welcome! We are excited to have you contribute to NeMo Gym. Whether you are addi
 
 Refer to the [Environment Contribution Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/environments) for detailed guidance.
 
+Environment contributions are eval-first: provide a representative held-out task set, repeated baseline results,
+and priority manual-review evidence before proposing training as the next step. The five checked-in example rows are
+smoke-test fixtures, not a substitute for an eval dataset.
+
 **RL Framework Integrations**
 - Integration for new RL training frameworks (TRL, SkyRL, and so on)
 
