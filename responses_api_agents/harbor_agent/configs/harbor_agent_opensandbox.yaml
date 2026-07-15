@@ -81,10 +81,10 @@ harbor_agent:
         sandbox_ttl_s: 21600
         sandbox_ready_timeout_s: 900
         default_exec_timeout_s: 14400
-        # Match the Qwen3.6 model-card harness setup (32 CPU / 48 GB per task).
-        # Remove these to run with each task.toml's own resources instead.
-        override_cpus: 32
-        override_memory_mb: 49152
+        # Uniform per-sandbox resources for all tasks. Remove these to run with
+        # each task.toml's own resources instead.
+        override_cpus: 4
+        override_memory_mb: 16384
 
       model_server:
         type: responses_api_models
