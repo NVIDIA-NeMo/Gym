@@ -210,6 +210,76 @@ class TestRolloutCollection:
         with pytest.raises(RuntimeError, match="boom"):
             await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
 
+    async def test_run_examples_soft_fail_retries_transient_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        bad_response = MagicMock()
+        bad_response.status = 503
+        good_response = MagicMock()
+        good_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=[bad_response, bad_response, good_response])
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(response):
+            if response.status != 200:
+                raise RuntimeError("transient blip")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_TRANSIENT_RUN_RETRY_DELAY_SECONDS", 0)
+
+        returned_row, result = await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+        assert returned_row == row
+        assert result == {"reward": 1.0}
+        assert mock_server_client.post.await_count == 3
+
+    async def test_run_examples_soft_fail_transient_retries_exhausted_soft_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        response = MagicMock()
+        response.status = 429
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(_response):
+            raise RuntimeError("rate limited")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_TRANSIENT_RUN_RETRY_DELAY_SECONDS", 0)
+
+        returned_row, result = await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+        assert returned_row == row
+        assert result["reward"] == 0.0
+        assert result["_ng_soft_failed"] is True
+        assert result["_ng_soft_failure_http_status"] == 429
+        assert mock_server_client.post.await_count == 1 + nemo_gym.rollout_collection._MAX_TRANSIENT_RUN_RETRIES
+
     async def test_run_from_config_soft_fail_run_errors_persists_reward_zero(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(

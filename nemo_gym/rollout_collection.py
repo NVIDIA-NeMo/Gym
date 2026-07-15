@@ -86,6 +86,10 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 NG_SOFT_FAILED_KEY = "_ng_soft_failed"
 
+_TRANSIENT_RUN_STATUSES = (429, 503, 504)
+_MAX_TRANSIENT_RUN_RETRIES = 3
+_TRANSIENT_RUN_RETRY_DELAY_SECONDS = 5.0
+
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
@@ -729,28 +733,44 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception as e:
-                    status = getattr(res, "status", None)
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={status} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                    if soft_fail_run_errors and status is not None and status >= 500:
-                        print(
-                            "[rollout_collection] soft-failing /run "
-                            f"status={status} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                        return row, _make_soft_failed_run_result(row, e, status)
-                    raise
-                return row, await get_response_json(res)
+                transient_attempts = 0
+                while True:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    try:
+                        await raise_for_status(res)
+                    except Exception as e:
+                        status = getattr(res, "status", None)
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_collection] /run failed "
+                                f"status={status} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                        if not soft_fail_run_errors or status is None:
+                            raise
+                        if status in _TRANSIENT_RUN_STATUSES and transient_attempts < _MAX_TRANSIENT_RUN_RETRIES:
+                            transient_attempts += 1
+                            delay = _TRANSIENT_RUN_RETRY_DELAY_SECONDS * 2 ** (transient_attempts - 1)
+                            print(
+                                "[rollout_collection] transient /run "
+                                f"status={status}, retry {transient_attempts}/{_MAX_TRANSIENT_RUN_RETRIES} "
+                                f"in {delay:.0f}s "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        if status >= 500 or status in _TRANSIENT_RUN_STATUSES:
+                            print(
+                                "[rollout_collection] soft-failing /run "
+                                f"status={status} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                            return row, _make_soft_failed_run_result(row, e, status)
+                        raise
+                    return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
