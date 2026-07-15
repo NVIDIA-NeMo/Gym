@@ -6,6 +6,13 @@ A NeMo Gym agent harness that runs a serialized [Haystack](https://haystack.deep
 native NeMo Gym model server's `/v1/responses` endpoint (resolved by `server_name`). Haystack's
 `Agent` drives the repeated tool-calling loop; tools live entirely on the Haystack side.
 
+> [!WARNING]
+> **Env-side (resources-server) tools are not supported yet.** Tools must be defined in the
+> Haystack pipeline as executable Haystack `Tool`/`Toolset` objects. Tools served by the resources
+> server — and any `tools` passed in the request body — are ignored: the request's `tools` field is
+> not forwarded to the model, and the agent cannot invoke tools it doesn't hold locally. If your
+> environment relies on resources-server tools, this harness won't run them.
+
 The pipeline is deserialized and warmed up **once at startup** (in `model_post_init`) and shared
 across all requests, so expensive component/tool initialization is paid a single time rather than on
 every rollout. Concurrent rollouts are safe: Haystack's `Agent`/`Pipeline` keep all per-run state in
