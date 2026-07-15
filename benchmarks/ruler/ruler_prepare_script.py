@@ -28,60 +28,6 @@ from pathlib import Path
 from ruler_thread_unsafe import ensure_thread_unsafe_resources
 
 
-DEFAULT_SETTINGS = """
-DATASET_GROUP = "long-context"
-METRICS_TYPE = "ruler"
-GENERATION_ARGS = (
-    "++prompt_config=generic/default "
-    "++eval_type=ruler ++eval_config.match_type={match_type} "
-{extra_generation_args})
-"""
-
-TEXT_COMPLETIONS_EXTRA_ARGS = """\
-    "++inference.tokens_to_generate={tokens_to_generate} "
-    "++start_assistant_response_key=generation "
-    "++inference.endpoint_type=text "
-"""
-
-
-TOKENS_TO_GENERATE = {"niah": 128, "vt": 30, "cwe": 120, "fwe": 50, "qa": 32}
-MATCH_TYPE = {"niah": "all", "vt": "all", "cwe": "all", "fwe": "all", "qa": "part"}
-
-
-def prepare_task_for_ns(task, data_dir, setup, data_format):
-    """Resaving from data_dir/task/test.jsonl into current folder/task/test.jsonl and adding proper init.py"""
-    original_path = Path(data_dir) / task / "test.jsonl"
-    new_path = Path(__file__).parent / setup / task / "test.jsonl"
-    Path(new_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(original_path, "r", encoding="utf-8") as fin, open(new_path, "w", encoding="utf-8") as fout:
-        for line in fin:
-            original_entry = json.loads(line)
-            new_entry = {
-                "index": original_entry["index"],
-                "question": original_entry["input"],
-                "expected_answer": original_entry["outputs"],
-                "length": original_entry["length"],
-            }
-            if data_format == "default":
-                new_entry["generation"] = original_entry["answer_prefix"].strip()
-            elif data_format == "base":
-                new_entry["generation"] = "\n" + original_entry["answer_prefix"].strip()
-            fout.write(json.dumps(new_entry) + "\n")
-
-    with open(new_path.parent / "__init__.py", "w", encoding="utf-8") as init_file:
-        short_name = task.split("_")[0]
-        if data_format == "chat":
-            extra_generation_args = ""
-        else:
-            extra_generation_args = TEXT_COMPLETIONS_EXTRA_ARGS.format(
-                tokens_to_generate=TOKENS_TO_GENERATE[short_name]
-            )
-
-        init_file.write(
-            DEFAULT_SETTINGS.format(match_type=MATCH_TYPE[short_name], extra_generation_args=extra_generation_args)
-        )
-
-
 def get_ruler_data(
     tasks,
     setup,
@@ -181,24 +127,6 @@ def get_ruler_data(
             futures = [executor.submit(prepare_task, task) for task in tasks]
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # Will raise exception if any subprocess fails
-
-        ########################################
-        # START NeMo Gym prepare skips these steps since we don't use them
-        ########################################
-
-        # resaving the data and creating __init__.py files
-        # for task in tasks:
-        #     prepare_task_for_ns(task, Path(tmpdirname) / "ruler_data", setup, data_format=data_format)
-
-        # with open(Path(__file__).parent / setup / "__init__.py", "w", encoding="utf-8") as init_file:
-        #     init_file.write("IS_BENCHMARK_GROUP = True\n")
-        #     init_file.write("SCORE_MODULE = 'nemo_skills.dataset.ruler.ruler_score'\n")
-        #     benchmarks = ", ".join(f"'ruler.{setup}.{task}': {{}}" for task in tasks)
-        #     init_file.write(f"BENCHMARKS = {{{benchmarks}}}\n")
-
-        ########################################
-        # END NeMo Gym prepare skips these steps since we don't use them
-        ########################################
 
     finally:
         if tmpdir_context is not None:

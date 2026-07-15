@@ -72,14 +72,15 @@ def prepare_helper(output_name: str, model: str, length: int) -> Path:
     )
 
     samples = []
+    TOKENS_TO_GENERATE = {"niah": 128, "vt": 30, "cwe": 120, "fwe": 50, "qa": 32}
     for subset_dir in (tmp_data_dir / "ruler_data").iterdir():
         subset_file = subset_dir / "test.jsonl"
         with subset_file.open() as f:
             subset_samples = list(map(json.loads, f))
-
+        short_name = subset_dir.name.split("_")[0]
         for sample in subset_samples:
             sample = {
-                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
+                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}], "max_output_tokens": TOKENS_TO_GENERATE[short_name]},
                 "outputs": sample["outputs"],
                 "length": sample["length"],
                 "subset": subset_dir.name,
