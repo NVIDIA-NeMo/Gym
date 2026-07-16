@@ -33,7 +33,12 @@ from pydantic import BaseModel
 
 pytest.importorskip("mcp")
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer  # noqa: E402
+from nemo_gym.base_resources_server import (  # noqa: E402
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
     bind_route,
@@ -273,6 +278,41 @@ def test_refuses_dependency_injection_handler():
 # ==================================================================================================
 # The detector's annotation resolution (regression: factory-set __signature__ must win)
 # ==================================================================================================
+
+
+def test_verify_normalizes_mcp_namespaced_tool_names():
+    """MCP-driven rollouts record tool calls as mcp__<server>__<tool>; verify must see bare names."""
+    seen: dict[str, list] = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    with TestClient(app) as client:
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "x"}]},
+            "response": {
+                "id": "resp_x",
+                "created_at": 0.0,
+                "model": "m",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {"type": "function_call", "name": "mcp__store__append", "arguments": "{}", "call_id": "c1"},
+                    {"type": "function_call", "name": "raw_step", "arguments": "{}", "call_id": "c2"},
+                    {"type": "function_call", "name": "mcp__other__tool", "arguments": "{}", "call_id": "c3"},
+                ],
+            },
+        }
+        resp = client.post("/verify", json=body)
+        assert resp.status_code == 200, resp.text
+    # this server's prefix stripped, bare names untouched, other servers' prefixes left alone
+    assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
 
 
 def test_bind_route_honors_factory_signature_over_annotations():

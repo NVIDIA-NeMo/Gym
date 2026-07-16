@@ -44,6 +44,25 @@ _MCP_SESSION_TOKEN: ContextVar[Optional[str]] = ContextVar("nemo_gym_mcp_session
 _MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
 
 
+def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
+    """Map a trajectory tool-call name to the server's bare tool name.
+
+    HTTP-driven agents record bare tool names ("email_reply_email"); MCP-native agents (e.g.
+    Claude Code) record them namespaced per server ("mcp__workplace_assistant__email_reply_email").
+    Verifiers compare trajectory names against dataset/ground-truth vocabulary, so names are
+    normalized before verify sees them and rollouts score identically on both transports.
+    Non-namespaced names pass through unchanged. When ``server_name`` is given, only that server's
+    prefix is stripped (robust to tool names that themselves contain double underscores).
+    """
+    if not name.startswith("mcp__"):
+        return name
+    if server_name is not None:
+        prefix = f"mcp__{server_name}__"
+        return name[len(prefix) :] if name.startswith(prefix) else name
+    _, sep, tool = name[len("mcp__") :].partition("__")
+    return tool if sep else name
+
+
 class MCPSessionError(Exception):
     """A Gym MCP tool call lacked a valid per-rollout session token.
 
@@ -141,10 +160,28 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         self.setup_session_middleware(app)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self.verify)
+        app.post("/verify")(self._verify_with_normalized_tool_names())
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
+
+    def normalize_tool_name(self, name: str) -> str:
+        """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
+        return normalize_tool_name(name, self.config.name or self.__class__.__name__)
+
+    def _verify_with_normalized_tool_names(self):
+        verify = self.verify
+
+        @functools.wraps(verify)
+        async def verify_normalized(*args, **kwargs):
+            for candidate in (*args, *kwargs.values()):
+                output = getattr(getattr(candidate, "response", None), "output", None) or []
+                for item in output:
+                    if getattr(item, "type", None) == "function_call":
+                        item.name = self.normalize_tool_name(item.name)
+            return await verify(*args, **kwargs)
+
+        return verify_normalized
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()
