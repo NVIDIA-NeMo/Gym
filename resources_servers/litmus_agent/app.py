@@ -23,9 +23,10 @@ this server keeps only that path and drops everything RDKit-specific.
 What it does
 ------------
 1. Extracts the model's final answer text from the rollout trajectory.
-2. Pulls a value out of that text using the requested ``answer_format`` regex
-   (the ``fmt_XX`` family) -- the same wrapper-syntax extraction the chemistry
-   server used, which was already domain-independent.
+2. Pulls a value out of that text using the row's ``output_regex`` when present,
+   otherwise the requested ``answer_format`` regex (the ``fmt_XX`` family) -- the
+   same wrapper-syntax extraction the chemistry server used, which was already
+   domain-independent.
 3. Scores it against ``expected_answer`` using a small ``answer_type`` taxonomy
    that selects the comparison rule.
 
@@ -302,6 +303,10 @@ class LitmusAgentRunRequest(BaseRunRequest):
     # Selects how the answer is parsed. Optional so legacy rows carrying only
     # ``property_type`` still resolve via _PROPERTY_TYPE_TO_ANSWER_TYPE.
     answer_type: Optional[str] = None
+    # Preferred parser: a regex string carried directly on the row (exactly one
+    # capture group). When present it wins over ``answer_format``; see
+    # extract_predicted_value for the full resolution order.
+    output_regex: Optional[str] = None
     answer_format: Optional[str] = None
     use_box_format: bool = False
     # Per-row reward-rule override: {"rule": <name>, **params}. When absent, the
@@ -376,11 +381,13 @@ def resolve_answer_type(answer_type: Optional[str], extra: Dict[str, Any]) -> st
     return mapped
 
 
-def _raw_capture(text: str, answer_format: str) -> Optional[str]:
-    """Return the last match of the answer-format regex, or None."""
-    pattern = _ANSWER_FORMAT_REGEXES.get(answer_format)
-    if pattern is None:
-        raise ValueError(f"Unsupported answer_format={answer_format!r}")
+def _capture_with_pattern(text: str, pattern: re.Pattern[str]) -> Optional[str]:
+    """Return the last match of a compiled answer regex, or None.
+
+    Only the last match is considered, so a self-correcting response ("...3,
+    actually 5") scores on its final answer. Multi-group patterns collapse to
+    their first non-empty group.
+    """
     matches = pattern.findall(text)
     if not matches:
         return None
@@ -388,6 +395,29 @@ def _raw_capture(text: str, answer_format: str) -> Optional[str]:
     if isinstance(match, tuple):
         match = next((group for group in match if group), "")
     return match.strip()
+
+
+def _raw_capture(text: str, answer_format: str) -> Optional[str]:
+    """Return the last match of the named ``fmt_XX`` regex, or None."""
+    pattern = _ANSWER_FORMAT_REGEXES.get(answer_format)
+    if pattern is None:
+        raise ValueError(f"Unsupported answer_format={answer_format!r}")
+    return _capture_with_pattern(text, pattern)
+
+
+def _compile_output_regex(output_regex: str) -> re.Pattern[str]:
+    """Compile a per-row ``output_regex``, requiring exactly one capture group.
+
+    Fails loudly on an invalid pattern or a group count other than one so bad
+    dataset regexes surface at scoring time instead of silently mis-extracting.
+    """
+    try:
+        pattern = re.compile(output_regex, re.S)
+    except re.error as exc:
+        raise ValueError(f"Invalid output_regex={output_regex!r}: {exc}") from exc
+    if pattern.groups != 1:
+        raise ValueError(f"output_regex={output_regex!r} must have exactly one capture group, got {pattern.groups}")
+    return pattern
 
 
 def _parse_bool(inner: str) -> Optional[float]:
@@ -423,21 +453,36 @@ def extract_predicted_value(
     response: str,
     answer_type: str,
     *,
+    output_regex: Optional[str] = None,
     answer_format: Optional[str] = None,
     use_box_format: bool = False,
 ) -> Optional[Union[float, str]]:
     """Extract the model's predicted value from its response text.
 
-    Locates the answer with the ``answer_format`` regex (legacy rows fall back
-    to boxed/double-paren via ``use_box_format``), then coerces it: numeric
-    types parse to float, ``string`` returns the raw captured text. Returns None
-    when nothing can be extracted.
+    Locates the answer, then coerces it by ``answer_type``: numeric types parse
+    to float, ``bool`` to 1.0/0.0, ``string`` returns the raw captured text.
+
+    The answer is located by the first available of, in order:
+
+    1. ``output_regex`` (preferred): a regex carried directly on the row. Must
+       compile and have exactly one capture group, else ``ValueError``.
+    2. ``answer_format``: look up a regex by ``fmt_XX`` name in the registry
+       kept for rows exported without an ``output_regex``. Unknown names raise
+       ``ValueError`` so bad data fails loudly.
+    3. ``use_box_format``: very-legacy fallback -- boxed when true, double
+       parentheses when false.
+
+    Returns None when nothing can be extracted.
     """
     if not isinstance(response, str):
         return None
     text = response.strip()
-    fmt = answer_format or ("fmt_07" if use_box_format else "fmt_00")
-    raw = _raw_capture(text, fmt)
+
+    if output_regex is not None:
+        raw = _capture_with_pattern(text, _compile_output_regex(output_regex))
+    else:
+        fmt = answer_format or ("fmt_07" if use_box_format else "fmt_00")
+        raw = _raw_capture(text, fmt)
     if raw is None:
         return None
     if answer_type == STRING:
@@ -719,6 +764,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         predicted = extract_predicted_value(
             text,
             answer_type,
+            output_regex=body.output_regex,
             answer_format=body.answer_format,
             use_box_format=body.use_box_format,
         )
