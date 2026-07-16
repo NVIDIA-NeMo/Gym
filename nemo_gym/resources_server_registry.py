@@ -22,7 +22,7 @@ the same way ``gym list environments``/``benchmarks`` read theirs (via
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Optional
 
 from omegaconf import OmegaConf
 
@@ -93,16 +93,13 @@ def _discover_resources_servers_in_dir(resources_servers_dir: Path) -> Dict[str,
     return servers
 
 
-def discover_resources_servers(
-    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
-) -> Dict[str, ResourcesServerEntry]:
+def discover_resources_servers() -> Dict[str, ResourcesServerEntry]:
     """Map resources-server name -> :class:`ResourcesServerEntry` for every discoverable server.
 
     Scans the ``resources_servers/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
-    root (``search_dirs`` + cwd + built-ins), merged so user servers shadow same-named built-ins.
-    ``search_dirs`` is one dir or a list.
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user servers shadow same-named built-ins.
     """
-    return discover_components(RESOURCES_SERVERS_SUBDIR, _discover_resources_servers_in_dir, search_dirs)
+    return discover_components(RESOURCES_SERVERS_SUBDIR, _discover_resources_servers_in_dir)
 
 
 def read_resources_server_value(config_path: Path) -> Optional[str]:

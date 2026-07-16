@@ -27,7 +27,7 @@ so it's safe to call even when those aren't set.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -77,16 +77,13 @@ def _discover_environments_in_dir(environments_dir: Path) -> Dict[str, Environme
     return environments
 
 
-def discover_environments(
-    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
-) -> Dict[str, EnvironmentEntry]:
+def discover_environments() -> Dict[str, EnvironmentEntry]:
     """Map environment name -> :class:`EnvironmentEntry` for every discoverable ``<name>/config.yaml``.
 
     Scans the ``environments/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
-    (``search_dirs`` + cwd + built-ins), merged so user environments shadow same-named built-ins.
-    ``search_dirs`` is one dir or a list.
+    (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user environments shadow same-named built-ins.
     """
-    return discover_components(ENVIRONMENTS_SUBDIR, _discover_environments_in_dir, search_dirs)
+    return discover_components(ENVIRONMENTS_SUBDIR, _discover_environments_in_dir)
 
 
 def read_environment_details(config_path: Path) -> Dict[str, object]:

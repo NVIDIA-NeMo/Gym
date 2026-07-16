@@ -14,6 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.registry import _discover_environments_in_dir, discover_environments
 
 
@@ -117,10 +118,11 @@ class TestRealEnvironments:
 
 
 class TestDiscoverEnvironmentsAcrossRoots:
-    def test_search_dirs_surface_user_environments_alongside_builtins(self, tmp_path: Path) -> None:
+    def test_extra_root_surfaces_user_environments_alongside_builtins(self, tmp_path: Path, monkeypatch) -> None:
         _make_env(tmp_path / "environments", "custom_env", _ENV_CONFIG.format(name="custom_env"))
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
 
-        environments = discover_environments(search_dirs=[tmp_path])
+        environments = discover_environments()
 
         assert "custom_env" in environments  # a user-supplied environment is discovered
         assert "workplace_assistant" in environments  # ...alongside the built-ins

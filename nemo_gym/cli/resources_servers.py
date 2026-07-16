@@ -28,7 +28,6 @@ from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
-    SEARCH_DIR_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -70,7 +69,7 @@ def list_resources_servers() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    servers = discover_resources_servers(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
+    servers = discover_resources_servers()
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:

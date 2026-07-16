@@ -21,6 +21,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.agent_registry import AgentEntry
 from nemo_gym.cli.agents import list_agents
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 
 
 def _mock_global_config(config: dict = None):
@@ -117,14 +118,15 @@ class TestListAgents:
         out = capsys.readouterr().out
         assert "Unknown agent 'swe_agent'" in out and "swe_agents" in out
 
-    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys) -> None:
-        # Real discovery (via --search-dir): the path line must be the agent dir's absolute path.
+    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        # Real discovery (via an extra root): the path line must be the agent dir's absolute path.
         agent_dir = tmp_path / "responses_api_agents" / "my_agent"
         agent_dir.mkdir(parents=True)
         (agent_dir / "app.py").write_text("")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         with patch(
             "nemo_gym.cli.agents.get_global_config_dict",
-            return_value=_mock_global_config({"component_name": "my_agent", "search_dir": [str(tmp_path)]}),
+            return_value=_mock_global_config({"component_name": "my_agent"}),
         ):
             list_agents()
         assert f"path: {agent_dir.resolve()}" in capsys.readouterr().out

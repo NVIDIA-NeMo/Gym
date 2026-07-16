@@ -55,7 +55,6 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
-    SEARCH_DIR_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -980,7 +979,7 @@ def list_environments() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    environments = discover_environments(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
+    environments = discover_environments()
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:

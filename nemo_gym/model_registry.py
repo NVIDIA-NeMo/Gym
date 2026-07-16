@@ -21,7 +21,7 @@ directory tree only; never loads a config.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Tuple
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.discovery import discover_components
@@ -75,11 +75,10 @@ def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
     return models
 
 
-def discover_models(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> Dict[str, ModelEntry]:
+def discover_models() -> Dict[str, ModelEntry]:
     """Map model name -> :class:`ModelEntry` for every discoverable model server.
 
     Scans the ``responses_api_models/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
-    root (``search_dirs`` + cwd + built-ins), merged so user models shadow same-named built-ins.
-    ``search_dirs`` is one dir or a list.
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user models shadow same-named built-ins.
     """
-    return discover_components(MODELS_SUBDIR, _discover_models_in_dir, search_dirs)
+    return discover_components(MODELS_SUBDIR, _discover_models_in_dir)

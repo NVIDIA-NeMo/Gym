@@ -20,6 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.cli.models import list_models
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.model_registry import ModelEntry
 
 
@@ -148,14 +149,15 @@ class TestListModels:
         out = capsys.readouterr().out
         assert "Unknown model 'my_model/nope'" in out
 
-    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys) -> None:
-        # Real discovery (via --search-dir): the path line must be the model dir's absolute path.
+    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        # Real discovery (via an extra root): the path line must be the model dir's absolute path.
         model_dir = tmp_path / "responses_api_models" / "my_model"
         (model_dir / "configs").mkdir(parents=True)
         (model_dir / "configs" / "my_model.yaml").write_text("my_model: {}\n")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         with patch(
             "nemo_gym.cli.models.get_global_config_dict",
-            return_value=_mock_global_config({"component_name": "my_model", "search_dir": [str(tmp_path)]}),
+            return_value=_mock_global_config({"component_name": "my_model"}),
         ):
             list_models()
         assert f"path: {model_dir.resolve()}" in capsys.readouterr().out

@@ -46,7 +46,6 @@ from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
-    SEARCH_DIR_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -105,7 +104,7 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    benchmarks = discover_benchmarks(search_dirs=global_config_dict.get(SEARCH_DIR_KEY_NAME))
+    benchmarks = discover_benchmarks()
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:

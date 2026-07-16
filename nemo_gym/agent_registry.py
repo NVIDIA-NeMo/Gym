@@ -39,7 +39,7 @@ starts servers, so it is safe to call when secrets/API keys referenced by a conf
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 from omegaconf import OmegaConf
 
@@ -162,13 +162,10 @@ def _discover_agents_in_dir(agents_dir: Path) -> Dict[str, AgentEntry]:
     return agents
 
 
-def discover_agents(
-    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
-) -> Dict[str, AgentEntry]:
+def discover_agents() -> Dict[str, AgentEntry]:
     """Map agent name -> :class:`AgentEntry` for every discoverable agent dir.
 
     Scans the ``responses_api_agents/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
-    root (``search_dirs`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
-    ``search_dirs`` is one dir or a list.
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
     """
-    return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir, search_dirs)
+    return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir)

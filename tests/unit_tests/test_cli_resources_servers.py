@@ -20,6 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.cli.resources_servers import list_resources_servers
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.resources_server_registry import ResourcesServerEntry
 
 
@@ -118,14 +119,15 @@ class TestListResourcesServers:
         out = capsys.readouterr().out
         assert "Unknown resources server 'mcq'" in out and "mcqa" in out
 
-    def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys) -> None:
-        # Real discovery (via --search-dir): the config line must be the flavor config's absolute path.
+    def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        # Real discovery (via an extra root): the config line must be the flavor config's absolute path.
         cfg = tmp_path / "resources_servers" / "my_rs" / "configs" / "my_rs.yaml"
         cfg.parent.mkdir(parents=True)
         cfg.write_text("my_rs:\n  resources_servers:\n    my_rs:\n      domain: knowledge\n      description: D\n")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         with patch(
             "nemo_gym.cli.resources_servers.get_global_config_dict",
-            return_value=_mock_global_config({"component_name": "my_rs", "search_dir": [str(tmp_path)]}),
+            return_value=_mock_global_config({"component_name": "my_rs"}),
         ):
             list_resources_servers()
         assert f"config: {cfg.resolve()}" in capsys.readouterr().out

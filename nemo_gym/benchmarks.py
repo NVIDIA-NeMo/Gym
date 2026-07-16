@@ -17,7 +17,7 @@
 import sys
 from glob import glob
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
@@ -149,14 +149,13 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
     return benchmarks_dict
 
 
-def discover_benchmarks(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> Dict[str, BenchmarkConfig]:
+def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
 
     Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
-    (``search_dirs`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
-    ``search_dirs`` is one dir or a list.
+    (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
     """
-    return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir, search_dirs)
+    return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir)
 
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.

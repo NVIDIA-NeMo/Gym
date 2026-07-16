@@ -19,10 +19,11 @@ Lives below the per-component registries (``registry.py``, ``benchmarks.py``, ``
 they can share it without depending on each other. Reads configs only; never starts servers.
 """
 
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError
@@ -37,24 +38,27 @@ from nemo_gym.global_config import (
 
 _T = TypeVar("_T")
 
+# Extra component-search roots, `os.pathsep`-separated; same effect as repeating `--search-dir`
+# (see :func:`component_search_roots`).
+NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME = "NEMO_GYM_EXTRA_ROOTS"
 
-def component_search_roots(search_dirs: Optional[Union[Path, Sequence[Path]]] = None) -> List[Path]:
-    """Ordered, de-duplicated roots to look for a Gym component under: any ``search_dirs`` (one dir or a
-    list, e.g. from ``--search-dir``), then cwd, then ``WORKING_DIR`` and the install root (``PARENT_DIR``,
+
+def component_search_roots() -> List[Path]:
+    """Ordered, de-duplicated roots to look for a Gym component under: the roots from the
+    ``NEMO_GYM_EXTRA_ROOTS`` env var, then cwd, then ``WORKING_DIR`` and the install root (``PARENT_DIR``,
     the built-ins).
+
+    ``NEMO_GYM_EXTRA_ROOTS`` is an ``os.pathsep``-separated list of extra roots — the single source of extra
+    roots. ``--search-dir`` is folded into it up front (see ``nemo_gym.cli.main.main``), so the flag and the
+    env var are one and the same channel here.
 
     Earlier roots win on a name collision (see :func:`merge_by_name`), so user components shadow built-ins.
     De-duplicated by resolved path, since cwd/``WORKING_DIR``/install root coincide in an editable checkout.
     The single source of truth for where Gym looks for components — used by both config resolution
     (``_asset_config_path``) and the ``gym list``/``gym search`` discovery functions.
     """
-    if search_dirs is None:
-        extra: List[Path] = []
-    elif isinstance(search_dirs, (str, Path)):
-        extra = [Path(search_dirs)]  # a single dir
-    else:
-        extra = [Path(d) for d in search_dirs]  # a list of dirs
-    candidates: List[Path] = [*extra, Path.cwd(), WORKING_DIR, PARENT_DIR]
+    env_roots = [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
+    candidates: List[Path] = [*env_roots, Path.cwd(), WORKING_DIR, PARENT_DIR]
     roots: List[Path] = []
     seen: set[Path] = set()
     for root in candidates:
@@ -79,16 +83,14 @@ def merge_by_name(per_root: Iterable[Dict[str, _T]]) -> Dict[str, _T]:
 def discover_components(
     subdir: str,
     dir_scanning_fn: Callable[[Path], Dict[str, _T]],
-    search_dirs: Optional[Union[Path, Sequence[Path]]] = None,
 ) -> Dict[str, _T]:
     """Run ``dir_scanning_fn`` on ``subdir`` of every :func:`component_search_roots` root and merge the results.
 
     The shared body of ``discover_environments``/``discover_agents``/``discover_models``/
     ``discover_benchmarks``: each passes its ``<type>/`` subdir and a single-directory scan function, and
-    gets user-shadows-built-in merging (via :func:`merge_by_name`) for free. ``search_dirs`` is one dir or
-    a list.
+    gets user-shadows-built-in merging (via :func:`merge_by_name`) for free.
     """
-    return merge_by_name(dir_scanning_fn(root / subdir) for root in component_search_roots(search_dirs))
+    return merge_by_name(dir_scanning_fn(root / subdir) for root in component_search_roots())
 
 
 # Fills unset `???`/`${...}` values during listing: they reference runtime-only values (API keys,

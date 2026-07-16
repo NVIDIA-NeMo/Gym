@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import sys
 import types
 
@@ -23,7 +24,16 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import WORKING_DIR
 from nemo_gym.cli.main import main
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+
+
+@pytest.fixture(autouse=True)
+def _isolate_extra_roots_env(monkeypatch: MonkeyPatch):
+    # `main()` folds `--search-dir` into NEMO_GYM_EXTRA_ROOTS by mutating os.environ directly; delenv gives
+    # each test a clean baseline and restores the original on teardown (even after main() reassigns the key),
+    # so the roots never leak between tests.
+    monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
 
 
 def _dispatch_for(monkeypatch: MonkeyPatch, argv: list[str]) -> tuple[str, list[str]]:
@@ -1149,11 +1159,37 @@ class TestListEnvironmentsRouting:
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
 
-    def test_search_dir_becomes_config_override(self, monkeypatch: MonkeyPatch) -> None:
-        # `--search-dir` (repeatable) reaches the no-arg list command as the reserved `search_dir` config
-        # key, read centrally from the resolved config — like --json/--query.
-        _, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
-        assert overrides == ["+search_dir=[/a,/b]"]
+    def test_search_dir_populates_extra_roots_env_during_command_then_restores(self, monkeypatch: MonkeyPatch) -> None:
+        # `--search-dir` (repeatable) is folded into NEMO_GYM_EXTRA_ROOTS for the duration of the command (no
+        # Hydra override) so the roots reach every resolver, then restored so main() leaves no global state.
+        seen = {}
+
+        def fake_dispatch(target: str, overrides: list[str]) -> None:
+            seen["overrides"] = overrides
+            seen["env"] = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+
+        monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
+        main()
+
+        assert seen["overrides"] == []
+        assert seen["env"] == os.pathsep.join(["/a", "/b"])  # set while the command runs
+        assert NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME not in os.environ  # restored (unset) after main()
+
+    def test_search_dir_restores_pre_existing_extra_roots_env(self, monkeypatch: MonkeyPatch) -> None:
+        # A pre-existing NEMO_GYM_EXTRA_ROOTS is fully replaced by --search-dir for the command, then restored.
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "/pre")
+        seen = {}
+
+        def fake_dispatch(target: str, overrides: list[str]) -> None:
+            seen["env"] = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+
+        monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a"])
+        main()
+
+        assert seen["env"] == "/a"  # flag fully replaces the existing value for the command
+        assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "/pre"  # original restored after main()
 
     def test_name_positional_becomes_component_name_override(self, monkeypatch: MonkeyPatch) -> None:
         # `gym list <type> <name>` reaches the listing command as the reserved `component_name` config key,

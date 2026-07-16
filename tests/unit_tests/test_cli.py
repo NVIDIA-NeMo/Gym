@@ -46,6 +46,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentEntry
 
 
@@ -531,14 +532,15 @@ class TestListEnvironments:
         assert "Unknown environment 'alfa'" in out and "alpha" in out
 
     def test_inspect_shows_absolute_config_path(self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path) -> None:
-        # Real discovery (via --search-dir): the config line must be the config's absolute path.
+        # Real discovery (via an extra root): the config line must be the config's absolute path.
         cfg = tmp_path / "environments" / "my_env" / "config.yaml"
         cfg.parent.mkdir(parents=True)
         cfg.write_text("my_env:\n  resources_servers:\n    my_env:\n      domain: agent\n      description: D\n")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         monkeypatch.setattr(
             nemo_gym.cli.env,
             "get_global_config_dict",
-            lambda **k: OmegaConf.create({"component_name": "my_env", "search_dir": [str(tmp_path)]}),
+            lambda **k: OmegaConf.create({"component_name": "my_env"}),
         )
 
         list_environments()

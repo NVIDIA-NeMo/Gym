@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -19,6 +20,7 @@ from omegaconf import OmegaConf
 from nemo_gym import PARENT_DIR
 from nemo_gym.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
+    NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
     _parse_no_environment_tolerating_unset_values,
     component_search_roots,
     merge_by_name,
@@ -32,29 +34,32 @@ class TestComponentSearchRoots:
         assert Path.cwd().resolve() in resolved
         assert PARENT_DIR.resolve() in resolved
 
-    def test_search_dirs_take_precedence_and_keep_order(self, tmp_path: Path) -> None:
+    def test_env_var_roots_added_before_builtins(self, tmp_path: Path, monkeypatch) -> None:
+        # NEMO_GYM_EXTRA_ROOTS is the sole source of extra roots (--search-dir is folded into it). Its roots
+        # are searched ahead of cwd/built-ins, in listed order, so they can shadow them.
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.mkdir()
         b.mkdir()
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, os.pathsep.join([str(a), str(b)]))
 
-        roots = component_search_roots(search_dirs=[a, b])
+        roots = component_search_roots()
 
-        assert roots[0] == a  # explicit search dirs come first, in the given order
-        assert roots[1] == b
+        assert roots[0] == a and roots[1] == b  # os.pathsep-separated, order preserved
         assert PARENT_DIR.resolve() in {root.resolve() for root in roots}  # built-ins still scanned
 
-    def test_accepts_a_single_dir(self, tmp_path: Path) -> None:
-        # `search_dirs` takes one dir or a list; a lone Path must be treated as that single root.
-        assert component_search_roots(tmp_path)[0] == tmp_path
-
-    def test_dedupes_roots_by_resolved_path(self) -> None:
-        # Passing the install root as an explicit search dir must not scan it twice.
-        roots = component_search_roots(search_dirs=[PARENT_DIR])
+    def test_dedupes_roots_by_resolved_path(self, monkeypatch) -> None:
+        # An extra root that resolves to the install root must not be scanned twice.
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(PARENT_DIR))
+        roots = component_search_roots()
         resolved = [root.resolve() for root in roots]
 
         assert resolved.count(PARENT_DIR.resolve()) == 1
-        assert roots[0].resolve() == PARENT_DIR.resolve()  # the explicit search dir still takes precedence
+        assert roots[0].resolve() == PARENT_DIR.resolve()  # the extra root still takes precedence
+
+    def test_empty_or_unset_env_var_adds_nothing(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "")
+        assert component_search_roots()[0].resolve() == Path.cwd().resolve()
 
 
 class TestMergeByName:
