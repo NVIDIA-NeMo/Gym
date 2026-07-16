@@ -46,7 +46,7 @@ Keeping execution in `testbench_runner.py` lets `app.py` stay focused on the con
 | `container_tmp_bind_path` | `""`                    | If set, redirects in-container temp (e.g. `/tmp`) to per-rollout host storage and forces temp env vars (`TMPDIR`, `XCELIUM_TMPDIR`, `CDS_LOCK`, `JAVA_TOOL_OPTIONS`) — useful when default `/tmp` is too small or tools (Cadence/Java) write large temp/lock artifacts |
 
 
-**Note**: To run the commercial subset, pass the EDA image name in the yaml config file (/scratch/artij/Gym/resources_servers/cvdp/configs/cvdp.yaml).
+**Note**: To run the commercial subset, pass the EDA image name in the yaml config file (`resources_servers/cvdp/configs/cvdp.yaml`).
 
 ```
 eda_sim_image: cvdp-cadence-verif:latest
@@ -184,7 +184,7 @@ The data can be found [on Hugging Face](https://huggingface.co/datasets/nvidia/c
 ## Step 1 — Download dataset from HF
 
 ```bash
-huggingface-cli download nvidia/cvdp-benchmark-dataset \
+hf download nvidia/cvdp-benchmark-dataset \
   --include "cvdp_v1.0.2_nonagentic_code_generation_no_commercial.jsonl" \
   --repo-type dataset \
   --local-dir resources_servers/cvdp/data/cvdp_v1.0.2_nonagentic_code_generation_no_commercial.jsonl
@@ -227,7 +227,7 @@ This example is for using the **NV inference endpoint** with the vLLM backend. T
 **NVIDIA hosted API**
 
 ```yaml
-policy_base_url: https://inference-api.nvidia.com/v1
+policy_base_url: https://integrate.api.nvidia.com/v1
 policy_api_key: <your-api-key>
 policy_model_name: <your-model-name>
 ```
