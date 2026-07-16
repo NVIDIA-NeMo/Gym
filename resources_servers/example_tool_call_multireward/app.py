@@ -43,7 +43,7 @@ from pydantic import Field
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
-    BaseVerifyResponse,
+    BaseMultiRewardVerifyResponse,
     SimpleResourcesServer,
 )
 
@@ -58,13 +58,9 @@ class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
     expected_call: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
+class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):
     # Per-component scores are also surfaced as top-level fields so the aggregate
     # metrics endpoint profiles each one in addition to the combined reward.
-    # Decoupled per-component rewards (name -> score). How these reach a trainer
-    # depends on the training framework's NeMo Gym integration. Defined here (not on
-    # BaseVerifyResponse) so other environments' verify responses are unchanged.
-    reward_components: Dict[str, float] | None = None
     correctness: float = 0.0
     schema_valid: float = 0.0
     format: float = 0.0

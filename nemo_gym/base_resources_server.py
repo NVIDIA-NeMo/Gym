@@ -92,6 +92,12 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
+    """Use the same keys for every task in an environment."""
+
+    reward_components: dict[str, float]
+
+
 class BaseSeedSessionRequest(BaseModel):
     pass
 
