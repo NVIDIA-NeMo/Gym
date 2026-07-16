@@ -162,6 +162,28 @@ class TestRun:
         assert model_calls == [(model_path, None)]
 
     @pytest.mark.asyncio
+    async def test_no_rollout_prefix_when_observability_disabled(self):
+        agent = _make_agent(observability=False)
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/reset": [{"observation": "go", "info": {}}],
+                "/v1/responses": [_model_response("move A")],
+                "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.terminated is True
+        # Task indices are present, but capture is off -> the model call stays unprefixed.
+        assert [u for _s, u, _j in call_log if u.startswith("/v1/")] == ["/v1/responses"]
+
+    @pytest.mark.asyncio
     async def test_multi_step_preserves_output_items_in_history(self):
         agent = _make_agent(max_steps=3)
         call_log = _wire_mock_client(
