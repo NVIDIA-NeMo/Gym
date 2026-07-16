@@ -42,8 +42,8 @@ class PromptConfig(BaseModel):
 def load_prompt_config(path: str) -> PromptConfig:
     """Load and validate a YAML prompt config file.
 
-    Relative paths are resolved against the current working directory first, then the Gym install
-    root, consistent with how ``config_paths`` and other Gym paths are resolved.
+    Relative paths are resolved against the component-search roots (extra roots, cwd, then the Gym install
+    root), consistent with how ``config_paths`` and other Gym paths are resolved.
 
     Returns a ``PromptConfig`` with required ``user`` and optional ``system`` fields.
     Each value is a string template with ``{placeholder}`` syntax.

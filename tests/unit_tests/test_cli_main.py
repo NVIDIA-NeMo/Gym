@@ -22,9 +22,8 @@ from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
-from nemo_gym import WORKING_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
@@ -1099,8 +1098,8 @@ class TestInstallRootResolution:
         install_root.mkdir()
         user_cwd.mkdir()
         self._make_resources_server(install_root)  # built-in only under the install root
-        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
-        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         resolved = cli_main._asset_config_path("resources-server", "foo")
@@ -1112,8 +1111,8 @@ class TestInstallRootResolution:
         install_root.mkdir()
         user_cwd.mkdir()
         self._make_resources_server(user_cwd, name="myenv")  # exists only in the user's project
-        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
-        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         resolved = cli_main._asset_config_path("resources-server", "myenv")
@@ -1127,8 +1126,8 @@ class TestInstallRootResolution:
         user_cwd.mkdir()
         self._make_resources_server(install_root)
         self._make_resources_server(user_cwd)
-        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", install_root)
-        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", user_cwd)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
         with pytest.raises(ValueError, match="ambiguous"):
@@ -1140,8 +1139,8 @@ class TestInstallRootResolution:
         repo_root = tmp_path / "Gym"
         repo_root.mkdir()
         self._make_resources_server(repo_root)
-        monkeypatch.setattr("nemo_gym.discovery.PARENT_DIR", repo_root)
-        monkeypatch.setattr("nemo_gym.discovery.WORKING_DIR", repo_root)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", repo_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", repo_root)
         monkeypatch.chdir(repo_root)
 
         resolved = cli_main._asset_config_path("resources-server", "foo")

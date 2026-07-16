@@ -14,7 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.registry import _discover_environments_in_dir, discover_environments
 
 

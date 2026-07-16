@@ -27,7 +27,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.env
 import nemo_gym.global_config
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
@@ -46,7 +46,6 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentEntry
 
 

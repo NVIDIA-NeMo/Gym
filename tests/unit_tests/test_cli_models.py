@@ -19,8 +19,8 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.models import list_models
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.model_registry import ModelEntry
 
 

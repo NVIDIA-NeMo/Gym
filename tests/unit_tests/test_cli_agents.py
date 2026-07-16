@@ -19,9 +19,9 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.agent_registry import AgentEntry
 from nemo_gym.cli.agents import list_agents
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 
 
 def _mock_global_config(config: dict = None):

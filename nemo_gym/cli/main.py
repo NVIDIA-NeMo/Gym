@@ -23,8 +23,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym.cli.utils import did_you_mean
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, component_search_roots
 
 
 logger = logging.getLogger(__name__)
@@ -681,6 +681,7 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
     Setting the env var lets the roots reach every resolver (discovery, the --<component> selectors,
     deep config/prompt/rollout resolution) and inherit into spawned server subprocesses.
     The original value is restored (or the var unset) on exit so main() leaves no global side effect.
+    (sys.path is augmented with the new roots for plugin ``prepare.py`` imports and left as-is on exit.)
     """
     if not search_dirs:
         yield
@@ -688,6 +689,7 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
     original = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
     value = os.pathsep.join(search_dirs)
     os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = value
+    _augment_sys_path()  # re-read env so --search-dir roots are importable (e.g. a benchmark prepare.py)
     logger.debug(f"Set {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={value} from --search-dir")
     try:
         yield

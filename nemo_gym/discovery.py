@@ -19,16 +19,15 @@ Lives below the per-component registries (``registry.py``, ``benchmarks.py``, ``
 they can share it without depending on each other. Reads configs only; never starts servers.
 """
 
-import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, Iterable, Optional, Tuple, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError
 
-from nemo_gym import PARENT_DIR, WORKING_DIR
+from nemo_gym import component_search_roots
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
@@ -37,36 +36,6 @@ from nemo_gym.global_config import (
 
 
 _T = TypeVar("_T")
-
-# Extra component-search roots, `os.pathsep`-separated; same effect as repeating `--search-dir`
-# (see :func:`component_search_roots`).
-NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME = "NEMO_GYM_EXTRA_ROOTS"
-
-
-def component_search_roots() -> List[Path]:
-    """Ordered, de-duplicated roots to look for a Gym component under: the roots from the
-    ``NEMO_GYM_EXTRA_ROOTS`` env var, then cwd, then ``WORKING_DIR`` and the install root (``PARENT_DIR``,
-    the built-ins).
-
-    ``NEMO_GYM_EXTRA_ROOTS`` is an ``os.pathsep``-separated list of extra roots — the single source of extra
-    roots. ``--search-dir`` is folded into it up front (see ``nemo_gym.cli.main.main``), so the flag and the
-    env var are one and the same channel here.
-
-    Earlier roots win on a name collision (see :func:`merge_by_name`), so user components shadow built-ins.
-    De-duplicated by resolved path, since cwd/``WORKING_DIR``/install root coincide in an editable checkout.
-    The single source of truth for where Gym looks for components — used by both config resolution
-    (``_asset_config_path``) and the ``gym list``/``gym search`` discovery functions.
-    """
-    env_roots = [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
-    candidates: List[Path] = [*env_roots, Path.cwd(), WORKING_DIR, PARENT_DIR]
-    roots: List[Path] = []
-    seen: set[Path] = set()
-    for root in candidates:
-        resolved = root.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            roots.append(root)
-    return roots
 
 
 def merge_by_name(per_root: Iterable[Dict[str, _T]]) -> Dict[str, _T]:

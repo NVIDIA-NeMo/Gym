@@ -36,7 +36,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR
+from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.setup_command import run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
@@ -80,14 +80,14 @@ _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
-    Checks the current working directory first (a user's local server), then falls back to the Gym
-    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs.
-    This lets ``gym env test`` find and run built-in servers from any cwd, not just a repo checkout.
+    Searches NEMO_GYM_EXTRA_ROOTS, the current working directory (a user's local server), then the Gym
+    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs. A
+    directory counts as a server only if it ships an install marker for one of our two venv setups. This
+    lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
     """
-    cwd_path = Path.cwd() / rel_path
-    if (cwd_path / "requirements.txt").exists() or (cwd_path / "pyproject.toml").exists():
-        return cwd_path
-    return PARENT_DIR / rel_path
+    return _resolve_under_cwd_or_install(
+        rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -627,14 +627,14 @@ def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
 
-    # Discover server modules under both the cwd (a user's project) and the Gym install root
-    # (built-ins, which live under PARENT_DIR in editable and wheel installs). Entrypoints are kept
-    # relative; the cwd shadows the install root for same-named modules. This lets `gym env test`
-    # discover and run built-in servers from any cwd, not only a repo checkout.
+    # Discover server modules across every component-search root: NEMO_GYM_EXTRA_ROOTS (plugins), the cwd
+    # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
+    # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
+    # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
     server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
-    for root in (Path.cwd(), PARENT_DIR):
+    for root in component_search_roots():
         for server_type_dir in server_type_dirs:
             for module_path in sorted((root / server_type_dir).glob("*")):
                 if "pycache" in module_path.name or not module_path.is_dir():

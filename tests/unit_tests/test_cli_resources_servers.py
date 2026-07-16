@@ -19,8 +19,8 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.resources_servers import list_resources_servers
-from nemo_gym.discovery import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.resources_server_registry import ResourcesServerEntry
 
 

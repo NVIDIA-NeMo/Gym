@@ -17,12 +17,10 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, component_search_roots
 from nemo_gym.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
-    NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
     _parse_no_environment_tolerating_unset_values,
-    component_search_roots,
     merge_by_name,
     read_config_metadata,
 )
