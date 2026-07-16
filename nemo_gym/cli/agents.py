@@ -28,12 +28,9 @@ from nemo_gym.global_config import (
 
 
 def list_agents() -> None:
-    """CLI command: list discovered agent harnesses and how each composes (Pattern A vs B).
-
-    Complements ``gym list benchmarks``: the asset selectors resolve a component *by name*, but only
-    this listing surfaces which agents are freely wireable into a separate environment (Pattern A)
-    versus self-contained harnesses that run with their own config (Pattern B) — the distinction the
-    config composer's compatibility guard relies on.
+    """List discovered agent harnesses and how each composes: freely wireable into a separate environment
+    (Pattern A) vs. self-contained harnesses that run with their own config (Pattern B). ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(

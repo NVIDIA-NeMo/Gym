@@ -18,7 +18,6 @@ import difflib
 import importlib
 import json
 from copy import deepcopy
-from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -32,15 +31,14 @@ from tqdm.auto import tqdm
 from nemo_gym.benchmarks import (
     BENCHMARKS_DIR,
     BenchmarkConfig,
-    _load_benchmarks_from_config_paths,
-    _parse_no_environment_tolerating_unset_values,
+    discover_benchmarks,
 )
 from nemo_gym.cli.env import RunHelper
 from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.discovery import read_config_metadata
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
-    POLICY_MODEL_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -75,40 +73,13 @@ def _fuzzy_matches(query: str, *fields: str) -> bool:
     return False
 
 
-def _benchmark_domain(bench: BenchmarkConfig) -> str:
-    """Resolve a benchmark's config to its `domain` (for the domain column and `gym search`).
-
-    `BenchmarkConfig` flattens away the `domain`, so we re-resolve the config with the tolerant listing
-    parser (so chained `config_paths` / `_inherit_from` are applied) and read the field back out. `domain`
-    may be declared on any server config — a resources server (e.g. `aime24`) or an agent (e.g. `tau2`) —
-    so we scan every server group.
-    """
-    initial_config_dict = OmegaConf.load(bench.path)
-    if POLICY_MODEL_KEY_NAME not in initial_config_dict:
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
-        )
-    resolved = _parse_no_environment_tolerating_unset_values(initial_config_dict)
-
-    for instance_name in resolved:
-        instance = resolved[instance_name]
-        if not isinstance(instance, (dict, DictConfig)):
-            continue
-
-        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
-            servers = instance.get(group_key)
-            if not servers:
-                continue
-            for server_config in servers.values():
-                found_domain = (server_config or {}).get("domain")
-                if found_domain:
-                    return str(found_domain)
-
-    return ""
-
-
 def list_benchmarks() -> None:
-    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point)."""
+    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point).
+
+    A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
+    domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
+    """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -116,34 +87,28 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
+    benchmarks = discover_benchmarks()
 
-    # A config defines a benchmark iff it declares a `type: benchmark` dataset (see `BenchmarkConfig`),
-    # regardless of its filename. So discovery is content-based: scan every yaml and keep the ones that
-    # literally declare such a dataset. That text check is a cheap prefilter so we only pay the resolve
-    # cost on real candidates (not every prompt/endpoint yaml), and it finds benchmarks whose config
-    # isn't named `config.yaml` — e.g. tau2's `configs/*.yaml` and livecodebench's `cascade.yaml`.
-    config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
-    config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
-
-    benchmarks = _load_benchmarks_from_config_paths(config_paths)
-
-    # Resolve the domain once per benchmark, for the domain column and `gym search`.
-    domains = {name: _benchmark_domain(bench) for name, bench in benchmarks.items()}
+    # Resolve domain + description once per benchmark, via the shared component-metadata reader —
+    # the same one `gym list environments` uses — for the columns and `gym search`.
+    metadata = {name: read_config_metadata(bench.path) for name, bench in benchmarks.items()}
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
     # across the benchmark name and domain.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        benchmarks = {name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, domains[name])}
+        benchmarks = {
+            name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, metadata[name][0] or "")
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
                 "name": name,
                 "agent_name": bench.agent_name,
-                "domain": domains[name],
+                "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
+                "description": metadata[name][1] or "",
             }
             for name, bench in benchmarks.items()
         ]
@@ -164,13 +129,16 @@ def list_benchmarks() -> None:
         else f"Available benchmarks in NeMo Gym ({len(benchmarks)})"
     )
     table = Table(title=title)
-    table.add_column("Benchmark name")
+    # Shared environment columns first (name, domain, description), then benchmark-specific ones.
+    table.add_column("Name")
     table.add_column("Domain")
+    table.add_column("Description")
     table.add_column("Agent name")
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, domains[name], bench.agent_name, str(bench.num_repeats))
+        domain, description = metadata[name]
+        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
 
     print_rich_table(table)
 
