@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -99,6 +100,8 @@ def test_multienv_dry_run_writes_complete_terminal_lifecycle(tmp_path: Path) -> 
             "RUNNER_NAME": "gym_pyautogui",
             "RECORD_VIDEO": "0",
             "TASK_ARTIFACTS": "0",
+            "OSWORLD_ENABLE_PROXY": "0",
+            "PROXY_CONFIG_FILE": "",
             "UV_BIN": str(_fake_uv(tmp_path)),
         }
     )
@@ -123,6 +126,77 @@ def test_multienv_dry_run_writes_complete_terminal_lifecycle(tmp_path: Path) -> 
     assert run_env["RUN_ATTEMPT_ID"] == "fresh-test"
     assert run_env["RUN_LIFECYCLE_DIR"] == str(run_dir)
     assert run_env["MATERIALIZED_INPUT_JSONL"] == str(run_dir / "rollouts_materialized_inputs.jsonl")
+    assert run_env["OSWORLD_ENABLE_PROXY"] == "0"
+    assert run_env["PROXY_CONFIG_CONFIGURED"] == "0"
+
+
+def test_multienv_proxy_switch_validates_and_records_non_secret_provenance(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    proxy_path = tmp_path / "proxy.json"
+    raw = b'[{"host":"proxy.example.com","port":3128}]\n'
+    proxy_path.write_bytes(raw)
+    env = os.environ.copy()
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "RUN_DIR": str(run_dir),
+            "RUNNER_NAME": "gym_pyautogui",
+            "RECORD_VIDEO": "0",
+            "TASK_ARTIFACTS": "0",
+            "OSWORLD_ENABLE_PROXY": "1",
+            "PROXY_CONFIG_FILE": str(proxy_path),
+            "PYTHON_BIN": sys.executable,
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    run_env = _read_run_env(run_dir / "run.env")
+    assert run_env["OSWORLD_ENABLE_PROXY"] == "1"
+    assert run_env["PROXY_CONFIG_FILE"] == str(proxy_path)
+    assert run_env["PROXY_CONFIG_CONFIGURED"] == "1"
+    assert run_env["PROXY_CONFIG_SHA256"] == hashlib.sha256(raw).hexdigest()
+    assert run_env["PROXY_CONFIG_ENTRY_COUNT"] == "1"
+    resolved = (run_dir / "resolved-command.log").read_text(encoding="utf-8")
+    assert "osworld_agent.enable_proxy=true" in resolved
+    assert f"osworld_agent.proxy_config_file={proxy_path}" in resolved
+    assert "proxy:      enabled=1 configured=1 entries=1" in completed.stdout
+
+
+def test_multienv_proxy_enable_requires_a_config_and_writes_terminal_markers(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    env = os.environ.copy()
+    env.pop("PROXY_CONFIG_FILE", None)
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "RUN_DIR": str(run_dir),
+            "OSWORLD_ENABLE_PROXY": "1",
+            "UV_BIN": str(_fake_uv(tmp_path)),
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(RUN_SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "PROXY_CONFIG_FILE is required" in completed.stderr
+    assert (run_dir / "finished_at.txt").is_file()
+    assert (run_dir / "exit_code.txt").read_text() == "2\n"
 
 
 def test_multienv_refuses_to_mutate_an_existing_run(tmp_path: Path) -> None:

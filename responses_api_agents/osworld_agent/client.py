@@ -36,6 +36,7 @@ from importlib import import_module
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
+from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
 
 
@@ -1457,6 +1458,8 @@ def run_osworld_task(
     screen_size: tuple = (1920, 1080),
     require_a11y_tree: bool = False,
     client_password: str = "password",
+    enable_proxy: bool = False,
+    proxy_config_file: Optional[str] = None,
     max_steps: int = 15,
     max_trajectory_length: int = 3,
     sleep_after_execution: float = 0.5,
@@ -1491,6 +1494,38 @@ def run_osworld_task(
     """
     if reward_mode not in {"raw", "binary"}:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
+
+    def proxy_precondition_failure(reason: str, message: str) -> RolloutResult:
+        LOG.error("OSWorld proxy precondition failed for task %s: %s", _safe_task_id(task_config), message)
+        return RolloutResult(
+            reward=0.0,
+            score=0.0,
+            steps=[],
+            error=message,
+            finished=False,
+            mask_sample=True,
+            termination_reason=reason,
+        )
+
+    try:
+        requires_proxy = task_requires_proxy(task_config)
+    except ValueError as exc:
+        return proxy_precondition_failure("proxy_configuration_error", f"ProxyConfigurationError: {exc}")
+    proxy_info = None
+    if requires_proxy and not enable_proxy:
+        return proxy_precondition_failure(
+            "proxy_required_but_disabled",
+            "ProxyRequiredButDisabled: task requires a proxy, but proxy support is disabled",
+        )
+    if requires_proxy:
+        try:
+            proxy_info = inspect_proxy_config_file(proxy_config_file)
+        except ValueError as exc:
+            return proxy_precondition_failure("proxy_configuration_error", f"ProxyConfigurationError: {exc}")
+        # OSWorld reads this lazily during DesktopEnv.reset(). Set it before
+        # loading the environment class so both current and older runtimes see
+        # the same explicit configuration.
+        os.environ["PROXY_CONFIG_FILE"] = proxy_info.path
 
     # Keep the requested Docker image visible to future/custom providers. The
     # clean upstream main provider currently starts happysixd/osworld-docker
@@ -1545,6 +1580,8 @@ def run_osworld_task(
     setup_score_zero = False
     agent_terminal_action: Optional[str] = None
     evaluation_error: Optional[str] = None
+    proxy_setup_error = False
+    rollout_phase = "before_environment"
     task_start = time.monotonic()
     recording_path: Optional[str] = None
     task_artifacts = _setup_task_artifacts(
@@ -1568,6 +1605,11 @@ def run_osworld_task(
             "temperature": policy_temperature,
             "top_p": policy_top_p,
             "reward_mode": reward_mode,
+            "proxy_required": requires_proxy,
+            "proxy_enabled": enable_proxy,
+            "proxy_config_file": proxy_info.path if proxy_info is not None else None,
+            "proxy_config_sha256": proxy_info.sha256 if proxy_info is not None else None,
+            "proxy_config_entry_count": proxy_info.entry_count if proxy_info is not None else 0,
         },
     )
     task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
@@ -1587,6 +1629,7 @@ def run_osworld_task(
     pointer_io_context_token: Optional[contextvars.Token[_PointerModelIOContext | None]] = None
 
     try:
+        rollout_phase = "environment_start"
         env = env_cls(
             provider_name=provider_name,
             action_space=runner_spec.action_space,
@@ -1597,13 +1640,16 @@ def run_osworld_task(
             os_type="Ubuntu",
             client_password=client_password,
             cache_dir=cache_dir,
+            enable_proxy=enable_proxy,
         )
         linked_cache_files = _stage_setup_cache(task_config, cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
+        rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
+        rollout_phase = "rollout"
         native_agent = None
         pointer_agent = None
         pointer_log_handler: Optional[logging.Handler] = None
@@ -2099,6 +2145,7 @@ def run_osworld_task(
             {"event": "evaluation", "score": 0.0, "status": "completed", "reason": "setup_score_zero"},
         )
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
+        proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
@@ -2142,6 +2189,8 @@ def run_osworld_task(
         termination_reason = "setup_score_zero"
     elif evaluation_error:
         termination_reason = "evaluator_error"
+    elif proxy_setup_error:
+        termination_reason = "proxy_setup_error"
     elif error:
         termination_reason = "rollout_error"
     elif agent_terminal_action is not None:

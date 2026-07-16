@@ -19,12 +19,11 @@ version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    # Clean xlang-ai/OSWorld main. Use the immutable commit archive instead of
-    # a git URL: uv recursively initializes git submodules, while upstream's
-    # optional SurferH submodules use private/SSH URLs and are not needed by
-    # this adapter. The archive keeps the runtime source reproducible without
-    # requiring those unrelated repositories.
-    "osworld @ https://github.com/xlang-ai/OSWorld/archive/83e8534451ba8b3ab6477448ef3f0a8e563f05be.tar.gz",
+    # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
+    # 83e85344 plus the nv-gym provider overlay and explicit proxy-runtime
+    # repair. Use an archive because uv recursively initializes git
+    # submodules, while optional SurferH submodules are not needed here.
+    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/95dc83aad1670b8ef399d5e37e696619417dafd8.tar.gz",
     "docker==7.1.0",
     # Needed by OSWorld's mm_agents.pointer implementation.
     "anthropic",

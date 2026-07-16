@@ -40,6 +40,8 @@ osworld_simple_agent:
       screen_height: 1080
       require_a11y_tree: false    # a11y_tree gives precise UI coords from OS AT-SPI — info a human user wouldn't have. Set false for pure-VLM evaluation (matches OSWorld paper's vision-only baseline + OpenAI/Anthropic computer-use benchmarks). Set true if you want max accuracy on small-UI clicks at the cost of much larger prompts (one a11y dump can be 100s of KB of XML, which blows the context window quickly with max_trajectory_length>1).
       client_password: password  # pragma: allowlist secret
+      enable_proxy: false        # global opt-in; only tasks with proxy: true use it
+      proxy_config_file: null    # local JSON path; PROXY_CONFIG_FILE overrides this value
       max_steps: 15
       max_trajectory_length: 3
       sleep_after_execution: 10.0   # Generous post-action wait. pyautogui clicks actuate immediately but page nav/render can take 5-8s under software emulation (TCG) — 1.5s catches mid-render screenshots that look "unchanged" and trigger broken-record re-clicks. Under KVM (hardware-accelerated qemu) 0.5-1.5s usually suffices.

@@ -227,6 +227,8 @@ overlays should be listed after the base config so their values win.
 | `headless` | `true` | Run without forwarding a desktop window |
 | `screen_width`, `screen_height` | `1920`, `1080` | VM resolution |
 | `require_a11y_tree` | `false` | Include AT-SPI accessibility data |
+| `enable_proxy` | `false` | Global opt-in; only a task with `proxy: true` uses it |
+| `proxy_config_file` | `null` | Local upstream-proxy JSON path; `PROXY_CONFIG_FILE` overrides it |
 | `max_steps` | `15` | Maximum observation/action iterations |
 | `max_trajectory_length` | `3` | Previous observations retained in Gym-built prompts |
 | `sleep_after_execution` | `10.0` | Wait after each action before observing again |
@@ -256,6 +258,70 @@ model-specific and do not change defaults for other runners.
 
 The response sets `mask_sample=true` when a timeout, evaluator error, or
 unfinished max-step rollout makes the reward unreliable.
+
+### Proxy-required tasks
+
+Proxy policy belongs to the Gym `feature/osworld` adapter; VM setup belongs to
+the pinned OSWorld `nv-gym` runtime. The branch names are independent Git refs
+in different repositories. Gym connects them only through the immutable
+OSWorld commit in `pyproject.toml`. That OSWorld commit merges upstream main
+`83e85344` and retains the `nv-gym` integration overlay.
+
+#### OSWorld version selection
+
+| Consumer workflow | Required OSWorld version |
+| --- | --- |
+| Gym `feature/osworld` | No manual checkout. The agent package installs the exact SHA from `pyproject.toml`. |
+| Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `95dc83aad1670b8ef399d5e37e696619417dafd8` or a documented successor. |
+| Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
+| Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
+
+For a direct integration of the tested version:
+
+```bash
+git clone https://github.com/JeffPengCoder/OSWorld.git
+cd OSWorld
+git checkout 95dc83aad1670b8ef399d5e37e696619417dafd8
+```
+
+Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
+branch is the integration line that follows upstream main, but its tip can
+move as new upstream changes are merged.
+
+The adapter defaults to proxy disabled. Set both variables only for a run that
+is allowed to use a proxy:
+
+```bash
+OSWORLD_ENABLE_PROXY=1 \
+PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
+The JSON file is local runtime configuration, not a repository asset. It is a
+non-empty list of HTTP upstreams. Each entry requires `host` and `port`; omit
+both `username` and `password` for an unauthenticated proxy, or provide both
+for an authenticated proxy. No cluster-specific hostname is hard-coded.
+
+| Task `proxy` | Global switch | Config | Result |
+| --- | --- | --- | --- |
+| `false` | `0` | absent | Normal direct-network task |
+| `false` | `1` | valid | Normal task; no VM proxy is installed for this task |
+| `true` | `0` | any | Masked infrastructure result: `proxy_required_but_disabled` |
+| `true` | `1` | valid | OSWorld installs/uses the VM-local proxy |
+| `true` | `1` | absent or invalid | Masked infrastructure result: `proxy_configuration_error` |
+
+An exception while the proxy-marked task is resetting is reported as
+`proxy_setup_error`, also with `mask_sample=true`. These cases are never
+silently counted as formal reward-zero samples. Successful result metadata
+records whether proxy was required, enabled, and configured, but never stores
+credentials.
+
+The multi-environment launcher accepts exactly `OSWORLD_ENABLE_PROXY=0` or
+`1`, validates the config before starting Gym, and records the switch, config
+path, SHA-256, and entry count in `run.env`. OSWorld loads the file lazily only
+for `proxy: true` tasks, uses the upstream for APT with bounded retry, and
+launches Chrome through the loopback-only `127.0.0.1:18888` tinyproxy endpoint.
 
 Task setup commands may optionally declare `expected_returncodes` and
 `on_nonzero: score_zero`. These fields express evaluator/setup semantics rather

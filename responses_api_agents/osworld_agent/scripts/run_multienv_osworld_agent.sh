@@ -76,6 +76,8 @@ PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
 TASK_ARTIFACTS="${TASK_ARTIFACTS:-1}"
 FULL_MODEL_IO="${FULL_MODEL_IO:-0}"
+OSWORLD_ENABLE_PROXY="${OSWORLD_ENABLE_PROXY:-0}"
+PROXY_CONFIG_FILE="${PROXY_CONFIG_FILE:-}"
 TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-}"
 VIDEO_SAMPLE_PER="${VIDEO_SAMPLE_PER:-100}"
 VIDEO_SAMPLE_COUNT="${VIDEO_SAMPLE_COUNT:-4}"
@@ -199,6 +201,31 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 date -u +%Y-%m-%dT%H:%M:%SZ > "${RUN_LIFECYCLE_DIR}/started_at.txt"
 printf '%s\n' "$$" > "${RUN_LIFECYCLE_DIR}/launcher.pid"
+
+case "${OSWORLD_ENABLE_PROXY}" in
+    0|1) ;;
+    *)
+        echo "OSWORLD_ENABLE_PROXY must be exactly 0 or 1, got: ${OSWORLD_ENABLE_PROXY}" >&2
+        exit 2
+        ;;
+esac
+
+PROXY_CONFIG_CONFIGURED=0
+PROXY_CONFIG_SHA256=""
+PROXY_CONFIG_ENTRY_COUNT=0
+if [[ -n "${PROXY_CONFIG_FILE}" ]]; then
+    PROXY_CONFIG_FILE="$(gym_absolute_path "${PROXY_CONFIG_FILE}")"
+    PROXY_CONFIG_CONFIGURED=1
+fi
+if [[ "${OSWORLD_ENABLE_PROXY}" == "1" ]]; then
+    if [[ -z "${PROXY_CONFIG_FILE}" ]]; then
+        echo "PROXY_CONFIG_FILE is required when OSWORLD_ENABLE_PROXY=1" >&2
+        exit 2
+    fi
+    proxy_inspection="$("${PYTHON_BIN}" "${SCRIPT_DIR}/../proxy.py" "${PROXY_CONFIG_FILE}")" || exit $?
+    IFS=$'\t' read -r PROXY_CONFIG_SHA256 PROXY_CONFIG_ENTRY_COUNT PROXY_CONFIG_FILE <<< "${proxy_inspection}"
+fi
+export OSWORLD_ENABLE_PROXY PROXY_CONFIG_FILE
 
 TASK_ARTIFACT_ROOT="${TASK_ARTIFACT_ROOT:-${RUN_LIFECYCLE_DIR}/task-artifacts}"
 VIDEO_SAMPLE_TASK_IDS_FILE="${VIDEO_SAMPLE_TASK_IDS_FILE:-${RUN_LIFECYCLE_DIR}/video_task_ids.txt}"
@@ -366,6 +393,11 @@ TEMPERATURE=${TEMPERATURE}
 RECORD_VIDEO=${RECORD_VIDEO}
 TASK_ARTIFACTS=${TASK_ARTIFACTS}
 FULL_MODEL_IO=${FULL_MODEL_IO}
+OSWORLD_ENABLE_PROXY=${OSWORLD_ENABLE_PROXY}
+PROXY_CONFIG_FILE=${PROXY_CONFIG_FILE}
+PROXY_CONFIG_CONFIGURED=${PROXY_CONFIG_CONFIGURED}
+PROXY_CONFIG_SHA256=${PROXY_CONFIG_SHA256}
+PROXY_CONFIG_ENTRY_COUNT=${PROXY_CONFIG_ENTRY_COUNT}
 OSWORLD_TASK_ARTIFACT_ROOT=${OSWORLD_TASK_ARTIFACT_ROOT:-}
 OSWORLD_RECORD_VIDEO_DIR=${OSWORLD_RECORD_VIDEO_DIR:-}
 OSWORLD_MODEL_IO_LOG=${OSWORLD_MODEL_IO_LOG:-}
@@ -396,6 +428,7 @@ echo "output:      ${OUTPUT_JSONL}"
 echo "limit:       ${LIMIT}"
 echo "num envs:    ${NUM_ENVS}"
 echo "parallel:    ${NUM_SAMPLES_IN_PARALLEL}"
+echo "proxy:      enabled=${OSWORLD_ENABLE_PROXY} configured=${PROXY_CONFIG_CONFIGURED} entries=${PROXY_CONFIG_ENTRY_COUNT}"
 echo "resume:      ${RESUME_FROM_CACHE}"
 echo "ray tmp:     ${RAY_TMPDIR}"
 if [[ -n "${SERVER_VENV_ROOT}" ]]; then
@@ -433,6 +466,16 @@ ng_run_cmd=(
     "+config_paths=[${CONFIG_PATHS}]"
     "++osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
 )
+
+if [[ "${OSWORLD_ENABLE_PROXY}" == "1" ]]; then
+    proxy_hydra_value=true
+else
+    proxy_hydra_value=false
+fi
+ng_run_cmd+=("++osworld_simple_agent.responses_api_agents.osworld_agent.enable_proxy=${proxy_hydra_value}")
+if [[ -n "${PROXY_CONFIG_FILE}" ]]; then
+    ng_run_cmd+=("++osworld_simple_agent.responses_api_agents.osworld_agent.proxy_config_file=${PROXY_CONFIG_FILE}")
+fi
 
 if [[ -n "${POLICY_MODEL_NAME}" ]]; then
     ng_run_cmd+=("++policy_model_name=${POLICY_MODEL_NAME}")

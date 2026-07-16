@@ -50,6 +50,11 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+from responses_api_agents.osworld_agent.proxy import (
+    inspect_proxy_config_file,
+    parse_env_bool,
+    task_requires_proxy,
+)
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
 
 
@@ -227,6 +232,8 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     screen_height: int = 1080
     require_a11y_tree: bool = False
     client_password: str = "password"
+    enable_proxy: bool = False
+    proxy_config_file: Optional[str] = None
     max_steps: int = 15
     max_trajectory_length: int = 3
     sleep_after_execution: float = 0.5
@@ -753,6 +760,42 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             if not task_config:
                 return _empty_response(body, error="No 'osworld_task' provided in verifier_metadata.")
 
+            try:
+                requires_proxy = task_requires_proxy(task_config)
+                enable_proxy = parse_env_bool("OSWORLD_ENABLE_PROXY", self.config.enable_proxy)
+            except ValueError as exc:
+                return _empty_response(
+                    body,
+                    error=f"ProxyConfigurationError: {exc}",
+                    termination_reason="proxy_configuration_error",
+                )
+
+            proxy_config_file = os.environ.get("PROXY_CONFIG_FILE") or self.config.proxy_config_file
+            if requires_proxy and not enable_proxy:
+                return _empty_response(
+                    body,
+                    error=(
+                        "ProxyRequiredButDisabled: task requires a proxy, but "
+                        "OSWORLD_ENABLE_PROXY is disabled"
+                    ),
+                    termination_reason="proxy_required_but_disabled",
+                    proxy_required=True,
+                    proxy_enabled=False,
+                    proxy_configured=bool(proxy_config_file),
+                )
+            if requires_proxy:
+                try:
+                    proxy_config_file = inspect_proxy_config_file(proxy_config_file).path
+                except ValueError as exc:
+                    return _empty_response(
+                        body,
+                        error=f"ProxyConfigurationError: {exc}",
+                        termination_reason="proxy_configuration_error",
+                        proxy_required=True,
+                        proxy_enabled=True,
+                        proxy_configured=bool(proxy_config_file),
+                    )
+
             model_server_name = self.config.model_server.name
             global_config_dict = ServerClient.load_from_global_config().global_config_dict
             model_server_config = get_first_server_config_dict(global_config_dict, model_server_name)
@@ -785,6 +828,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "screen_size": (self.config.screen_width, self.config.screen_height),
                 "require_a11y_tree": self.config.require_a11y_tree,
                 "client_password": self.config.client_password,
+                "enable_proxy": enable_proxy,
+                "proxy_config_file": proxy_config_file,
                 "max_steps": self.config.max_steps,
                 "max_trajectory_length": self.config.max_trajectory_length,
                 "sleep_after_execution": self.config.sleep_after_execution,
@@ -819,6 +864,13 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
                 return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
+
+            # These values are owned by the current request, not the Ray
+            # result payload. Assign them explicitly so a reused/malformed
+            # payload cannot carry stale proxy provenance across tasks.
+            result_dict["proxy_required"] = requires_proxy
+            result_dict["proxy_enabled"] = enable_proxy
+            result_dict["proxy_configured"] = bool(proxy_config_file)
 
             return _build_response(body, result_dict, policy_model_name, temperature, top_p)
 
@@ -867,6 +919,9 @@ def _build_response(
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
     metadata["osworld_model_name"] = policy_model_name
     metadata["osworld_termination_reason"] = result.get("termination_reason")
+    metadata["osworld_proxy_required"] = bool(result.get("proxy_required", False))
+    metadata["osworld_proxy_enabled"] = bool(result.get("proxy_enabled", False))
+    metadata["osworld_proxy_configured"] = bool(result.get("proxy_configured", False))
 
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
@@ -877,10 +932,25 @@ def _build_response(
     )
 
 
-def _empty_response(body: OSWorldRunRequest, *, error: str) -> OSWorldVerifyResponse:
+def _empty_response(
+    body: OSWorldRunRequest,
+    *,
+    error: str,
+    termination_reason: Optional[str] = None,
+    proxy_required: bool = False,
+    proxy_enabled: bool = False,
+    proxy_configured: Optional[bool] = None,
+) -> OSWorldVerifyResponse:
     LOG.warning("Returning empty OSWorld response: %s", error)
     metadata = dict(body.verifier_metadata or {})
     metadata["osworld_error"] = error
+    if termination_reason:
+        metadata["osworld_termination_reason"] = termination_reason
+    metadata["osworld_proxy_required"] = proxy_required
+    metadata["osworld_proxy_enabled"] = proxy_enabled
+    metadata["osworld_proxy_configured"] = (
+        bool(os.environ.get("PROXY_CONFIG_FILE")) if proxy_configured is None else proxy_configured
+    )
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
         reward=0.0,

@@ -326,7 +326,71 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert result.finished is True
     assert result.steps[0].actions == ["DONE"]
     assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
+    assert FakeEnv.instances[0].kwargs["enable_proxy"] is False
     assert FakeEnv.instances[0].actions == ["DONE"]
+
+
+def test_proxy_required_task_is_masked_without_starting_an_environment(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "proxy-disabled", "instruction": "Open the website.", "proxy": True},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        env_class_path="fake.FakeEnv",
+        enable_proxy=False,
+    )
+
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.termination_reason == "proxy_required_but_disabled"
+    assert "ProxyRequiredButDisabled" in (result.error or "")
+    assert FakeEnv.instances == []
+
+
+def test_proxy_required_task_passes_enablement_and_config_to_osworld(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    proxy_path = tmp_path / "proxy.json"
+    proxy_path.write_text('[{"host":"proxy.example.com","port":3128}]\n', encoding="utf-8")
+
+    result = osworld_client.run_osworld_task(
+        {"id": "proxy-enabled", "instruction": "Open the website.", "proxy": True},
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        enable_proxy=True,
+        proxy_config_file=str(proxy_path),
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.mask_sample is False
+    assert FakeEnv.instances[0].kwargs["enable_proxy"] is True
+    assert osworld_client.os.environ["PROXY_CONFIG_FILE"] == str(proxy_path)
+
+
+def test_proxy_reset_failure_has_specific_masked_termination(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    proxy_path = tmp_path / "proxy.json"
+    proxy_path.write_text('[{"host":"proxy.example.com","port":3128}]\n', encoding="utf-8")
+
+    def fail_reset(_self, task_config):
+        raise RuntimeError("tinyproxy setup failed")
+
+    monkeypatch.setattr(FakeEnv, "reset", fail_reset)
+    result = osworld_client.run_osworld_task(
+        {"id": "proxy-setup-failure", "instruction": "Open the website.", "proxy": True},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        env_class_path="fake.FakeEnv",
+        enable_proxy=True,
+        proxy_config_file=str(proxy_path),
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.termination_reason == "proxy_setup_error"
+    assert "tinyproxy setup failed" in (result.error or "")
 
 
 def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:

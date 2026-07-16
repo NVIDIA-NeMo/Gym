@@ -75,6 +75,21 @@ prior attempt is terminal, and no prior attempt succeeded. Resume control
 records are written to `${RUN_DIR}/resume-attempts/<attempt-id>` so earlier
 records remain unchanged.
 
+Proxy support is explicit and off by default. Direct-network environments use
+the normal command unchanged. For proxy-required tasks:
+
+```bash
+OSWORLD_ENABLE_PROXY=1 \
+PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json \
+RUNNER_NAME=prompt_agent LIMIT=8 NUM_ENVS=4 \
+bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+```
+
+The launcher validates the file before server startup and writes only its
+path, checksum, and entry count to `run.env`; it never copies credentials into
+the resolved command or manifest. A `proxy: true` task with the switch off is
+returned as a masked infrastructure failure, not a valid reward-zero sample.
+
 Every attempt writes `started_at.txt`, `launcher.pid`, `run.env`, and
 `resolved-command.log`, then writes `finished_at.txt` and `exit_code.txt` on
 normal completion, preflight failure, or signal termination. For a fresh run

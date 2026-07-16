@@ -595,6 +595,8 @@ class TestApp:
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
         assert positional_args[1]["evaluator_disable_gpu"] is True
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
+        assert positional_args[1]["enable_proxy"] is False
+        assert positional_args[1]["proxy_config_file"] is None
         assert positional_args[1]["log_context"] == {
             "run_id": "run-001",
             "adapter": "gym",
@@ -602,6 +604,62 @@ class TestApp:
             "domain": "chrome",
             "task_attempt": 1,
         }
+
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    async def test_proxy_required_task_is_masked_before_ray_when_disabled(self, mock_remote) -> None:
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(config=make_config(enable_proxy=False), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_required_but_disabled"
+        assert response.verifier_metadata["osworld_proxy_required"] is True
+        assert response.verifier_metadata["osworld_proxy_enabled"] is False
+        mock_remote.options.assert_not_called()
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_proxy_enable_env_validates_and_reaches_ray(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        proxy_path = tmp_path / "proxy.json"
+        proxy_path.write_text('[{"host":"proxy.example.com","port":3128}]\n', encoding="utf-8")
+        monkeypatch.setenv("OSWORLD_ENABLE_PROXY", "1")
+        monkeypatch.setenv("PROXY_CONFIG_FILE", str(proxy_path))
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["enable_proxy"] is True
+        assert positional_args[1]["proxy_config_file"] == str(proxy_path)
+        assert response.mask_sample is False
+        assert response.verifier_metadata["osworld_proxy_required"] is True
+        assert response.verifier_metadata["osworld_proxy_enabled"] is True
+        assert response.verifier_metadata["osworld_proxy_configured"] is True
+
+    async def test_invalid_proxy_env_value_is_masked(self, monkeypatch) -> None:
+        monkeypatch.setenv("OSWORLD_ENABLE_PROXY", "sometimes")
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
