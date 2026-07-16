@@ -137,15 +137,6 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         config.max_steps = self.config.max_steps
 
-        import sys as _sys
-        print(
-            f"NGDBG tau2.run: agent_api_base={config.llm_args_agent.get('api_base')!r} "
-            f"user_api_base={config.llm_args_user.get('api_base')!r} "
-            f"body_task_index={getattr(body, '_ng_task_index', 'MISSING')} "
-            f"body_rollout_index={getattr(body, '_ng_rollout_index', 'MISSING')}",
-            file=_sys.stderr, flush=True,
-        )
-
         result = await run_single_task(**body_dict)
 
         messages_to_convert = []

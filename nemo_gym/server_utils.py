@@ -319,19 +319,6 @@ class ServerClient(BaseModel):
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
-        import sys as _sys
-        try:
-            _keys = list(global_config_dict.keys())
-            print(
-                f"NGDBG ServerClient.load_from_global_config: head={head_server_url} "
-                f"observability_enabled={global_config_dict.get('observability_enabled')!r} "
-                f"model_call_capture_dir={global_config_dict.get('model_call_capture_dir')!r} "
-                f"top_level_keys={_keys}",
-                file=_sys.stderr, flush=True,
-            )
-        except Exception as _e:
-            print(f"NGDBG ServerClient.load_from_global_config: EXC {_e!r} raw_head_yaml={global_config_dict_yaml[:500]!r}", file=_sys.stderr, flush=True)
-
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
@@ -794,19 +781,7 @@ class HeadServer(BaseServer):
         return uvicorn_server, thread, server
 
     async def global_config_dict_yaml(self) -> str:
-        _gcd = get_global_config_dict()
-        import sys as _sys
-        try:
-            print(
-                f"NGDBG HeadServer.global_config_dict_yaml served: "
-                f"observability_enabled={_gcd.get('observability_enabled')!r} "
-                f"model_call_capture_dir={_gcd.get('model_call_capture_dir')!r} "
-                f"top_level_keys={list(_gcd.keys())}",
-                file=_sys.stderr, flush=True,
-            )
-        except Exception as _e:
-            print(f"NGDBG HeadServer.global_config_dict_yaml: EXC {_e!r}", file=_sys.stderr, flush=True)
-        return OmegaConf.to_yaml(_gcd)
+        return OmegaConf.to_yaml(get_global_config_dict())
 
 
 class ServerInstanceDisplayConfig(BaseModel):

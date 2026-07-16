@@ -71,20 +71,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # Fail closed: an agent whose client carries no usable global config runs uncorrelated
         # rather than erroring on every model call.
         global_config = getattr(self.server_client, "global_config_dict", None)
-        try:
-            import sys as _sys
-            _keys = list(global_config.keys()) if isinstance(global_config, Mapping) else None
-            print(
-                f"NGDBG gate: server_client_type={type(self.server_client).__name__} "
-                f"has_gcd_attr={hasattr(self.server_client, 'global_config_dict')} "
-                f"gcd_type={type(global_config).__name__} is_mapping={isinstance(global_config, Mapping)} "
-                f"key={OBSERVABILITY_ENABLED_KEY_NAME!r} present={(_keys is not None and OBSERVABILITY_ENABLED_KEY_NAME in _keys)} "
-                f"value={global_config.get(OBSERVABILITY_ENABLED_KEY_NAME) if isinstance(global_config, Mapping) else 'NA'!r} "
-                f"top_level_keys={_keys}",
-                file=_sys.stderr, flush=True,
-            )
-        except Exception as _e:
-            print(f"NGDBG gate: EXC {_e!r}", file=__import__('sys').stderr, flush=True)
         if not isinstance(global_config, Mapping):
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
@@ -95,18 +81,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         None when model-call capture (observability) is disabled or the body carries no indices,
         so callers apply no correlation prefix in either case.
         """
-        enabled = self._model_call_capture_enabled()
-        rid = maybe_rollout_id_from_run_body(body) if enabled else None
-        import sys as _sys
-        _bt = body if isinstance(body, Mapping) else getattr(body, "__dict__", body)
-        _idx = None
-        try:
-            _dump = body.model_dump() if hasattr(body, "model_dump") else (dict(body) if isinstance(body, Mapping) else {})
-            _idx = {k: _dump.get(k) for k in ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index")}
-        except Exception as _e:
-            _idx = f"EXC {_e!r}"
-        print(f"NGDBG rollout_id_from_run: enabled={enabled} rollout_id={rid!r} body_indices={_idx}", file=_sys.stderr, flush=True)
-        return rid
+        if not self._model_call_capture_enabled():
+            return None
+        return maybe_rollout_id_from_run_body(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
         """A downstream url_path with the per-rollout capture-correlation prefix applied.
@@ -125,11 +102,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         harnesses that configure a client once instead of prefixing each call: same gating, applied
         to a server root URL (append the API-version suffix afterwards).
         """
-        _rid = self.rollout_id_from_run(body)
-        _out = apply_rollout_prefix(base_url, _rid)
-        import sys as _sys
-        print(f"NGDBG base_url_for_run: in={base_url!r} rollout_id={_rid!r} out={_out!r}", file=_sys.stderr, flush=True)
-        return _out
+        return apply_rollout_prefix(base_url, self.rollout_id_from_run(body))
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
         """Carry an inbound ``/ng-rollout/<id>`` self-call prefix onto a downstream url_path.

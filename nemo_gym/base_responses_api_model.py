@@ -86,14 +86,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        import sys as _sys
-        print(
-            f"NGDBG ModelServer[{self.config.name}] capture_config: "
-            f"observability_enabled={capture_config.observability_enabled} "
-            f"model_call_capture_dir={capture_config.model_call_capture_dir!r} "
-            f"gcd_has_key={('observability_enabled' in self.server_client.global_config_dict) if hasattr(self.server_client.global_config_dict, '__contains__') else 'NA'}",
-            file=_sys.stderr, flush=True,
-        )
         install_model_call_capture(app, capture_config, model_server_name=self.config.name)
 
         app.post("/v1/chat/completions")(self.chat_completions)
@@ -200,8 +192,6 @@ class CaptureStore:
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
-        import sys as _sys
-        print(f"NGDBG CaptureStore.record: WRITING rollout_id={rollout_id!r} path={str(path)!r} bytes={len(line)}", file=_sys.stderr, flush=True)
         with self._lock:
             with path.open("ab") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -828,15 +818,6 @@ class _CaptureMiddleware:
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
-        if ("/v1/" in path) or (rollout_from_path is not None):
-            import sys as _sys
-            print(
-                f"NGDBG CaptureMiddleware[{self._model_server_name}]: stripped_path={path!r} "
-                f"rollout_from_path={rollout_from_path!r} store_is_none={self._store is None} "
-                f"observed_dialect={_OBSERVED_PATHS.get(path)!r}",
-                file=_sys.stderr, flush=True,
-            )
-
         # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
         if self._store is None:
             await self._app(scope, receive, send)
@@ -1000,17 +981,9 @@ def install_model_call_capture(
     unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
     durable capture write).
     """
-    _store = make_capture_store(config)
-    import sys as _sys
-    print(
-        f"NGDBG install_model_call_capture[{model_server_name}]: "
-        f"observability_enabled={config.observability_enabled} capture_dir={config.model_call_capture_dir!r} "
-        f"store_created={_store is not None}",
-        file=_sys.stderr, flush=True,
-    )
     app.add_middleware(
         _CaptureMiddleware,
-        store=_store,
+        store=make_capture_store(config),
         model_server_name=model_server_name,
     )
 
