@@ -282,10 +282,44 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
+
+                # Harmony models (gpt-oss) sometimes emit a malformed tool call: reasoning/CoT
+                # text bleeds into the arguments, so json.loads(arguments) raises. We must NOT
+                # crash the whole rollout (that soft-fails ~92% of gpt-oss BrowseComp), AND we
+                # must NOT leave the malformed function_call in new_outputs verbatim -- re-sending
+                # it next turn makes vLLM's harmony template re-render the garbage and 500 on the
+                # serving side (it also persists across resume via the checkpoint). So: skip the
+                # call, sanitize the stored arguments to "{}" so the history re-renders cleanly,
+                # and feed the bad json back as a corrective function_call_output for the model.
+                try:
+                    tool_args = json.loads(output_function_call.arguments)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    bad_args = output_function_call.arguments
+                    print(
+                        f"[browsecomp][malformed_tool_call][{qid}] step={step} "
+                        f"tool={output_function_call.name} error={type(exc).__name__} "
+                        f"args={bad_args[:300]}",
+                        flush=True,
+                    )
+                    self._sanitize_function_call_args(new_outputs, output_function_call)
+                    corrective = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=output_function_call.call_id,
+                        output=(
+                            "[ERROR] The arguments you provided for tool "
+                            f"'{output_function_call.name}' were not valid JSON and could not be "
+                            f"parsed: {bad_args}\nPlease call the tool again with a single, "
+                            "well-formed JSON object as the arguments."
+                        ),
+                    )
+                    new_outputs.append(corrective)
+                    full_trajectory.append(corrective)
+                    continue
+
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
+                    json=tool_args,
                     cookies=resources_server_cookies,
                 )
                 # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
@@ -489,6 +523,22 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
+
+    def _sanitize_function_call_args(self, new_outputs, function_call):
+        """Replace a malformed function_call's arguments with "{}" in-place in the running
+        history (new_outputs) so re-rendering the conversation on the serving side (the
+        harmony chat template for gpt-oss) does not choke on the bled-in reasoning text and
+        return HTTP 500. Matched by call_id. The bad arguments are surfaced to the model
+        separately via a corrective function_call_output, so no feedback is lost. Only
+        new_outputs (the re-sent + checkpointed history) is touched; full_trajectory keeps
+        the original malformed call for forensics."""
+        for i, item in enumerate(new_outputs):
+            if (
+                getattr(item, "type", None) == "function_call"
+                and getattr(item, "call_id", None) == function_call.call_id
+            ):
+                new_outputs[i] = item.model_copy(update={"arguments": "{}"})
+                break
 
     def _compact_old_tool_messages(self, messages):
         """
