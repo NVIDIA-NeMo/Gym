@@ -306,6 +306,86 @@ class TestApp:
         # max_steps=2: 2 model calls + 2 tool calls = 4 total posts
         assert agent.server_client.post.call_count == 4
 
+    # ---- malformed tool-call handling (approach #2) ----
+
+    def test_sanitize_function_call_args_replaces_malformed(self, agent: BrowsecompAgent) -> None:
+        bad = NeMoGymResponseFunctionToolCall(
+            id="fc_bad",
+            call_id="c1",
+            name="search",
+            arguments="to=functions.search??? not valid json",
+            type="function_call",
+        )
+        new_outputs = [bad]
+        agent._sanitize_function_call_args(new_outputs, bad)
+        # Arguments blanked to "{}" so the harmony re-render on the serving side does not 500,
+        # while call_id / name identity is preserved so the paired output still matches.
+        assert new_outputs[0].arguments == "{}"
+        assert new_outputs[0].call_id == "c1"
+        assert new_outputs[0].name == "search"
+
+    def test_sanitize_function_call_args_matches_by_call_id(self, agent: BrowsecompAgent) -> None:
+        good = _make_fn_call("browse", call_id="c_good", args={"url": "x"})
+        tool_out = _make_tool_output(call_id="c_good", output="ok")
+        bad = NeMoGymResponseFunctionToolCall(
+            id="fc_bad", call_id="c_bad", name="search", arguments="not json", type="function_call"
+        )
+        new_outputs = [good, tool_out, bad]
+        agent._sanitize_function_call_args(new_outputs, bad)
+        assert new_outputs[2].arguments == "{}"  # only the malformed one is sanitized
+        assert new_outputs[0].arguments == json.dumps({"url": "x"})  # good call untouched
+        assert new_outputs[1] is tool_out  # tool output untouched
+
+    def test_sanitize_function_call_args_no_match_is_noop(self, agent: BrowsecompAgent) -> None:
+        good = _make_fn_call("search", call_id="c1", args={"q": "x"})
+        absent = NeMoGymResponseFunctionToolCall(
+            id="fc_x", call_id="c_absent", name="search", arguments="bad", type="function_call"
+        )
+        new_outputs = [good]
+        agent._sanitize_function_call_args(new_outputs, absent)
+        assert new_outputs[0].arguments == json.dumps({"q": "x"})  # unchanged (no matching call_id)
+
+    async def test_responses_malformed_tool_call_does_not_crash(self, agent: BrowsecompAgent) -> None:
+        """A malformed (non-JSON) tool-call argument must NOT crash the rollout: the tool POST is
+        skipped and the loop continues to a final answer (approach #2, Layer A)."""
+        bad_fn = NeMoGymResponseFunctionToolCall(
+            id="fc_bad",
+            call_id="c1",
+            name="search",
+            arguments="to=functions.search??? I don't see that tool",
+            type="function_call",
+        )
+        malformed_turn = _make_model_response([bad_fn])
+        final_turn = _make_model_response([_make_msg("Final Answer: 42")])
+
+        http = MagicMock()
+        http.ok = True
+        http.status = 200
+        http.read = AsyncMock(
+            side_effect=[
+                json.dumps(malformed_turn).encode(),  # model call 1: malformed tool call
+                json.dumps(final_turn).encode(),  # model call 2: answer
+            ]
+        )
+        http.content.read = AsyncMock(return_value=b"{}")
+        http.cookies = {}
+        agent.server_client.post = AsyncMock(return_value=http)
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        response_mock = MagicMock()
+        response_mock.set_cookie = MagicMock()
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hard question"}])
+        # Must not raise despite json.loads() failing on the malformed arguments.
+        result = await agent.responses(request_mock, response_mock, body)
+
+        # Only the two model calls happened — the /search tool POST was skipped for the bad call.
+        assert agent.server_client.post.call_count == 2
+        posted_paths = [c.kwargs.get("url_path") for c in agent.server_client.post.call_args_list]
+        assert "/search" not in posted_paths
+        assert result.output[-1].content[0].text == "Final Answer: 42"
+
     # ---- full trajectory (Part B) ----
 
     def test_save_trajectory_writes_header_and_all_items(self, tmp_path) -> None:
