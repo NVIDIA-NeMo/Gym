@@ -95,6 +95,8 @@ class BaseVerifyRequest(BaseRunRequest):
 
 
 class BaseVerifyResponse(BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
+
     reward: float
 
 
