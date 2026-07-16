@@ -97,7 +97,6 @@ gdpval_resources_server:
         kimi_k26:           {deliverables_dir: /gdpval/refs/kimi_k26,           elo: 1191}
         nemotron3_ultra:    {deliverables_dir: /gdpval/refs/nemotron3_ultra,    elo: 1160}
         qwen36_35b:         {deliverables_dir: /gdpval/refs/qwen36_35b,         elo: 1045}
-        human_gold:         {deliverables_dir: /gdpval/refs/human_gold,         elo: 1000}
         qwen35_397b:        {deliverables_dir: /gdpval/refs/qwen35_397b,        elo: 960}
         gptoss_120b:        {deliverables_dir: /gdpval/refs/gptoss_120b,        elo: 775}
         gemma4_26b:         {deliverables_dir: /gdpval/refs/gemma4_26b,         elo: 752}
@@ -119,13 +118,13 @@ gym eval run \
     --split benchmark \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 110}, {num_tasks: 220, num_models: 4}]'
+    ++multistage.stages='[{num_tasks: 45}, {num_tasks: 220, num_models: 4}]'
 ```
 
 The example above runs two stages:
 
-- **Stage 1** — `num_tasks: 110`, no `num_models` ⇒ sample **110** tasks and
-  include **all 10** references; each task is judged against **one** randomly-assigned reference for a rough ELO.
+- **Stage 1** — `num_tasks: 45`, no `num_models` ⇒ sample **45** tasks and
+  include **all 9** references; each task is judged against **one** randomly-assigned reference for a rough ELO.
 - **Stage 2** — `num_tasks: 220` and `num_models: 4` ⇒ the **full 220-task set** against only the **4 references closest** to the stage-1 ELO; each task is judged against one of those four, concentrating the larger task budget on the nearest anchors for a tight final estimate.
 
 For example, if Stage 1 places the eval model near **1170**,
@@ -156,7 +155,7 @@ gym eval run \
     --output results/gdpval_multistage.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 110}, {num_models: 4}]'
+    ++multistage.stages='[{num_tasks: 45}, {num_models: 4}]'
 ```
 
   The cache must contain a `task_<id>/repeat_<n>/` dir for every repeat the run
@@ -172,14 +171,14 @@ each task just one reference — so it is *not* equivalent to the non-multistage
 full run:
 
 ```bash
-    ++multistage.enabled=true ++multistage.stages='[{num_models: 12}]'
+    ++multistage.enabled=true ++multistage.stages='[{num_tasks: 220}]'
 ```
 
 ### `multistage.*` options
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?}` (or `"[num_tasks]:M:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |
