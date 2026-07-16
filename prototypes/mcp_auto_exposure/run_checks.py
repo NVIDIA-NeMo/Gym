@@ -28,6 +28,7 @@ import re
 import sys
 import tempfile
 import threading
+from base64 import b64encode
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,11 +36,12 @@ from pathlib import Path
 import aiohttp
 import servers as spike_servers  # sets sys.path to the repo root
 import uvicorn
-from itsdangerous import URLSafeSerializer
+from itsdangerous import TimestampSigner, URLSafeSerializer
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, TOKEN_SALT, mint_session_cookie
+from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, TOKEN_SALT
+from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 SPIKE_DIR = Path(__file__).resolve().parent
@@ -271,7 +273,8 @@ async def check_c_parity(secrets: dict[str, str]) -> None:
         # SAME minted cookie is valid on both, so both sides see identical requests, byte for byte.
         def cookies(server_key: str, sid: str) -> str:
             secret = secrets[server_key]
-            return mint_session_cookie(secret, secret, sid)
+            data = b64encode(json.dumps({SESSION_ID_KEY: sid}).encode("utf-8"))
+            return f"{secret}={TimestampSigner(secret).sign(data).decode('utf-8')}"
 
         # ---------- finance ----------
         fin_cookie = cookies("finance", "parity-fin-1")

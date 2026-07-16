@@ -23,13 +23,12 @@ reads exactly as written; this module never touches them.
 for any server that sets the flag. Dispatcher servers (one catch-all route backing many tools, whose
 per-tool schemas live in data) additionally override one method, ``mcp_tool_inventory()``.
 
-Dispatch, chosen per route at startup:
-  * DIRECT (default): the frozen handler runs exactly ONCE, invoked with a fabricated ``Request``
-    whose ``.session`` is materialized directly — no middleware, no routing, no second app pass.
-  * REPLAY (fallback): where the detector cannot prove direct == a real HTTP request (an author's
-    custom middleware, or a handler shape direct dispatch does not reproduce), the call is re-issued
-    as an internal in-process HTTP request through the full app stack. Correctness never depends on
-    the fast path.
+Dispatch is DIRECT: the frozen handler runs exactly ONCE per MCP call, invoked with a fabricated
+``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
+pass. Where that cannot be proven equivalent to a real HTTP request (the server installs custom
+middleware, or a handler uses a shape direct dispatch does not reproduce — FastAPI dependency
+injection, multiple body models, ...), exposure REFUSES LOUDLY at startup, naming the route and the
+reason: a wrong dispatch would corrupt rollouts silently, a startup error is a small fix.
 
 MCP-side engine: the official SDK's public low-level ``mcp.server.lowlevel.Server`` +
 ``StreamableHTTPSessionManager`` — no private-attribute access.
@@ -41,7 +40,6 @@ import inspect
 import json
 import logging
 import re
-from base64 import b64encode
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, get_type_hints
@@ -52,7 +50,7 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from itsdangerous import BadSignature, TimestampSigner, URLSafeSerializer
+from itsdangerous import BadSignature, URLSafeSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -88,18 +86,6 @@ _GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
 
 
 # ==================================================================================================
-# The signed session token (mirrors base_resources_server) + the session cookie the replay path mints
-# ==================================================================================================
-
-
-def mint_session_cookie(secret_key: str, cookie_name: str, session_id: str) -> str:
-    """Build the exact Cookie header value starlette's SessionMiddleware would verify (replay path)."""
-    data = b64encode(json.dumps({SESSION_ID_KEY: session_id}).encode("utf-8"))
-    signed = TimestampSigner(str(secret_key)).sign(data).decode("utf-8")
-    return f"{cookie_name}={signed}"
-
-
-# ==================================================================================================
 # The detector: bind_route (route-level) + audit_middleware (server-level)
 # ==================================================================================================
 
@@ -122,9 +108,9 @@ class DirectBinding:
 
 @dataclass
 class BindOutcome:
-    binding: Optional[DirectBinding]  # None -> this route must be REPLAY-dispatched
-    reasons: list[str] = field(default_factory=list)
-    body_model: Optional[type[BaseModel]] = None  # for the tools/list schema, even when binding is None
+    binding: Optional[DirectBinding]  # None -> this handler shape is not directly dispatchable
+    reasons: list[str] = field(default_factory=list)  # why not, when binding is None
+    body_model: Optional[type[BaseModel]] = None  # resolved body model, for the tools/list schema
 
 
 def bind_route(route: APIRoute) -> BindOutcome:
@@ -228,9 +214,9 @@ def audit_middleware(app: FastAPI) -> list[str]:
     """Return the names of NON-Gym middleware installed on the app (empty == direct-safe).
 
     Any non-Gym middleware means an env author added per-request behavior that direct dispatch would
-    silently skip, so the whole server falls back to replay. Each entry is a
-    ``starlette.middleware.Middleware`` data holder: ``.cls`` is the class, ``.kwargs`` its
-    constructor kwargs (``dispatch=fn`` for ``@app.middleware("http")`` functions).
+    silently skip, so exposure refuses. Each entry is a ``starlette.middleware.Middleware`` data
+    holder: ``.cls`` is the class, ``.kwargs`` its constructor kwargs (``dispatch=fn`` for
+    ``@app.middleware("http")`` functions).
     """
     custom: list[str] = []
     for m in app.user_middleware:
@@ -338,51 +324,7 @@ async def call_direct(
 
 
 # ==================================================================================================
-# The replay fallback: one in-process HTTP request through the app's full ASGI stack (httpx-free)
-# ==================================================================================================
-
-
-async def _replay(app: FastAPI, path: str, raw_path: bytes, base_headers: tuple, body: bytes) -> tuple[int, bytes]:
-    """Issue one internal HTTP request through the full app stack. Only immutable objects (the
-    pre-encoded header tuple, raw_path) are shared between calls; the scope and its nested dicts are
-    built fresh per call, so a scope-mutating middleware cannot leak state into a later replay."""
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": path,
-        "raw_path": raw_path,
-        "query_string": b"",
-        "root_path": "",
-        "headers": [*base_headers, (b"content-length", str(len(body)).encode("latin-1"))],
-        "client": ("127.0.0.1", 0),
-        "server": ("internal-mcp-replay", 80),
-        "state": {},
-    }
-    status: Optional[int] = None
-    chunks: list[bytes] = []
-
-    async def send(message: dict) -> None:
-        nonlocal status
-        if message["type"] == "http.response.start":
-            status = message["status"]
-        elif message["type"] == "http.response.body":
-            chunks.append(message.get("body", b""))
-
-    try:
-        await app(scope, _make_receive(body), send)
-    except BaseException:
-        # Starlette's ServerErrorMiddleware sends its 500 before re-raising; surface a completed one.
-        if status is None:
-            raise
-    assert status is not None, "ASGI app returned no response"
-    return status, b"".join(chunks)
-
-
-# ==================================================================================================
-# Harvest: one walk over app.routes -> the tool map (advertisement + dispatch plan per tool)
+# Harvest: one walk over app.routes -> the tool map (advertisement + direct binding per tool)
 # ==================================================================================================
 
 
@@ -390,12 +332,8 @@ async def _replay(app: FastAPI, path: str, raw_path: bytes, base_headers: tuple,
 class MCPTool:
     name: str
     tool: types.Tool  # the tools/list advertisement
-    mode: str  # "direct" | "replay"
-    replay_path: str  # POST path the replay fallback targets
-    raw_path: bytes  # pre-encoded replay_path
-    binding: Optional[DirectBinding] = None  # set when mode == "direct"
+    binding: DirectBinding  # how to invoke the frozen handler directly
     path_value: Optional[str] = None  # catch-all tools: value bound to the path param
-    reasons: list[str] = field(default_factory=list)  # why replay, when mode == "replay"
 
 
 def _schema_for(body_model: Optional[type[BaseModel]]) -> dict:
@@ -411,7 +349,11 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     Catch-alls that back no tools are declared via ``mcp_toolless_catchall_paths``.
     """
     custom_middleware = audit_middleware(app)
-    server_mode = "replay" if custom_middleware else "direct"
+    if custom_middleware:
+        raise ValueError(
+            f"{type(server).__name__} installs non-Gym middleware {custom_middleware}, which direct MCP "
+            "dispatch would silently skip. Remove the middleware, or do not set expose_tools_over_mcp."
+        )
 
     typed_routes: dict[str, APIRoute] = {}
     catchall_routes: list[APIRoute] = []
@@ -437,23 +379,19 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         )
 
     def make(
-        name: str, description: Optional[str], schema: dict, route: Optional[APIRoute], path_value: Optional[str]
+        name: str, description: Optional[str], schema: dict, route: APIRoute, path_value: Optional[str]
     ) -> MCPTool:
-        binding, reasons = None, ["no route to bind"]
-        if route is not None:
-            outcome = bind_route(route)
-            binding, reasons = outcome.binding, outcome.reasons
-        mode = "direct" if (server_mode == "direct" and binding is not None) else "replay"
-        replay_path = "/" + name
+        outcome = bind_route(route)
+        if outcome.binding is None:
+            raise ValueError(
+                f"{type(server).__name__} tool {name!r} (route {route.path!r}) cannot be dispatched directly: "
+                f"{'; '.join(outcome.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
+            )
         return MCPTool(
             name=name,
             tool=types.Tool(name=name, description=description, inputSchema=schema),
-            mode=mode,
-            replay_path=replay_path,
-            raw_path=replay_path.encode("utf-8"),
-            binding=binding,
+            binding=outcome.binding,
             path_value=path_value,
-            reasons=[] if mode == "direct" else (reasons or [f"custom middleware: {custom_middleware}"]),
         )
 
     tools: dict[str, MCPTool] = {}
@@ -466,8 +404,14 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     inventory_fn = getattr(server, "mcp_tool_inventory", None)
     if inventory_fn is not None:
         inventory_catchalls = [r for r in catchall_routes if r.path not in declared_toolless]
+        inventory_items = list(inventory_fn())
+        if inventory_items and not inventory_catchalls:
+            raise ValueError(
+                f"{type(server).__name__}.mcp_tool_inventory() names tools but the app has no catch-all "
+                "route to dispatch them through."
+            )
         catch_route = inventory_catchalls[0] if inventory_catchalls else None
-        for item in inventory_fn():
+        for item in inventory_items:
             name = item["name"]
             if name in tools:
                 raise ValueError(f"Duplicate MCP tool name {name!r} (route harvest vs inventory override)")
@@ -484,16 +428,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
                 [r.path for r in undeclared],
             )
 
-    direct_n = sum(1 for t in tools.values() if t.mode == "direct")
-    LOG.info(
-        "%s MCP: %d tools (%d direct, %d replay), server_mode=%s%s",
-        type(server).__name__,
-        len(tools),
-        direct_n,
-        len(tools) - direct_n,
-        server_mode,
-        f", custom middleware {custom_middleware}" if custom_middleware else "",
-    )
+    LOG.info("%s MCP: exposing %d tool(s) over direct dispatch", type(server).__name__, len(tools))
     return tools
 
 
@@ -583,10 +518,8 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
 
     mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
 
-    # Per-session caches: verify the token HMAC once per session; mint the replay cookie once per
-    # session. Both grow one small entry per rollout, like any server's own session state.
+    # Verify the token HMAC once per session (one small entry per rollout, like any session state).
     claims_cache: dict[str, Any] = {}
-    replay_headers_cache: dict[str, tuple] = {}
 
     def session_claims(required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
         ctx_request = mcp_server.request_context.request  # the POST /mcp starlette Request
@@ -631,36 +564,11 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
         session_id, allowed = session_claims(required=True)
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
-
-        if tool.mode == "direct":
-            try:
-                payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
-            except DirectDispatchError as exc:
-                raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
-            return _to_result(payload)
-
-        # replay fallback
-        base_headers = replay_headers_cache.get(session_id)
-        if base_headers is None:
-            base_headers = (
-                (b"content-type", b"application/json"),
-                (b"cookie", mint_session_cookie(secret, secret, session_id).encode("latin-1")),
-                (b"host", b"internal-mcp-replay"),
-            )
-            replay_headers_cache[session_id] = base_headers
-        status, body = await _replay(
-            app, tool.replay_path, tool.raw_path, base_headers, json.dumps(arguments or {}).encode("utf-8")
-        )
-        text = body.decode("utf-8", errors="replace")
-        if not 200 <= status < 300:
-            raise ValueError(f"HTTP {status} from POST {tool.replay_path}: {text}")
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return [types.TextContent(type="text", text=text)]
-        if isinstance(parsed, dict):
-            return [types.TextContent(type="text", text=text)], parsed
-        return [types.TextContent(type="text", text=text)]
+            payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
+        except DirectDispatchError as exc:
+            raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
+        return _to_result(payload)
 
     manager = StreamableHTTPSessionManager(
         app=mcp_server,
