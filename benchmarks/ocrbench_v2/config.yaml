@@ -1,0 +1,32 @@
+# OCRBench v2 via the vlm_eval_kit resources server (VLMEvalKitMcore wrapped as a
+# library). 30+ OCR task types scored by per-type rule-based metrics (TEDS / KIE-F1 /
+# IoU / spotting / BLEU-family / VQA containment).
+config_paths:
+  - resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml
+
+# `_inherit_from` isolates this benchmark's instances from the generic server config.
+# No judge fields: all OCRBench v2 metrics are rule-based (no LLM judge in the
+# reference evaluate() either).
+ocrbench_v2_benchmark_resources_server:
+  _inherit_from: vlm_eval_kit_resources_server
+  resources_servers:
+    vlm_eval_kit:
+      # OCRBench v2's verified numbers (Nano Omni cluster EN 67.26 / ZH 54.09
+      # wordnet-corrected vs paper 67.0 / 52.7) were produced against the mcore
+      # fork — the authoritative source for these benchmarks.
+      vlmevalkit_url: https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git
+      vlmevalkit_commit: c0dfe394662232a58a00d08b67d7ade0e091db1c
+
+ocrbench_v2_benchmark_simple_agent:
+  _inherit_from: vlm_eval_kit_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ocrbench_v2_benchmark_resources_server
+      datasets:
+      - name: ocrbench_v2
+        type: benchmark
+        jsonl_fpath: benchmarks/ocrbench_v2/data/ocrbench_v2_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/ocrbench_v2/prepare.py
+        num_repeats: 1

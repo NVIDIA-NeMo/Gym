@@ -6,6 +6,18 @@ vlm_eval_kit_resources_server:
       verified: false
       description: Run all supported VLMEvalKit benchmarks.
       value: Measure VLM capabilities
+      # VLMEvalKit source per instance (declared in base YAML so benchmark-scoped
+      # _inherit_from overrides survive the OmegaConf struct merge). Defaults =
+      # the original upstream pin; omni benchmarks override to the mcore fork.
+      vlmevalkit_url: https://github.com/open-compass/VLMEvalKit
+      vlmevalkit_commit: 00804217f868058f871f5ff252a7b9623c3475d9
+      # LLM judge / fallback matcher. Declared here so benchmark-scoped
+      # `_inherit_from` overrides survive the OmegaConf struct merge.
+      # judge_api_key is injected via CLI override at launch.
+      judge_model: ''
+      judge_base_url: https://inference-api.nvidia.com/v1/chat/completions
+      judge_api_key: ""
+      judge_max_concurrency: 8
 vlm_eval_kit_simple_agent:
   responses_api_agents:
     simple_agent:

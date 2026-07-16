@@ -270,14 +270,20 @@ def aggregate_other_metrics(metrics: Dict[str, Any], sample: Dict[str, Any]) -> 
         for item in values:
             if isinstance(item, bool):
                 item = int(item)
+            # Keys with UNION-typed values across samples (e.g. a bbox field that is a
+            # sentinel string on most rows and a numeric list on others) must not crash
+            # aggregation: the aggregator is keyed on the first-seen type, and mismatched
+            # later values are skipped (best-effort metrics for such keys).
             if isinstance(item, (int, float)):
                 if k not in metrics:
                     metrics[k] = AvgMinMax()
-                metrics[k].observe(item)
+                if isinstance(metrics[k], AvgMinMax):
+                    metrics[k].observe(item)
             elif isinstance(item, str):
                 if k not in metrics:
                     metrics[k] = Counter()
-                metrics[k][item] += 1
+                if isinstance(metrics[k], Counter):
+                    metrics[k][item] += 1
 
 
 def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, Any]) -> None:
@@ -477,6 +483,16 @@ class TrainDataProcessor(BaseModel):
                 jsonl_fpath = _resolve_under_cwd_or_install(d.jsonl_fpath)
                 if jsonl_fpath.exists():
                     local_datasets_found[c.name].append(d)
+                elif d.type == "benchmark":
+                    # Benchmark datasets are PREPARED (via their prepare_script / `gym eval
+                    # prepare`), never downloaded: BenchmarkDatasetConfig carries no
+                    # gitlab/huggingface identifier, so letting it reach the download sweep
+                    # below crashes with AttributeError. A missing benchmark jsonl at server
+                    # start is expected — data prep runs later in the eval flow.
+                    print(
+                        f"Skipping missing BENCHMARK dataset `{d.name}` for `{c.name}` "
+                        f"({d.jsonl_fpath}): benchmark datasets are produced by data prep, not downloaded."
+                    )
                 else:
                     local_datasets_not_found[c.name].append(d)
 

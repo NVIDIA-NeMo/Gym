@@ -1484,3 +1484,25 @@ class TestDeclaringInstanceValidation:
                 }
             )
         assert [c.name for c in out] == ["my_agent"]
+
+
+class TestAggregateOtherMetrics:
+    def test_union_typed_values_do_not_crash(self) -> None:
+        # Keys whose values change type across samples (e.g. OCRBench v2's bbox field:
+        # sentinel string 'without bbox' on most rows, a numeric list on grounding rows)
+        # must not crash aggregation (AttributeError: 'Counter' object has no attribute
+        # 'observe'). First-seen aggregator wins; mismatched later values are skipped.
+        from collections import Counter
+
+        from nemo_gym.train_data_utils import aggregate_other_metrics
+
+        metrics: dict = {}
+        aggregate_other_metrics(metrics, {"bbox": "without bbox", "score": 1.0})
+        aggregate_other_metrics(metrics, {"bbox": [1.0, 2.0, 3.0, 4.0], "score": "high"})
+        aggregate_other_metrics(metrics, {"bbox": "without bbox", "score": 0.5})
+
+        assert isinstance(metrics["bbox"], Counter)
+        assert metrics["bbox"]["without bbox"] == 2
+        assert isinstance(metrics["score"], AvgMinMax)
+        assert metrics["score"].total == 2
+

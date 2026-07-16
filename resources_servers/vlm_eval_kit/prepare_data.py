@@ -16,7 +16,9 @@
 The prepare_* functions in this file are written to exactly match the input observed in the VLMEvalKit OpenAI API call.
 """
 
+import base64
 from collections import Counter
+from pathlib import Path
 
 import orjson
 from app import VlmEvalKitResourcesServer
@@ -24,6 +26,49 @@ from pandas import DataFrame
 from vlmeval.dataset.image_mcq import ImageMCQDataset
 from vlmeval.dataset.image_vqa import OCRBench
 from vlmeval.dataset.utils.multiple_choice import build_choices
+
+_IMAGE_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+def image_file_to_data_url(fpath: str) -> str:
+    """Base64-encode a build_prompt-dumped image file into a data URL."""
+    mime = _IMAGE_MIME_BY_SUFFIX.get(Path(fpath).suffix.lower(), "image/jpeg")
+    with open(fpath, "rb") as f:
+        return f"data:{mime};base64,{base64.b64encode(f.read()).decode('ascii')}"
+
+
+def segments_to_content_items(segments, detail: str = "high") -> list:
+    """Convert mcore ``build_prompt`` segments into Responses API content items IN ORDER.
+
+    Multi-image datasets (interleaved image/text segment lists) produce
+    interleaved ``{'type': 'image'|'text', 'value': ...}`` segments; preserving that
+    exact order is the whole point — do NOT flatten to one image + one text block.
+    Image values are file paths dumped by ``build_prompt`` and are base64-encoded from
+    disk. Empty-string text segments (some preps emit them when the question
+    starts with an image tag) are dropped: they carry no content and some Responses
+    API backends reject empty ``input_text`` items.
+    """
+    items = []
+    for seg in segments:
+        if seg["type"] == "image":
+            items.append(
+                {
+                    "type": "input_image",
+                    "image_url": image_file_to_data_url(seg["value"]),
+                    "detail": detail,
+                }
+            )
+        elif seg["type"] == "text":
+            if seg["value"] != "":
+                items.append({"type": "input_text", "text": seg["value"]})
+        else:
+            raise ValueError(f"Unsupported segment type: {seg['type']!r}")
+    return items
 
 
 def prepare_OCRBench():
@@ -142,8 +187,80 @@ Data head:
         f.write(orjson.dumps(gym_row) + b"\n")
 
 
+def prepare_OCRBench_v2(output_fpath: str = "data/OCRBench_v2_validation.jsonl") -> Path:
+    """Build the Gym JSONL for OCRBench v2 via the pinned VLMEvalKitMcore.
+
+    The mcore class is the monolith ``OCRBench_v2`` (vlmeval/dataset/image_vqa.py:3513,
+    dataset name 'OCRBench_v2'); prompts come from the inherited
+    ``ImageBaseDataset.build_prompt`` (image + raw question). Carries EVERYTHING the
+    per-type scoring dispatcher reads (``process_predictions``,
+    vlmeval/dataset/utils/ocrbrnch_v2_eval.py:44): ``type`` (= the TSV ``category``
+    column, stored as the Gym ``category``), ``question``, ``answers``, ``bbox``,
+    ``content``, and ``eval`` when present. Field parsing mirrors
+    ``OCRBench_v2.evaluate`` (image_vqa.py:3535-3557): answer/bbox/content are
+    stringified Python literals with 'without bbox' / 'without content' /
+    'without eval' sentinels.
+
+    NOTE: the ~1.4 GB TSV gets LOCALIZED at load time (base64 images are written to
+    ``<LMUData>/images/OCRBench_v2/`` and the DataFrame carries ``image_path``, NOT an
+    ``image`` column), so the payload is built from the ``build_prompt`` segments via
+    ``segments_to_content_items``, which base64-encodes the dumped files from disk.
+    """
+    import ast
+
+    from vlmeval.dataset.image_vqa import OCRBench_v2
+
+    dataset_name = "OCRBench_v2"
+
+    dataset = OCRBench_v2(dataset=dataset_name)
+    data: DataFrame = dataset.data
+
+    print(f"Columns: {data.columns}")
+    print(data.head())
+
+    output_fpath = Path(output_fpath)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_fpath, "wb") as f:
+        for _, vlmevalkit_row in data.iterrows():
+            # [image (localized file path), question text] — the images live on disk
+            # (image_path column), so encode via segments_to_content_items.
+            messages = dataset.build_prompt(vlmevalkit_row)
+            content_items = segments_to_content_items(messages)
+
+            # Literal-parsing mirrors OCRBench_v2.evaluate exactly (image_vqa.py:3535,
+            # :3543-3544) so the verify request carries reference-identical inputs.
+            answers = ast.literal_eval(vlmevalkit_row["answer"])
+            bbox_raw = vlmevalkit_row["bbox"]
+            bbox = ast.literal_eval(bbox_raw) if bbox_raw != "without bbox" else bbox_raw
+            content_raw = vlmevalkit_row["content"]
+            content = ast.literal_eval(content_raw) if content_raw != "without content" else content_raw
+
+            gym_row = {
+                "responses_create_params": {"input": [{"role": "user", "content": content_items}]},
+                "answer": answers,
+                # data_item['type'] in the reference dispatcher, e.g. 'cognition VQA en',
+                # 'full-page OCR cn' — also the EN/ZH bucketing key of the official
+                # aggregation (ocrbench_v2_aggregate_accuracy, ocrbrnch_v2_eval.py:360).
+                "category": vlmevalkit_row["category"],
+                "benchmark_name": dataset_name,
+                "index": int(vlmevalkit_row["index"]),
+                "question": vlmevalkit_row["question"],
+                "bbox": bbox,
+                "content": content,
+            }
+            # 'multiple choice' / 'case sensitive'; only set when present, mirroring
+            # evaluate (:3556-3557).
+            evals = vlmevalkit_row["eval"]
+            if evals != "without eval":
+                gym_row["eval"] = evals
+            f.write(orjson.dumps(gym_row) + b"\n")
+
+    return output_fpath
+
+
 if __name__ == "__main__":
-    VlmEvalKitResourcesServer.setup_VLMEvalKit(None)
+    VlmEvalKitResourcesServer.setup_VLMEvalKit()
 
     prepare_OCRBench()
     prepare_MMBench_DEV_EN_V11()
+    # prepare_OCRBench_v2() is opt-in via benchmarks/ocrbench_v2/prepare.py (mcore pin + ~2 GB TSV).
