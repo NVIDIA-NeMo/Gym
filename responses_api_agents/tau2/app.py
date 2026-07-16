@@ -113,6 +113,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
+        for _ng in ("ng_task_index", "ng_rollout_index", "ng_attempt_index"):
+            body_dict.pop(_ng, None)
 
         config: TextRunConfig = body_dict["config"]
 
