@@ -74,6 +74,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         env_cookies = request.cookies
+        model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -106,7 +107,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
             model_resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
