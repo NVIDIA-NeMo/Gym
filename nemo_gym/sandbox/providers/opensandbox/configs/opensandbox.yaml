@@ -49,9 +49,13 @@ sandbox:
     # attributable both via the OpenSandbox list API and at the cluster level, e.g.
     # `kubectl get pods -l nemo-gym.nvidia.com/team=my-team`. Unset fields auto-detect
     # from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD, then Slurm job env vars
-    # (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME), then the OS login name
-    # for `user`; unresolvable fields are omitted. Explicit sandbox_spec.metadata and
-    # default_metadata keys always win over attribution keys.
+    # (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME), then the OS login name for
+    # `user` ("root" is ignored) and the gym CLI's NEMO_GYM_CONFIG_PATH server instance
+    # name for `workload`; unresolvable fields are omitted. `run` scopes sandboxes to one
+    # launch of the creating process (NEMO_GYM_RUN_ID, else generated per process and
+    # logged) so an interrupted run's sandboxes can be listed and cleaned up exactly.
+    # Explicit sandbox_spec.metadata and default_metadata keys always win over
+    # attribution keys.
     attribution:
       enabled: true
       # Kubernetes prefixed-key namespace for the injected label keys; "" for bare keys.
@@ -59,3 +63,4 @@ sandbox:
       # team: my-team
       # user: my-user
       # workload: my-benchmark
+      # run: my-run-id
