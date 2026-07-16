@@ -87,6 +87,8 @@ NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
+OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -112,11 +114,16 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     VERBOSE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
 ]
 
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
+# (task, rollout) so their captured model calls stay separable.
+ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
