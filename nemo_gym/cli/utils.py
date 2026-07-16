@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import difflib
-from typing import Optional
+from typing import Iterable, Optional
+
+
+def did_you_mean(value: str, candidates: Iterable[str]) -> str:
+    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
+    matches = difflib.get_close_matches(value, list(candidates), n=1)
+    return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
 def print_no_matches(component_type: str, query: Optional[str]) -> None:

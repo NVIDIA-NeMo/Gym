@@ -13,29 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
-import difflib
 import importlib
 import logging
 import os
 import re
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
+from nemo_gym.cli.utils import did_you_mean
 
 
 logger = logging.getLogger(__name__)
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
-
-
-def _did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
-    return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
 class _GymArgumentParser(argparse.ArgumentParser):
@@ -52,7 +46,7 @@ class _GymArgumentParser(argparse.ArgumentParser):
             choices = re.findall(r"'([^']+)'", match.group(2))
             if not choices:
                 choices = [choice.strip() for choice in match.group(2).split(",")]
-            message += _did_you_mean(typo, choices)
+            message += did_you_mean(typo, choices)
         super().error(message)
 
 
@@ -243,7 +237,7 @@ def _asset_config_path(flag: str, value: str) -> str:
         ]
 
     raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{_did_you_mean(typo, candidates)} "
+        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{did_you_mean(typo, candidates)} "
         f"See available {flag} configs in {available}."
     )
 
@@ -693,7 +687,7 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        hints = "".join(_did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        hints = "".join(did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
     # set NEMO_GYM_EXTRA_ROOTS from --search-dir for the duration of the command
