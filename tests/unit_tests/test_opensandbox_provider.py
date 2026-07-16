@@ -740,6 +740,8 @@ ATTRIBUTION_ENV_VARS = (
     "NEMO_GYM_TEAM",
     "NEMO_GYM_USER",
     "NEMO_GYM_WORKLOAD",
+    "NEMO_GYM_RUN_ID",
+    "NEMO_GYM_CONFIG_PATH",
     "SLURM_JOB_ACCOUNT",
     "SLURM_JOB_USER",
     "SLURM_JOB_NAME",
@@ -757,9 +759,10 @@ async def test_create_injects_attribution_metadata(
     clean_attribution_env: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("NEMO_GYM_TEAM", "nemo rl")  # sanitized to a valid label value below
+    monkeypatch.setenv("NEMO_GYM_TEAM", "gym team")  # sanitized to a valid label value below
     monkeypatch.setenv("NEMO_GYM_USER", "alice")
     monkeypatch.setenv("NEMO_GYM_WORKLOAD", "swe-gym")
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-123")
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 10},
         probe={"command": None},
@@ -768,9 +771,10 @@ async def test_create_injects_attribution_metadata(
     await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
 
     assert FakeSandbox.created_kwargs["metadata"] == {
-        "nemo-gym.nvidia.com/team": "nemo_rl",
+        "nemo-gym.nvidia.com/team": "gym_team",
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "swe-gym",
+        "nemo-gym.nvidia.com/run": "run-123",
         "purpose": "test",
     }
 
@@ -784,7 +788,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 10},
         probe={"command": None},
-        attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload"},
+        attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload", "run": "cfg-run"},
     )
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
@@ -793,6 +797,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
         "nemo-gym.nvidia.com/team": "explicit-team",
         "nemo-gym.nvidia.com/user": "cfg-user",
         "nemo-gym.nvidia.com/workload": "cfg-workload",
+        "nemo-gym.nvidia.com/run": "cfg-run",
     }
 
 
@@ -836,3 +841,23 @@ async def test_create_attribution_key_prefix(
 
     metadata = FakeSandbox.created_kwargs["metadata"]
     assert metadata[expected_key] == "cfg-team"
+
+
+async def test_create_attribution_run_id_generated(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert FakeSandbox.created_kwargs["metadata"]["nemo-gym.nvidia.com/run"]  # generated per process
+
+
+@pytest.mark.parametrize("key_prefix", ["Not_A_Valid_Prefix/", "-bad.example.com/", "bad..example.com/"])
+def test_attribution_invalid_key_prefix_raises(key_prefix: str) -> None:
+    with pytest.raises(ValueError, match="key_prefix"):
+        opensandbox_provider.OpenSandboxAttributionConfig(key_prefix=key_prefix)
