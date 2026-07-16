@@ -95,7 +95,9 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     )
     limit: Optional[int] = Field(default=None, description="Maximum number of examples to re-verify.")
     # to do - block overwriting it
-    agent_to_resources_server_mapping: Optional[Dict[str, str]] = Field(default=None, description="Mapping of agent names to resources server names.")
+    agent_to_resources_server_mapping: Optional[Dict[str, str]] = Field(
+        default=None, description="Mapping of agent names to resources server names."
+    )
 
 
 # to do add validation if I decide to do it here
@@ -110,9 +112,14 @@ def _resolve_input_path(input_path: str | Path) -> Path:
         )
     return _input_path
 
-from omegaconf import DictConfig
+
 from collections import defaultdict
+
+from omegaconf import DictConfig
+
+
 class RolloutReverificationHelper(BaseModel):
+
     def _build_agent_to_resources_server_mapping(self, gcd) -> Dict[str, str]:
         mapping = {}
         # first pass - assuming there is response_api_agents in the config
@@ -129,12 +136,11 @@ class RolloutReverificationHelper(BaseModel):
         # The rollout rows still carry agent names that were never started, so fall back to the
         # single resources server for EVERY requested key.
         resources_server_names = [
-        name for name in gcd
-        if isinstance(gcd[name], (dict, DictConfig)) and "resources_servers" in gcd[name]
-    ]
+            name for name in gcd if isinstance(gcd[name], (dict, DictConfig)) and "resources_servers" in gcd[name]
+        ]
         if len(resources_server_names) == 1:
             only = resources_server_names[0]
-            return defaultdict(lambda: only)   # any key → the one resources server instance
+            return defaultdict(lambda: only)  # any key → the one resources server instance
         if not resources_server_names:
             raise ConfigError("reverify: no resources server found in the config.")
         raise ConfigError(
@@ -176,7 +182,6 @@ class RolloutReverificationHelper(BaseModel):
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
         server_client = ServerClient.load_from_global_config(head_server_config)
-        
 
         # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
         if not is_global_aiohttp_client_setup():
@@ -186,25 +191,21 @@ class RolloutReverificationHelper(BaseModel):
 
         return server_client
 
-    def get_resources_server_names_mapping(self, config: RolloutReverificationConfig) -> None:
-        print(config)
-        return None
 
     def _run_reverification_payloads(
         self,
         payloads: List[Dict],
-        head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Semaphore | nullcontext[None] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
-        server_client = self.setup_resource_server_client(head_server_config)
-        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
+       
         semaphore = semaphore or nullcontext[None]()
+        server_client = self.setup_resource_server_client()
+        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
+
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
-                res = await server_client.post(
-                    server_name=rs_name, url_path="/verify", json=row
-                )
+                res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
                 try:
                     await raise_for_status(res)
                 except Exception:
@@ -244,16 +245,15 @@ class RolloutReverificationHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
-        self.get_resources_server_names_mapping(config)
 
         self._validate_input_paths(config)
+        # to do - move to other function 
 
         payloads_to_reverify = self._prepare_payloads_from_config(config)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
-
 
         from nemo_gym.rollout_collection import _failures_path_for
 
@@ -268,7 +268,7 @@ class RolloutReverificationHelper(BaseModel):
         results: List[Dict] = []
         result_strs: List[List[str]] = []
         # to do - get server name from config
-        for future in self._run_reverification_payloads(payloads_to_reverify, semaphore=semaphore):
+        for future in self._run_reverification_payloads(payloads_to_reverify,semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -357,6 +357,8 @@ class RolloutReverificationHelper(BaseModel):
         if not results:
             return None
 
+        server_client = self.setup_resource_server_client()
+        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
         # Group results by agent name
         agent_results: Dict[str, List[Dict]] = {}
         for row, result in zip(rows, results):
@@ -364,8 +366,6 @@ class RolloutReverificationHelper(BaseModel):
             if not agent_name:
                 continue
             agent_results.setdefault(agent_name, []).append(result)
-
-        resource_server_client = self.setup_resource_server_client()
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage
@@ -378,8 +378,8 @@ class RolloutReverificationHelper(BaseModel):
                 stripped.append(entry)
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await resource_server_client.post(
-                server_name=agent_name,
+            agg_response = await server_client.post(
+                server_name=agent_to_rs[agent_name],
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
