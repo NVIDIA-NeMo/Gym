@@ -18,19 +18,9 @@ TASK_IDS = ("area/task-one", "area/task-group/scenario-01")
 
 
 def _configure_small_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    index = tmp_path / "all.jsonl"
-    rows = [
-        {
-            "instance_id": f"legal_agent_bench::{prepare.flatten_task_id(task_id)}",
-            "agent_ref": {"type": "responses_api_agents", "name": "legal_agent_bench_harbor_agent"},
-            "responses_create_params": {"input": [], "temperature": 1.0, "top_p": 0.95},
-        }
-        for task_id in TASK_IDS
-    ]
-    index.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     monkeypatch.setattr(prepare, "EXPECTED_TASK_COUNT", len(TASK_IDS))
     monkeypatch.setattr(prepare, "SMOKE_TASK_IDS", TASK_IDS)
-    monkeypatch.setattr(prepare, "INDEX_PATH", index)
+    monkeypatch.setattr(prepare, "DEFAULT_INDEX_FPATH", tmp_path / "all.jsonl")
 
 
 def _write_source(root: Path, task_ids: tuple[str, ...] = TASK_IDS, *, missing_skill: str | None = None) -> Path:
@@ -95,6 +85,12 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
 
     assert _tree_hashes(first) == _tree_hashes(second)
     prepare.validate_harbor_tasks(first)
+    rows = [json.loads(line) for line in (first / prepare.INDEX_FILENAME).read_text().splitlines()]
+    assert [row["instance_id"] for row in rows] == [
+        "legal_agent_bench::area__task-group__scenario-01",
+        "legal_agent_bench::area__task-one",
+    ]
+    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
@@ -113,6 +109,7 @@ def test_existing_valid_caches_skip_network(monkeypatch, tmp_path) -> None:
     result = prepare.prepare_assets("all", tasks_dir=tasks, skills_dir=skills)
 
     assert result == {"tasks": tasks, "skills": skills}
+    assert (tmp_path / "all.jsonl").read_bytes() == (tasks / prepare.INDEX_FILENAME).read_bytes()
 
 
 def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> None:
@@ -127,6 +124,8 @@ def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> N
     result = prepare.prepare_assets("all", tasks_dir=tasks, skills_dir=skills)
 
     assert result == {"tasks": tasks, "skills": skills}
+    assert (tmp_path / "all.jsonl").read_bytes() == (tasks / prepare.INDEX_FILENAME).read_bytes()
+    assert (tasks / prepare.INDEX_FILENAME).is_file()
     assert (tasks / "area__task-one" / "documents" / "input.txt").is_file()
     assert (tasks / "area__task-group__scenario-01" / "task.toml").is_file()
     for relpath in prepare.VERIFIER_TEMPLATE_SOURCES:
@@ -136,7 +135,9 @@ def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> N
 
 def test_failed_force_refresh_does_not_replace_valid_cache(monkeypatch, tmp_path) -> None:
     _source, tasks, skills = _build_caches(monkeypatch, tmp_path)
+    prepare.prepare_assets("all", tasks_dir=tasks, skills_dir=skills)
     before = _tree_hashes(tasks)
+    published_before = (tmp_path / "all.jsonl").read_bytes()
     bad_source = _write_source(tmp_path / "bad-source", task_ids=(TASK_IDS[0],))
     archive = tmp_path / "bad-source.tar.gz"
     _archive_source(bad_source, archive)
@@ -146,7 +147,21 @@ def test_failed_force_refresh_does_not_replace_valid_cache(monkeypatch, tmp_path
         prepare.prepare_assets("all", tasks_dir=tasks, skills_dir=skills, force=True)
 
     assert _tree_hashes(tasks) == before
+    assert (tmp_path / "all.jsonl").read_bytes() == published_before
     prepare.validate_harbor_tasks(tasks)
+
+
+def test_missing_or_modified_generated_index_invalidates_cache(monkeypatch, tmp_path) -> None:
+    _source, tasks, _skills = _build_caches(monkeypatch, tmp_path)
+    index_path = tasks / prepare.INDEX_FILENAME
+
+    index_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="stale or non-deterministic"):
+        prepare.validate_harbor_tasks(tasks)
+
+    index_path.unlink()
+    with pytest.raises(FileNotFoundError, match="task index is missing"):
+        prepare.validate_harbor_tasks(tasks)
 
 
 @pytest.mark.parametrize("kind", ["traversal", "link", "corrupt"])

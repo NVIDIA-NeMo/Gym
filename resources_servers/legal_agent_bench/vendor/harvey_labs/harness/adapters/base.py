@@ -46,7 +46,7 @@ class ModelAdapter(ABC):
         self.reasoning_effort = reasoning_effort  # "low", "medium", "high", or None
 
     @abstractmethod
-    def chat(self, messages: list[dict], tools: list[dict]) -> ModelResponse:
+    async def chat(self, messages: list[dict], tools: list[dict]) -> ModelResponse:
         """Send messages + tool definitions, get back a normalized response.
 
         Args:

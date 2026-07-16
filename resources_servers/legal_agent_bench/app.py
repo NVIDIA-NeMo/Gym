@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import ConfigDict, PositiveInt
+from pydantic import ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,10 +25,18 @@ from resources_servers.legal_agent_bench.prepare import (
 
 
 RewardMode = Literal["full_task", "criteria_pass_rate"]
-JUDGE_ENV_KEYS = {
+JUDGE_CONFIG_TO_ENV = {
     "judge_base_url": "LAB_JUDGE_BASE_URL",
     "judge_api_key": "LAB_JUDGE_API_KEY",
     "judge_model_name": "LAB_JUDGE_MODEL",
+    "judge_temperature": "LAB_JUDGE_TEMPERATURE",
+    "judge_request_timeout_seconds": "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS",
+    "judge_max_retries": "LAB_JUDGE_MAX_RETRIES",
+    "judge_structured_output": "LAB_JUDGE_STRUCTURED_OUTPUT",
+    "judge_parse_repair_attempts": "LAB_JUDGE_PARSE_REPAIR_ATTEMPTS",
+    "judge_repair_max_tokens": "LAB_JUDGE_REPAIR_MAX_TOKENS",
+    "judge_max_tokens": "LAB_JUDGE_MAX_TOKENS",
+    "judge_parallelism": "LAB_JUDGE_PARALLELISM",
 }
 
 
@@ -40,7 +48,33 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     harness_skills_dir: str = str(DEFAULT_SKILLS_DIR)
     auto_prepare_assets: bool = True
     reward_mode: RewardMode = "full_task"
-    judge_parallelism: PositiveInt = 6
+    judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
+    judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
+    judge_model_name: str | None = Field(default=None, description="Model identifier sent to the LAB judge endpoint.")
+    judge_temperature: float | None = Field(
+        default=None,
+        ge=0,
+        description="Optional sampling temperature for LAB judge requests.",
+    )
+    judge_request_timeout_seconds: PositiveFloat = Field(
+        default=90,
+        description="Timeout for one LAB judge request.",
+    )
+    judge_max_retries: PositiveInt = Field(default=1, description="Maximum attempts for each LAB judge request.")
+    judge_structured_output: bool = Field(
+        default=True,
+        description="Request structured judge output before falling back to plain text.",
+    )
+    judge_parse_repair_attempts: NonNegativeInt = Field(
+        default=1,
+        description="Maximum attempts to repair an unparseable judge response.",
+    )
+    judge_repair_max_tokens: PositiveInt = Field(
+        default=4096,
+        description="Maximum output tokens for judge response repair.",
+    )
+    judge_max_tokens: PositiveInt = Field(default=4096, description="Maximum output tokens for LAB judge requests.")
+    judge_parallelism: PositiveInt = Field(default=6, description="Maximum concurrent LAB judge requests per task.")
 
 
 class LegalAgentBenchResourcesServer(SimpleResourcesServer):
@@ -54,8 +88,7 @@ class LegalAgentBenchResourcesServer(SimpleResourcesServer):
             skills_dir=self.config.harness_skills_dir,
             allow_download=self.config.auto_prepare_assets,
         )
-        verifier_env = _load_judge_env_from_global_config()
-        verifier_env["LAB_JUDGE_PARALLELISM"] = str(self.config.judge_parallelism)
+        verifier_env = _build_verifier_env(self.config)
         hydrate_runtime_tasks(
             assets["tasks"],
             self.config.harbor_tasks_dir,
@@ -70,19 +103,15 @@ class LegalAgentBenchResourcesServer(SimpleResourcesServer):
         return BaseVerifyResponse(**body.model_dump(), reward=0.0)
 
 
-def _load_judge_env_from_global_config() -> dict[str, str]:
-    from nemo_gym.global_config import get_global_config_dict
-
-    config = get_global_config_dict()
-
+def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[str, str]:
     env: dict[str, str] = {}
-    for config_key, env_key in JUDGE_ENV_KEYS.items():
-        value = config.get(config_key)
-        if value and value != "****":
-            value = str(value)
-            if config_key == "judge_model_name" and not value.startswith("openai-compatible/"):
-                value = f"openai-compatible/{value}"
-            env[env_key] = value
+    for config_key, env_key in JUDGE_CONFIG_TO_ENV.items():
+        value = getattr(config, config_key)
+        if value in (None, "", "****"):
+            continue
+        if config_key == "judge_model_name" and not str(value).startswith("openai-compatible/"):
+            value = f"openai-compatible/{value}"
+        env[env_key] = str(value).lower() if isinstance(value, bool) else str(value)
     return env
 
 

@@ -44,7 +44,7 @@ judge_model_name: your-judge-model
 ```
 
 The judge credentials are injected only into the regenerated, gitignored
-runtime task tree. They are never written into the pristine cache.
+runtime task tree. They are never written into the cache.
 
 ## Prepare explicitly (recommended)
 
@@ -72,32 +72,38 @@ python resources_servers/legal_agent_bench/prepare.py \
   --skills-dir /custom/skills-cache
 ```
 
-## Prepare through the normal Gym workflow
+## Collate datasets
 
-The committed `data/all.jsonl` is a lightweight 1,749-row task index, so
-`ng_prepare_data` works without downloading binary assets. If you skip
-`prepare.py`, `ng_run` prepares missing task and skill caches during startup.
-
-Set the two configs used by the benchmark:
+The five example tasks are included in the repo and can be collated without downloading the full LAB archive:
 
 ```bash
-CONFIG_PATHS=resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml
+gym dataset collate \
+  --resources-server legal_agent_bench \
+  --model-type vllm_model \
+  --output-dir results/legal_agent_bench_prepare \
+  --mode example_validation
 ```
 
-Validate the five examples:
+Preparation generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
 
 ```bash
-ng_prepare_data "+config_paths=[${CONFIG_PATHS}]" \
-  +output_dirpath=results/legal_agent_bench_prepare \
-  +mode=example_validation
+python resources_servers/legal_agent_bench/prepare.py
+
+gym dataset collate \
+  --resources-server legal_agent_bench \
+  --model-type vllm_model \
+  --output-dir results/legal_agent_bench_prepare \
+  --mode train_preparation
 ```
 
-To collate the full validation index instead:
+If you skip explicit preparation, `gym env start` prepares the missing task index, task mirrors, and skill cache during startup. Full validation collation still requires the generated index.
+
+## Test the environment
+
+Run the resource-server tests:
 
 ```bash
-ng_prepare_data "+config_paths=[${CONFIG_PATHS}]" \
-  +output_dirpath=results/legal_agent_bench_prepare \
-  +mode=train_preparation
+gym env test --resources-server legal_agent_bench
 ```
 
 ## Run and smoke test
@@ -105,7 +111,9 @@ ng_prepare_data "+config_paths=[${CONFIG_PATHS}]" \
 Start the servers:
 
 ```bash
-ng_run "+config_paths=[${CONFIG_PATHS}]"
+gym env start \
+  --resources-server legal_agent_bench \
+  --model-type vllm_model
 ```
 
 On a clean cache, startup visibly downloads and prepares the pinned assets.
@@ -115,14 +123,12 @@ be reused.
 In a second activated terminal, collect one rollout:
 
 ```bash
-CONFIG_PATHS=resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml
-
-ng_collect_rollouts "+config_paths=[${CONFIG_PATHS}]" \
-  +agent_name=legal_agent_bench_harbor_agent \
-  +input_jsonl_fpath=resources_servers/legal_agent_bench/data/example.jsonl \
-  +output_jsonl_fpath=results/legal_agent_bench_smoke_rollout.jsonl \
-  +num_samples_in_parallel=1 \
-  +limit=1
+gym eval run --no-serve \
+  --agent legal_agent_bench_harbor_agent \
+  --input resources_servers/legal_agent_bench/data/example.jsonl \
+  --output results/legal_agent_bench_smoke_rollout.jsonl \
+  --concurrency 1 \
+  --limit 1
 ```
 
 The default `full_task` reward is LAB's official all-criteria score: a task
@@ -130,7 +136,9 @@ earns `1.0` only when every criterion passes. For diagnostic partial credit,
 start with:
 
 ```bash
-ng_run "+config_paths=[${CONFIG_PATHS}]" \
+gym env start \
+  --resources-server legal_agent_bench \
+  --model-type vllm_model \
   +legal_agent_bench.resources_servers.legal_agent_bench.reward_mode=criteria_pass_rate
 ```
 
@@ -139,7 +147,9 @@ default. Adjust the resource setting when the judge endpoint has a lower
 concurrency limit:
 
 ```bash
-ng_run "+config_paths=[${CONFIG_PATHS}]" \
+gym env start \
+  --resources-server legal_agent_bench \
+  --model-type vllm_model \
   +legal_agent_bench.resources_servers.legal_agent_bench.judge_parallelism=2
 ```
 
@@ -155,13 +165,13 @@ closed-network reference sandbox and should be recorded when comparing runs.
 
 The default paths are:
 
-- Pristine generated tasks: `data/cache/harbor_tasks/legal_agent_bench`
+- Generated tasks: `data/cache/harbor_tasks/legal_agent_bench`
 - Public skills: `data/cache/harness/skills`
 - Credential-bearing runtime tasks: `data/runtime/harbor_tasks/legal_agent_bench`
 - Harbor jobs: `results/legal_agent_bench/harbor_jobs`
-- Rollout output: the path passed to `ng_collect_rollouts`
+- Rollout output: the path passed to `gym eval run`
 
-The runtime tree hardlinks immutable documents from the pristine cache when the
+The runtime tree hardlinks immutable documents from the cache when the
 filesystem permits it, avoiding a second copy of the large document corpus.
 Set `auto_prepare_assets: false` to require a prepopulated valid cache and avoid
 network access at startup.
@@ -181,7 +191,7 @@ should list exactly `docx`, `pptx`, and `xlsx`.
   infrastructure failure, not an ordinary model failure, even though Harbor
   receives a numeric zero reward so it can preserve a complete trial result.
 - If Docker appears idle on the first rollout, inspect `docker ps` and the
-  `ng_run` terminal; Harbor is normally building the task image.
+  `gym env start` terminal; Harbor is normally building the task image.
 - Do not copy or publish `data/runtime/`: it can contain local judge credentials.
 - Results are revision-specific and should not be compared directly with runs
   that use a different task snapshot or skill set.

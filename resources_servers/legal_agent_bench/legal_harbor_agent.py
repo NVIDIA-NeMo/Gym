@@ -342,8 +342,6 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             temperature=self.temperature,
             max_tokens=int(kwargs.pop("agent_model_max_tokens", 32768)),
             reasoning_effort=self.reasoning_effort,
-            max_retries=int(kwargs.pop("agent_model_max_retries", 3)),
-            retry_backoff_seconds=float(kwargs.pop("agent_model_retry_backoff_seconds", 2.0)),
             timeout_seconds=kwargs.pop("agent_model_timeout_seconds", None),
             omit_temperature=kwargs.pop("agent_model_omit_temperature", None),
             chat_template_kwargs=_coerce_json_object(kwargs.pop("agent_model_chat_template_kwargs", None)),
@@ -463,7 +461,7 @@ async def _chat_with_timeout(
     adapter: OpenAICompatibleAdapter, messages: list[dict], tools: list[dict]
 ) -> ModelResponse:
     timeout_seconds = getattr(adapter, "timeout_seconds", None)
-    chat_call = asyncio.to_thread(adapter.chat, messages, tools)
+    chat_call = adapter.chat(messages, tools)
     if not timeout_seconds:
         return await chat_call
     try:

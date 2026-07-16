@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
 from asyncio import Semaphore
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,8 +19,15 @@ from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAg
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
     OpenAICompatibleAdapter,
+    _chat_with_timeout,
 )
-from resources_servers.legal_agent_bench.prepare import REQUIRED_SKILLS, _marker
+from resources_servers.legal_agent_bench.prepare import (
+    EXPECTED_TASK_COUNT,
+    REQUIRED_SKILLS,
+    SMOKE_TASK_IDS,
+    _marker,
+    flatten_task_id,
+)
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
     _extract_judge_message_text,
@@ -76,15 +83,13 @@ def test_folder_config_is_public_docker_only() -> None:
     assert "docker_image" not in json.dumps(agent)
 
 
-def test_committed_index_has_1749_unique_tasks_and_five_examples() -> None:
-    rows = [json.loads(line) for line in (BENCH_DIR / "data" / "all.jsonl").read_text().splitlines()]
+def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:
     examples = [json.loads(line) for line in (BENCH_DIR / "data" / "example.jsonl").read_text().splitlines()]
-    ids = [row["instance_id"] for row in rows]
+    expected_ids = {f"legal_agent_bench::{flatten_task_id(source_id)}" for source_id in SMOKE_TASK_IDS}
 
-    assert len(ids) == len(set(ids)) == 1749
+    assert EXPECTED_TASK_COUNT == 1749
     assert len(examples) == 5
-    assert {row["instance_id"] for row in examples} <= set(ids)
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert {row["instance_id"] for row in examples} == expected_ids
 
 
 def test_committed_example_rollouts_are_complete_and_match_examples() -> None:
@@ -179,25 +184,92 @@ async def test_container_hydration_uploads_configured_skills_and_documents(tmp_p
     assert environment.uploads == [(documents, "/workspace/vdr"), (skills, "/workspace/skills")]
 
 
-def test_policy_adapter_forwards_reasoning_effort(monkeypatch) -> None:
-    create = MagicMock(
-        return_value=SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=[]))],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-        )
-    )
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    monkeypatch.setattr("harness.adapters.openai_compatible.openai.OpenAI", lambda **_kwargs: client)
+@pytest.mark.asyncio
+async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
+    observed = {}
+
+    class Response:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "done",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "read", "arguments": '{"path":"input.docx"}'},
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            }
+
+    class Session:
+        def __init__(self, *, timeout, headers):
+            observed["timeout"] = timeout.total
+            observed["headers"] = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, url, *, json):
+            observed["url"] = url
+            observed["payload"] = json
+            return Response()
+
+    monkeypatch.setattr("harness.adapters.openai_compatible.ClientSession", Session)
     adapter = OpenAICompatibleAdapter(
         model="policy-model",
         base_url="http://policy/v1",
         reasoning_effort="high",
+        timeout_seconds=30,
     )
 
-    response = adapter.chat([{"role": "user", "content": "work"}], [])
+    response = await adapter.chat([{"role": "user", "content": "work"}], [])
 
-    assert create.call_args.kwargs["reasoning_effort"] == "high"
+    assert observed["url"] == "http://policy/v1/chat/completions"
+    assert observed["timeout"] == 30
+    assert observed["headers"] == {"Authorization": "Bearer EMPTY"}
+    assert observed["payload"]["reasoning_effort"] == "high"
     assert response.text == "done"
+    assert response.input_tokens == 10
+    assert response.output_tokens == 2
+    assert response.tool_calls[0].id == "call-1"
+    assert response.tool_calls[0].name == "read"
+    assert response.tool_calls[0].arguments == '{"path":"input.docx"}'
+
+
+@pytest.mark.asyncio
+async def test_policy_adapter_timeout(monkeypatch) -> None:
+    adapter = OpenAICompatibleAdapter(
+        model="policy-model",
+        base_url="http://policy/v1",
+        timeout_seconds=0.001,
+    )
+
+    async def slow_chat(_messages, _tools):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(adapter, "chat", slow_chat)
+
+    with pytest.raises(TimeoutError, match="agent model request exceeded timeout"):
+        await _chat_with_timeout(adapter, [], [])
 
 
 @pytest.mark.parametrize(
@@ -295,6 +367,19 @@ def test_scoring_includes_docx_redlines_when_requested(monkeypatch, tmp_path) ->
 
     assert observed == [lab_scoring.DocxTrackChanges.ALL]
     assert scores["score"] == 1.0
+
+
+def test_docx_conversion_replaces_invalid_utf8(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "response.docx"
+    path.write_bytes(b"placeholder")
+
+    def run(*_args, **kwargs):
+        output = b"valid text\xff".decode(kwargs["encoding"], errors=kwargs["errors"])
+        return lab_scoring.subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(lab_scoring.subprocess, "run", run)
+
+    assert lab_scoring._read_file_as_text(path) == "valid text\ufffd"
 
 
 def test_deliverable_matching_ignores_thread_export() -> None:

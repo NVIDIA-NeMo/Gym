@@ -11,6 +11,16 @@ legal_agent_bench:
       harness_skills_dir: ${oc.env:LEGAL_AGENT_BENCH_SKILLS_DIR,resources_servers/legal_agent_bench/data/cache/harness/skills}
       auto_prepare_assets: true
       reward_mode: full_task  # official all-criteria score; criteria_pass_rate is diagnostic
+      judge_base_url: ${oc.select:judge_base_url,null}
+      judge_api_key: ${oc.select:judge_api_key,null}
+      judge_model_name: ${oc.select:judge_model_name,null}
+      judge_temperature: null
+      judge_request_timeout_seconds: 90
+      judge_max_retries: 1
+      judge_structured_output: true
+      judge_parse_repair_attempts: 1
+      judge_repair_max_tokens: 4096
+      judge_max_tokens: 4096
       judge_parallelism: 6
 
 responses_create_params:
@@ -37,8 +47,6 @@ legal_agent_bench_harbor_agent:
         max_turns: 60
         shell_timeout: 60
         agent_model_max_tokens: 32768
-        agent_model_max_retries: 3
-        agent_model_retry_backoff_seconds: 2.0
         agent_model_timeout_seconds: 1800
 
       harbor_environment_type: docker
@@ -56,7 +64,7 @@ legal_agent_bench_harbor_agent:
         license: MIT
       - name: legal_agent_bench
         type: validation
-        jsonl_fpath: resources_servers/legal_agent_bench/data/all.jsonl
+        jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
         license: MIT
 
       harbor_agent_override_timeout: 10800

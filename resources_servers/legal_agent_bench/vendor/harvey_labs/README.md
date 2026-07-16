@@ -5,7 +5,8 @@ This directory contains a minimal runtime adaptation of
 `f46ef86e4788545622db25dcffa3aebb7a139929` and distributed under Harvey's
 MIT license in `LICENSE`.
 
-NeMo Gym modifications add an OpenAI-compatible Harbor adapter,
+NeMo Gym modifications add an asynchronous protocol adapter for the local Gym
+model server selected by the Harbor agent,
 path-constrained file tools, pagination and telemetry, and a Harbor-oriented
 system prompt. `lab_harbor/scoring.py` is an attributed adaptation of upstream
 `evaluation/scoring.py`; its module docstring lists each intentional behavioral

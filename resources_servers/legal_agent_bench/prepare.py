@@ -40,9 +40,10 @@ SMOKE_TASK_IDS = (
 DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "harbor_tasks" / "legal_agent_bench"
 DEFAULT_RUNTIME_TASKS_DIR = PACKAGE_DIR / "data" / "runtime" / "harbor_tasks" / "legal_agent_bench"
 DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
-INDEX_PATH = PACKAGE_DIR / "data" / "all.jsonl"
+INDEX_FILENAME = "all.jsonl"
+DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 3
+CACHE_FORMAT_VERSION = 4
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
@@ -152,6 +153,7 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
     if len(task_dirs) != EXPECTED_TASK_COUNT:
         raise ValueError(f"Expected {EXPECTED_TASK_COUNT} Harbor tasks in {path}, found {len(task_dirs)}")
     invalid: list[str] = []
+    source_ids: list[str] = []
     verifier_templates = {relpath: source.read_bytes() for relpath, source in VERIFIER_TEMPLATE_SOURCES.items()}
     tool_runner_template = TOOL_RUNNER_SOURCE.read_bytes()
     for task_dir in task_dirs:
@@ -174,6 +176,8 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
         source_id = (task_json.get("metadata") or {}).get("lab_task_id")
         if not source_id or flatten_task_id(str(source_id)) != task_dir.name:
             invalid.append(f"{task_dir.name}: missing or inconsistent lab_task_id metadata")
+        else:
+            source_ids.append(str(source_id))
         if (task_dir / "tests" / "task.json").read_bytes() != (task_dir / "task.json").read_bytes():
             invalid.append(f"{task_dir.name}: verifier task.json differs from source task.json")
         for relpath, template in verifier_templates.items():
@@ -192,15 +196,19 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
     if invalid:
         preview = "\n  - ".join(invalid[:10])
         raise FileNotFoundError(f"Invalid Legal Agent Bench task cache in {path}:\n  - {preview}")
+    index_path = path / INDEX_FILENAME
+    try:
+        index_text = index_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"Legal Agent Bench task index is missing from the prepared cache: {index_path}"
+        ) from exc
+    expected_index = _render_task_index(source_ids)
+    if index_text != expected_index:
+        raise ValueError(f"Legal Agent Bench task index is stale or non-deterministic: {index_path}")
     for source_id in SMOKE_TASK_IDS:
         if not (path / flatten_task_id(source_id)).is_dir():
             raise FileNotFoundError(f"Pinned smoke task is missing from {path}: {source_id}")
-    expected_names = _index_task_names()
-    actual_names = {task_dir.name for task_dir in task_dirs}
-    if expected_names and actual_names != expected_names:
-        missing = sorted(expected_names - actual_names)
-        extra = sorted(actual_names - expected_names)
-        raise ValueError(f"Task cache does not match committed index; missing={missing[:5]}, extra={extra[:5]}")
     return path
 
 
@@ -236,6 +244,8 @@ def prepare_assets(
         missing.append(name)
 
     if not missing:
+        if "tasks" in prepared:
+            _publish_task_index(prepared["tasks"])
         return prepared
     if not allow_download:
         for name in missing:
@@ -278,6 +288,8 @@ def prepare_assets(
                 _replace_directory(staged[name], targets[name])
                 prepared[name] = validators[name](targets[name])
                 print(f"Prepared Legal Agent Bench {name} in {prepared[name]}", flush=True)
+    if "tasks" in prepared:
+        _publish_task_index(prepared["tasks"])
     return prepared
 
 
@@ -427,9 +439,6 @@ def _validate_source_tree(source_root: Path) -> Path:
     flattened = [flatten_task_id(source_id) for source_id in source_ids]
     if len(flattened) != len(set(flattened)):
         raise ValueError("Flattening LAB source task ids produces a collision")
-    expected_names = _index_task_names()
-    if expected_names and set(flattened) != expected_names:
-        raise ValueError("Pinned LAB source task ids do not match the committed data/all.jsonl index")
     for skill in REQUIRED_SKILLS:
         if not (source_root / "harness" / "skills" / skill / "SKILL.md").is_file():
             raise ValueError(f"Pinned LAB source is missing skill {skill}/SKILL.md")
@@ -464,25 +473,23 @@ def _validate_task_json(config: Any, path: Path) -> None:
             raise ValueError(f"{path} criterion {index} is invalid")
 
 
-def _index_task_names() -> set[str]:
-    if not INDEX_PATH.is_file():
-        return set()
-    names: set[str] = set()
-    prefix = "legal_agent_bench::"
-    for line_number, line in enumerate(INDEX_PATH.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        instance_id = row.get("instance_id") if isinstance(row, dict) else None
-        if not isinstance(instance_id, str) or not instance_id.startswith(prefix):
-            raise ValueError(f"{INDEX_PATH}:{line_number} has an invalid Legal Agent Bench instance_id")
-        name = instance_id.removeprefix(prefix)
-        if name in names:
-            raise ValueError(f"{INDEX_PATH}:{line_number} contains duplicate task {name!r}")
-        names.add(name)
-    if len(names) != EXPECTED_TASK_COUNT:
-        raise ValueError(f"Expected {EXPECTED_TASK_COUNT} rows in {INDEX_PATH}, found {len(names)}")
-    return names
+def _render_task_index(source_ids: Iterable[str]) -> str:
+    rows = []
+    for source_id in sorted(source_ids):
+        row = {
+            "agent_ref": {
+                "name": "legal_agent_bench_harbor_agent",
+                "type": "responses_api_agents",
+            },
+            "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
+            "responses_create_params": {
+                "input": [],
+                "temperature": 1.0,
+                "top_p": 0.95,
+            },
+        }
+        rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    return "".join(rows)
 
 
 def _build_task_cache(source_root: Path, output_dir: Path) -> None:
@@ -493,7 +500,8 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
     if missing_templates:
         raise FileNotFoundError(f"Legal Agent Bench runtime templates are missing: {missing_templates}")
 
-    for source_id, source_task_dir in _source_task_entries(source_root):
+    source_entries = _source_task_entries(source_root)
+    for source_id, source_task_dir in source_entries:
         task_name = flatten_task_id(source_id)
         task_dir = output_dir / task_name
         (task_dir / "environment" / "harness").mkdir(parents=True)
@@ -527,6 +535,10 @@ def _build_task_cache(source_root: Path, output_dir: Path) -> None:
         test_script = task_dir / "tests" / "test.sh"
         test_script.write_text(_TEST_SCRIPT, encoding="utf-8")
         test_script.chmod(test_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    (output_dir / INDEX_FILENAME).write_text(
+        _render_task_index(source_id for source_id, _ in source_entries),
+        encoding="utf-8",
+    )
     _write_marker(output_dir, "tasks")
 
 
@@ -585,6 +597,7 @@ def _marker(kind: str) -> dict[str, Any]:
     if kind == "tasks":
         marker.update(
             {
+                "index_filename": INDEX_FILENAME,
                 "dockerfile_sha256": hashlib.sha256(_DOCKERFILE.encode()).hexdigest(),
                 "tool_runner_sha256": _file_sha256(TOOL_RUNNER_SOURCE),
                 "verifier_files_sha256": {
@@ -658,6 +671,22 @@ def _replace_directory(source: Path, target: Path) -> None:
     else:
         if backup.exists():
             shutil.rmtree(backup)
+
+
+def _publish_task_index(tasks_dir: Path) -> Path:
+    """Atomically publish the prepared index at Gym's stable dataset path."""
+    source = tasks_dir / INDEX_FILENAME
+    target = resolve_repo_path(DEFAULT_INDEX_FPATH)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    os.close(file_descriptor)
+    temp_path = Path(temp_name)
+    try:
+        shutil.copyfile(source, temp_path)
+        os.replace(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return target
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
