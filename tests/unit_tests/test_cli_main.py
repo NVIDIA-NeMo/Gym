@@ -126,6 +126,15 @@ class TestStorageFlag:
             main()
 
 
+class TestEvalDatasetValidationCommand:
+    def test_parser_accepts_manifest_and_json(self) -> None:
+        args = cli_main.build_parser().parse_args(["dataset", "validate-eval", "--manifest", "eval.yaml", "--json"])
+
+        assert args.manifest == "eval.yaml"
+        assert args.json is True
+        assert args._command.target is cli_main._dataset_validate_eval
+
+
 class TestEvalRunFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
