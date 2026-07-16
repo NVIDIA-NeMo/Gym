@@ -32,6 +32,10 @@ from tqdm.asyncio import tqdm
 from wandb import Table
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agent_execution_capture import (
+    clear_agent_execution_captures_for_rollouts,
+    merge_agent_execution_capture_into_record,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
@@ -525,8 +529,9 @@ class RolloutCollectionHelper(BaseModel):
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
         if capture_dirs:
-            print("Clearing existing model-call captures for rollouts being dispatched")
+            print("Clearing existing observability captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+            clear_agent_execution_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -547,6 +552,7 @@ class RolloutCollectionHelper(BaseModel):
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_dirs:
                 merge_model_call_capture_into_record(result, capture_dirs)
+                merge_agent_execution_capture_into_record(result, capture_dirs)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)

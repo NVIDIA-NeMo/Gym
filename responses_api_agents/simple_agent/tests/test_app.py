@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.agent_execution_capture import AgentExecutionRecorder
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -271,6 +272,75 @@ class TestApp:
         # The exception type must be visible to the model — repr(e) on a
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
+
+    async def test_responses_records_individual_tool_timing(self) -> None:
+        config = SimpleAgentConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test_agent",
+            model_server=ModelServerRef(type="responses_api_models", name="test_model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="test_resources"),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        clock = iter([100, 250])
+        recorder = AgentExecutionRecorder(
+            "0.0",
+            config.name,
+            clock=lambda: next(clock),
+            wall_clock=iter([1.0, 1.5]).__next__,
+            clock_id="test-clock",
+        )
+        lock, recorders = server._agent_execution_state()
+        with lock:
+            recorders[recorder.rollout_id] = recorder
+
+        def response(response_id: str, output: list[dict]) -> dict:
+            return {
+                "id": response_id,
+                "created_at": 0.0,
+                "model": "test_model",
+                "object": "response",
+                "output": output,
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        tool_model_response = response(
+            "resp_tool",
+            [{"id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": "{}", "type": "function_call"}],
+        )
+        final_model_response = response(
+            "resp_final",
+            [{"id": "msg_1", "content": [], "role": "assistant", "status": "completed", "type": "message"}],
+        )
+        first_model_http = MagicMock(
+            ok=True, cookies={}, read=AsyncMock(return_value=json.dumps(tool_model_response).encode())
+        )
+        tool_http = MagicMock(ok=True, cookies={}, content=MagicMock(read=AsyncMock(return_value=b"result")))
+        final_model_http = MagicMock(
+            ok=True, cookies={}, read=AsyncMock(return_value=json.dumps(final_model_response).encode())
+        )
+        server.server_client.post = AsyncMock(side_effect=[first_model_http, tool_http, final_model_http])
+
+        request = MagicMock(cookies={}, path_params={"rollout_id": recorder.rollout_id})
+        response = MagicMock()
+        await server.responses(
+            request,
+            response,
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        capture = recorder.capture()
+        span = capture.tool_spans[0]
+        assert (span.tool_call_id, span.measurement_scope) == ("call_1", "caller_round_trip")
+        assert (span.started_ns, span.ended_ns, span.status, span.clock_id) == (100, 250, "returned", "test-clock")
+        assert (span.model_ref, span.model_response_id) == (config.model_server, "resp_tool")
+        assert [(link.model_ref, link.response_id) for link in capture.model_call_links] == [
+            (config.model_server, "resp_tool"),
+            (config.model_server, "resp_final"),
+        ]
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(

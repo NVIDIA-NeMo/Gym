@@ -397,6 +397,7 @@ class ModelCallRecord(BaseModel):
     model_ref: Optional[ModelServerRef] = None
     dialect: Optional[str] = None
     status_code: Optional[int] = None
+    response_id: Optional[str] = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -445,6 +446,7 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         model_ref=exchange.get("model_ref"),
         dialect=exchange.get("dialect"),
         status_code=exchange.get("status_code"),
+        response_id=response.get("id"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=exchange.get("request"),
@@ -663,11 +665,13 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     reasoning_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
+    response_id: Optional[str] = None
     model: Optional[str] = None
     role = "assistant"
     finish_reason: Optional[str] = None
     saw_choice = False
     for chunk in events:
+        response_id = chunk.get("id") or response_id
         model = chunk.get("model") or model
         if chunk.get("usage"):
             usage = chunk["usage"]
@@ -707,6 +711,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
+    if response_id is not None:
+        result["id"] = response_id
     if usage:
         result["usage"] = usage
     return result
