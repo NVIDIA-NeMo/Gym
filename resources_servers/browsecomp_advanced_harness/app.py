@@ -711,6 +711,17 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
+# Judge retry backoff cap. The 2026-07-15 inference-api 529 outage outlasted the old
+# 10-attempt/30s-cap schedule (~2.9 min total) and falsely zeroed 25 samples in one
+# full-400 run; 15 attempts capped at 120s gives ~18 min of cumulative window.
+JUDGE_BACKOFF_CAP_S = 120
+
+
+def _judge_backoff_s(attempt: int) -> int:
+    """Exponential backoff for judge-call retries: 1, 2, 4, ... capped at JUDGE_BACKOFF_CAP_S."""
+    return min(2**attempt, JUDGE_BACKOFF_CAP_S)
+
+
 def _last_assistant_text(response) -> str:
     """Text of the LAST assistant message item in response.output (the model's final answer).
     Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
@@ -741,7 +752,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _workspace_root: Optional[str] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
-    JUDGE_MAX_ATTEMPTS: int = 10
+    JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
 
     def model_post_init(self, __context) -> None:
         # Tavily clients (built only when a Tavily key is configured).
@@ -1286,7 +1297,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 )
 
             except Exception as e:
-                sleep_s = min(2**attempt, 30)
+                sleep_s = _judge_backoff_s(attempt)
                 print(
                     f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error_type={type(e).__name__} error={str(e)[:200]} backoff_s={sleep_s}]",
                     flush=True,
