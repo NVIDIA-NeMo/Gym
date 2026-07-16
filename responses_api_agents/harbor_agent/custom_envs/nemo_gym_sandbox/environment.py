@@ -69,8 +69,18 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         sandbox_ready_timeout_s: Create/readiness timeout incl. image pull
             (default 900).
         default_exec_timeout_s: Timeout applied when Harbor calls ``exec``
-            without ``timeout_sec`` (default 14400). Trial-level agent/verifier
-            timeouts still apply on top.
+            without ``timeout_sec`` (default 300). This is a *per-command*
+            bound, not a trial bound: it caps how long a single sandbox exec
+            (submit + background poll) may run before the provider gives up and
+            raises ``TimeoutError`` (which Terminus-2 handles as a command
+            timeout). Terminus-2 only omits ``timeout_sec`` for its own short
+            tmux plumbing (``send-keys``/``capture-pane`` are sub-second; blocked
+            waits self-bound at ``timeout <=180s tmux wait done``), so 300s is
+            ample headroom while still bounding a wedged exec on a hostile
+            cross-cluster path. Agent commands pass their own ``timeout_sec``
+            (``command.duration_sec``) and are unaffected. Do NOT set this to a
+            trial-length value (e.g. hours): a value that large lets a single
+            stuck exec hang the whole task until the trial deadline.
         exec_shell: Shell prefix wrapped around every Harbor-issued command
             (default ``"bash -ic"``, matching Harbor's docker/daytona
             backends). Set to null to run commands verbatim.
@@ -93,7 +103,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         sandbox_env: Optional[Mapping[str, str]] = None,
         sandbox_ttl_s: Optional[float] = 21600,
         sandbox_ready_timeout_s: Optional[float] = 900,
-        default_exec_timeout_s: Optional[float] = 14400,
+        default_exec_timeout_s: Optional[float] = 300,
         exec_shell: Optional[str] = "bash -ic",
         image_rewrites: Optional[list[Mapping[str, str]]] = None,
         workdir: Optional[str] = None,

@@ -341,6 +341,14 @@ class OpenSandboxConnectionConfig:
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    # When true, give the SDK an httpx transport with connection keepalive
+    # disabled (max_keepalive_connections=0), so every request opens a fresh
+    # connection. Set this for cross-cluster/load-balanced paths (e.g. an istio
+    # east-west gateway fronted by an AWS NLB) where the LB silently reaps idle
+    # pooled connections: the SDK would otherwise reuse a reaped "zombie"
+    # connection and hang. Fresh connections cost a handshake per request but
+    # never reuse a dead socket. Harmless (slightly slower) on a direct path.
+    disable_connection_pooling: bool = False
 
 
 @dataclass(frozen=True)
@@ -552,6 +560,14 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+        if self._connection.disable_connection_pooling:
+            import httpx
+
+            # Fresh connection per request: never reuse a connection an
+            # intermediary load balancer may have silently reaped.
+            kwargs["transport"] = httpx.AsyncHTTPTransport(
+                limits=httpx.Limits(max_keepalive_connections=0, max_connections=200)
+            )
         return ConnectionConfig(**kwargs)
 
     async def aclose(self) -> None:
@@ -889,38 +905,57 @@ class OpenSandboxProvider:
         )
         effective_retries = self._command_retry_count() if retries is None else retries
 
-        if self._operations.background_exec:
-            return await self._exec_background(
-                handle,
-                effective_command,
-                opts_kwargs,
-                sdk_timeout_s=sdk_timeout_s,
-                total_timeout_s=timeout_s,
+        async def _dispatch() -> SandboxExecResult:
+            if self._operations.background_exec:
+                return await self._exec_background(
+                    handle,
+                    effective_command,
+                    opts_kwargs,
+                    sdk_timeout_s=sdk_timeout_s,
+                    total_timeout_s=timeout_s,
+                    retries=effective_retries,
+                )
+
+            execution = await self._await_sdk_operation(
+                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                operation="command run",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=sdk_timeout_s,
                 retries=effective_retries,
             )
+            stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
+            stderr_parts = [msg.text for msg in execution.logs.stderr]
+            if execution.error is not None:
+                stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+            stderr = "\n".join(stderr_parts) or None
+            error_type = None
+            if execution.exit_code is not None:
+                return_code = execution.exit_code
+            elif execution.error is not None:
+                return_code = 125
+                error_type = "sandbox"
+            else:
+                return_code = 0
 
-        execution = await self._await_sdk_operation(
-            lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
-            operation="command run",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=sdk_timeout_s,
-            retries=effective_retries,
-        )
-        stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
-        stderr_parts = [msg.text for msg in execution.logs.stderr]
-        if execution.error is not None:
-            stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        stderr = "\n".join(stderr_parts) or None
-        error_type = None
-        if execution.exit_code is not None:
-            return_code = execution.exit_code
-        elif execution.error is not None:
-            return_code = 125
-            error_type = "sandbox"
-        else:
-            return_code = 0
+            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
-        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+        # Hard wall-clock backstop for the whole exec (submit + background poll +
+        # any retries). The inner poll-loop deadline / per-call timeouts bound the
+        # common cases and fire first with cleaner errors; this only catches
+        # pathological wedges (e.g. a request silently black-holed on a
+        # cross-cluster load balancer, or a status that never flips) so a single
+        # exec can never hang the task past ~2x its intended per-command budget.
+        # Raising TimeoutError lets Terminus-2 record a command timeout and move on.
+        hard_cap_s = None if sdk_timeout_s is None else (2.0 * float(sdk_timeout_s) + 30.0)
+        if hard_cap_s is None:
+            return await _dispatch()
+        try:
+            return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                f"(sandbox_id={handle.sandbox_id!r})"
+            ) from e
 
     async def _exec_background(
         self,

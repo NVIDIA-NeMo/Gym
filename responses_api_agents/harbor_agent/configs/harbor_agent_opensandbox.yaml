@@ -57,8 +57,12 @@ harbor_agent:
         collect_rollout_details: false
         # Thinking-mode episodes can generate for tens of minutes under load;
         # the 120s default times out and re-sends, piling zombie requests onto
-        # the model server.
-        nemo_model_server_timeout_sec: 7200
+        # the model server. But don't set this to multi-hour either: the serving
+        # stack can silently drop an in-flight request (observed: engine shows 0
+        # running while clients hold open sockets), and the client then blocks
+        # for this full duration. 2400s clears any legitimate thinking turn
+        # while letting a dropped request self-heal within 40 minutes.
+        nemo_model_server_timeout_sec: 2400
         model_info:
           max_input_tokens: 262144
           max_output_tokens: 81920
@@ -77,7 +81,13 @@ harbor_agent:
         # timeouts below.
         sandbox_ttl_s: 21600
         sandbox_ready_timeout_s: 900
-        default_exec_timeout_s: 14400
+        # Per-command exec bound (NOT a trial bound). Terminus-2 omits
+        # ``timeout_sec`` only for its short tmux plumbing (send-keys/capture are
+        # sub-second; blocked waits self-bound at ``timeout <=180s tmux wait
+        # done``), so 300s is ample headroom while still bounding a wedged exec
+        # on the cross-cluster path. A trial-length value here (e.g. hours) lets
+        # a single stuck exec hang the whole task until the trial deadline.
+        default_exec_timeout_s: 600
         # Uniform per-sandbox resources for all tasks. disk_gib is derived from
         # override_storage_mb; 30 GiB avoids kubelet ephemeral-storage evictions
         # on disk-heavy tasks (image builds, dataset downloads) that overrun the

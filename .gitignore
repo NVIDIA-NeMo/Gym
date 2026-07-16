@@ -237,3 +237,4 @@ env.yaml
 
 # Backup files
 *.backup
+OPENSANDBOX_SSE_DROP_REPORT.md

@@ -277,7 +277,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if self.config.harbor_ray_task_num_cpus is not None:
                     runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
                 future = runner.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                # Await the ObjectRef directly (Ray futures are awaitable). Using
+                # asyncio.to_thread(ray.get, ...) here caps result consumption at
+                # the default executor's ~(cpus+4) threads: with more concurrent
+                # jobs than threads, finished results queue behind long-blocking
+                # ray.get calls and responses flush in delayed waves.
+                trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 
                 # Read the trial result (summary: reward, agent_result, verifier_result)
