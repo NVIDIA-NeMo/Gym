@@ -306,6 +306,41 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 ########################################
 
 
+@contextmanager
+def file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
+    """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
+    lock_dir = file_path.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{file_path.name}.lockdir"
+
+    print(f"Acquiring {label} lock at {lock_path}", flush=True)
+    waited = 0
+    while True:
+        try:
+            lock_path.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            stale_threshold = 3600
+            try:
+                lock_age = time.time() - lock_path.stat().st_mtime
+                if lock_age > stale_threshold:
+                    print(f"  Lock appears stale ({lock_age:.0f}s old), breaking it", flush=True)
+                    shutil.rmtree(lock_path, ignore_errors=True)
+                    continue
+            except OSError:
+                pass
+            if waited >= max_wait:
+                raise TimeoutError(f"Timed out waiting for {label} lock after {max_wait}s")
+            if waited % 30 == 0:
+                print(f"  Waiting for {label} lock (held by another process, {waited}s elapsed)...", flush=True)
+            time.sleep(poll_interval)
+            waited += poll_interval
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock_path, ignore_errors=True)
+
+
 class BaseDatasetHarnessProcessor(BaseModel):
     config: SWEBenchWrapperConfig | SWEBenchWrapperInstanceConfig
 
@@ -321,44 +356,6 @@ class BaseDatasetHarnessProcessor(BaseModel):
         process = Popen(command, shell=True)
         return_code = process.wait()
         assert return_code == 0, f"Command failed: {command}"
-
-    @contextmanager
-    def _setup_directory_lock(self, setup_dir: Path, label: str):
-        """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
-        lock_dir = setup_dir.parent
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / f".{setup_dir.name}.lockdir"
-
-        print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
-        max_wait = 3600
-        poll_interval = 5
-        waited = 0
-        while True:
-            try:
-                lock_path.mkdir(exist_ok=False)
-                break
-            except FileExistsError:
-                stale_threshold = 3600
-                try:
-                    lock_age = time.time() - lock_path.stat().st_mtime
-                    if lock_age > stale_threshold:
-                        print(f"  Lock appears stale ({lock_age:.0f}s old), breaking it", flush=True)
-                        shutil.rmtree(lock_path, ignore_errors=True)
-                        continue
-                except OSError:
-                    pass
-                if waited >= max_wait:
-                    raise TimeoutError(f"Timed out waiting for {label} setup lock after {max_wait}s")
-                if waited % 30 == 0:
-                    print(
-                        f"  Waiting for {label} setup lock (held by another process, {waited}s elapsed)...", flush=True
-                    )
-                time.sleep(poll_interval)
-                waited += poll_interval
-        try:
-            yield
-        finally:
-            shutil.rmtree(lock_path, ignore_errors=True)
 
     # Setup method is sync for now since there's been no need to concurrently set up
     def setup(self) -> Path:
@@ -382,7 +379,7 @@ class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
         setup_dir = self.parent_dir / "swe_swebench_setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
 
-        with self._setup_directory_lock(setup_dir, "SWE-bench"):
+        with file_lock(setup_dir, "SWE-bench setup"):
             swebench_dir = setup_dir / "SWE-bench"
             uv_dir = setup_dir / "uv"
             python_dir = setup_dir / "python"
@@ -452,7 +449,7 @@ class SweBenchMultilingualDatasetProcessor(BaseDatasetHarnessProcessor):
         setup_dir = self.parent_dir / "swe_swebench_multilingual_setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
 
-        with self._setup_directory_lock(setup_dir, "SWE-bench_Multilingual"):
+        with file_lock(setup_dir, "SWE-bench_Multilingual setup"):
             swebench_multilingual_dir = setup_dir / "SWE-bench_Multilingual"
             uv_dir = setup_dir / "uv"
             python_dir = setup_dir / "python"
@@ -521,7 +518,7 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
 
         setup_dir = self.parent_dir / "swe_r2e_gym_setup"
 
-        with self._setup_directory_lock(setup_dir, "R2E-Gym"):
+        with file_lock(setup_dir, "R2E-Gym setup"):
             r2e_gym_dir = setup_dir / "R2E-Gym"
             uv_dir = setup_dir / "uv"
             python_dir = setup_dir / "python"
@@ -765,7 +762,7 @@ class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_rebench_setup"
 
-        with self._setup_directory_lock(setup_dir, "SWE-rebench"):
+        with file_lock(setup_dir, "SWE-rebench setup"):
             rebench_dir = setup_dir / "SWE-rebench-V2"
 
             if rebench_dir.exists() and (rebench_dir / "agent" / "log_parsers.py").exists():
@@ -1549,7 +1546,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
-        with self._setup_directory_lock(setup_dir, "OpenHands"):
+        with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
             miniforge_dir = setup_dir / "miniforge3"
 
@@ -2164,15 +2161,30 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     return report_file
 
 
-def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
-    with metrics_fpath.open() as f:
-        existing_dict = json.loads(f.read())
+def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | None = None) -> dict:
+    update_dict = update_dict or {}
 
-    existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
-    update_dict = {k: v for k, v in update_dict.items() if v is not None}
+    with file_lock(metrics_fpath, "persistent metrics", max_wait=300, poll_interval=1):
+        try:
+            existing_dict = json.loads(metrics_fpath.read_text() or "{}")
+        except (json.JSONDecodeError, FileNotFoundError):
+            print(f"Error reading {metrics_fpath}: {format_exc()}\n\nDefaulting to empty metrics", flush=True)
+            existing_dict = {}
 
-    with metrics_fpath.open("w") as f:
-        json.dump(existing_dict | update_dict, f)
+        existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
+
+        if update_dict:
+            update_dict = {k: v for k, v in update_dict.items() if v is not None}
+            metrics = existing_dict | update_dict
+
+            # Write to a temp file and swap it to reduce chance of reading a partially written file.
+            tmp_file = metrics_fpath.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+            tmp_file.write_text(json.dumps(metrics))
+            os.replace(tmp_file, metrics_fpath)
+        else:
+            metrics = existing_dict
+
+        return metrics
 
 
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
@@ -2560,7 +2572,7 @@ class RunOpenHandsAgent(BaseModel):
                 metrics.openhands_run_time is not None
                 and metrics.openhands_run_time >= self.config.swebench_agent_timeout
             )
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
             return None
@@ -2618,7 +2630,7 @@ class RunOpenHandsAgent(BaseModel):
 
             await self._kill_active_command(eval_active_command)
 
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
 
         with open(self.config.model_patch_path, "w") as f:
@@ -2639,7 +2651,7 @@ class RunOpenHandsAgent(BaseModel):
             metrics.eval_timed_out = (
                 metrics.final_eval_time is not None and metrics.final_eval_time >= self.config.swebench_tests_timeout
             )
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
             return None
@@ -2651,7 +2663,7 @@ class RunOpenHandsAgent(BaseModel):
         metrics.final_eval_time += time.time()
 
         metrics.patch_exists = True
-        update_metrics(self.config.metrics_fpath, metrics.model_dump())
+        update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
 
         if self.config.debug:
             profiler.stop()
@@ -2715,7 +2727,7 @@ class RunOpenHandsAgent(BaseModel):
         except Exception as e:
             print(f"Golden-patch eval failed for {instance_id}: {e}", flush=True)
             metrics.final_eval_time += time.time()
-            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             return None
 
         final_eval_apptainer_spinup_timestamp = float(
@@ -2724,7 +2736,7 @@ class RunOpenHandsAgent(BaseModel):
         metrics.final_eval_apptainer_spinup_time += final_eval_apptainer_spinup_timestamp
         metrics.final_eval_time += time.time()
 
-        update_metrics(self.config.metrics_fpath, metrics.model_dump())
+        update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
 
         return report_file
 
@@ -3551,7 +3563,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
-        persisted_metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3626,14 +3638,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             input_items, output_items = split_responses_input_output_items(responses_items)
 
-        update_metrics(params.metrics_fpath, metrics_to_update)
+        updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
         metadata: dict[str, str] = {
             "input": json.dumps([i.model_dump() for i in input_items]),
-            "metrics": params.metrics_fpath.read_text(),
+            "metrics": json.dumps(updated_metrics),
             "instance_config": params.model_dump_json(),
         }
         if params.opencode_subagents_enabled:
