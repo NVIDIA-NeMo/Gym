@@ -373,7 +373,9 @@ async def run_multistage_stages(
     ``multistage.seed`` is ``None``. ``resume=None`` is byte-for-byte the
     pre-resume behavior.
     """
-    base_rng = rng or (random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random())
+    base_rng = rng or (
+        random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
+    )
     rows_by_task = index_rows_by_task(materialized_rows)
 
     # Sample each stage's ``T`` tasks up front (``num_tasks=None`` ⇒ the full task

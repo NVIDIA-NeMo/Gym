@@ -172,9 +172,7 @@ class TestPlanStageTaskIds:
     def test_num_tasks_none_nested_full_then_prefix(self) -> None:
         dist = _dist({"x": [f"x{i}" for i in range(10)]})
         # None (full) as the largest stage; a smaller explicit stage is a prefix.
-        planned = plan_stage_task_ids(
-            dist, [StageSpec(num_tasks=4), StageSpec()], rng=random.Random(1), nested=True
-        )
+        planned = plan_stage_task_ids(dist, [StageSpec(num_tasks=4), StageSpec()], rng=random.Random(1), nested=True)
         assert len(planned[0]) == 4
         assert len(planned[1]) == 10
         assert set(planned[0]).issubset(set(planned[1]))

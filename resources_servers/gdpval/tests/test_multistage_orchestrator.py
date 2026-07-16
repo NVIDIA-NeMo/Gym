@@ -245,9 +245,7 @@ class TestRunStages:
         cfg = MultiStageRunConfig(
             enabled=True,
             # Full task set each stage (robust ELO); stage 1 narrows to 2 refs.
-            stages=parse_multistage_config(
-                {"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}
-            ).stages,
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}).stages,
             seed=0,
         )
         all_results, summaries = await run_multistage_stages(
@@ -284,9 +282,7 @@ class TestRunStages:
         cfg = MultiStageRunConfig(
             enabled=True,
             # No num_tasks ⇒ full dataset; stage 1 narrows to 2 references.
-            stages=parse_multistage_config(
-                {"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}
-            ).stages,
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}).stages,
             seed=0,
         )
 
@@ -318,9 +314,7 @@ class TestRunStages:
         cfg = MultiStageRunConfig(
             enabled=True,
             # Stage 0 samples 6 tasks; stage 1 defaults to the full 40.
-            stages=parse_multistage_config(
-                {"enabled": True, "stages": [{"num_tasks": 6}, {"num_models": 2}]}
-            ).stages,
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_tasks": 6}, {"num_models": 2}]}).stages,
             seed=0,
         )
 
