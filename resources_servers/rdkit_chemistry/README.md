@@ -1,5 +1,14 @@
 # rdkit_chemistry Resources Server
 
+> **⚠️ Deprecated.** The scoring path in this server never depended on chemistry;
+> it has been generalized into the domain-agnostic
+> [`litmus_agent`](../litmus_agent) resources server (answer extraction + a
+> swappable reward-rule taxonomy, plus an optional sandbox-backed Python
+> code-execution tool). New work should target `litmus_agent`; export legacy
+> chemistry rows there via its `property_type` → `answer_type` back-compat
+> mapping. `rdkit_chemistry` is retained only for existing runs and will not
+> receive new features.
+
 ## Overview
 
 This resources server verifies chemistry question answering over RDKit-computable

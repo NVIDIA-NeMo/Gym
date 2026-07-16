@@ -27,19 +27,26 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    get_global_config_dict,
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -133,6 +140,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    rollout_collection_driver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dotted ``module.path:function`` to run rollout collection instead of the "
+            "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "When unset, the standard single-pass collection runs."
+        ),
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -204,6 +221,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
     )
+
+    @field_validator("num_repeats", mode="before")
+    @classmethod
+    def _coerce_null_num_repeats(cls, v):
+        # default to 1 if num_repeats is None
+        # for backwards compatibility
+        return 1 if v is None else v
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
@@ -289,10 +313,17 @@ class RolloutCollectionHelper(BaseModel):
         if not _input_path.is_absolute():
             _cwd_path = Path.cwd() / _input_path
             _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -422,6 +453,14 @@ class RolloutCollectionHelper(BaseModel):
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
+        # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
+        # captured model calls are keyed separately from the prior attempt's (see
+        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        for row in input_rows:
+            attempt = attempts_by_key.get(get_key(row), 0)
+            if attempt > 0:
+                row[ATTEMPT_INDEX_KEY_NAME] = attempt
+
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
 
@@ -479,6 +518,16 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = _failures_path_for(output_fpath)
 
+        # Resolve capture dirs once so each rollout's captured model calls can be folded
+        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+
+        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
+        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
+        if capture_dirs:
+            print("Clearing existing model-call captures for rollouts being dispatched")
+            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
@@ -491,6 +540,13 @@ class RolloutCollectionHelper(BaseModel):
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+            if ATTEMPT_INDEX_KEY_NAME in row:
+                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+
+            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+            # when capture is off). Never alters the harness output/reward already in `result`.
+            if capture_dirs:
+                merge_model_call_capture_into_record(result, capture_dirs)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -738,6 +794,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     )
 
 
+def loads_jsonl_line(raw, fpath, line_no: int):
+    """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
+    try:
+        return orjson.loads(raw)
+    except orjson.JSONDecodeError as e:
+        raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
+
+
 def _expand_input_glob(input_glob: str) -> List[str]:
     """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
 
@@ -757,7 +821,7 @@ class RolloutAggregationHelper(BaseModel):
     async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
-            raise FileNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+            raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
@@ -765,11 +829,11 @@ class RolloutAggregationHelper(BaseModel):
         results: List[Dict] = []
         for shard_path in input_paths:
             with open(shard_path, "rb") as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    results.append(orjson.loads(line))
+                    results.append(loads_jsonl_line(line, shard_path, line_no))
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)

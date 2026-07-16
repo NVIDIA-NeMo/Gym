@@ -24,6 +24,7 @@ import yaml
 
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
@@ -36,7 +37,24 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    loads_jsonl_line,
 )
+
+
+@pytest.fixture
+def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    get_global_config_dict = MagicMock(return_value={})
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    return get_global_config_dict
+
+
+class TestLoadsJsonlLine:
+    def test_parses_valid_line(self) -> None:
+        assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
+
+    def test_malformed_line_raises_config_error_with_location(self) -> None:
+        with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
+            loads_jsonl_line("{not json", "f.jsonl", 3)
 
 
 class TestGetMaxRolloutAttempts:
@@ -174,6 +192,17 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(ValueError, match="mutually exclusive"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_preprocess_rows_missing_input_raises_config_error(self, tmp_path: Path) -> None:
+        """A non-existent input file fails with a clean ConfigPathNotFoundError, not a raw FileNotFoundError."""
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "does_not_exist.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        with pytest.raises(ConfigPathNotFoundError, match="does_not_exist.jsonl.*--input"):
             RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
@@ -482,6 +511,16 @@ class TestRolloutCollection:
                 num_repeats={"alpha": bad_value},
             )
 
+    def test_num_repeats_null_coerces_to_one(self, tmp_path: Path) -> None:
+        # `--num-repeats null` (None) restores the pre-#1356 default of 1.
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=None,
+        )
+        assert config.num_repeats == 1
+
     def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
         """An agent listed in the dict that never appears in input rows warns (likely typo)."""
         fpath = tmp_path / "input.jsonl"
@@ -498,7 +537,13 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
-    async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
+    async def test_run_from_config_sanity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -543,6 +588,9 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        empty_global_config.assert_called_once_with()
+        clear_captures.assert_not_called()
+        merge_capture.assert_not_called()
 
         expected_results = [
             {
@@ -612,7 +660,57 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
-    async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
+    async def test_run_from_config_replaces_stale_capture_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        row = {**source_row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        input_fpath = tmp_path / "input.jsonl"
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=resume_from_cache,
+            disable_aggregation=True,
+        )
+        if resume_from_cache:
+            output_fpath.touch()
+            config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        else:
+            input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+
+        store = CaptureStore(capture_dir)
+        store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
+                assert store.read("0-0") == []
+                store.record(
+                    "0-0",
+                    {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
+                )
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+
+    async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -951,7 +1049,9 @@ class TestDisableAggregationAndCallerTaskIndex:
     the existing default-on aggregation + auto-numbering behaviour.
     """
 
-    async def test_run_from_config_disable_aggregation_skips_call(self, tmp_path: Path) -> None:
+    async def test_run_from_config_disable_aggregation_skips_call(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
         """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
 
         Shows up in chunked-rollouts flows where the aggregation pass is deferred
