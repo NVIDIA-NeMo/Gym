@@ -18,7 +18,7 @@ from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import orjson
 from pydantic import BaseModel, Field
@@ -43,22 +43,72 @@ from nemo_gym.server_utils import (
     set_global_aiohttp_client,
 )
 
+from collections import defaultdict
 
+from omegaconf import DictConfig
+from nemo_gym.global_config import get_wandb_run
+from wandb import Table
+from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.path_utils import resolve_input_path
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 
 
-def _rollout_verify_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "resources_server_name": resources_server_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
 
+# ---------------------------------------------------------------------------
+# Agent-name → resources-server-name routing helpers
+# Used by RolloutReverificationHelper to resolve which resources server to call
+# for each rollout row, given a Hydra global config dict.
+# ---------------------------------------------------------------------------
+
+
+def _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+    mapping = {}
+    for name in global_conflict_dict:
+        block = global_conflict_dict[name]
+        if isinstance(block, (dict, DictConfig)) and "responses_api_agents" in block:
+            impl = next(iter(block["responses_api_agents"].values()))
+            rs = (impl.get("resources_server") or {}).get("name")
+            if rs:
+                mapping[name] = rs
+    return mapping
+
+
+def _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+    # The rollout rows still carry agent names that were never started, so fall back to the
+    # single resources server for EVERY requested key.
+    resources_server_names = [
+        name for name in global_conflict_dict
+        if isinstance(global_conflict_dict[name], (dict, DictConfig)) and "resources_servers" in global_conflict_dict[name]
+    ]
+    if len(resources_server_names) == 1:
+        only = resources_server_names[0]
+        return defaultdict(lambda: only)  # any key → the one resources server instance
+    if not resources_server_names:
+        raise ConfigError("reverify: no resources server found in the config.")
+    raise ConfigError(
+        f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
+        "route by. Use a config with agent blocks."
+    )
+
+
+def _build_agent_to_resources_server_mapping(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+    mapping = _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict)
+    if mapping:
+        return mapping
+    return _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict)
+    
 class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     # to do - we provide description 2 times here - once in the config main.py and once in the field
     # to do can we use Path already here?
@@ -85,7 +135,7 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     disable_aggregation: bool = Field(
         default=False,
         description=(
-            "Skip the post-rollout aggregate-metrics computation and file write. "
+            "Skip the post-reverification aggregate-metrics computation and file write. "
             "Used when sharding rollouts across multiple jobs that will be aggregated together "
             "afterward by `gym eval aggregate`."
         ),
@@ -94,69 +144,21 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=None, description="Maximum number of samples to re-verify in parallel."
     )
     limit: Optional[int] = Field(default=None, description="Maximum number of examples to re-verify.")
-    # to do - block overwriting it
-    agent_to_resources_server_mapping: Optional[Dict[str, str]] = Field(
-        default=None, description="Mapping of agent names to resources server names."
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
 
 
-# to do add validation if I decide to do it here
-def _resolve_input_path(input_path: str | Path) -> Path:
-    input_path = Path(input_path)
-    if not input_path.is_absolute():
-        _cwd_path = Path.cwd() / input_path
-        _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / input_path
-    if not _input_path.is_file():
-        raise ConfigPathNotFoundError(
-            f"Given input file not found: '{input_path}'. Check it is spelled correctly and exists."
-        )
-    return _input_path
-
-
-from collections import defaultdict
-
-from omegaconf import DictConfig
-
 
 class RolloutReverificationHelper(BaseModel):
-
-    def _build_agent_to_resources_server_mapping(self, gcd) -> Dict[str, str]:
-        mapping = {}
-        # first pass - assuming there is response_api_agents in the config
-        for name in gcd:
-            block = gcd[name]
-            if isinstance(block, (dict, DictConfig)) and "responses_api_agents" in block:
-                impl = next(iter(block["responses_api_agents"].values()))
-                rs = (impl.get("resources_server") or {}).get("name")
-                if rs:
-                    mapping[name] = rs
-        if mapping:
-            return mapping
-        # Second pass (Case A): no agents in the config (resources-only, e.g. mcqa_resources_server.yaml).
-        # The rollout rows still carry agent names that were never started, so fall back to the
-        # single resources server for EVERY requested key.
-        resources_server_names = [
-            name for name in gcd if isinstance(gcd[name], (dict, DictConfig)) and "resources_servers" in gcd[name]
-        ]
-        if len(resources_server_names) == 1:
-            only = resources_server_names[0]
-            return defaultdict(lambda: only)  # any key → the one resources server instance
-        if not resources_server_names:
-            raise ConfigError("reverify: no resources server found in the config.")
-        raise ConfigError(
-            f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
-            "route by. Use a config with agent blocks."
-        )
-
-    def _validate_input_paths(self, config: RolloutReverificationConfig) -> None:
-        materialized_inputs_jsonl_fpath = Path(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = Path(config.rollouts_jsonl_fpath)
-        if not materialized_inputs_jsonl_fpath.exists():
-            raise ConfigPathNotFoundError(
-                f"Materialized inputs JSONL file {materialized_inputs_jsonl_fpath} does not exist!"
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":  # pragma: no cover
+        server_client = ServerClient.load_from_global_config(head_server_config)
+        if not is_global_aiohttp_client_setup():
+            set_global_aiohttp_client(
+                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
             )
-        if not rollouts_jsonl_fpath.exists():
-            raise ConfigPathNotFoundError(f"Rollouts JSONL file {rollouts_jsonl_fpath} does not exist!")
+        return server_client
 
     def _yield_inputs_and_rollouts_paired(
         self, materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
@@ -178,20 +180,6 @@ class RolloutReverificationHelper(BaseModel):
                     raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
                 yield (input_row, rollout_row)
 
-    def setup_resource_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
-
-
     def _run_reverification_payloads(
         self,
         payloads: List[Dict],
@@ -199,8 +187,8 @@ class RolloutReverificationHelper(BaseModel):
     ) -> Iterator[Future]:  # pragma: no cover
        
         semaphore = semaphore or nullcontext[None]()
-        server_client = self.setup_resource_server_client()
-        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
+        server_client = self.setup_server_client()
+        agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
@@ -213,7 +201,7 @@ class RolloutReverificationHelper(BaseModel):
                         print(
                             "[rollout_reverification] /verify failed "
                             f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_verify_debug_summary(row), sort_keys=True)}",
+                            f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
                             flush=True,
                         )
                     raise
@@ -233,8 +221,8 @@ class RolloutReverificationHelper(BaseModel):
     def _prepare_payloads_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # to do - what about agent name?
 
-        materialized_inputs_jsonl_fpath = _resolve_input_path(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = _resolve_input_path(config.rollouts_jsonl_fpath)
+        materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
+        rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
         # to do - add validation for output_fpath and failures_fpath
 
         payloads = [
@@ -246,7 +234,6 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
-        self._validate_input_paths(config)
         # to do - move to other function 
 
         payloads_to_reverify = self._prepare_payloads_from_config(config)
@@ -317,9 +304,9 @@ class RolloutReverificationHelper(BaseModel):
         results_file.close()
         failures_file.close()
         # to do - add upload to wandb later
-        # if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
-        #     print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-        #     get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
+            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
+            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
@@ -358,7 +345,7 @@ class RolloutReverificationHelper(BaseModel):
             return None
 
         server_client = self.setup_resource_server_client()
-        agent_to_rs = self._build_agent_to_resources_server_mapping(server_client.global_config_dict)
+        agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
         # Group results by agent name
         agent_results: Dict[str, List[Dict]] = {}
         for row, result in zip(rows, results):
@@ -423,9 +410,9 @@ class RolloutReverificationHelper(BaseModel):
                     if isinstance(v, primitive_types)
                 }
             )
-        # to do - add upload to wandb later
-        # if get_wandb_run():  # pragma: no cover
-        #     get_wandb_run().log(metrics_to_log)
+        # to do - check that wandb works
+        if get_wandb_run():  # pragma: no cover
+            get_wandb_run().log(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -433,15 +420,4 @@ class RolloutReverificationHelper(BaseModel):
 
         return metrics_fpath
 
-    def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
 
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client

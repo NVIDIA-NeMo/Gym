@@ -43,6 +43,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.path_utils import resolve_input_path
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -302,14 +303,7 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        _input_path = Path(config.input_jsonl_fpath)
-        if not _input_path.is_absolute():
-            _cwd_path = Path.cwd() / _input_path
-            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
-        if not _input_path.exists():
-            raise ConfigPathNotFoundError(
-                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
-            )
+        _input_path = resolve_input_path(config.input_jsonl_fpath, f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly.")
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
