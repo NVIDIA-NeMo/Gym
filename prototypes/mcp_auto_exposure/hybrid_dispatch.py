@@ -110,6 +110,8 @@ class DirectBinding:
     defaulted_params: tuple[str, ...] = ()
     return_model: Optional[type[BaseModel]] = None
     needs_raw_body: bool = False  # handler reads await request.json() (no body model)
+    body_is_dict: bool = False  # handler declares ``body: dict`` — FastAPI passes the parsed
+    #                             JSON through unvalidated; direct dispatch passes ``arguments``
 
 
 @dataclass
@@ -119,24 +121,41 @@ class BindOutcome:
 
 
 def bind_route(route: APIRoute) -> BindOutcome:
-    """Classify one route's handler signature. PUBLIC introspection only."""
+    """Classify one route's handler signature. PUBLIC introspection only.
+
+    Annotation resolution matches FastAPI's own: ``inspect.signature`` first (it honors a
+    factory-set ``__signature__`` — newton_bench rewrites __signature__ with the real per-module
+    body model while ``__annotations__`` still says ``Any``), falling back to ``get_type_hints``
+    only for deferred string annotations (``from __future__ import annotations``).
+    """
     endpoint = route.endpoint
     reasons: list[str] = []
     try:
         hints = get_type_hints(endpoint)
-    except Exception as e:  # unresolvable forward refs etc.
-        return BindOutcome(None, [f"get_type_hints failed: {e!r}"])
+    except Exception:  # unresolvable forward refs; only fatal if a needed annotation is a string
+        hints = {}
     signature = inspect.signature(endpoint)
     path_params = set(_PATH_PARAM_RE.findall(route.path))
+
+    def resolve(name: str, raw: Any) -> Any:
+        if isinstance(raw, str):  # deferred annotation — get_type_hints is the resolver
+            return hints.get(name, raw)
+        if raw is inspect.Parameter.empty:
+            return hints.get(name, raw)
+        return raw  # concrete object on the signature wins (FastAPI reads the signature too)
 
     request_params: list[str] = []
     body_param: Optional[str] = None
     body_model: Optional[type[BaseModel]] = None
+    body_is_dict = False
     path_param: Optional[str] = None
     defaulted: list[str] = []
 
     for name, param in signature.parameters.items():
-        annotation = hints.get(name, param.annotation)
+        annotation = resolve(name, param.annotation)
+        if isinstance(annotation, str):
+            reasons.append(f"unresolvable string annotation on {name!r}: {annotation!r}")
+            continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             reasons.append(f"*args/**kwargs parameter {name!r}")
             continue
@@ -148,6 +167,14 @@ def bind_route(route: APIRoute) -> BindOutcome:
                 reasons.append(f"multiple body models ({body_param!r}, {name!r})")
                 continue
             body_param, body_model = name, annotation
+            continue
+        if annotation is dict:
+            # ``body: dict`` — FastAPI parses the JSON body and passes the dict through with no
+            # validation (openenv's non-MCP /step). Direct equivalent: pass ``arguments`` as-is.
+            if body_param is not None:
+                reasons.append(f"multiple body params ({body_param!r}, {name!r})")
+                continue
+            body_param, body_is_dict = name, True
             continue
         if name in path_params:
             if annotation not in (str, inspect.Parameter.empty):
@@ -167,7 +194,7 @@ def bind_route(route: APIRoute) -> BindOutcome:
             continue
         reasons.append(f"unsupported required param {name!r}: {annotation!r}")
 
-    ret = hints.get("return")
+    ret = resolve("return", signature.return_annotation)
     return_model = ret if isinstance(ret, type) and issubclass(ret, BaseModel) else None
 
     if reasons:
@@ -182,7 +209,8 @@ def bind_route(route: APIRoute) -> BindOutcome:
             path_param=path_param,
             defaulted_params=tuple(defaulted),
             return_model=return_model,
-            needs_raw_body=body_model is None and bool(request_params),
+            needs_raw_body=body_param is None and bool(request_params),
+            body_is_dict=body_is_dict,
         ),
         [],
     )
@@ -245,6 +273,8 @@ async def call_direct(
             kwargs[binding.body_param] = binding.body_model.model_validate(arguments)
         except ValidationError as e:
             raise DirectDispatchError(422, json.dumps(jsonable_encoder(e.errors()))) from e
+    elif binding.body_is_dict:
+        kwargs[binding.body_param] = dict(arguments or {})  # FastAPI's dict-body pass-through
     if binding.request_params:
         raw = json.dumps(arguments or {}).encode("utf-8") if binding.needs_raw_body else b""
         headers = [(b"content-type", b"application/json")]
