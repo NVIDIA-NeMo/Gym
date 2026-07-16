@@ -812,20 +812,62 @@ def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeyp
 
 def test_stage_setup_cache_links_task_artifacts_without_patching_osworld(monkeypatch, tmp_path: Path) -> None:
     task_id = "task-with-prestaged-files"
+    url = "https://example.test/reference.pdf"
+    cache_name = f"{osworld_client.uuid.uuid5(osworld_client.uuid.NAMESPACE_URL, url)}_reference.pdf"
     source_dir = tmp_path / "prestage" / task_id
     source_dir.mkdir(parents=True)
-    (source_dir / "reference.pdf").write_bytes(b"pdf")
+    (source_dir / cache_name).write_bytes(b"pdf")
     monkeypatch.setenv("OSWORLD_SETUP_CACHE_DIR", str(tmp_path / "prestage"))
 
     linked = osworld_client._stage_setup_cache(
-        {"id": task_id, "instruction": "Use the reference.", "config": []},
+        {
+            "id": task_id,
+            "instruction": "Use the reference.",
+            "config": [
+                {
+                    "type": "download",
+                    "parameters": {"files": [{"url": url, "path": "/home/oai/share/reference.pdf"}]},
+                }
+            ],
+        },
         str(tmp_path / "cache"),
     )
 
-    destination = tmp_path / "cache" / task_id / "reference.pdf"
+    destination = tmp_path / "cache" / task_id / cache_name
     assert linked == 1
     assert destination.is_symlink()
     assert destination.read_bytes() == b"pdf"
+
+
+def test_stage_setup_cache_does_not_link_evaluator_outputs(monkeypatch, tmp_path: Path) -> None:
+    task_id = "task-with-archive-evaluator"
+    url = "https://example.test/input.zip"
+    cache_name = f"{osworld_client.uuid.uuid5(osworld_client.uuid.NAMESPACE_URL, url)}_input.zip"
+    source_dir = tmp_path / "prestage" / task_id
+    source_dir.mkdir(parents=True)
+    (source_dir / cache_name).write_bytes(b"zip")
+    (source_dir / "result_pred").mkdir()
+    (source_dir / "result_gold").mkdir()
+    monkeypatch.setenv("OSWORLD_SETUP_CACHE_DIR", str(tmp_path / "prestage"))
+
+    linked = osworld_client._stage_setup_cache(
+        {
+            "id": task_id,
+            "config": [
+                {
+                    "type": "download",
+                    "parameters": {"files": [{"url": url, "path": "/home/oai/share/input.zip"}]},
+                }
+            ],
+        },
+        str(tmp_path / "cache"),
+    )
+
+    task_cache = tmp_path / "cache" / task_id
+    assert linked == 1
+    assert (task_cache / cache_name).is_symlink()
+    assert not (task_cache / "result_pred").exists()
+    assert not (task_cache / "result_gold").exists()
 
 
 def test_stage_setup_cache_supports_flat_spreadsheet_download_cache(monkeypatch, tmp_path: Path) -> None:

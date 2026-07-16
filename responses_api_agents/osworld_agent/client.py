@@ -187,7 +187,11 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
     """Expose pre-staged setup artifacts through OSWorld's per-task cache.
 
     Staging before ``env.reset`` preserves OSWorld's existing
-    ``SetupController`` flow without modifying the OSWorld checkout.
+    ``SetupController`` flow without modifying the OSWorld checkout.  Only
+    cache entries named by setup ``download`` actions are linked.  A shared
+    task cache can also contain evaluator outputs such as ``*_pred`` and
+    ``*_gold``; linking those mutable directories into a new rollout makes
+    archive evaluators fail when they try to recreate their output folders.
     """
 
     task_id = str(task_config.get("id") or task_config.get("task_id") or "")
@@ -202,33 +206,29 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
     elif "pptc" in task_id:
         flat_cache_env = "PPTC_SETUP_CACHE_DIR"
 
+    setup_cache_names: List[str] = []
+    for setup_item in task_config.get("config", []):
+        if setup_item.get("type") != "download":
+            continue
+        for file_config in setup_item.get("parameters", {}).get("files", []):
+            url = file_config.get("url")
+            destination_path = file_config.get("path")
+            if not url or not destination_path:
+                continue
+            setup_cache_names.append(
+                f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}_{os.path.basename(destination_path)}"
+            )
+
     if flat_cache_env:
         source_dir = os.environ.get(flat_cache_env, "")
-        if not os.path.isdir(source_dir):
-            return 0
-        for setup_item in task_config.get("config", []):
-            if setup_item.get("type") != "download":
-                continue
-            for file_config in setup_item.get("parameters", {}).get("files", []):
-                url = file_config.get("url")
-                destination_path = file_config.get("path")
-                if not url or not destination_path:
-                    continue
-                cache_name = f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}_{os.path.basename(destination_path)}"
-                linked += int(
-                    _link_if_present(
-                        os.path.join(source_dir, cache_name),
-                        os.path.join(task_cache_dir, cache_name),
-                    )
-                )
-        return linked
+    else:
+        cache_env = "OW_SETUP_CACHE_DIR" if task_id.startswith("ow-") else "OSWORLD_SETUP_CACHE_DIR"
+        source_root = os.environ.get(cache_env, "")
+        source_dir = os.path.join(source_root, task_id) if source_root else ""
 
-    cache_env = "OW_SETUP_CACHE_DIR" if task_id.startswith("ow-") else "OSWORLD_SETUP_CACHE_DIR"
-    source_root = os.environ.get(cache_env, "")
-    source_dir = os.path.join(source_root, task_id) if source_root else ""
     if not os.path.isdir(source_dir):
         return 0
-    for name in os.listdir(source_dir):
+    for name in setup_cache_names:
         linked += int(_link_if_present(os.path.join(source_dir, name), os.path.join(task_cache_dir, name)))
     return linked
 
