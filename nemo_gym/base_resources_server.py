@@ -17,7 +17,7 @@ import inspect
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Optional, get_type_hints
+from typing import Any, ClassVar, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -128,6 +128,12 @@ class _MCPHeaderSessionMiddleware:
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+
+    # Opt in to serve this server's tool routes over MCP. When True, run_webserver auto-installs the
+    # MCP /mcp endpoint after the app is built (nemo_gym.mcp_auto_exposure.maybe_auto_expose) — no
+    # handler changes, no explicit call. Off by default: auto-exposing every route is not always
+    # wanted (e.g. harness-only routes). Dispatcher servers also override mcp_tool_inventory().
+    expose_tools_over_mcp: ClassVar[bool] = False
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
