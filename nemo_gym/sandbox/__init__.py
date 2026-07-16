@@ -14,7 +14,7 @@
 
 """Public sandbox API for NeMo Gym."""
 
-from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
+from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, observability_env_vars
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
     ExecResult,
@@ -37,6 +37,7 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "observability_env_vars",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

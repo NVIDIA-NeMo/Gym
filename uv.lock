@@ -1917,6 +1917,9 @@ dev = [
     { name = "requests-mock" },
     { name = "ruff" },
 ]
+lens = [
+    { name = "nemo-lens", extra = ["sdk"], marker = "python_full_version >= '3.13'" },
+]
 sandbox = [
     { name = "boto3" },
     { name = "daytona" },
@@ -1958,6 +1961,7 @@ requires-dist = [
     { name = "mlflow-skinny", specifier = ">=3.14.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
+    { name = "nemo-lens", extras = ["sdk"], marker = "python_full_version >= '3.13' and extra == 'lens'", specifier = ">=0.1.0" },
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
@@ -1984,7 +1988,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["all", "sandbox", "dev"]
+provides-extras = ["all", "lens", "sandbox", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
@@ -1998,6 +2002,25 @@ docs = [
     { name = "sphinx-reredirects", specifier = ">=0.1.6" },
     { name = "sphinxcontrib-mermaid", specifier = ">=1.0.0" },
     { name = "swagger-plugin-for-sphinx", specifier = ">=6.0.0" },
+]
+
+[[package]]
+name = "nemo-lens"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-api" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/9f/c32809fdb5c375218d8dc4f5762133c0be63a791ced8654a4f2408822513/nemo_lens-0.1.0.tar.gz", hash = "sha256:044621a6d877739e0bc69aced2f2f2a5c565eadc3f9070b99af72bb57abd73aa", size = 46741, upload-time = "2026-07-03T00:49:47.303Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/e4/23f7b705bd4102be32f92e651ad5dece122d93e09b8518d3df8c17fd2f6b/nemo_lens-0.1.0-py3-none-any.whl", hash = "sha256:87eca2609dfd41db8f663d943c0c83153e209c1a880bcab816750b6a4f841d58", size = 51451, upload-time = "2026-07-03T00:49:46.109Z" },
+]
+
+[package.optional-dependencies]
+sdk = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
 ]
 
 [[package]]
@@ -2226,6 +2249,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/83/dd4660f2956ff88ed071e9e0e36e830df14b8c5dc06722dbde1841accbe8/opentelemetry_exporter_otlp_proto_common-1.38.0.tar.gz", hash = "sha256:e333278afab4695aa8114eeb7bf4e44e65c6607d54968271a249c180b2cb605c", size = 20431, upload-time = "2025-10-16T08:35:53.285Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/9e/55a41c9601191e8cd8eb626b54ee6827b9c9d4a46d736f32abc80d8039fc/opentelemetry_exporter_otlp_proto_common-1.38.0-py3-none-any.whl", hash = "sha256:03cb76ab213300fe4f4c62b7d8f17d97fcfd21b89f0b5ce38ea156327ddda74a", size = 18359, upload-time = "2025-10-16T08:35:34.099Z" },
+]
+
+[[package]]
+name = "opentelemetry-exporter-otlp-proto-grpc"
+version = "1.38.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-common" },
+    { name = "opentelemetry-proto" },
+    { name = "opentelemetry-sdk" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a2/c0/43222f5b97dc10812bc4f0abc5dc7cd0a2525a91b5151d26c9e2e958f52e/opentelemetry_exporter_otlp_proto_grpc-1.38.0.tar.gz", hash = "sha256:2473935e9eac71f401de6101d37d6f3f0f1831db92b953c7dcc912536158ebd6", size = 24676, upload-time = "2025-10-16T08:35:53.83Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/f0/bd831afbdba74ca2ce3982142a2fad707f8c487e8a3b6fef01f1d5945d1b/opentelemetry_exporter_otlp_proto_grpc-1.38.0-py3-none-any.whl", hash = "sha256:7c49fd9b4bd0dbe9ba13d91f764c2d20b0025649a6e4ac35792fb8d84d764bc7", size = 19695, upload-time = "2025-10-16T08:35:35.053Z" },
 ]
 
 [[package]]

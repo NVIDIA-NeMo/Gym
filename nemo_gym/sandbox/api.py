@@ -15,6 +15,9 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import atexit
+import contextlib
+import os
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
@@ -36,6 +39,37 @@ from nemo_gym.sandbox.providers import (
 T = TypeVar("T")
 SYNC_OPERATION_TIMEOUT_S = 3600.0
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+
+_OBSERVABILITY_ENV_PREFIXES = ("NEMO_RL_SANDBOX_OBSERVABILITY_", "NEMO_LENS_", "OTEL_")
+
+_recorder_lock = threading.Lock()
+_recorder: Any = None
+_recorder_initialized = False
+
+
+def _get_sandbox_recorder() -> Any:
+    """Return the process-level sandbox observability recorder, or None if not configured."""
+    global _recorder, _recorder_initialized
+    if _recorder_initialized:
+        return _recorder
+    with _recorder_lock:
+        if _recorder_initialized:
+            return _recorder
+        _recorder_initialized = True
+        try:
+            from nemo.lens.sandbox.observability import build_recorder_from_env
+
+            _recorder = build_recorder_from_env()
+            if _recorder is not None:
+                atexit.register(_recorder.finalize)
+        except ImportError:
+            pass
+    return _recorder
+
+
+def observability_env_vars() -> dict[str, str]:
+    """Return the subset of os.environ that controls sandbox observability."""
+    return {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _OBSERVABILITY_ENV_PREFIXES)}
 
 
 class AsyncSandbox:
@@ -69,20 +103,32 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        handle = await self._provider.create(requested_spec)
-        try:
-            if requested_spec.files:
-                with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
-                    tmp_path = Path(tmp_dir)
-                    for index, (target_path, contents) in enumerate(requested_spec.files.items()):
-                        source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
-            raise
+        rec = _get_sandbox_recorder()
+        trajectory_id = requested_spec.metadata.get("instance_id", "")
+        _obs = (
+            rec.sync_span(
+                "sandbox.create",
+                phase="create",
+                attributes={"image": requested_spec.image or "", "trajectory_id": trajectory_id},
+            )
+            if rec is not None
+            else contextlib.nullcontext()
+        )
+        with _obs:
+            handle = await self._provider.create(requested_spec)
+            try:
+                if requested_spec.files:
+                    with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                        tmp_path = Path(tmp_dir)
+                        for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                            source_path = tmp_path / f"file-{index}"
+                            source_path.write_text(contents, encoding="utf-8")
+                            await self._provider.upload_file(handle, source_path, target_path)
+            except Exception:
+                await self._provider.close(handle)
+                await self._provider.aclose()
+                self._closed = True
+                raise
 
         self._spec = requested_spec
         self._handle = handle
@@ -98,14 +144,31 @@ class AsyncSandbox:
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        return await self._provider.exec(
-            self._require_handle(),
-            command,
-            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-            env=env,
-            timeout_s=timeout_s,
-            user=user,
+        handle = self._require_handle()
+        rec = _get_sandbox_recorder()
+        trajectory_id = self._spec.metadata.get("instance_id", "") if self._spec is not None else ""
+        _obs = (
+            rec.sync_span(
+                "sandbox.exec",
+                phase="execution",
+                attributes={
+                    "sandbox_id": handle.sandbox_id,
+                    "trajectory_id": trajectory_id,
+                    "command": command[:500],
+                },
+            )
+            if rec is not None
+            else contextlib.nullcontext()
         )
+        with _obs:
+            return await self._provider.exec(
+                handle,
+                command,
+                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+            )
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
@@ -123,10 +186,23 @@ class AsyncSandbox:
     async def stop(self) -> None:
         if self._closed:
             return
+        rec = _get_sandbox_recorder()
+        sandbox_id = self._handle.sandbox_id if self._handle is not None else ""
+        trajectory_id = self._spec.metadata.get("instance_id", "") if self._spec is not None else ""
         try:
             if self._handle is not None and not self._stopped:
                 self._stopped = True
-                await self._provider.close(self._handle)
+                _obs = (
+                    rec.sync_span(
+                        "sandbox.destroy",
+                        phase="cleanup",
+                        attributes={"sandbox_id": sandbox_id, "trajectory_id": trajectory_id},
+                    )
+                    if rec is not None
+                    else contextlib.nullcontext()
+                )
+                with _obs:
+                    await self._provider.close(self._handle)
         finally:
             await self._provider.aclose()
             self._closed = True

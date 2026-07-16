@@ -167,13 +167,17 @@ def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any
 
 
 def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
+    from nemo_gym.sandbox import observability_env_vars
+
     runtime_env: dict[str, Any] = {"py_executable": sys.executable}
+    env_vars: dict[str, str] = observability_env_vars()
     connection = _opensandbox_connection(provider)
-    if connection is None:
-        return runtime_env
-    api_key = connection.get("api_key")
-    if api_key:
-        runtime_env["env_vars"] = {OPENSANDBOX_API_KEY_ENV: str(api_key)}
+    if connection is not None:
+        api_key = connection.get("api_key")
+        if api_key:
+            env_vars[OPENSANDBOX_API_KEY_ENV] = str(api_key)
+    if env_vars:
+        runtime_env["env_vars"] = env_vars
     return runtime_env
 
 
