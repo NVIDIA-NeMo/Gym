@@ -23,7 +23,7 @@ dependencies = [
     # 83e85344 plus the nv-gym provider overlay and explicit proxy-runtime
     # repair. Use an archive because uv recursively initializes git
     # submodules, while optional SurferH submodules are not needed here.
-    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/95dc83aad1670b8ef399d5e37e696619417dafd8.tar.gz",
+    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/73910565d51c6964958312b3640b6655d85b31d3.tar.gz",
     "docker==7.1.0",
     # Needed by OSWorld's mm_agents.pointer implementation.
     "anthropic",

@@ -273,7 +273,7 @@ OSWorld commit in `pyproject.toml`. That OSWorld commit merges upstream main
 | --- | --- |
 | Gym `feature/osworld` | No manual checkout. The agent package installs the exact SHA from `pyproject.toml`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `95dc83aad1670b8ef399d5e37e696619417dafd8` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `73910565d51c6964958312b3640b6655d85b31d3` or a documented successor. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -282,12 +282,17 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout 95dc83aad1670b8ef399d5e37e696619417dafd8
+git checkout 73910565d51c6964958312b3640b6655d85b31d3
 ```
 
 Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
 branch is the integration line that follows upstream main, but its tip can
 move as new upstream changes are merged.
+
+This pinned revision also prevents OSWorld's Chrome setup DEBUG logging from
+serializing the complete worker environment into task artifacts. Model and
+proxy credentials must remain runtime secrets and are never useful setup
+diagnostics.
 
 The adapter defaults to proxy disabled. Set both variables only for a run that
 is allowed to use a proxy:
