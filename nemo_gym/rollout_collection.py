@@ -43,7 +43,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.path_utils import resolve_input_path
+from nemo_gym.path_utils import failures_path_for, resolve_input_path
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -108,9 +108,6 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-def _failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
-    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):

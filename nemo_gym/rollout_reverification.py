@@ -16,6 +16,7 @@ import asyncio
 import json
 from asyncio import Future, Semaphore
 from collections import Counter
+from dataclasses import dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
@@ -49,21 +50,15 @@ from omegaconf import DictConfig
 from nemo_gym.global_config import get_wandb_run
 from wandb import Table
 from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.path_utils import resolve_input_path
+from nemo_gym.path_utils import failures_path_for, resolve_input_path
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 
-
-def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
-    summary = {
-        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
-        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
-        "resources_server_name": resources_server_name,
-    }
-    return {k: v for k, v in summary.items() if v is not None}
+@dataclass
+class InputRolloutPair:
+    input: Dict[str, Any]
+    rollout: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +96,6 @@ def _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict: Union[
         f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
         "route by. Use a config with agent blocks."
     )
-
 
 def _build_agent_to_resources_server_mapping(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
     mapping = _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict)
@@ -148,46 +142,57 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "If the output file already exists, delete it and start fresh. "
+            "By default, an existing output file raises an error to prevent accidental appending or overwriting."
+        ),
+    )
 
+def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    summary = {
+        TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+        ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "resources_server_name": resources_server_name,
+    }
+    return {k: v for k, v in summary.items() if v is not None}
 
+def _setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":  # pragma: no cover
+    server_client = ServerClient.load_from_global_config(head_server_config)
+    if not is_global_aiohttp_client_setup():
+        set_global_aiohttp_client(
+            cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
+        )
+    return server_client
+        
 
-class RolloutReverificationHelper(BaseModel):
-    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-        return server_client
+def _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
+) -> "Iterator[InputRolloutPair]":
+    inputs_by_key = {}
+    with open(materialized_inputs_jsonl_fpath) as m_f:
+        for line in m_f:
+            r = orjson.loads(line)
+            inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
+    with open(rollouts_jsonl_fpath) as r_f:
+        for i, line in tqdm(enumerate(r_f), desc="Reading rollouts"):  # never holds the whole file
+            if limit and i >= limit:
+                break
+            rollout_row = orjson.loads(line)
+            input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
+            if input_row is None:
+                raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
+            yield InputRolloutPair(input=input_row, rollout=rollout_row)
 
-    def _yield_inputs_and_rollouts_paired(
-        self, materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
-    ) -> Iterator[Tuple[Dict, Dict]]:
-        inputs_by_key = {}
-        with open(materialized_inputs_jsonl_fpath) as m_f:
-            for line in m_f:
-                r = orjson.loads(line)
-                inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
-        # to do - change to use namedtuple
-        # to do - tqdm or other progress bar already used in Gym
-        with open(rollouts_jsonl_fpath) as r_f:
-            for i, line in enumerate(r_f):  # never holds the whole file
-                if limit and i >= limit:
-                    break
-                rollout_row = orjson.loads(line)
-                input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
-                if input_row is None:
-                    raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
-                yield (input_row, rollout_row)
-
-    def _run_reverification_payloads(
-        self,
+def _run_verification_payloads(
         payloads: List[Dict],
         semaphore: Semaphore | nullcontext[None] | None = None,
     ) -> Iterator[Future]:  # pragma: no cover
        
         semaphore = semaphore or nullcontext[None]()
-        server_client = self.setup_server_client()
+        server_client = _setup_server_client()
         agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
@@ -215,37 +220,131 @@ class RolloutReverificationHelper(BaseModel):
             maxinterval=60,
         )
 
-    def map_input_and_rollout_rows_to_payload(self, input_row: Dict, rollout_row: Dict) -> Dict:
-        return input_row | {"response": rollout_row["response"]}
+def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
+    if output_fpath.exists():
+        if overwrite:
+            output_fpath.unlink()
+        else:
+            raise ConfigError(
+                f"Output file already exists: '{output_fpath}'. "
+                "Pass ++overwrite=true to delete it and start fresh."
+            )
 
-    def _prepare_payloads_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        # to do - what about agent name?
 
-        materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
-        # to do - add validation for output_fpath and failures_fpath
+def _build_verify_payload(input_row: Dict, rollout_row: Dict) -> Dict:
+    return input_row | {"response": rollout_row["response"]}
 
-        payloads = [
-            self.map_input_and_rollout_rows_to_payload(ir, rr)
-            for ir, rr in self._yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath)
-        ]  # can be written better
-        return payloads
+def _prepare_payloads_from_config(config: RolloutReverificationConfig) -> List[Dict]:
+    materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
+    rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
+    payloads = [
+        _build_verify_payload(pair.input, pair.rollout)
+        for pair in _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath)
+    ]
+    return payloads
 
+async def _call_aggregate_metrics(
+    results: List[Dict],
+    rows: List[Dict],
+    output_fpath: Path,
+) -> Optional[Path]:
+    """Call /aggregate_metrics on each resource server after rollouts complete.
+
+    Writes a single _aggregate_metrics.json with one entry per agent (same shape
+    as the old _agent_metrics.json). Returns the file path.
+    """
+    if not results:
+        return None
+
+    server_client = _setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    # Group results by agent name
+    agent_results: Dict[str, List[Dict]] = {}
+    for row, result in zip(rows, results):
+        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        if not agent_name:
+            continue
+        agent_results.setdefault(agent_name, []).append(result)
+
+    async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+        # Strip heavyweight fields before sending, but preserve response.usage
+        stripped = []
+        for r in agent_result_list:
+            entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+            usage = (r.get("response") or {}).get("usage")
+            if usage:
+                entry["response"] = {"usage": usage}
+            stripped.append(entry)
+
+        agg_request = AggregateMetricsRequest(verify_responses=stripped)
+        agg_response = await server_client.post(
+            server_name=agent_to_rs[agent_name],
+            url_path="/aggregate_metrics",
+            json=agg_request,
+        )
+
+        await raise_for_status(agg_response)
+        agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+
+        agent_entry = {
+            AGENT_REF_KEY_NAME: {"name": agent_name},
+            "agent_metrics": agg_result.agent_metrics,
+            "key_metrics": agg_result.key_metrics,
+            "group_level_metrics": agg_result.group_level_metrics,
+        }
+        return agent_entry
+
+    all_agent_metrics: List[Dict] = []
+    tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+    for coro in asyncio.as_completed(tasks):
+        agent_entry = await coro
+        all_agent_metrics.append(agent_entry)
+
+        agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+        key_metrics = agent_entry.get("key_metrics", {})
+        print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+    primitive_types = (bool, int, float, str, type(None))
+    metrics_to_log = dict()
+    for agent_entry in all_agent_metrics:
+        agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+        metrics_to_log.update(
+            {
+                f"{agent_name}/{k}": v
+                for k, v in agent_entry["agent_metrics"].items()
+                if isinstance(v, primitive_types)
+            }
+        )
+        metrics_to_log.update(
+            {
+                f"key_metrics/{agent_name}/{k}": v
+                for k, v in agent_entry["key_metrics"].items()
+                if isinstance(v, primitive_types)
+            }
+        )
+    # to do - check that wandb works
+    if get_wandb_run():  # pragma: no cover
+        get_wandb_run().log(metrics_to_log)
+
+    # Write single file with all agents
+    metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+    metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+
+    return metrics_fpath
+class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        output_fpath.parent.mkdir(exist_ok=True, parents=True)
+        failures_fpath = failures_path_for(output_fpath)
 
-        # to do - move to other function 
+        for fpath in (output_fpath, failures_fpath):
+            _guard_output_file(fpath, config.overwrite)
 
-        payloads_to_reverify = self._prepare_payloads_from_config(config)
+        payloads_to_reverify = _prepare_payloads_from_config(config)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
-
-        from nemo_gym.rollout_collection import _failures_path_for
-
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
@@ -254,8 +353,7 @@ class RolloutReverificationHelper(BaseModel):
         rows: List[Dict] = []
         results: List[Dict] = []
         result_strs: List[List[str]] = []
-        # to do - get server name from config
-        for future in self._run_reverification_payloads(payloads_to_reverify,semaphore=semaphore):
+        for future in _run_verification_payloads(payloads_to_reverify,semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -303,7 +401,7 @@ class RolloutReverificationHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
-        # to do - add upload to wandb later
+        # to do - check upload to wandb later
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
@@ -322,7 +420,7 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(results, rows, output_fpath)
 
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpath}
@@ -330,94 +428,6 @@ class RolloutReverificationHelper(BaseModel):
 
         return results
 
-    async def _call_aggregate_metrics(
-        self,
-        results: List[Dict],
-        rows: List[Dict],
-        output_fpath: Path,
-    ) -> Optional[Path]:
-        """Call /aggregate_metrics on each resource server after rollouts complete.
 
-        Writes a single _aggregate_metrics.json with one entry per agent (same shape
-        as the old _agent_metrics.json). Returns the file path.
-        """
-        if not results:
-            return None
-
-        server_client = self.setup_resource_server_client()
-        agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-        # Group results by agent name
-        agent_results: Dict[str, List[Dict]] = {}
-        for row, result in zip(rows, results):
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if not agent_name:
-                continue
-            agent_results.setdefault(agent_name, []).append(result)
-
-        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
-            # Strip heavyweight fields before sending, but preserve response.usage
-            stripped = []
-            for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
-                usage = (r.get("response") or {}).get("usage")
-                if usage:
-                    entry["response"] = {"usage": usage}
-                stripped.append(entry)
-
-            agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await server_client.post(
-                server_name=agent_to_rs[agent_name],
-                url_path="/aggregate_metrics",
-                json=agg_request,
-            )
-
-            await raise_for_status(agg_response)
-            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
-
-            agent_entry = {
-                AGENT_REF_KEY_NAME: {"name": agent_name},
-                "agent_metrics": agg_result.agent_metrics,
-                "key_metrics": agg_result.key_metrics,
-                "group_level_metrics": agg_result.group_level_metrics,
-            }
-            return agent_entry
-
-        all_agent_metrics: List[Dict] = []
-        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
-        for coro in asyncio.as_completed(tasks):
-            agent_entry = await coro
-            all_agent_metrics.append(agent_entry)
-
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            key_metrics = agent_entry.get("key_metrics", {})
-            print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
-
-        primitive_types = (bool, int, float, str, type(None))
-        metrics_to_log = dict()
-        for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            metrics_to_log.update(
-                {
-                    f"{agent_name}/{k}": v
-                    for k, v in agent_entry["agent_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-            metrics_to_log.update(
-                {
-                    f"key_metrics/{agent_name}/{k}": v
-                    for k, v in agent_entry["key_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-        # to do - check that wandb works
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
-
-        # Write single file with all agents
-        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
-        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
-
-        return metrics_fpath
 
 

@@ -29,11 +29,14 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, T
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_reverification import (
-    RolloutReverificationHelper,
+    InputRolloutPair,
     _agent_to_rs_mapping_from_agent_blocks,
     _agent_to_rs_mapping_from_resources_only_config,
     _build_agent_to_resources_server_mapping,
+    _guard_output_file,
     _rollout_verify_debug_summary,
+    _setup_server_client,
+    _yield_inputs_and_rollouts_paired,
 )
 #  (
 #     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -150,8 +153,224 @@ class TestBuildAgentToResourcesServerMapping:
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
 
+class TestRolloutVerifyDebugSummary:
+    """Tests for RolloutReverificationHelper._rollout_verify_debug_summary."""
 
-class TestRolloutAggregationHelper:
+    def test_rollout_verify_debug_summary_compact(self) -> None:
+        resources_server_name = "my_rs"
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            "env_specific_metadata": "do not include",
+            "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
+        }
+
+        assert _rollout_verify_debug_summary(row, resources_server_name) == {
+            "agent_name": "my_agent",
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            "resources_server_name": "my_rs",
+        }
+
+class TestSetupServerClient:
+    """Tests for _setup_server_client: loads ServerClient and lazily initialises the global aiohttp session."""
+
+    def test_returns_server_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock()
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
+            lambda _: mock_client,
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
+
+        result = _setup_server_client()
+
+        assert result is mock_client
+
+    def test_configures_aiohttp_client_when_not_yet_set_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {"max_connections": 10}
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
+            lambda _: mock_client,
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: False)
+
+        set_aiohttp_calls = []
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.set_global_aiohttp_client",
+            lambda cfg: set_aiohttp_calls.append(cfg),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.GlobalAIOHTTPAsyncClientConfig.model_validate",
+            lambda d: d,
+        )
+
+        _setup_server_client()
+
+        assert len(set_aiohttp_calls) == 1
+        assert set_aiohttp_calls[0] == {"max_connections": 10}
+
+    def test_skips_aiohttp_setup_when_already_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock()
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
+            lambda _: mock_client,
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
+
+        set_aiohttp_calls = []
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.set_global_aiohttp_client",
+            lambda cfg: set_aiohttp_calls.append(cfg),
+        )
+
+        _setup_server_client()
+
+        assert set_aiohttp_calls == []
+
+    def test_passes_head_server_config_to_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        received = []
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
+            lambda cfg: received.append(cfg) or MagicMock(),
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
+
+        sentinel = MagicMock()
+        _setup_server_client(head_server_config=sentinel)
+
+        assert received == [sentinel]
+
+
+class TestYieldInputsAndRolloutsPaired:
+    """Tests for _yield_inputs_and_rollouts_paired.
+
+    Minimal data shape per row:
+      materialized input: {_ng_task_index, _ng_rollout_index, <input fields>}
+      rollout:            {_ng_task_index, _ng_rollout_index, <output fields>}
+    The function pairs them by (task_index, rollout_index) and yields InputRolloutPair.
+    """
+
+    def _write_jsonl(self, path: Path, rows: list) -> None:
+        path.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+
+    def test_pairs_input_and_rollout_by_task_and_rollout_index(self, tmp_path: Path) -> None:
+        inputs = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q1"},
+        ]
+        rollouts = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+        ]
+        inputs_path = tmp_path / "inputs.jsonl"
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._write_jsonl(inputs_path, inputs)
+        self._write_jsonl(rollouts_path, rollouts)
+
+        pairs = list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path))
+
+        assert len(pairs) == 2
+        assert pairs[0] == InputRolloutPair(input=inputs[0], rollout=rollouts[0])
+        assert pairs[1] == InputRolloutPair(input=inputs[1], rollout=rollouts[1])
+
+    def test_rollouts_in_different_order_than_inputs_still_paired_correctly(self, tmp_path: Path) -> None:
+        inputs = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q1"},
+        ]
+        rollouts = [
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+        ]
+        inputs_path = tmp_path / "inputs.jsonl"
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._write_jsonl(inputs_path, inputs)
+        self._write_jsonl(rollouts_path, rollouts)
+
+        pairs = list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path))
+
+        assert pairs[0].input["question"] == "q1"
+        assert pairs[0].rollout["reward"] == 0.0
+        assert pairs[1].input["question"] == "q0"
+        assert pairs[1].rollout["reward"] == 1.0
+
+    def test_limit_stops_after_n_rollouts(self, tmp_path: Path) -> None:
+        inputs = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "q": i} for i in range(5)]
+        rollouts = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(5)]
+        inputs_path = tmp_path / "inputs.jsonl"
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._write_jsonl(inputs_path, inputs)
+        self._write_jsonl(rollouts_path, rollouts)
+
+        pairs = list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path, limit=3))
+
+        assert len(pairs) == 3
+        assert [p.rollout[TASK_INDEX_KEY_NAME] for p in pairs] == [0, 1, 2]
+
+    def test_rollout_with_no_matching_input_raises_config_error(self, tmp_path: Path) -> None:
+        inputs = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"}]
+        rollouts = [{TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+        inputs_path = tmp_path / "inputs.jsonl"
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._write_jsonl(inputs_path, inputs)
+        self._write_jsonl(rollouts_path, rollouts)
+
+        with pytest.raises(ConfigError, match="No matching materialized input row"):
+            list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path))
+
+    def test_multiple_rollouts_per_task_paired_independently(self, tmp_path: Path) -> None:
+        inputs = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "question": "q0"},
+        ]
+        rollouts = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+        ]
+        inputs_path = tmp_path / "inputs.jsonl"
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._write_jsonl(inputs_path, inputs)
+        self._write_jsonl(rollouts_path, rollouts)
+
+        pairs = list(_yield_inputs_and_rollouts_paired(inputs_path, rollouts_path))
+
+        assert len(pairs) == 2
+        assert pairs[0].rollout[ROLLOUT_INDEX_KEY_NAME] == 0
+        assert pairs[1].rollout[ROLLOUT_INDEX_KEY_NAME] == 1
+        # each rollout is keyed by (task_index, rollout_index), so each gets its own input row
+        assert pairs[0].input[ROLLOUT_INDEX_KEY_NAME] == 0
+        assert pairs[1].input[ROLLOUT_INDEX_KEY_NAME] == 1
+
+
+class TestGuardOutputFile:
+    """Unit tests for _guard_output_file (single file).
+
+    The for loop over (output, failures) lives in run_from_config; this tests the per-file logic.
+      - overwrite=False and file exists → ConfigError
+      - overwrite=True and file exists  → file is deleted
+      - file absent                     → no error regardless of overwrite
+    """
+
+    def test_raises_if_file_exists_and_overwrite_false(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "output.jsonl"
+        fpath.write_text("stale")
+        with pytest.raises(ConfigError, match="Output file already exists"):
+            _guard_output_file(fpath, overwrite=False)
+
+    def test_deletes_file_when_overwrite_true(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "output.jsonl"
+        fpath.write_text("stale")
+        _guard_output_file(fpath, overwrite=True)
+        assert not fpath.exists()
+
+    def test_no_error_when_file_absent(self, tmp_path: Path) -> None:
+        _guard_output_file(tmp_path / "output.jsonl", overwrite=False)
+
+
+class TestRolloutReverificationHelper:
     """End-to-end shape of `ng_aggregate_rollouts`: glob → load → sort → aggregate."""
 
     async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,22 +482,6 @@ class TestRolloutAggregationHelper:
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
 
 class TestRolloutReverification:
-    def test_rollout_verify_debug_summary_compact(self) -> None:
-        resources_server_name = "my_rs"
-        row = {
-            AGENT_REF_KEY_NAME: {"name": "my_agent"},
-            TASK_INDEX_KEY_NAME: 12,
-            ROLLOUT_INDEX_KEY_NAME: 3,
-            "env_specific_metadata": "do not include",
-            "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
-        }
-
-        assert _rollout_verify_debug_summary(row, resources_server_name) == {
-            "agent_name": "my_agent",
-            TASK_INDEX_KEY_NAME: 12,
-            ROLLOUT_INDEX_KEY_NAME: 3,
-            "resources_server_name": "my_rs",
-        }
 
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
