@@ -3821,3 +3821,53 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+class TestToolChoiceNormalization:
+    """`_preprocess_chat_completion_create_params` must not forward a
+    tool_choice other than "none" when the request has no tools.
+
+    vLLM's OpenAI ChatCompletion validator raises
+    ``Value error, When using `tool_choice`, `tools` must be set.`` in that case,
+    which returns HTTP 500 and (in NeMo-RL) tears down the whole rollout/training
+    run. No-tool agents such as an LLM-as-judge still send the OpenAI-default
+    ``tool_choice="auto"`` / ``parallel_tool_calls=True``, so the model server
+    must strip them.
+    """
+
+    def test_auto_tool_choice_without_tools_is_dropped(self) -> None:
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Which document is correct?"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_explicit_none_tool_choice_is_preserved(self) -> None:
+        model = _make_minimal_audio_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": "none",
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["tool_choice"] == "none"
+
+    def test_tool_choice_with_tools_is_untouched(self) -> None:
+        model = _make_minimal_audio_model()
+        tools = [{"type": "function", "function": {"name": "noop", "parameters": {}}}]
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "tools": tools,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["tool_choice"] == "auto"
+        assert result["parallel_tool_calls"] is True
+        assert result["tools"] == tools

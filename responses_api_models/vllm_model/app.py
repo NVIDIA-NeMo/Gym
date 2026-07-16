@@ -228,6 +228,19 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict["model"] = self.config.model
 
+        # Normalize tool params when the request carries no tools. vLLM's OpenAI
+        # ChatCompletion validator rejects a request that sets `tool_choice` to
+        # anything other than "none" without any `tools`
+        # ("When using `tool_choice`, `tools` must be set."). No-tool agents
+        # (e.g. an LLM-as-judge) still send the OpenAI-default `tool_choice="auto"`
+        # / `parallel_tool_calls=True`, which would 500 the model server. Drop the
+        # orphaned tool params (an explicit "none" is left untouched) so such
+        # requests validate cleanly.
+        if not body_dict.get("tools"):
+            if body_dict.get("tool_choice") not in (None, "none"):
+                body_dict.pop("tool_choice", None)
+            body_dict.pop("parallel_tool_calls", None)
+
         chat_template_kwargs = {}
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
