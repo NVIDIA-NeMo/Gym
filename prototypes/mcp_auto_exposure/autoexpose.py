@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Brian-design auto-exposure base (spike).
+"""Auto-exposure engine: serve unmodified FastAPI tool routes over MCP.
 
 Contract (R1-R4):
   R1  Env authors write plain FastAPI routes exactly as on origin/main. No decorators.
@@ -7,29 +7,23 @@ Contract (R1-R4):
       — byte-identical handler code. This module never touches handler functions.
   R3  Every non-basic POST route is exposed as an MCP tool automatically. Parameterized catch-all
       routes cannot be single tools; dispatcher servers override ONE function,
-      ``mcp_tool_inventory()``, returning the tool inventory (names + schemas); those tools
-      dispatch by replaying ``POST /<name>`` which the existing catch-all route matches.
+      ``mcp_tool_inventory()``, returning the tool inventory (names + schemas).
   R4  The HTTP door is untouched except for two additive deltas, both reported by the checks:
       the ``/seed_session`` response gains an ``mcp`` key, and ``/mcp`` (a new path) exists.
 
-Mechanism (the replay bridge):
-  MCP tools/call -> verify the signed session token (header ``X-NeMo-Gym-Session-Token``) ->
-  mint the starlette SessionMiddleware cookie for that session id (Gym owns the itsdangerous
-  secret) -> re-issue the call as an INTERNAL ASGI request through the app's OWN middleware
-  stack (SessionMiddleware populates request.session; the unmodified handler runs) -> map the
-  HTTP response to an MCP result (2xx JSON -> content + structuredContent; anything else ->
-  isError carrying the HTTP status and body text).
+Dispatch (per route, chosen at startup by hybrid_dispatch.plan_hybrid):
+  * DIRECT (default): run the frozen handler ONCE with a fabricated Request whose ``.session`` is
+    served by a public Request subclass — no second app pass. ~5-7 us/call. See hybrid_dispatch.py.
+  * REPLAY (fallback): where the detector cannot prove direct == a real HTTP request (custom
+    middleware, unsupported handler shapes), re-issue the call as an INTERNAL ASGI request through
+    the app's OWN stack (SessionMiddleware populates request.session; the unmodified handler runs).
+    Same result mapping either way: 2xx JSON -> content + structuredContent; else -> isError.
 
-MCP-side implementation choice: the official SDK's LOW-LEVEL ``mcp.server.lowlevel.Server`` +
-``StreamableHTTPSessionManager`` (stateless, json_response). Why:
-  * tools here are dynamic (harvested from routes / returned by an inventory hook) with
-    hand-built JSON schemas — lowlevel serves that first-class via list_tools/call_tool
-    handlers, no function-introspection to fight and no private attributes to patch
-    (FastMCP would need ``_tool_manager`` surgery for dynamic tools);
-  * the SDK populates ``server.request_context.request`` with the actual starlette Request of
-    the POST /mcp envelope, so the session-token header is read directly — no ASGI middleware
-    + ContextVar bridge needed;
-  * zero new dependency: Gym already ships the ``mcp`` package.
+MCP-side engine: the official SDK's LOW-LEVEL ``mcp.server.lowlevel.Server`` +
+``StreamableHTTPSessionManager`` (stateless, json_response). Tools here are dynamic (harvested from
+routes / an inventory hook) with hand-built JSON schemas — lowlevel serves that first-class via
+list_tools/call_tool handlers, no private attributes patched, and the SDK exposes the POST /mcp
+Request via ``request_context`` so the session-token header is read directly. Gym already ships mcp.
 """
 
 from __future__ import annotations
@@ -47,6 +41,7 @@ import mcp.types as types
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
+from hybrid_dispatch import DirectDispatchError, call_direct, plan_hybrid
 from itsdangerous import BadSignature, TimestampSigner, URLSafeSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -288,7 +283,7 @@ def install_auto_exposure(
     serializer = URLSafeSerializer(secret, salt=TOKEN_SALT)
 
     # ---- tool inventory (R3) ---------------------------------------------------------------
-    entries, catchall_routes = harvest_route_tools(app)
+    typed_entries, catchall_routes = harvest_route_tools(app)
 
     # Whether a catch-all backs real tools is author knowledge no classifier can recover
     # (workplace's /{path} backs 27 tools; finance's /{tool_name} only returns error strings).
@@ -305,13 +300,14 @@ def install_auto_exposure(
         )
     undeclared_catchalls = [route for route in catchall_routes if route.path not in declared_toolless]
 
+    inventory_entries: list[ToolEntry] = []
     inventory_fn = getattr(server, "mcp_tool_inventory", None)
     if inventory_fn is not None:
         for item in inventory_fn():
-            entries.append(
+            inventory_entries.append(
                 ToolEntry(
                     name=item["name"],
-                    path="/" + item["name"],  # dispatch through the existing catch-all route
+                    path="/" + item["name"],  # replay fall-through matches the catch-all by URL
                     tool=types.Tool(
                         name=item["name"],
                         description=item.get("description"),
@@ -329,10 +325,31 @@ def install_auto_exposure(
         )
 
     tool_map: dict[str, ToolEntry] = {}
-    for entry in entries:
+    for entry in (*typed_entries, *inventory_entries):
         if entry.name in tool_map:
             raise ValueError(f"Duplicate MCP tool name {entry.name!r} (route harvest vs inventory override)")
         tool_map[entry.name] = entry
+
+    # ---- hybrid dispatch plan: DIRECT where provably safe, REPLAY where not ------------------
+    # Direct dispatch runs the frozen handler exactly once (no second app pass). The detector
+    # falls a route (or the whole server, on custom middleware) back to replay when it cannot
+    # prove direct == replay, so correctness never depends on the fast path.
+    typed_tool_paths = {e.name: e.path for e in typed_entries}
+    inventory_catchalls = [r for r in catchall_routes if r.path not in declared_toolless]
+    catchall_tools: dict[str, str] = {}
+    if inventory_entries and inventory_catchalls:
+        catchall_path = inventory_catchalls[0].path  # the (single) catch-all backing the inventory
+        catchall_tools = {e.name: catchall_path for e in inventory_entries}
+    plan = plan_hybrid(app, typed_tool_paths, catchall_tools)
+    direct_n = sum(1 for t in plan.tools.values() if t.mode == "direct")
+    LOG.info(
+        "%s MCP dispatch: %d direct, %d replay (server_mode=%s%s)",
+        type(server).__name__,
+        direct_n,
+        len(plan.tools) - direct_n,
+        plan.server_mode,
+        f", custom middleware {plan.custom_middleware}" if plan.custom_middleware else "",
+    )
 
     # ---- /seed_session -> signed session token (mint mirrors base_resources_server) ----------
     def mint_metadata(request: Request) -> dict:
@@ -393,8 +410,18 @@ def install_auto_exposure(
         _, allowed = session_claims(required=False)
         return [e.tool for e in tool_map.values() if allowed is None or e.name in allowed]
 
-    # validate_input=False: argument validation stays where it always was — the FastAPI route.
-    # Malformed args therefore surface as the HTTP door's own 422 body, mapped to isError below.
+    def _to_mcp_result(payload: Any):
+        # Match the replay path's shaping: dict -> text + structuredContent; str -> text;
+        # other JSON -> text. JSONResponse renders the door's exact success bytes.
+        if isinstance(payload, dict):
+            return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))], payload
+        if isinstance(payload, str):
+            return [types.TextContent(type="text", text=payload)]
+        return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))]
+
+    # validate_input=False: argument validation stays where it always was (the handler's own
+    # body model), whether the call is dispatched directly or replayed. Errors surface as the
+    # HTTP door's 422 / 400 body, mapped to an isError result.
     @mcp_server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict):
         entry = tool_map.get(name)
@@ -404,6 +431,18 @@ def install_auto_exposure(
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
 
+        # DIRECT dispatch where the detector proved it safe: run the frozen handler once.
+        tool_plan = plan.tools.get(name)
+        if tool_plan is not None and tool_plan.mode == "direct":
+            try:
+                payload = await call_direct(
+                    app, tool_plan.binding, session_id, arguments, path_value=tool_plan.path_value
+                )
+            except DirectDispatchError as exc:
+                raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
+            return _to_mcp_result(payload)
+
+        # REPLAY fallback (custom middleware, or a handler shape direct dispatch won't reproduce).
         base_headers = session_headers_cache.get(session_id)
         if base_headers is None:
             # Byte-for-byte the headers asgi_call would build from the previous per-call dict
