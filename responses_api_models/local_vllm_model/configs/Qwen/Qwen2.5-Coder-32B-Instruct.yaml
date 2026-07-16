@@ -1,0 +1,26 @@
+Qwen2.5-Coder-32B-Instruct:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: Qwen/Qwen2.5-Coder-32B-Instruct
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      replace_developer_role_with_system: false
+      debug: false
+
+      hf_home: null
+
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 2
+        pipeline_parallel_size: 1
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        tool_call_parser: hermes
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16
