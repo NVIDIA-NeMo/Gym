@@ -3,6 +3,9 @@
 *.pkl
 #*.ipynb
 output
+
+# local-only MCP auto-exposure demo/verification harness (not part of the PR; unit tests live in tests/)
+prototypes/
 output_2048
 result
 *.pt
