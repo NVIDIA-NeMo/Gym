@@ -647,6 +647,10 @@ def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
 
+    if getattr(args, "verbose", False):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+
     # Hydra overrides never start with "-" so we treat them as unknown flags.
     unknown_flags = [token for token in overrides if token.startswith("-")]
     if unknown_flags:
