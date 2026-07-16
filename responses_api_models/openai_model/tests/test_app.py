@@ -57,7 +57,7 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None):
+    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -67,6 +67,7 @@ class TestApp:
             entrypoint="",
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
+            drop_input_reasoning_items=drop_input_reasoning_items,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 

@@ -1,0 +1,72 @@
+litmus_agent:
+  resources_servers:
+    litmus_agent:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: >-
+        Domain-agnostic answer verifier: extracts a model's final answer with an
+        answer_format regex and scores it against expected_answer per an
+        answer_type taxonomy (float, bool, string). For tool-using rows it can
+        also host a sandbox-backed stateful Python code-execution tool. This
+        variant backs the tool with the local Apptainer provider (no service or
+        API key); swap to litmus_agent.yaml for the OpenSandbox provider.
+      value: Reusable scoring for any benchmark whose tasks reduce to "match the expected answer".
+      float_rel_tol: ${oc.env:LITMUS_AGENT_FLOAT_REL_TOL,1e-6}
+      float_abs_tol: ${oc.env:LITMUS_AGENT_FLOAT_ABS_TOL,1e-6}
+      # Sandbox is created lazily on the first tool call, so direct (no-tool)
+      # rows never need the apptainer binary present.
+      code_exec_tool_name: stateful_python_code_exec
+      code_exec_timeout_s: ${oc.env:LITMUS_AGENT_CODE_EXEC_TIMEOUT_S,120}
+      code_exec_max_output_chars: ${oc.env:LITMUS_AGENT_CODE_EXEC_MAX_OUTPUT_CHARS,10000}
+      code_exec_user: root
+      # Local Apptainer provider. Requires the `apptainer` binary on PATH (installed
+      # at job start via the NeMo-RL SETUP_COMMAND, see mini_swe_agent README).
+      sandbox_provider:
+        apptainer:
+          exec:
+            fakeroot_for_root: true
+            concurrency: 32
+          create:
+            mount_point: /sandbox
+            start_timeout_s: 600
+            # cgroups-v2 delegation is not guaranteed inside an enroot container;
+            # leave resource limits off unless the node supports it. Literal bool
+            # (not oc.env) because the apptainer sub-config is a plain dataclass
+            # with no string coercion -- "False" would be truthy.
+            apply_resource_limits: false
+          probe:
+            command: printf apptainer-sandbox-ready
+            expected_stdout: apptainer-sandbox-ready
+            deadline_s: 120
+            stable_count: 2
+            stable_delay_s: 1.0
+      sandbox_spec:
+        # Apptainer pulls this on first use; pre-build a local .sif and point here
+        # if the compute node has no outbound network.
+        image: ${oc.env:LITMUS_AGENT_SANDBOX_IMAGE,docker://python:3.12-slim}
+        workdir: /sandbox
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        # ttl_s intentionally omitted: Apptainer has no native auto-expiry and
+        # ignores it (warns). Lifetime is managed via the per-rollout cleanup.
+        metadata:
+          harness: litmus_agent
+          sandbox-api: apptainer
+
+litmus_agent_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 10
+      resources_server:
+        type: resources_servers
+        name: litmus_agent
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl

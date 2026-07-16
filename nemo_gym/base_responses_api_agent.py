@@ -58,6 +58,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
 
         app.post("/v1/responses")(self.responses)
+        # Prefixed twin of /v1/responses: a self-call made with url_path_for_run() lands here, and
+        # responses() recovers the rollout id from the path (see url_path_for_request) to correlate
+        # its model calls. Same handler, so unprefixed calls are unaffected.
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
         app.post("/run")(self.run)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 

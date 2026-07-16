@@ -23,7 +23,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
-def _make_agent(max_steps=10):
+def _make_agent(max_steps=10, observability=True):
     config = GymnasiumAgentConfig(
         host="",
         port=0,
@@ -33,7 +33,9 @@ def _make_agent(max_steps=10):
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         max_steps=max_steps,
     )
-    return GymnasiumAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"observability_enabled": observability}
+    return GymnasiumAgent(config=config, server_client=server_client)
 
 
 def _model_response(text: str, input_toks=1, output_toks=1) -> dict:
