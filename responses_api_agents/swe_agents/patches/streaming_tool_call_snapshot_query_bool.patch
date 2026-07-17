@@ -1,0 +1,39 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -838,8 +838,12 @@
+                         "stream_id": response_id,
+                         "min_content_chars": min_content_chars,
+                         "timeout_seconds": snapshot_long_poll_timeout,
+-                        "event_driven_snapshot_wait": context.config.get(
+-                            "event_driven_snapshot_wait", True
++                        "event_driven_snapshot_wait": (
++                            "true"
++                            if context.config.get(
++                                "event_driven_snapshot_wait", True
++                            )
++                            else "false"
+                         ),
+                     },
+                     timeout=ClientTimeout(total=snapshot_long_poll_timeout + 1),
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1361,6 +1361,7 @@
+                 "initial_chunk_chars": 128,
+                 "snapshot_poll_interval_seconds": 0.05,
+                 "snapshot_long_poll_timeout_seconds": 2.0,
++                "event_driven_snapshot_wait": False,
+                 "flush_interval_seconds": 0.25,
+                 "request_timeout_seconds": 5,
+             },
+@@ -1394,6 +1395,9 @@
+         assert snapshot_cancelled.is_set()
+         session.get.assert_not_called()
+         streaming_http_session.get.assert_called_once()
++        assert streaming_http_session.get.call_args.kwargs["params"][
++            "event_driven_snapshot_wait"
++        ] == "false"
+         streaming_http_session.close.assert_awaited_once()
+ 
+     @pytest.mark.asyncio
