@@ -19,6 +19,8 @@ fast and offline.
 """
 
 import json
+import math
+import statistics
 from unittest.mock import MagicMock
 
 import pytest
@@ -32,6 +34,7 @@ from responses_api_agents.pinchbench.app import (
     PinchBenchAgentConfig,
     SandboxKilledError,
     _classify_task_failure,
+    _reward_std_across_runs,
 )
 
 
@@ -343,3 +346,82 @@ def test_classify_task_failure_mapping():
     assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
     assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
     assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
+
+
+# ---------------------------------------------------------------------------
+# Across-run reward variability (compute_metrics)
+# ---------------------------------------------------------------------------
+
+
+class TestRewardStdAcrossRuns:
+    def test_two_runs_hand_computed(self):
+        tasks = [
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"reward": 0.0, "_ng_rollout_index": 1}],
+            [{"reward": 0.5, "_ng_rollout_index": 0}, {"reward": 0.5, "_ng_rollout_index": 1}],
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"reward": 0.5, "_ng_rollout_index": 1}],
+        ]
+        m = _reward_std_across_runs(tasks)
+        # Run means: (1.0 + 0.5 + 1.0)/3 = 5/6 and (0.0 + 0.5 + 0.5)/3 = 1/3;
+        # sample std-dev (ddof=1) of those two means.
+        expected_std = statistics.stdev([5 / 6, 1 / 3])
+        assert m["mean/reward/std_dev_across_runs"] == pytest.approx(expected_std)
+        assert m["mean/reward/std_err_across_runs"] == pytest.approx(expected_std / math.sqrt(2))
+
+    def test_single_repeat_emits_nothing(self):
+        tasks = [[{"reward": 1.0, "_ng_rollout_index": 0}], [{"reward": 0.0, "_ng_rollout_index": 0}]]
+        assert _reward_std_across_runs(tasks) == {}
+
+    def test_empty_input(self):
+        assert _reward_std_across_runs([]) == {}
+
+    def test_rollout_index_alignment_not_arrival_order(self):
+        ordered = [
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"reward": 0.0, "_ng_rollout_index": 1}],
+            [{"reward": 0.8, "_ng_rollout_index": 0}, {"reward": 0.2, "_ng_rollout_index": 1}],
+        ]
+        shuffled = [list(reversed(task)) for task in ordered]
+        assert _reward_std_across_runs(shuffled) == _reward_std_across_runs(ordered)
+
+    def test_uneven_rollout_counts_use_min_k(self):
+        tasks = [
+            [{"reward": 1.0, "_ng_rollout_index": i} for i in range(3)],
+            [{"reward": 0.0, "_ng_rollout_index": 0}, {"reward": 1.0, "_ng_rollout_index": 1}],
+        ]
+        m = _reward_std_across_runs(tasks)
+        # k = 2: run means (1.0+0.0)/2 = 0.5 and (1.0+1.0)/2 = 1.0.
+        assert m["mean/reward/std_dev_across_runs"] == pytest.approx(statistics.stdev([0.5, 1.0]))
+
+    def test_missing_reward_drops_task(self):
+        tasks = [
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"_ng_rollout_index": 1}],
+            [{"reward": 0.5, "_ng_rollout_index": 0}, {"reward": 0.5, "_ng_rollout_index": 1}],
+        ]
+        m = _reward_std_across_runs(tasks)
+        # Only the fully-rewarded task remains -> both run means 0.5 -> zero variance.
+        assert m["mean/reward/std_dev_across_runs"] == 0.0
+
+    def test_identical_runs_zero_std(self):
+        tasks = [
+            [{"reward": 0.7, "_ng_rollout_index": 0}, {"reward": 0.7, "_ng_rollout_index": 1}],
+            [{"reward": 0.3, "_ng_rollout_index": 0}, {"reward": 0.3, "_ng_rollout_index": 1}],
+        ]
+        m = _reward_std_across_runs(tasks)
+        assert m["mean/reward/std_dev_across_runs"] == 0.0
+        assert m["mean/reward/std_err_across_runs"] == 0.0
+
+    def test_agent_compute_metrics_and_key_metrics(self):
+        agent = make_agent()
+        tasks = [
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"reward": 0.0, "_ng_rollout_index": 1}],
+            [{"reward": 1.0, "_ng_rollout_index": 0}, {"reward": 0.5, "_ng_rollout_index": 1}],
+        ]
+        metrics = agent.compute_metrics(tasks)
+        assert set(metrics) == {
+            "mean/reward/std_dev_across_runs",
+            "mean/reward/std_err_across_runs",
+        }
+        # Default key-metrics selection keeps mean/* entries, so the new
+        # across-run stats surface as headline metrics automatically.
+        key = agent.get_key_metrics({"mean/reward": 0.6, "std/reward": 0.2, **metrics})
+        assert "mean/reward/std_dev_across_runs" in key
+        assert "std/reward" not in key

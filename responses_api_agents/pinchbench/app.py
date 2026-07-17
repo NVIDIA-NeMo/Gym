@@ -38,7 +38,9 @@ See README.md for design + findings (skill patch, gateway, parity).
 import asyncio
 import glob
 import json
+import math
 import shutil
+import statistics
 import tarfile
 import textwrap
 import uuid
@@ -49,6 +51,7 @@ from fastapi import Request, Response
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -152,12 +155,51 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
     raw_rollout: dict  # transcript archive location + compact metadata
 
 
+def _reward_std_across_runs(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    """Across-run variability of the benchmark's mean reward.
+
+    Run i is "take repeat i of every task and average the rewards"; the
+    std-dev over those per-run means measures repeat-to-repeat variability
+    of mean/reward, unlike the pooled per-rollout std/reward. Repeats are
+    aligned by their rollout index, the run count is the minimum rollout
+    count present (keeps the matrix rectangular under partial outputs),
+    and single-repeat collections emit nothing.
+    """
+    max_k = min((len(t) for t in tasks if t), default=0)
+    if max_k < 2:
+        return {}
+
+    matrix: list[list[float]] = []
+    for task_rollouts in tasks:
+        # Stable sort: falls back to arrival order when the index is absent.
+        ordered = sorted(task_rollouts, key=lambda r: r.get(ROLLOUT_INDEX_KEY_NAME, 0))
+        row = [ordered[i].get("reward") for i in range(max_k)]
+        if any(v is None for v in row):
+            continue
+        matrix.append([float(v) for v in row])
+    if not matrix:
+        return {}
+
+    run_means = [sum(row[i] for row in matrix) / len(matrix) for i in range(max_k)]
+    if all(v == run_means[0] for v in run_means):
+        std_dev = 0.0
+    else:
+        std_dev = statistics.stdev(run_means)
+    return {
+        "mean/reward/std_dev_across_runs": std_dev,
+        "mean/reward/std_err_across_runs": std_dev / math.sqrt(max_k),
+    }
+
+
 class PinchBenchAgent(SimpleResponsesAPIAgent):
     config: PinchBenchAgentConfig
 
     def model_post_init(self, context):
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
         return super().model_post_init(context)
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return _reward_std_across_runs(tasks)
 
     async def responses(
         self,
