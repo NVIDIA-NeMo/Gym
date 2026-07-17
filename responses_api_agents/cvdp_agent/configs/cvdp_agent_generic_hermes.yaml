@@ -1,14 +1,16 @@
-# cvdp agentic, harness-agnostic agent driving hermes_agent inside the sim sandbox.
-# same agent + data + verifier as the claude config; only the agent_server_* block
-# and the deps script (setup_scripts/hermes_agent_deps.sh) differ.
 cvdp_agent_generic_hermes:
   responses_api_agents:
     cvdp_agent:
       entrypoint: agentic_generic.py
       resources_server: {type: resources_servers, name: cvdp}
       model_server: {type: responses_api_models, name: policy_model}
-      concurrency: 1
+      concurrency: 4
       timeout: 900
+
+      datasets:
+      - name: example_agentic
+        type: example
+        jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
       # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
       agent_server_module: responses_api_agents.hermes_agent.app
@@ -18,6 +20,7 @@ cvdp_agent_generic_hermes:
 
       # sandbox: eda sim image, apptainer backend, deps bind-mounted
       image: ${cvdp_sim_image}
+      
       # mount_point MUST match container_workdir: the provider bind-mounts a writable host
       # dir at mount_point, and everything the agent writes lives under container_workdir.
       # --writable-tmpfs makes the rest of the container (e.g. the harness's HOME) writable.
