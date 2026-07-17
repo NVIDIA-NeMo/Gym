@@ -109,7 +109,7 @@ jobs:
 
   manual-review:
     if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@v1.7.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@v1.8.1
     with:
       model: ${{ vars.CLAUDE_MODEL }}
       prompt: |
