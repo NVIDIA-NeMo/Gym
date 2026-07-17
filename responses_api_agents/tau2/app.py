@@ -121,7 +121,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_user = "openai/dummy user model"
         config.llm_args_user |= {
-            "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
+            "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 
@@ -133,7 +133,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
-            "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
+            "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
 
