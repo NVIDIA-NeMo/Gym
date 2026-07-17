@@ -95,13 +95,11 @@ class Store(SimpleResourcesServer):
 
         @app.post("/raw_step")
         async def raw_step(body: dict, request: Request):
-            # dict body: FastAPI passes the parsed JSON through unvalidated.
             _ = request.session[SESSION_ID_KEY]
             return {"echo": body}
 
         @app.post("/{tool_name}")
         async def dispatch(tool_name: str, request: Request) -> PlainTextResponse:
-            # raw-body catch-all: reads request.json(), returns PlainTextResponse.
             args = await request.json()
             return PlainTextResponse(json.dumps({"tool": tool_name, "args": args}))
 
@@ -352,13 +350,10 @@ def test_allowed_tools_filters_list_and_gates_call():
 
 def test_error_mapping():
     with _mcp() as (client, token):
-        # unknown tool
         r = _call(client, "nope", {}, token=token)
         assert r["isError"] is True and "Unknown tool" in r["content"][0]["text"]
-        # missing token
         r = _call(client, "append", {"value": "x"}, token=None)
         assert r["isError"] is True and TOKEN_HEADER in r["content"][0]["text"]
-        # invalid token
         r = _call(client, "append", {"value": "x"}, token="garbage")
         assert r["isError"] is True and "Invalid" in r["content"][0]["text"]
         # malformed args -> the handler's own 422
@@ -417,7 +412,7 @@ def test_defaulted_query_param_gets_its_default():
 def test_response_model_filters_extra_fields():
     with _mcp(Shapes, "shapes") as (client, token):
         payload = _payload(_call(client, "filtered", {"value": "v"}, token=token))
-        assert payload == {"shown": "v"}  # "secret" filtered, as the plain HTTP route would
+        assert payload == {"shown": "v"}
 
 
 def test_unexpected_handler_exception_maps_to_is_error():
@@ -727,7 +722,7 @@ def test_bind_route_honors_factory_signature_over_annotations():
     route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == "/factory")
     outcome = bind_route(route)
     assert outcome.binding is not None
-    assert outcome.binding.body_model is EchoBody  # the signature won, not Any
+    assert outcome.binding.body_model is EchoBody
 
 
 # ==================================================================================================
@@ -773,7 +768,6 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
         echoed = [o["name"] for o in resp.json()["response"]["output"] if o["type"] == "function_call"]
     # verify SAW: this server's prefix stripped, bare names untouched, other servers' prefixes left alone
     assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
-    # persisted response KEEPS the names the model actually emitted — normalization is scoring-only
     assert echoed == emitted
 
 
@@ -794,7 +788,6 @@ def test_verify_does_not_normalize_when_mcp_exposure_off():
         emitted = ["mcp__store__append", "raw_step"]
         resp = client.post("/verify", json=_verify_body(emitted))
         assert resp.status_code == 200, resp.text
-    # nothing stripped — a flag-off server never touches trajectory names
     assert seen["names"] == emitted
 
 

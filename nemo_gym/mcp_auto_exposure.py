@@ -83,8 +83,7 @@ MCP_URL_PATH = "/mcp"
 # Session tokens expire: one day outlives any rollout while bounding how long a leaked token works.
 TOKEN_MAX_AGE_SECONDS = 86400
 
-# Infrastructure routes are never tools. GET docs/openapi are excluded by the POST filter below;
-# /mcp is excluded by path. Derived from the reserved tool names so the two sets cannot drift apart.
+# Never tools. GET docs/openapi are excluded by the POST filter below; /mcp by path.
 BASIC_PATHS = frozenset("/" + name for name in RESERVED_MCP_TOOL_NAMES)
 
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
@@ -96,10 +95,7 @@ _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
 
-# Middleware whose dispatch lives in these modules is Gym's own function-based stack (add_session_id +
-# the exception middleware); Gym's SessionMiddleware is matched separately by class name in
-# audit_middleware (line 261). Its effect is replicated by direct dispatch, so its absence there is
-# compensated, not lost.
+# Gym's function-based middleware (add_session_id + exception middleware); SessionMiddleware is matched by class name.
 _GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
 
 
@@ -363,7 +359,6 @@ async def call_direct(
             "server": ("internal-mcp-direct", 80),
             "state": {},
             "app": app,
-            # SessionMiddleware's documented effect, materialized for this rollout's session id.
             "session": {SESSION_ID_KEY: session_id},
         }
         request = Request(scope, _make_receive(raw))
@@ -493,7 +488,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     for name, route in typed_routes.items():
         outcome = bind_route(route)
         description = (route.description or route.summary or "").strip() or None
-        # schema comes from the same resolution that decides dispatch (no separate route.body_field read)
+        # schema comes from the same bind_route resolution that decides dispatch, so they cannot diverge
         tools[name] = make(name, description, _schema_for(outcome.body_model), route, None)
 
     inventory_catchalls = [r for r in catchall_routes if r.path not in declared_toolless]
@@ -637,9 +632,8 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
     ``server`` is any resources server built exactly as on main; ``app`` is the FastAPI app its
     unmodified ``setup_webserver()`` returned. Returns the tool map.
     """
-    # A server that already serves /mcp (an MCPResourcesServer with @gym_tool methods) uses a
-    # different MCP mechanism; front-inserting a second /mcp here would shadow it and silently drop
-    # every tool it registered. One server gets one MCP mechanism.
+    # A second /mcp inserted at the front would shadow an MCPResourcesServer's existing /mcp
+    # and silently drop its tools.
     preexisting_mcp = [
         r for r in app.router.routes if isinstance(r, (Route, Mount)) and getattr(r, "path", None) == MCP_URL_PATH
     ]
@@ -650,11 +644,9 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
             "and rely on expose_tools_over_mcp."
         )
 
-    # The signing secret comes from get_session_middleware_key(), which derives from the server class
-    # and config name — public names, not entropy. Hardening that secret is a separate main-level
-    # change (it also signs the session cookie); the max_age below bounds how long a leaked or
-    # brute-forced token stays usable. Timed tokens diverge from MCPResourcesServer's untimed scheme
-    # on purpose: the /mcp-conflict check above guarantees the two schemes never share a server.
+    # The signing secret derives from public names (class + config name), not entropy; max_age bounds how long
+    # a leaked or brute-forced token stays usable. Timed tokens diverge from MCPResourcesServer's untimed
+    # scheme on purpose: the /mcp-conflict check above guarantees the two schemes never share a server.
     secret = server.get_session_middleware_key()
     serializer = URLSafeTimedSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
@@ -685,8 +677,7 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
                 raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
             return None, None
         try:
-            # Verified on every call: an HMAC check costs microseconds, while caching claims per
-            # token would grow one entry per rollout with nothing to evict it.
+            # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
             payload = serializer.loads(token, max_age=TOKEN_MAX_AGE_SECONDS)
         except BadSignature:  # SignatureExpired subclasses BadSignature, so expiry lands here too
             if required:

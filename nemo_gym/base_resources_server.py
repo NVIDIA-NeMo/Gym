@@ -150,12 +150,8 @@ class _MCPHeaderSessionMiddleware:
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
-    # Opt in to serve this server's tool routes over MCP. When True, run_webserver auto-installs the
-    # MCP /mcp endpoint after the app is built (nemo_gym.mcp_auto_exposure.maybe_auto_expose) — no
-    # handler changes, no explicit call. Off by default: auto-exposing every route is not always
-    # wanted (e.g. harness-only routes). A server whose tools are all served by one catch-all route
-    # (POST /{path}) must also list them via mcp_tool_inventory(). Class-level for now; letting a
-    # YAML config toggle it per instance is a possible follow-up.
+    # Opt-in: run_webserver installs the /mcp endpoint; catch-all-route servers must also
+    # override mcp_tool_inventory().
     expose_tools_over_mcp: ClassVar[bool] = False
 
     # Catch-all routes (as registered, e.g. "/{tool_name}") that back no tools. Declaring one tells MCP
@@ -169,9 +165,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         self.setup_session_middleware(app)
 
         app.post("/seed_session")(self.seed_session)
-        # MCP-native agents record tool calls namespaced (mcp__<server>__<tool>). Only servers that
-        # actually expose their tools over MCP can receive such names, so the scoring-time
-        # normalization is installed only when that flag is set — HTTP-only servers keep verify
+        # Wrap verify only for MCP-exposed servers, so HTTP-only servers keep verify
         # byte-for-byte and their baselines stay valid.
         verify_handler = self._verify_with_normalized_tool_names() if self.expose_tools_over_mcp else self.verify
         # A flag-on subclass that strips and re-registers /verify must re-apply this wrapper (normalize
@@ -214,8 +208,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         @functools.wraps(verify)
         async def verify_normalized(*args, **kwargs):
             args = list(args)
-            # Locate the request-like argument carrying the trajectory (verify signatures vary:
-            # (body), (request, body), ...); leave everything else untouched.
+            # Verify signatures vary ((body), (request, body), ...), so find the
+            # trajectory-carrying argument by content.
             target_key = next((k for k, v in enumerate(args) if _function_calls(v)), None)
             if target_key is None:
                 target_key = next((k for k, v in kwargs.items() if _function_calls(v)), None)
@@ -236,7 +230,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
             result = await verify(*args, **kwargs)
 
-            # Restore the names the model actually emitted in the echoed response.
             for item in _function_calls(result):
                 if item.call_id in emitted:
                     item.name = emitted[item.call_id]

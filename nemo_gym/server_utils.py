@@ -674,9 +674,7 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
-        # Auto-serve tool routes over MCP for resources servers that opted in (expose_tools_over_mcp).
-        # Runs here — after the fully-built app exists — so every subclass-registered route is present.
-        # Import lazily and only for opted-in servers so agents and models never pull in the MCP SDK.
+        # After the app is fully built so subclass routes are present; lazy import keeps the MCP SDK out of agents/models.
         if getattr(server, "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 
