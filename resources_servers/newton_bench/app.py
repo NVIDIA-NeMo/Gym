@@ -142,7 +142,6 @@ class NewtonBenchEndSessionResponse(BaseModel):
 
 
 class NewtonBenchResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
     mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
 
     config: NewtonBenchResourcesServerConfig

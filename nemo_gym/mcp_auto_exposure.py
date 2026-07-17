@@ -14,7 +14,7 @@
 # limitations under the License.
 """Serve an unmodified resources server's FastAPI tool routes over MCP.
 
-A resources server sets ``expose_tools_over_mcp = True`` and its plain ``POST /<tool>`` routes are
+A resources server sets ``expose_tools_over_mcp: true`` in its config and its plain ``POST /<tool>`` routes are
 advertised and callable over an MCP ``/mcp`` endpoint — no decorators, no handler changes. The
 handlers keep their ``request: Request`` parameter and their ``request.session[SESSION_ID_KEY]``
 reads exactly as written; this module never touches them.
@@ -441,7 +441,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     if custom_middleware:
         raise ValueError(
             f"{type(server).__name__} installs non-Gym middleware {custom_middleware}, which direct MCP "
-            "dispatch would silently skip. Remove the middleware, or do not set expose_tools_over_mcp."
+            "dispatch would silently skip. Remove the middleware, or leave expose_tools_over_mcp off in the config."
         )
 
     # A typo'd exclusion would silently expose the route it meant to hide.
@@ -469,7 +469,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             raise ValueError(
                 f"{type(server).__name__} route {route.path!r} derives MCP tool name {name!r}, which does not "
                 "match ^[A-Za-z0-9_-]+$; MCP clients reject such names and verify-time normalization cannot "
-                "round-trip them. Rename the route, or do not set expose_tools_over_mcp."
+                "round-trip them. Rename the route, or leave expose_tools_over_mcp off in the config."
             )
         typed_routes[name] = route
 
@@ -704,12 +704,12 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
-    """Install MCP auto-exposure iff the server opts in (``expose_tools_over_mcp = True``).
+    """Install MCP auto-exposure iff the server opts in (``expose_tools_over_mcp: true`` in the config).
 
     Called by ``run_webserver`` after the app is fully built, so every route is present. Returns the
     tool map (for tests/introspection), or None when the server did not opt in.
     """
-    if not getattr(server, "expose_tools_over_mcp", False):
+    if not getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
         return None
     return install_auto_exposure(server, app)
 

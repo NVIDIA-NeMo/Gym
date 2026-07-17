@@ -77,7 +77,6 @@ class PublicView(BaseModel):
 class Store(SimpleResourcesServer):
     """A typed tool, a dict-body tool, and a raw-body PlainTextResponse catch-all dispatcher."""
 
-    expose_tools_over_mcp: ClassVar[bool] = True
     session_state: dict[str, list] = {}
 
     async def verify(self, body):
@@ -111,8 +110,6 @@ class Store(SimpleResourcesServer):
 
 class Shapes(SimpleResourcesServer):
     """One route per handler shape that direct dispatch must reproduce (or map to the right error)."""
-
-    expose_tools_over_mcp: ClassVar[bool] = True
 
     async def verify(self, body):
         pass
@@ -164,8 +161,8 @@ class Shapes(SimpleResourcesServer):
         return app
 
 
-def _server(cls=Store, name="store") -> SimpleResourcesServer:
-    cfg = BaseResourcesServerConfig(host="", port=0, entrypoint="", name=name)
+def _server(cls=Store, name="store", expose=True) -> SimpleResourcesServer:
+    cfg = BaseResourcesServerConfig(host="", port=0, entrypoint="", name=name, expose_tools_over_mcp=expose)
     return cls(config=cfg, server_client=MagicMock(spec=ServerClient))
 
 
@@ -225,10 +222,7 @@ def _payload(result: dict) -> Any:
 
 
 def test_flag_off_does_not_mount_mcp():
-    class Plain(Store):
-        expose_tools_over_mcp: ClassVar[bool] = False
-
-    server = _server(Plain)
+    server = _server(expose=False)
     app = server.setup_webserver()
     assert maybe_auto_expose(server, app) is None
     assert "/mcp" not in {getattr(r, "path", None) for r in app.routes}
@@ -586,8 +580,6 @@ def test_refuses_dependency_injection_handler():
 
 def test_refuses_catchall_without_inventory_or_toolless_declaration():
     class NoInventoryDispatcher(SimpleResourcesServer):
-        expose_tools_over_mcp: ClassVar[bool] = True
-
         async def verify(self, body):
             pass
 
@@ -625,7 +617,6 @@ def test_refuses_unknown_toolless_catchall_declaration():
 
 
 class Excluding(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
     mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
 
     async def verify(self, body):
@@ -683,8 +674,6 @@ def test_excluded_route_with_depends_param_does_not_refuse():
 
 def test_refuses_inventory_without_a_catchall_route():
     class InventoryNoCatchall(SimpleResourcesServer):
-        expose_tools_over_mcp: ClassVar[bool] = True
-
         async def verify(self, body):
             pass
 
@@ -708,8 +697,6 @@ def test_refuses_duplicate_tool_name_between_routes_and_inventory():
 
 def test_refuses_nested_tool_route():
     class NestedRoute(SimpleResourcesServer):
-        expose_tools_over_mcp: ClassVar[bool] = True
-
         async def verify(self, body):
             pass
 
@@ -874,7 +861,7 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
             seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
             return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    server = _server(Recorder, name="store")  # Store has expose_tools_over_mcp = True
+    server = _server(Recorder, name="store")  # _server defaults expose_tools_over_mcp = True in the config
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     with TestClient(app) as client:
@@ -935,13 +922,11 @@ def test_verify_does_not_normalize_when_mcp_exposure_off():
     seen: dict[str, list] = {}
 
     class Plain(Store):
-        expose_tools_over_mcp: ClassVar[bool] = False
-
         async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
             seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
             return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    server = _server(Plain, name="store")
+    server = _server(Plain, name="store", expose=False)
     app = server.setup_webserver()
     with TestClient(app) as client:
         emitted = ["mcp__store__append", "raw_step"]

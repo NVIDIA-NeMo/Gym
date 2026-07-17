@@ -94,7 +94,8 @@ def gym_tool(fn):
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
-    pass
+    # Opt in to serve this server's tool routes over MCP; default off.
+    expose_tools_over_mcp: bool = False
 
 
 class BaseResourcesServer(BaseServer):
@@ -149,10 +150,6 @@ class _MCPHeaderSessionMiddleware:
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
-
-    # Opt-in: run_webserver installs the /mcp endpoint; catch-all-route servers must also
-    # override mcp_tool_inventory().
-    expose_tools_over_mcp: ClassVar[bool] = False
 
     # Catch-all routes (as registered, e.g. "/{tool_name}") that back no tools. Declaring one tells MCP
     # auto-exposure not to refuse (raise ValueError at startup) over a missing mcp_tool_inventory()

@@ -164,7 +164,6 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 class PythonExecutorResourcesServer(SimpleResourcesServer):
     # new: create the pool once
 
-    expose_tools_over_mcp: ClassVar[bool] = True
     mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
 
     config: PythonExecutorResourcesServerConfig

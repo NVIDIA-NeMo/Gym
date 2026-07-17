@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, ClassVar, Dict
+from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -62,8 +62,6 @@ class WorkbenchVerifyResponse(BaseVerifyResponse):
 
 
 class WorkbenchResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 

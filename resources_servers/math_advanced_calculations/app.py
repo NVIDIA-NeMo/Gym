@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import ClassVar, Optional
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -68,8 +68,6 @@ class MultiVerseMathHardVerifyResponse(BaseVerifyResponse):
 
 
 class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: MultiVerseMathHardResourcesServerConfig
 
     _function_map = {

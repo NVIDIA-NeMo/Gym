@@ -30,7 +30,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, Request
@@ -127,7 +127,6 @@ class NSToolsVerifyResponse(BaseVerifyResponse):
 
 class NSToolsResourcesServer(SimpleResourcesServer):
     config: NSToolsConfig
-    expose_tools_over_mcp: ClassVar[bool] = True
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
     _mcp_tool_specs: List[Dict[str, Any]] = []  # name/input_schema/description retained for mcp_tool_inventory

@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 import re
-from typing import ClassVar, Optional
+from typing import Optional
 
 import requests
 import trafilatura
@@ -88,8 +88,6 @@ def _extract_last_assistant_text(body: GoogleSearchVerifyRequest) -> str:
 
 
 class GoogleSearchResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: GoogleSearchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

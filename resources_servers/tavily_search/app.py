@@ -189,8 +189,6 @@ class TavilySearchAIOHTTPClient(BaseModel):
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: TavilySearchResourcesServerConfig
     MAX_RESULTS: int = 10
     MAX_RESULT_CHARS: int = 2000

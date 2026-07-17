@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import ClassVar, List
+from typing import List
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -68,8 +68,6 @@ class ExampleMultiStepVerifyResponse(BaseVerifyResponse):
 
 
 class ExampleMultiStepResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: ExampleMultiStepResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

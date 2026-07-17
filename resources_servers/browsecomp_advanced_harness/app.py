@@ -693,8 +693,6 @@ def _last_assistant_text(response) -> str:
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     config: TavilySearchResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)

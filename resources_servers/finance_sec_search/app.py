@@ -343,8 +343,6 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     - /submit_final_result: Submit the final answer
     """
 
-    expose_tools_over_mcp: ClassVar[bool] = True
-
     # The catch-all only returns unknown-tool errors; the five typed routes are the tools.
     mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset({"/{tool_name}"})
 
