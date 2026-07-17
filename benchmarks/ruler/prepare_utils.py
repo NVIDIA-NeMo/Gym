@@ -26,9 +26,36 @@ from nemo_gym.global_config import get_hf_token
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
+TEXT_COMPLETION_OUTPUT_TOKENS = {"niah": 128, "vt": 30, "cwe": 120, "fwe": 50, "qa": 32}
+SUPPORTED_DATA_FORMATS = {"chat", "default", "base"}
 
 
-def prepare_helper(output_name: str, model: str, length: str) -> Path:
+def prepare(model: str, length: int, data_format: str = "chat") -> Path:
+    output_name = "ruler.jsonl" if data_format == "chat" else "ruler_pretrain.jsonl"
+    return prepare_helper(output_name=output_name, model=model, length=length, data_format=data_format)
+
+
+def _to_gym_sample(sample: dict, subset: str, data_format: str) -> dict:
+    content = sample["input"]
+    create_params = {"input": [{"role": "user", "content": content}]}
+    if data_format != "chat":
+        separator = "" if data_format == "default" else "\n"
+        create_params["input"][0]["content"] += separator + sample["answer_prefix"].strip()
+        task_family = subset.split("_", maxsplit=1)[0]
+        create_params["max_output_tokens"] = TEXT_COMPLETION_OUTPUT_TOKENS[task_family]
+
+    return {
+        "responses_create_params": create_params,
+        "outputs": sample["outputs"],
+        "length": sample["length"],
+        "subset": subset,
+    }
+
+
+def prepare_helper(output_name: str, model: str, length: int, data_format: str = "chat") -> Path:
+    if data_format not in SUPPORTED_DATA_FORMATS:
+        raise ValueError(f"Unsupported RULER data format: {data_format}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
@@ -52,7 +79,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
     run(
         f"""source .venv/bin/activate \
 && python ruler_prepare_script.py \
-    --data_format=chat \
+    --data_format={data_format} \
     --setup={model}-{length} \
     --max_seq_length={length} \
     --tokenizer_path={model} \
@@ -73,14 +100,7 @@ def prepare_helper(output_name: str, model: str, length: str) -> Path:
         with subset_file.open() as f:
             subset_samples = list(map(json.loads, f))
 
-        for sample in subset_samples:
-            sample = {
-                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
-                "outputs": sample["outputs"],
-                "length": sample["length"],
-                "subset": subset_dir.name,
-            }
-            samples.append(sample)
+        samples.extend(_to_gym_sample(sample, subset_dir.name, data_format) for sample in subset_samples)
 
     with output_fpath.open("w") as f:
         for sample in samples:
