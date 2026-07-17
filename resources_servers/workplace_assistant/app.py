@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,15 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
+
+
+TOOLKITS = [
+    "email",
+    "calendar",
+    "analytics",
+    "project_management",
+    "customer_relationship_manager",
+]
 
 
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -53,8 +62,16 @@ class WorkbenchVerifyResponse(BaseVerifyResponse):
 
 
 class WorkbenchResourcesServer(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
+
+    def mcp_tool_inventory(self) -> list[dict]:
+        return [
+            {"name": s["name"], "input_schema": s["parameters"], "description": s.get("description")}
+            for s in get_tools(TOOLKITS)["schemas"]
+        ]
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -64,14 +81,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
-        toolkits = [
-            "email",
-            "calendar",
-            "analytics",
-            "project_management",
-            "customer_relationship_manager",
-        ]
-        self.session_id_to_tool_env[session_id] = get_tools(toolkits)
+        self.session_id_to_tool_env[session_id] = get_tools(TOOLKITS)
         return BaseSeedSessionResponse()
 
     async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:

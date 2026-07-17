@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Optional
+from typing import ClassVar, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -68,6 +68,8 @@ class MultiVerseMathHardVerifyResponse(BaseVerifyResponse):
 
 
 class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+
     config: MultiVerseMathHardResourcesServerConfig
 
     _function_map = {
@@ -89,6 +91,18 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
         app.post("/{path}")(self.route_to_python_function)
 
         return app
+
+    def mcp_tool_inventory(self) -> list[dict]:
+        # Per-tool parameter schemas live only in dataset rows; advertise a permissive schema and
+        # let route_to_python_function's body model validate as it does over plain HTTP.
+        return [
+            {
+                "name": name,
+                "input_schema": {"type": "object", "additionalProperties": True},
+                "description": (func.__doc__ or "").strip().splitlines()[0] if func.__doc__ else None,
+            }
+            for name, func in self._function_map.items()
+        ]
 
     async def route_to_python_function(self, path: str, body: MultiVerseMathHardRequest) -> MultiVerseMathHardResponse:
         func = self._function_map.get(path)

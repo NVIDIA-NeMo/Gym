@@ -22,7 +22,7 @@ to add a new environment.
 """
 
 import importlib
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, create_model
@@ -73,6 +73,8 @@ class SessionState(BaseModel):
 
 class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
+
+    expose_tools_over_mcp: ClassVar[bool] = True
 
     config: OpenEnvResourcesServerConfig
     _sessions: Dict[str, SessionState] = {}

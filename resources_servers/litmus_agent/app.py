@@ -93,7 +93,7 @@ import statistics
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -607,6 +607,8 @@ def compute_reward(
 
 
 class LitmusAgentResourcesServer(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+
     config: LitmusAgentConfig
 
     # Per-instance sandbox state. _session_locks serializes calls within a

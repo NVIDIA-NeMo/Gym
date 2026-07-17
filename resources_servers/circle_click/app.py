@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -53,6 +53,8 @@ class CircleClickVerifyResponse(BaseVerifyResponse):
 
 
 class CircleClickResourcesServer(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+
     config: CircleClickConfig
 
     def setup_webserver(self) -> FastAPI:

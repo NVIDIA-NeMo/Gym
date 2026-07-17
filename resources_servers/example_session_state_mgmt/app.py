@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict
+from typing import ClassVar, Dict
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
@@ -57,6 +57,8 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 

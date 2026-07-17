@@ -23,7 +23,10 @@ reads exactly as written; this module never touches them.
 for any server that sets the flag. Dispatcher servers (one catch-all route backing many tools, whose
 per-tool schemas live in data) additionally override one method, ``mcp_tool_inventory()``. Routes
 named in ``mcp_excluded_paths`` are not tools at all: never advertised, never callable over MCP,
-never shape-checked — the plain HTTP route is untouched.
+never shape-checked — the plain HTTP route is untouched. A server can narrow one rollout's token to
+a subset of tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token minted by
+that /seed_session response then lists and calls only those tools, intersected with any
+install-time allow-list.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -565,7 +568,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
 # ==================================================================================================
 
 
-def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request], dict]) -> None:
+def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
     found = next(
         ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == "/seed_session"),
         None,
@@ -611,7 +614,15 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request], dict]) -
             result = response_model.model_validate(data)
         payload = jsonable_encoder(result)
         if isinstance(payload, dict) and NEMO_GYM_MCP_METADATA_KEY not in payload:
-            payload[NEMO_GYM_MCP_METADATA_KEY] = mint_metadata(request)
+            # request.body() returns FastAPI's cached bytes; the stream was consumed validating the body model.
+            raw_body = await request.body()
+            try:
+                seed_body = json.loads(raw_body) if raw_body else {}
+            except json.JSONDecodeError:
+                seed_body = {}
+            if not isinstance(seed_body, dict):
+                seed_body = {}
+            payload[NEMO_GYM_MCP_METADATA_KEY] = mint_metadata(request, seed_body)
         return JSONResponse(payload)
 
     seed_session_endpoint.__name__ = "seed_session"
@@ -729,12 +740,24 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
     tools = harvest_tools(app, server)
     allowed_floor = None if allowed_tools is None else frozenset(allowed_tools)
 
-    def mint_metadata(request: Request) -> dict:
+    def mint_metadata(request: Request, seed_body: dict) -> dict:
         session_id = request.session.get(SESSION_ID_KEY)
         if not session_id:
             session_id = str(uuid4())
             request.session[SESSION_ID_KEY] = session_id
-        payload: Any = session_id if allowed_tools is None else {"sid": session_id, "tools": list(allowed_tools)}
+        try:
+            session_allowed = server.mcp_allowed_tools_for_session(seed_body)
+        except Exception as e:
+            # Fail the seed request rather than mint an unrestricted token past a broken hook.
+            raise RuntimeError(
+                f"{type(server).__name__}.mcp_allowed_tools_for_session raised; refusing to mint an MCP "
+                f"session token: {e!r}"
+            ) from e
+        if session_allowed is None:
+            effective = None if allowed_floor is None else list(allowed_tools)
+        else:
+            effective = [t for t in session_allowed if allowed_floor is None or t in allowed_floor]
+        payload: Any = session_id if effective is None else {"sid": session_id, "tools": effective}
         return MCPServerMetadata(
             server_name=server.config.name or type(server).__name__,
             url_path=MCP_URL_PATH,

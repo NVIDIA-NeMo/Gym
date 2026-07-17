@@ -495,6 +495,64 @@ def test_expired_token_is_rejected(monkeypatch):
 
 
 # ==================================================================================================
+# Per-session tool restriction: mcp_allowed_tools_for_session(seed_body)
+# ==================================================================================================
+
+
+class SessionScoped(Store):
+    def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
+        return seed_body.get("allowed_tools")
+
+
+def test_session_hook_returning_none_mints_unrestricted_token():
+    with _mcp(SessionScoped) as (client, token):  # _seed posts {} -> hook returns None
+        assert {"append", "raw_step", "lookup"} <= {t["name"] for t in _list(client, token)}
+        payload = _payload(_call(client, "raw_step", {"k": 1}, token=token))
+        assert payload == {"echo": {"k": 1}}
+
+
+def test_session_hook_restricts_that_sessions_token():
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        resp = client.post("/seed_session", json={"allowed_tools": ["append"]})
+        token = resp.json()["mcp"]["headers"][TOKEN_HEADER]
+        _handshake(client)
+        assert {t["name"] for t in _list(client, token)} == {"append"}
+        blocked = _call(client, "raw_step", {}, token=token)
+        assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
+        assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+
+
+def test_session_hook_intersects_install_time_floor():
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    install_auto_exposure(server, app, allowed_tools=["append"])
+    with TestClient(app) as client:
+        resp = client.post("/seed_session", json={"allowed_tools": ["append", "raw_step"]})
+        token = resp.json()["mcp"]["headers"][TOKEN_HEADER]
+        _handshake(client)
+        assert {t["name"] for t in _list(client, token)} == {"append"}
+        blocked = _call(client, "raw_step", {}, token=token)
+        assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
+
+
+def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
+    class BrokenHook(Store):
+        def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
+            raise RuntimeError("hook boom")
+
+    server = _server(BrokenHook)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post("/seed_session", json={})
+        assert resp.status_code >= 500
+        assert TOKEN_HEADER not in resp.text
+
+
+# ==================================================================================================
 # Refusal: shapes/servers direct dispatch cannot reproduce raise loudly at startup
 # ==================================================================================================
 

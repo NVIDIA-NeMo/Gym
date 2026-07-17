@@ -188,6 +188,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         return None
 
+    def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
+        """Per-session tool restriction: return the tool names allowed for this rollout's MCP token,
+        or ``None`` (the default) for unrestricted. ``seed_body`` is the JSON body POSTed to
+        ``/seed_session``.
+        """
+        return None
+
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()
 
