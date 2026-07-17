@@ -19,12 +19,15 @@ import pytest
 
 from resources_servers.gdpval.multistage_elo import (
     StageSpec,
+    all_task_ids,
+    assign_task_references,
     ensure_distribution,
     fit_stage_elo,
     load_distribution,
     plan_stage_task_ids,
     pool_per_reference,
     select_references,
+    stage_assignment_rng,
 )
 
 
@@ -59,6 +62,64 @@ class TestSelectReferences:
     def test_result_sorted_by_id(self) -> None:
         chosen = select_references(self.ELOS, 1100.0, 3)
         assert chosen == sorted(chosen)
+
+
+class TestAllTaskIds:
+    def test_returns_every_task_deduped_in_order(self) -> None:
+        dist = {
+            "g0": {"percentage": 0.5, "task_ids": ["t0", "t1"]},
+            "g1": {"percentage": 0.5, "task_ids": ["t2", "t1"]},  # t1 repeated across groups
+        }
+        assert all_task_ids(dist) == ["t0", "t1", "t2"]
+
+    def test_empty_distribution(self) -> None:
+        assert all_task_ids({}) == []
+
+    def test_stringifies_ids(self) -> None:
+        assert all_task_ids({"g": {"task_ids": [0, 1]}}) == ["0", "1"]
+
+
+class TestAssignTaskReferences:
+    def test_one_reference_per_task_from_included_set(self) -> None:
+        task_ids = [f"t{i}" for i in range(50)]
+        refs = ["a", "b", "c"]
+        assignment = assign_task_references(task_ids, refs, rng=random.Random(0))
+        # Every task gets exactly one reference, always from the included set.
+        assert set(assignment) == set(task_ids)
+        assert all(ref in refs for ref in assignment.values())
+
+    def test_equal_probability_across_references(self) -> None:
+        # Over many tasks, a uniform draw spreads roughly evenly across refs.
+        task_ids = [f"t{i}" for i in range(3000)]
+        refs = ["a", "b", "c"]
+        assignment = assign_task_references(task_ids, refs, rng=random.Random(7))
+        counts = {r: 0 for r in refs}
+        for ref in assignment.values():
+            counts[ref] += 1
+        # Each ref should get ~1000; allow generous slack for randomness.
+        for ref in refs:
+            assert 800 < counts[ref] < 1200
+
+    def test_deterministic_for_same_rng_seed(self) -> None:
+        task_ids = [f"t{i}" for i in range(20)]
+        refs = ["a", "b"]
+        a = assign_task_references(task_ids, refs, rng=stage_assignment_rng(0, None, 1))
+        b = assign_task_references(task_ids, refs, rng=stage_assignment_rng(0, None, 1))
+        assert a == b
+
+    def test_empty_reference_set_yields_no_assignment(self) -> None:
+        assert assign_task_references(["t0", "t1"], [], rng=random.Random(0)) == {}
+
+
+class TestStageAssignmentRng:
+    def test_distinct_streams_per_stage_and_seed(self) -> None:
+        base = stage_assignment_rng(0, None, 0).random()
+        assert stage_assignment_rng(0, None, 1).random() != base
+        assert stage_assignment_rng(1, None, 0).random() != base
+        assert stage_assignment_rng(0, 5, 0).random() != base
+
+    def test_reproducible(self) -> None:
+        assert stage_assignment_rng(3, 9, 2).random() == stage_assignment_rng(3, 9, 2).random()
 
 
 class TestPlanStageTaskIds:
@@ -100,6 +161,21 @@ class TestPlanStageTaskIds:
         a = plan_stage_task_ids(dist, stages, nested=False)
         b = plan_stage_task_ids(dist, stages, nested=False)
         assert a == b
+
+    def test_num_tasks_none_defaults_to_full_dataset(self) -> None:
+        dist = _dist({"x": [f"x{i}" for i in range(10)], "y": [f"y{i}" for i in range(5)]})
+        # A stage with num_tasks unset judges every task in the distribution.
+        planned = plan_stage_task_ids(dist, [StageSpec()], rng=random.Random(0), nested=False)
+        assert len(planned[0]) == 15
+        assert set(planned[0]) == set(all_task_ids(dist))
+
+    def test_num_tasks_none_nested_full_then_prefix(self) -> None:
+        dist = _dist({"x": [f"x{i}" for i in range(10)]})
+        # None (full) as the largest stage; a smaller explicit stage is a prefix.
+        planned = plan_stage_task_ids(dist, [StageSpec(num_tasks=4), StageSpec()], rng=random.Random(1), nested=True)
+        assert len(planned[0]) == 4
+        assert len(planned[1]) == 10
+        assert set(planned[0]).issubset(set(planned[1]))
 
 
 class TestFitStageElo:
