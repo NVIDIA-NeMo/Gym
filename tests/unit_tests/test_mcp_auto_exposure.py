@@ -280,8 +280,28 @@ def test_refuses_dependency_injection_handler():
 # ==================================================================================================
 
 
+def _verify_body(names: list[str]) -> dict:
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": "x"}]},
+        "response": {
+            "id": "resp_x",
+            "created_at": 0.0,
+            "model": "m",
+            "object": "response",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {"type": "function_call", "name": n, "arguments": "{}", "call_id": f"c{i}"}
+                for i, n in enumerate(names)
+            ],
+        },
+    }
+
+
 def test_verify_normalizes_mcp_namespaced_tool_names():
-    """MCP-driven rollouts record tool calls as mcp__<server>__<tool>; verify must see bare names."""
+    """MCP-driven rollouts record tool calls as mcp__<server>__<tool>; verify must see bare names,
+    but the echoed response must keep what the model emitted (transport provenance preserved)."""
     seen: dict[str, list] = {}
 
     class Recorder(Store):
@@ -289,30 +309,38 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
             seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
             return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    server = _server(Recorder, name="store")
+    server = _server(Recorder, name="store")  # Store has expose_tools_over_mcp = True
     app = server.setup_webserver()
     with TestClient(app) as client:
-        body = {
-            "responses_create_params": {"input": [{"role": "user", "content": "x"}]},
-            "response": {
-                "id": "resp_x",
-                "created_at": 0.0,
-                "model": "m",
-                "object": "response",
-                "parallel_tool_calls": False,
-                "tool_choice": "auto",
-                "tools": [],
-                "output": [
-                    {"type": "function_call", "name": "mcp__store__append", "arguments": "{}", "call_id": "c1"},
-                    {"type": "function_call", "name": "raw_step", "arguments": "{}", "call_id": "c2"},
-                    {"type": "function_call", "name": "mcp__other__tool", "arguments": "{}", "call_id": "c3"},
-                ],
-            },
-        }
-        resp = client.post("/verify", json=body)
+        emitted = ["mcp__store__append", "raw_step", "mcp__other__tool"]
+        resp = client.post("/verify", json=_verify_body(emitted))
         assert resp.status_code == 200, resp.text
-    # this server's prefix stripped, bare names untouched, other servers' prefixes left alone
+        echoed = [o["name"] for o in resp.json()["response"]["output"] if o["type"] == "function_call"]
+    # verify SAW: this server's prefix stripped, bare names untouched, other servers' prefixes left alone
     assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
+    # persisted response KEEPS the names the model actually emitted — normalization is scoring-only
+    assert echoed == emitted
+
+
+def test_verify_does_not_normalize_when_mcp_exposure_off():
+    """Flag off (the default for every existing benchmark): verify is byte-identical, no rewrite."""
+    seen: dict[str, list] = {}
+
+    class Plain(Store):
+        expose_tools_over_mcp: ClassVar[bool] = False
+
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Plain, name="store")
+    app = server.setup_webserver()
+    with TestClient(app) as client:
+        emitted = ["mcp__store__append", "raw_step"]
+        resp = client.post("/verify", json=_verify_body(emitted))
+        assert resp.status_code == 200, resp.text
+    # nothing stripped — a flag-off server never touches trajectory names
+    assert seen["names"] == emitted
 
 
 def test_bind_route_honors_factory_signature_over_annotations():

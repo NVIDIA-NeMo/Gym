@@ -160,7 +160,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         self.setup_session_middleware(app)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self._verify_with_normalized_tool_names())
+        # MCP-native agents record tool calls namespaced (mcp__<server>__<tool>). Only servers that
+        # actually expose their tools over MCP can receive such names, so the scoring-time
+        # normalization is installed only when that flag is set — HTTP-only servers keep verify
+        # byte-for-byte and their baselines stay valid.
+        verify_handler = self._verify_with_normalized_tool_names() if self.expose_tools_over_mcp else self.verify
+        app.post("/verify")(verify_handler)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
@@ -170,16 +175,50 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)
 
     def _verify_with_normalized_tool_names(self):
+        """Wrap verify so tool names are normalized for scoring only, without changing the recorded
+        trajectory. The comparison runs against a normalized copy; the reward response's echoed tool
+        names are then restored to what the model emitted (matched by call_id), so persisted rollout
+        artifacts keep the real names and transport provenance.
+        """
         verify = self.verify
+
+        def _function_calls(container):
+            return [
+                item
+                for item in (getattr(getattr(container, "response", None), "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
 
         @functools.wraps(verify)
         async def verify_normalized(*args, **kwargs):
-            for candidate in (*args, *kwargs.values()):
-                output = getattr(getattr(candidate, "response", None), "output", None) or []
-                for item in output:
-                    if getattr(item, "type", None) == "function_call":
-                        item.name = self.normalize_tool_name(item.name)
-            return await verify(*args, **kwargs)
+            args = list(args)
+            # Locate the request-like argument carrying the trajectory (verify signatures vary:
+            # (body), (request, body), ...); leave everything else untouched.
+            target_key = next((k for k, v in enumerate(args) if _function_calls(v)), None)
+            if target_key is None:
+                target_key = next((k for k, v in kwargs.items() if _function_calls(v)), None)
+                container = kwargs.get(target_key)
+            else:
+                container = args[target_key]
+            if target_key is None:
+                return await verify(*args, **kwargs)
+
+            emitted = {item.call_id: item.name for item in _function_calls(container)}
+            normalized = container.model_copy(deep=True)
+            for item in _function_calls(normalized):
+                item.name = self.normalize_tool_name(item.name)
+            if isinstance(target_key, int):
+                args[target_key] = normalized
+            else:
+                kwargs[target_key] = normalized
+
+            result = await verify(*args, **kwargs)
+
+            # Restore the names the model actually emitted in the echoed response.
+            for item in _function_calls(result):
+                if item.call_id in emitted:
+                    item.name = emitted[item.call_id]
+            return result
 
         return verify_normalized
 
