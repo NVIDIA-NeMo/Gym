@@ -1,0 +1,50 @@
+# PinchBench runner image: Node 22 + OpenClaw + python/uv.
+#
+# The PinchBench skill is NOT vendored in this repo. At build time we clone it at a
+# pinned tag and apply the NVIDIA integration patch (custom OpenAI-compatible endpoint,
+# JUDGE_BASE_URL/JUDGE_API_KEY judge routing, transcript resolution) — mirroring how
+# harbor_agent / mini_swe_agent pin a framework commit instead of vendoring. run_task.sh
+# (our per-task entrypoint) is baked in at /opt/run_task.sh.
+#
+# Build context = responses_api_agents/pinchbench/ (see setup_scripts/build_image.sh).
+FROM node:22-bookworm
+
+LABEL org.opencontainers.image.source="https://github.com/pinchbench/skill"
+LABEL org.opencontainers.image.description="PinchBench runner (OpenClaw + NVIDIA endpoint patch)"
+
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip python3-venv git curl jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (PinchBench runs benchmark.py via `uv run --with pyyaml`)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# OpenClaw + Brave web-search plugin (pinned). The explicit plugin link makes the
+# runtime discover Brave as provider "brave" instead of falling back to SearXNG/Kimi.
+RUN npm install -g openclaw@2026.6.5 @openclaw/brave-plugin@2026.6.5 \
+    && (openclaw plugins install --link /usr/local/lib/node_modules/@openclaw/brave-plugin \
+        || echo "WARN: brave plugin link failed; web search disabled")
+
+# Clone the PinchBench skill at the validated tag, then apply the NVIDIA integration
+# patch (see setup_scripts/nvidia-pinchbench.patch — touches scripts/lib_agent.py only).
+ARG PINCHBENCH_SKILL_REF=v2.0.0
+RUN git clone --depth 1 --branch "$PINCHBENCH_SKILL_REF" https://github.com/pinchbench/skill /opt/pinchbench-skill
+COPY setup_scripts/nvidia-pinchbench.patch /tmp/nvidia-pinchbench.patch
+RUN cd /opt/pinchbench-skill && git apply /tmp/nvidia-pinchbench.patch && echo "applied nvidia-pinchbench.patch"
+
+# Sandbox isolation: benchmark.py hardcodes its run-root to /tmp/pinchbench, but under
+# the apptainer provider /tmp is the *host's* dir SHARED across concurrent instances
+# (only the per-sandbox /sandbox bind is isolated). Make the run-root honor
+# $PINCHBENCH_RUN_ROOT so run_task.sh can point it at the isolated working mount.
+RUN cd /opt/pinchbench-skill && \
+    sed -i 's#run_root = Path("/tmp/pinchbench")#run_root = Path(os.environ.get("PINCHBENCH_RUN_ROOT", "/tmp/pinchbench"))#' scripts/benchmark.py && \
+    sed -i 's#agent_workspace = Path(f"/tmp/pinchbench/{run_id}/agent_workspace")#agent_workspace = Path(f"{run_root}/{run_id}/agent_workspace")#' scripts/benchmark.py && \
+    grep -q 'PINCHBENCH_RUN_ROOT' scripts/benchmark.py
+
+# Bake in our per-task entrypoint.
+COPY run_task.sh /opt/run_task.sh
+
+RUN mkdir -p /root/.openclaw
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["openclaw --version && echo 'Ready for benchmarks'"]

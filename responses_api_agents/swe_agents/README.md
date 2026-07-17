@@ -120,7 +120,7 @@ Selection is driven by `problem_info["dataset_name"]` (set in the input JSONL). 
 >
 > Treat reward signals from `deepswe` / `denovoswe` as directional until a full agent-driven baseline is reproduced and matches published numbers.
 
-All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`_setup_directory_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
+All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`file_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
 
 The eval container is built from the same SIF as the agent for some datasets, but for SWE-bench / R2E-Gym / SWE-rebench / SWE-bench-Multilingual the harness venv is mounted at both `/{dataset}_setup` *and* its host absolute path (because `uv venv` bakes absolute paths into its wrappers).
 

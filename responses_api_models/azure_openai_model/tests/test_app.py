@@ -57,7 +57,7 @@ class TestApp:
             entrypoint="",
             name="",
         )
-        return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()

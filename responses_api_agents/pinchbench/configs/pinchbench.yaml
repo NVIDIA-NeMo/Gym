@@ -1,0 +1,44 @@
+pinchbench_agent:
+  responses_api_agents:
+    pinchbench:
+      entrypoint: app.py
+      # One sandbox per task (the isolation boundary, mirrors swe_agents/harbor). Each
+      # sandbox runs its OWN in-sandbox OpenClaw gateway — the only mode (at openclaw
+      # 2026.6.5 `openclaw agent` needs a gateway to persist transcripts).
+      openclaw_mode: gateway
+      gateway_token: pinchbench-local
+      # Per-task sandbox via Gym's provider-neutral Sandbox API (PR #1377). Provider is
+      # config-selected: apptainer (Slurm/HPC, shown) or opensandbox (cluster). Build a
+      # .sif from the image with setup_scripts/build_image.sh --apptainer; pass its path
+      # (or a docker://<image> ref) via +sandbox_image=... at run time.
+      # Defaults are fine: the .sif rootfs is read-only, but the provider bind-mounts a
+      # writable, per-sandbox-isolated host dir at mount_point (/sandbox) — run_task.sh
+      # writes the skill copy, OpenClaw $HOME, $TMPDIR and the benchmark run-root there.
+      sandbox_provider:
+        apptainer: {}
+      sandbox_spec:
+        image: ${sandbox_image}
+        ready_timeout_s: 600
+        resources:
+          cpu: 4
+          memory_mib: 8192
+      task_timeout_s: 1800
+      # Policy model OpenClaw runs against (streaming-capable endpoint; secrets
+      # supplied via CLI/env overrides at run time — never committed).
+      model_base_url: ${model_base_url}
+      model_api_key: ${model_api_key}
+      model_name: ${model_name}
+      # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
+      judge_model: ${judge_model}
+      judge_base_url: ${judge_base_url}
+      judge_api_key: ${judge_api_key}
+      web_search_provider: brave
+      brave_api_key: ${brave_api_key}
+      max_concurrent: 2
+      max_tokens: 16384
+      context_window: 131072
+      timeout_multiplier: 3.0
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/pinchbench/data/example.jsonl
