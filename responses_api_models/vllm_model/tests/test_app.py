@@ -16,6 +16,7 @@ import json
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -52,7 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -63,6 +64,18 @@ from responses_api_models.vllm_model.app import (
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+
+def _make_client_response_error(status: int, content: bytes) -> ClientResponseError:
+    error = ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=status,
+        message="Bad Request",
+        headers=None,
+    )
+    error.response_content = content
+    return error
 
 
 class FakeUUID:
@@ -661,7 +674,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(self, monkeypatch: MonkeyPatch, return_token_id_information: bool = False):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -670,7 +683,7 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
             uses_reasoning_parser=False,
         )
 
@@ -682,6 +695,76 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    async def test_chat_completions_converts_max_model_len_400_to_length(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            side_effect=_make_client_response_error(
+                400,
+                b'{"error":{"message":"Prompt length (8192) fills or exceeds max_model_len (8192). '
+                b'No room for output tokens."}}',
+            )
+        )
+        server._clients = [mock_client]
+
+        result = await server.chat_completions(
+            MagicMock(session={SESSION_ID_KEY: "test-session"}),
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": "hello"}]
+            ),
+        )
+
+        assert result.choices[0].finish_reason == "length"
+
+    async def test_tokenize_context_length_400_returns_length(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch, return_token_id_information=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-123",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "hello"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "token_id:1",
+                                    "bytes": None,
+                                    "logprob": -0.1,
+                                    "top_logprobs": [],
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=_make_client_response_error(
+                400,
+                b'{"error":{"message":"This model\'s maximum context length is 8192 tokens."}}',
+            )
+        )
+        server._clients = [mock_client]
+
+        result = await server.chat_completions(
+            MagicMock(session={SESSION_ID_KEY: "test-session"}),
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": "hello"}]
+            ),
+        )
+
+        assert result.choices[0].finish_reason == "length"
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
