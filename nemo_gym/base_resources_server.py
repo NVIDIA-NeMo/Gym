@@ -53,6 +53,8 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
     normalized before verify sees them and rollouts score identically on both transports.
     Non-namespaced names pass through unchanged. When ``server_name`` is given, only that server's
     prefix is stripped (robust to tool names that themselves contain double underscores).
+    This runs only for servers exposed over MCP and mirrors how MCP clients namespace tool names,
+    so a real tool that is itself named ``mcp__<server>__x`` being stripped is accepted.
     """
     if not name.startswith("mcp__"):
         return name
@@ -151,8 +153,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # Opt in to serve this server's tool routes over MCP. When True, run_webserver auto-installs the
     # MCP /mcp endpoint after the app is built (nemo_gym.mcp_auto_exposure.maybe_auto_expose) — no
     # handler changes, no explicit call. Off by default: auto-exposing every route is not always
-    # wanted (e.g. harness-only routes). Dispatcher servers also override mcp_tool_inventory().
+    # wanted (e.g. harness-only routes). A server whose tools are all served by one catch-all route
+    # (POST /{path}) must also list them via mcp_tool_inventory(). Class-level for now; letting a
+    # YAML config toggle it per instance is a possible follow-up.
     expose_tools_over_mcp: ClassVar[bool] = False
+
+    # Catch-all routes (as registered, e.g. "/{tool_name}") that back no tools. Declaring one tells MCP
+    # auto-exposure not to refuse (raise ValueError at startup) over a missing mcp_tool_inventory()
+    # override for that route.
+    mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset()
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -165,6 +174,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         # normalization is installed only when that flag is set — HTTP-only servers keep verify
         # byte-for-byte and their baselines stay valid.
         verify_handler = self._verify_with_normalized_tool_names() if self.expose_tools_over_mcp else self.verify
+        # A flag-on subclass that strips and re-registers /verify must re-apply this wrapper (normalize
+        # function_call names via self.normalize_tool_name), or MCP-namespaced trajectories score wrong.
         app.post("/verify")(verify_handler)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
@@ -173,6 +184,17 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)
+
+    def mcp_tool_inventory(self) -> Optional[list[dict]]:
+        """List the tools this server serves through a single catch-all route (POST /{path}).
+
+        MCP auto-exposure harvests one tool per typed route, so it cannot see tools that all live
+        behind one parameterized route. A server built that way overrides this to return
+        ``{"name", "input_schema", "description"}`` items; those tools dispatch through the
+        catch-all with its path parameter bound to the tool name. ``None`` (the default) means the
+        server has no such tools.
+        """
+        return None
 
     def _verify_with_normalized_tool_names(self):
         """Wrap verify so tool names are normalized for scoring only, without changing the recorded

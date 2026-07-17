@@ -20,24 +20,35 @@ engine through the real /mcp endpoint via TestClient. No external server depende
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
-from typing import Any, ClassVar
+import subprocess
+import sys
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any, ClassVar, Optional
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
+from starlette.routing import Mount
 
 
 pytest.importorskip("mcp")
 
+import nemo_gym.mcp_auto_exposure as mcp_auto_exposure  # noqa: E402
 from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    normalize_tool_name,
 )
 from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
@@ -45,7 +56,7 @@ from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     install_auto_exposure,
     maybe_auto_expose,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient  # noqa: E402
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, SimpleServer  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -53,6 +64,14 @@ RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, 
 
 class EchoBody(BaseModel):
     value: str
+
+
+class OtherBody(BaseModel):
+    other: str
+
+
+class PublicView(BaseModel):
+    shown: str
 
 
 class Store(SimpleResourcesServer):
@@ -90,6 +109,61 @@ class Store(SimpleResourcesServer):
 
     def mcp_tool_inventory(self) -> list[dict]:
         return [{"name": "lookup", "input_schema": {"type": "object", "additionalProperties": True}}]
+
+
+class Shapes(SimpleResourcesServer):
+    """One route per handler shape that direct dispatch must reproduce (or map to the right error)."""
+
+    expose_tools_over_mcp: ClassVar[bool] = True
+
+    async def verify(self, body):
+        pass
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        @app.post("/opt_body")
+        async def opt_body(body: Optional[EchoBody] = None):
+            return {"got": None if body is None else body.value}
+
+        @app.post("/typed_dict_body")
+        async def typed_dict_body(body: dict[str, Any]):
+            return {"echo": body}
+
+        @app.post("/model_and_raw")
+        async def model_and_raw(body: EchoBody, request: Request):
+            raw = await request.json()
+            return {"model": body.value, "raw": raw}
+
+        @app.post("/sync_tool")
+        def sync_tool(body: EchoBody):
+            return {"upper": body.value.upper()}
+
+        @app.post("/with_default")
+        async def with_default(body: EchoBody, limit: int = 3):
+            return {"value": body.value, "limit": limit}
+
+        @app.post("/filtered", response_model=PublicView)
+        async def filtered(body: EchoBody):
+            return {"shown": body.value, "secret": "leak"}
+
+        @app.post("/explode")
+        async def explode():
+            raise RuntimeError("kaboom")
+
+        @app.post("/teapot")
+        async def teapot():
+            raise HTTPException(status_code=418, detail="short and stout")
+
+        @app.post("/bad_status")
+        async def bad_status() -> PlainTextResponse:
+            return PlainTextResponse("nope", status_code=400)
+
+        @app.post("/plain_ok")
+        async def plain_ok() -> PlainTextResponse:
+            return PlainTextResponse("plain hello")
+
+        return app
 
 
 def _server(cls=Store, name="store") -> SimpleResourcesServer:
@@ -130,6 +204,23 @@ def _call(client: TestClient, name: str, args: dict, token: str | None = None) -
     return _rpc(client, "tools/call", {"name": name, "arguments": args}, token=token, rid=3)["result"]
 
 
+@contextmanager
+def _mcp(server_cls=Store, name="store"):
+    """Install auto-exposure, start the app, seed a session, and hand back (client, token)."""
+    server = _server(server_cls, name)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        yield client, token
+
+
+def _payload(result: dict) -> Any:
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
+
+
 # ==================================================================================================
 # The flag gate + mounting
 # ==================================================================================================
@@ -156,31 +247,78 @@ def test_flag_on_mounts_mcp_and_harvests_tools():
     assert "{tool_name}" not in " ".join(tools)
 
 
+def test_refuses_server_that_already_mounts_mcp():
+    server = _server()
+    app = server.setup_webserver()
+
+    async def existing_mcp(scope, receive, send):  # an MCPResourcesServer-style mount
+        pass
+
+    app.router.routes.append(Mount("/mcp", app=existing_mcp))
+    with pytest.raises(ValueError, match="already serves /mcp"):
+        install_auto_exposure(server, app)
+
+
+def test_server_utils_imports_mcp_auto_exposure_lazily():
+    # Agents and models import server_utils; the MCP SDK must not come along for the ride.
+    code = (
+        "import sys\n"
+        "import nemo_gym.server_utils\n"
+        "assert 'nemo_gym.mcp_auto_exposure' not in sys.modules, 'mcp_auto_exposure imported eagerly'\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_run_webserver_guards_maybe_auto_expose_behind_flag():
+    """run_webserver spins up ray + config, so assert on its AST: both the lazy import and the
+    maybe_auto_expose call must sit inside the expose_tools_over_mcp guard."""
+    module_tree = ast.parse(inspect.getsource(sys.modules[SimpleServer.__module__]))
+    tree = next(
+        node
+        for cls in ast.walk(module_tree)
+        if isinstance(cls, ast.ClassDef) and cls.name == "SimpleServer"
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run_webserver"
+    )
+    call_guards: list[list[str]] = []
+    import_guards: list[list[str]] = []
+
+    def visit(node: ast.AST, guards: list[str]) -> None:
+        if isinstance(node, ast.Call):
+            fn = node.func
+            fn_name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if fn_name == "maybe_auto_expose":
+                call_guards.append(list(guards))
+        if isinstance(node, ast.ImportFrom) and node.module == "nemo_gym.mcp_auto_exposure":
+            import_guards.append(list(guards))
+        for child in ast.iter_child_nodes(node):
+            child_guards = guards
+            if isinstance(node, ast.If) and child in node.body:
+                child_guards = guards + [ast.unparse(node.test)]
+            visit(child, child_guards)
+
+    visit(tree, [])
+    assert call_guards, "run_webserver no longer calls maybe_auto_expose"
+    assert import_guards, "run_webserver no longer imports mcp_auto_exposure lazily"
+    for guards in call_guards + import_guards:
+        assert any("expose_tools_over_mcp" in g for g in guards), guards
+
+
 # ==================================================================================================
 # tools/list + tools/call over the real /mcp endpoint
 # ==================================================================================================
 
 
 def test_tools_list_advertises_typed_schema():
-    server = _server()
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
+    with _mcp() as (client, token):
         tools = {t["name"]: t for t in _list(client, token)}
         assert sorted(tools["append"]["inputSchema"]["properties"]) == ["value"]
         assert tools["append"]["description"].startswith("Append a value")
 
 
-def test_direct_dispatch_runs_handler_and_shares_session_with_http_door():
-    server = _server()
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
-        # HTTP door (cookie) then MCP (token) — same seeded session id, so state accumulates.
+def test_direct_dispatch_runs_handler_and_shares_session_with_plain_http_route():
+    with _mcp() as (client, token):
+        # Plain HTTP route (cookie) then MCP (token) — same seeded session id, so state accumulates.
         client.post("/append", json={"value": "a"})
         result = _call(client, "append", {"value": "b"}, token=token)
         assert result.get("isError") is not True
@@ -188,23 +326,13 @@ def test_direct_dispatch_runs_handler_and_shares_session_with_http_door():
 
 
 def test_dict_body_tool_dispatches_direct():
-    server = _server()
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
+    with _mcp() as (client, token):
         result = _call(client, "raw_step", {"anything": [1, 2]}, token=token)
         assert json.loads(result["content"][0]["text"])["echo"] == {"anything": [1, 2]}
 
 
 def test_raw_body_catchall_dispatches_and_unwraps_plaintext():
-    server = _server()
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
+    with _mcp() as (client, token):
         result = _call(client, "lookup", {"q": "iron"}, token=token)
         payload = json.loads(result["content"][0]["text"])
         assert payload == {"tool": "lookup", "args": {"q": "iron"}}
@@ -223,12 +351,7 @@ def test_allowed_tools_filters_list_and_gates_call():
 
 
 def test_error_mapping():
-    server = _server()
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
+    with _mcp() as (client, token):
         # unknown tool
         r = _call(client, "nope", {}, token=token)
         assert r["isError"] is True and "Unknown tool" in r["content"][0]["text"]
@@ -241,6 +364,139 @@ def test_error_mapping():
         # malformed args -> the handler's own 422
         r = _call(client, "append", {"wrong": "field"}, token=token)
         assert r["isError"] is True and "422" in r["content"][0]["text"]
+
+
+# ==================================================================================================
+# Direct-dispatch parity: each handler shape returns what the plain HTTP route would have
+# ==================================================================================================
+
+
+def test_optional_body_model_receives_arguments():
+    # Optional[Model] = None is still a body param; the arguments must not be dropped as a default.
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "opt_body", {"value": "x"}, token=token))
+        assert payload == {"got": "x"}
+
+
+def test_optional_body_model_advertises_the_model_schema():
+    server = _server(Shapes, "shapes")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        tools = {t["name"]: t for t in _list(client, token)}
+        assert "value" in tools["opt_body"]["inputSchema"].get("properties", {})
+
+
+def test_parameterized_dict_body_dispatches():
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "typed_dict_body", {"k": [1, 2]}, token=token))
+        assert payload == {"echo": {"k": [1, 2]}}
+
+
+def test_body_model_handler_can_also_read_request_json():
+    # The fabricated Request must carry the same bytes the body model was validated from.
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "model_and_raw", {"value": "x"}, token=token))
+        assert payload == {"model": "x", "raw": {"value": "x"}}
+
+
+def test_sync_def_handler_dispatches_correctly():
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "sync_tool", {"value": "ab"}, token=token))
+        assert payload == {"upper": "AB"}
+
+
+def test_defaulted_query_param_gets_its_default():
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "with_default", {"value": "x"}, token=token))
+        assert payload == {"value": "x", "limit": 3}
+
+
+def test_response_model_filters_extra_fields():
+    with _mcp(Shapes, "shapes") as (client, token):
+        payload = _payload(_call(client, "filtered", {"value": "v"}, token=token))
+        assert payload == {"shown": "v"}  # "secret" filtered, as the plain HTTP route would
+
+
+def test_unexpected_handler_exception_maps_to_is_error():
+    with _mcp(Shapes, "shapes") as (client, token):
+        r = _call(client, "explode", {}, token=token)
+        assert r["isError"] is True
+        text = r["content"][0]["text"]
+        assert "HTTP 500" in text and "kaboom" in text
+
+
+def test_http_exception_keeps_status_and_detail():
+    with _mcp(Shapes, "shapes") as (client, token):
+        r = _call(client, "teapot", {}, token=token)
+        assert r["isError"] is True
+        text = r["content"][0]["text"]
+        assert "HTTP 418" in text and "short and stout" in text
+
+
+def test_non_2xx_response_maps_to_is_error():
+    with _mcp(Shapes, "shapes") as (client, token):
+        r = _call(client, "bad_status", {}, token=token)
+        assert r["isError"] is True
+        text = r["content"][0]["text"]
+        assert "HTTP 400" in text and "nope" in text
+
+
+def test_non_json_2xx_response_passes_through_as_text():
+    with _mcp(Shapes, "shapes") as (client, token):
+        r = _call(client, "plain_ok", {}, token=token)
+        assert r.get("isError") is not True
+        assert r["content"][0]["text"] == "plain hello"
+
+
+def test_sequential_calls_keep_sessions_isolated_and_ordered():
+    server = _server()
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token_a = _seed(client)
+        client.cookies.clear()  # a fresh seed mints a distinct session id
+        token_b = _seed(client)
+        _handshake(client)
+        for v in ("a1", "a2"):
+            _call(client, "append", {"value": v}, token=token_a)
+        _call(client, "append", {"value": "b1"}, token=token_b)
+        ra = _payload(_call(client, "append", {"value": "a3"}, token=token_a))
+        rb = _payload(_call(client, "append", {"value": "b2"}, token=token_b))
+        assert ra["values"] == ["a1", "a2", "a3"]
+        assert rb["values"] == ["b1", "b2"]
+
+
+# ==================================================================================================
+# Session tokens: floor for tokenless callers, expiry, garbage
+# ==================================================================================================
+
+
+def test_tokenless_list_respects_install_time_floor():
+    server = _server()
+    app = server.setup_webserver()
+    install_auto_exposure(server, app, allowed_tools=["append"])
+    with TestClient(app) as client:
+        _seed(client)
+        _handshake(client)
+        assert {t["name"] for t in _list(client, token=None)} == {"append"}
+
+
+def test_tokenless_and_garbage_token_list_without_floor():
+    with _mcp() as (client, _token):
+        full = {t["name"] for t in _list(client, token=None)}
+        assert {"append", "raw_step", "lookup"} <= full
+        # tools/list treats the token as optional, so a bad one degrades to tokenless, not an error
+        assert {t["name"] for t in _list(client, token="garbage")} == full
+
+
+def test_expired_token_is_rejected(monkeypatch):
+    with _mcp() as (client, token):
+        monkeypatch.setattr(mcp_auto_exposure, "TOKEN_MAX_AGE_SECONDS", -1)  # every token is now expired
+        r = _call(client, "append", {"value": "x"}, token=token)
+        assert r["isError"] is True and "expired" in r["content"][0]["text"]
 
 
 # ==================================================================================================
@@ -275,8 +531,207 @@ def test_refuses_dependency_injection_handler():
         install_auto_exposure(server, app)
 
 
+def test_refuses_catchall_without_inventory_or_toolless_declaration():
+    class NoInventoryDispatcher(SimpleResourcesServer):
+        expose_tools_over_mcp: ClassVar[bool] = True
+
+        async def verify(self, body):
+            pass
+
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            @app.post("/{tool_name}")
+            async def dispatch(tool_name: str, request: Request):
+                return {}
+
+            return app
+
+    server = _server(NoInventoryDispatcher, "dispatcher")
+    with pytest.raises(ValueError, match="mcp_tool_inventory"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_refuses_inventory_name_colliding_with_reserved_endpoint():
+    class ReservedInventory(Store):
+        def mcp_tool_inventory(self) -> list[dict]:
+            return [{"name": "verify"}]
+
+    server = _server(ReservedInventory)
+    with pytest.raises(ValueError, match="reserved"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_refuses_unknown_toolless_catchall_declaration():
+    class TypoDeclared(Store):
+        mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset({"/{typo}"})
+
+    server = _server(TypoDeclared)
+    with pytest.raises(ValueError, match="Fix the declaration"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_refuses_inventory_without_a_catchall_route():
+    class InventoryNoCatchall(SimpleResourcesServer):
+        expose_tools_over_mcp: ClassVar[bool] = True
+
+        async def verify(self, body):
+            pass
+
+        def mcp_tool_inventory(self) -> list[dict]:
+            return [{"name": "ghost"}]
+
+    server = _server(InventoryNoCatchall, "ghostly")
+    with pytest.raises(ValueError, match="no catch-all"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_refuses_duplicate_tool_name_between_routes_and_inventory():
+    class DuplicateInventory(Store):
+        def mcp_tool_inventory(self) -> list[dict]:
+            return [{"name": "append"}]
+
+    server = _server(DuplicateInventory)
+    with pytest.raises(ValueError, match="Duplicate MCP tool name"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_refuses_nested_tool_route():
+    class NestedRoute(SimpleResourcesServer):
+        expose_tools_over_mcp: ClassVar[bool] = True
+
+        async def verify(self, body):
+            pass
+
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            @app.post("/a/b")
+            async def nested(body: EchoBody):
+                return {}
+
+            return app
+
+    server = _server(NestedRoute, "nested")
+    with pytest.raises(ValueError, match="does not match"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_missing_seed_session_raises_a_clear_error():
+    server = _server()
+    app = server.setup_webserver()
+    app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) != "/seed_session"]
+    with pytest.raises(ValueError, match="seed_session"):
+        install_auto_exposure(server, app)
+
+
+def test_seed_session_with_unannotated_request_param_installs_and_mints_token():
+    class UnannotatedSeed(Store):
+        async def seed_session(self, request=None):  # non-Request param named "request"
+            return BaseSeedSessionResponse()
+
+    server = _server(UnannotatedSeed)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)  # must not produce a duplicate "request" parameter
+    with TestClient(app) as client:
+        assert _seed(client)  # the wrapper still injects the real Request and mints a token
+
+
+# ==================================================================================================
+# The detector: bind_route classification of accepted and refused shapes
+# ==================================================================================================
+
+
+def _stub_route(endpoint, path="/t", response_model=None):
+    """bind_route only reads endpoint/path/response_model, so a stub covers shapes FastAPI itself
+    would reject at registration."""
+    return SimpleNamespace(endpoint=endpoint, path=path, response_model=response_model)
+
+
+def test_bind_route_refusal_reasons():
+    async def var_args(*args):
+        pass
+
+    async def two_models(a: EchoBody, b: OtherBody):
+        pass
+
+    async def ambiguous_union(body: EchoBody | str):
+        pass
+
+    async def di_default(ok: bool = Depends(lambda: True)):
+        pass
+
+    async def bare_required(x: int):
+        pass
+
+    cases = {
+        "*args/**kwargs": var_args,
+        "multiple body models": two_models,
+        "ambiguous union body": ambiguous_union,
+        "DI marker default": di_default,
+        "unsupported required param": bare_required,
+    }
+    for expected, endpoint in cases.items():
+        outcome = bind_route(_stub_route(endpoint))
+        assert outcome.binding is None, expected
+        assert any(expected in reason for reason in outcome.reasons), (expected, outcome.reasons)
+
+
+def test_bind_route_accepts_defaulted_query_param():
+    async def handler(body: EchoBody, limit: int = 5):
+        pass
+
+    outcome = bind_route(_stub_route(handler))
+    assert outcome.binding is not None, outcome.reasons
+    assert outcome.binding.body_model is EchoBody
+    assert outcome.binding.defaulted_params == ("limit",)
+
+
+def test_silently_wrong_shapes_are_classified_not_degraded():
+    """The shapes that would dispatch wrongly if misclassified: Optional body is a body param (not a
+    dropped default), response_model is recorded for filtering, and a sync (def) handler is recorded
+    as is_coroutine=False."""
+    server = _server(Shapes, "shapes")
+    app = server.setup_webserver()
+    routes = {r.path: r for r in app.routes if isinstance(r, APIRoute)}
+
+    opt = bind_route(routes["/opt_body"]).binding
+    assert opt is not None and opt.body_model is EchoBody and not opt.defaulted_params
+
+    filt = bind_route(routes["/filtered"]).binding
+    assert filt is not None and filt.return_model is PublicView
+
+    sync = bind_route(routes["/sync_tool"]).binding
+    assert sync is not None and sync.is_coroutine is False
+
+
 # ==================================================================================================
 # The detector's annotation resolution (regression: factory-set __signature__ must win)
+# ==================================================================================================
+
+
+def test_bind_route_honors_factory_signature_over_annotations():
+    app = FastAPI()
+
+    async def handler(body: Any, request: Request):  # __annotations__ say Any
+        return {}
+
+    # A factory rewrites __signature__ with the REAL body model (the newton_bench pattern).
+    handler.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter("body", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=EchoBody),
+            inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
+        ]
+    )
+    app.post("/factory")(handler)
+    route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == "/factory")
+    outcome = bind_route(route)
+    assert outcome.binding is not None
+    assert outcome.binding.body_model is EchoBody  # the signature won, not Any
+
+
+# ==================================================================================================
+# Verify-time tool-name normalization (scoring-only, gated on expose_tools_over_mcp)
 # ==================================================================================================
 
 
@@ -343,25 +798,13 @@ def test_verify_does_not_normalize_when_mcp_exposure_off():
     assert seen["names"] == emitted
 
 
-def test_bind_route_honors_factory_signature_over_annotations():
-    import inspect
-
-    from fastapi.routing import APIRoute
-
-    app = FastAPI()
-
-    async def handler(body: Any, request: Request):  # __annotations__ say Any
-        return {}
-
-    # A factory rewrites __signature__ with the REAL body model (the newton_bench pattern).
-    handler.__signature__ = inspect.Signature(
-        [
-            inspect.Parameter("body", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=EchoBody),
-            inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
-        ]
-    )
-    app.post("/factory")(handler)
-    route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == "/factory")
-    outcome = bind_route(route)
-    assert outcome.binding is not None
-    assert outcome.binding.body_model is EchoBody  # the signature won, not Any
+def test_normalize_tool_name_without_server_name_strips_first_namespace():
+    assert normalize_tool_name("mcp__store__append") == "append"
+    # only the first separator is the namespace boundary; the tool's own underscores survive
+    assert normalize_tool_name("mcp__store__ns__tool") == "ns__tool"
+    # no tool part after the prefix -> not a namespaced name, unchanged
+    assert normalize_tool_name("mcp__dangling") == "mcp__dangling"
+    assert normalize_tool_name("plain") == "plain"
+    # with a server name, only that server's prefix is stripped
+    assert normalize_tool_name("mcp__store__append", "store") == "append"
+    assert normalize_tool_name("mcp__other__append", "store") == "mcp__other__append"
