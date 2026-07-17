@@ -395,7 +395,7 @@ def test_workflow_runs_hourly_on_weekdays_with_minimal_permissions() -> None:
     assert workflow["permissions"] == {
         "contents": "read",
         "issues": "write",
-        "pull-requests": "read",
+        "pull-requests": "write",
     }
     assert workflow["jobs"]["refresh"]["timeout-minutes"] == "10"
 
