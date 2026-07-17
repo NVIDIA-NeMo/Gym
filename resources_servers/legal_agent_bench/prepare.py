@@ -23,9 +23,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 
 LAB_SOURCE_REPOSITORY = "https://github.com/harveyai/harvey-labs"
-LAB_SOURCE_REVISION = "f46ef86e4788545622db25dcffa3aebb7a139929"
+LAB_SOURCE_REVISION = "f46ef86e4788545622db25dcffa3aebb7a139929"  # pragma: allowlist secret
 LAB_SOURCE_ARCHIVE_URL = f"https://codeload.github.com/harveyai/harvey-labs/tar.gz/{LAB_SOURCE_REVISION}"
-LAB_SOURCE_ARCHIVE_SHA256 = "e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c"
+LAB_SOURCE_ARCHIVE_SHA256 = (
+    "e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c"  # pragma: allowlist secret
+)
 LAB_SOURCE_ARCHIVE_ROOT = f"harvey-labs-{LAB_SOURCE_REVISION}"
 EXPECTED_TASK_COUNT = 1_749
 REQUIRED_SKILLS = ("docx", "pptx", "xlsx")

@@ -43,13 +43,13 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
     server = _server(
         tmp_path,
         judge_base_url="https://judge.example/v1",
-        judge_api_key="test-key",
+        judge_api_key="test-key",  # pragma: allowlist secret
         judge_model_name="provider/model-name",
         judge_temperature=0.2,
     )
     judge_env = {
         "LAB_JUDGE_BASE_URL": "https://judge.example/v1",
-        "LAB_JUDGE_API_KEY": "test-key",
+        "LAB_JUDGE_API_KEY": "test-key",  # pragma: allowlist secret
         "LAB_JUDGE_MODEL": "openai-compatible/provider/model-name",
         "LAB_JUDGE_TEMPERATURE": "0.2",
         "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS": "90",
@@ -91,11 +91,11 @@ def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
         port=0,
         entrypoint="app.py",
         judge_base_url="https://judge.example/v1",
-        judge_api_key="test-key",
+        judge_api_key="test-key",  # pragma: allowlist secret
         judge_model_name="provider/model-name",
     )
     env = _build_verifier_env(config)
 
     assert env["LAB_JUDGE_BASE_URL"] == "https://judge.example/v1"
-    assert env["LAB_JUDGE_API_KEY"] == "test-key"
+    assert env["LAB_JUDGE_API_KEY"] == "test-key"  # pragma: allowlist secret
     assert env["LAB_JUDGE_MODEL"] == "openai-compatible/provider/model-name"

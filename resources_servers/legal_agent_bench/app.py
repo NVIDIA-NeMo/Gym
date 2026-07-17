@@ -27,7 +27,7 @@ from resources_servers.legal_agent_bench.prepare import (
 RewardMode = Literal["full_task", "criteria_pass_rate"]
 JUDGE_CONFIG_TO_ENV = {
     "judge_base_url": "LAB_JUDGE_BASE_URL",
-    "judge_api_key": "LAB_JUDGE_API_KEY",
+    "judge_api_key": "LAB_JUDGE_API_KEY",  # pragma: allowlist secret
     "judge_model_name": "LAB_JUDGE_MODEL",
     "judge_temperature": "LAB_JUDGE_TEMPERATURE",
     "judge_request_timeout_seconds": "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS",

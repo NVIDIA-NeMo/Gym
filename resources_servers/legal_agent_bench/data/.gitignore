@@ -2,4 +2,5 @@ cache/
 runtime/
 generated/
 *_metrics.json
+!example_metrics.json
 *_prepare.jsonl

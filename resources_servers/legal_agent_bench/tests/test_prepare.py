@@ -199,7 +199,7 @@ def test_runtime_hydration_keeps_pristine_cache_secret_free(monkeypatch, tmp_pat
         runtime,
         verifier_env={
             "LAB_JUDGE_BASE_URL": "https://judge.example/v1",
-            "LAB_JUDGE_API_KEY": "test-secret",
+            "LAB_JUDGE_API_KEY": "test-secret",  # pragma: allowlist secret
             "LAB_JUDGE_MODEL": "openai-compatible/judge-model",
         },
         reward_mode="full_task",
@@ -209,7 +209,7 @@ def test_runtime_hydration_keeps_pristine_cache_secret_free(monkeypatch, tmp_pat
     runtime_toml = (runtime / "area__task-one" / "task.toml").read_text(encoding="utf-8")
     assert "test-secret" not in cached_toml
     assert "[verifier.env]" not in cached_toml
-    assert 'LAB_JUDGE_API_KEY = "test-secret"' in runtime_toml
+    assert 'LAB_JUDGE_API_KEY = "test-secret"' in runtime_toml  # pragma: allowlist secret
     assert 'LEGAL_AGENT_BENCH_REWARD_MODE = "full_task"' in runtime_toml
     assert (tasks / "area__task-one" / "documents" / "input.txt").stat().st_ino == (
         runtime / "area__task-one" / "documents" / "input.txt"
