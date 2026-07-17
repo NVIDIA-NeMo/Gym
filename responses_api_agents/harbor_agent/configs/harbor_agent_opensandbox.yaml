@@ -92,7 +92,11 @@ harbor_agent:
         # override_storage_mb; 30 GiB avoids kubelet ephemeral-storage evictions
         # on disk-heavy tasks (image builds, dataset downloads) that overrun the
         # 10 GiB task.toml default. Remove these to use each task.toml's values.
-        override_cpus: 4
+        # 8C/16G: exec-path 500s ("Failed to run command", no server error) were
+        # traced to sandbox containers dying under load — consistent with
+        # OOM/oversubscription kills; roomier limits keep execd alive on
+        # memory-hungry tasks.
+        override_cpus: 8
         override_memory_mb: 16384
         override_storage_mb: 30720
 
