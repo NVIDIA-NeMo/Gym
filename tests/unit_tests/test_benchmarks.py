@@ -120,6 +120,51 @@ class TestListBenchmarks:
             list_benchmarks()
         assert json.loads(capsys.readouterr().out) == []
 
+    def test_inspect_benchmark_by_name(self, capsys) -> None:
+        bench = MagicMock(agent_name="my_agent", num_repeats=8)
+        bench.path = Path("benchmarks/aime24/config.yaml")
+        bench.dataset.jsonl_fpath = Path("benchmarks/aime24/data/aime24.jsonl")
+        bench.dataset.prepare_script = Path("benchmarks/aime24/prepare.py")
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "aime24"}),
+            ),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"aime24": bench}),
+            patch("nemo_gym.cli.eval.read_config_metadata", return_value=("math", "AIME desc")),
+        ):
+            list_benchmarks()
+        out = capsys.readouterr().out
+        assert "The aime24 benchmark (domain: math)" in out and "AIME desc" in out
+        assert "agent: my_agent" in out and "num repeats: 8" in out
+        assert "gym eval prepare --benchmark aime24" in out
+        assert "gym eval run --benchmark aime24 --model-type vllm_model" in out
+
+    def test_inspect_unknown_benchmark_exits(self, capsys) -> None:
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config({"component_name": "aim24"}),
+            ),
+            patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"aime24": MagicMock()}),
+        ):
+            with pytest.raises(SystemExit):
+                list_benchmarks()
+        out = capsys.readouterr().out
+        assert "Unknown benchmark 'aim24'" in out and "aime24" in out
+
+    def test_inspect_shows_absolute_config_path(self, capsys) -> None:
+        # Real discovery: the config line must be the config's absolute path, not a cwd-relative one.
+        from nemo_gym.benchmarks import BENCHMARKS_DIR
+
+        expected = (BENCHMARKS_DIR / "aime24" / "config.yaml").resolve()
+        with patch(
+            "nemo_gym.cli.eval.get_global_config_dict",
+            return_value=_mock_global_config({"component_name": "aime24"}),
+        ):
+            list_benchmarks()
+        assert f"config: {expected}" in capsys.readouterr().out
+
 
 class TestDiscoverBenchmarksInDir:
     def test_skips_configs_that_fail_to_resolve_with_warning(self, tmp_path: Path, capsys) -> None:

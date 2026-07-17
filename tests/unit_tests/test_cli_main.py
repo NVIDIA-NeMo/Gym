@@ -1190,3 +1190,10 @@ class TestListEnvironmentsRouting:
         # --search-dir roots come first, existing extra roots after, so both stay searchable
         assert seen["env"] == os.pathsep.join(["/a", "/b", "/pre"])
         assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "/pre"  # original restored after main()
+
+    def test_name_positional_becomes_component_name_override(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym list <type> <name>` reaches the listing command as the reserved `component_name` config key,
+        # switching it into inspect mode.
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == ["+component_name=calendar"]

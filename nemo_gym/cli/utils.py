@@ -13,13 +13,74 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import difflib
-from typing import Iterable, Optional
+import json
+import sys
+from typing import Dict, Iterable, Optional
 
 
 def did_you_mean(value: str, candidates: Iterable[str]) -> str:
     """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
     matches = difflib.get_close_matches(value, list(candidates), n=1)
     return f" Did you mean `{matches[0]}`?" if matches else ""
+
+
+def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
+    """Print an `unknown <type> '<name>'` error (with a did-you-mean hint) and exit nonzero."""
+    import rich
+
+    rich.print(f"[red]Unknown {type_label} '{name}'.[/red]" + did_you_mean(name, candidates))
+    sys.exit(1)
+
+
+def render_component_inspection(
+    *,
+    json_output: bool,
+    name: str,
+    type_noun: str,
+    domain: Optional[str] = None,
+    description: Optional[str] = None,
+    details: Dict[str, str],
+    usage: Optional[str] = None,
+) -> None:
+    """Render the uniform ``gym list <type> <name>`` inspect view (or its ``--json`` payload).
+
+    ``details`` is an ordered label -> value mapping (e.g. ``{"config": ..., "agent": ...}``). Text
+    sections (domain suffix, description, Details, Usage example) are omitted when empty.
+    """
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "name": name,
+                    "type": type_noun,
+                    "domain": domain,
+                    "description": description,
+                    "details": details,
+                    "usage_example": usage,
+                }
+            )
+        )
+        return
+
+    from rich.console import Console
+    from rich.markup import escape
+
+    # The name and section titles are bold; all dynamic text is escaped so `[...]` in a description or
+    # value isn't parsed as Rich markup.
+    header = f"The [bold]{escape(name)}[/bold] {escape(type_noun)}"
+    if domain:
+        header += f" (domain: {escape(domain)})"
+    sections = [header]
+    if description:
+        sections.append(escape(description))
+    if details:
+        body = "\n".join(f"{escape(label)}: {escape(str(val))}" for label, val in details.items())
+        sections.append(f"[bold]Details:[/bold]\n{body}")
+    if usage:
+        sections.append(f"[bold]Usage example:[/bold]\n{escape(usage)}")
+    # `soft_wrap` so long descriptions/paths aren't reflowed to the console width (esp. when piped);
+    # `highlight=False` so only our explicit bold applies (no auto-styling of parens/numbers/paths).
+    Console().print("\n\n".join(sections), soft_wrap=True, highlight=False)
 
 
 def print_no_matches(component_type: str, query: Optional[str]) -> None:

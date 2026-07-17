@@ -16,9 +16,16 @@ import json
 
 from rich.table import Table
 
-from nemo_gym.cli.utils import fuzzy_matches, print_no_matches, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     GlobalConfigDictParserConfig,
@@ -27,11 +34,34 @@ from nemo_gym.global_config import (
 from nemo_gym.model_registry import discover_models
 
 
+def _inspect_model(name: str, models: dict, global_config_dict) -> None:
+    """Render the ``gym list models <name>`` inspect view for one model (thin: no usage example).
+
+    ``name`` may be a bare model or a ``<model>/<flavor>`` token; a valid flavor renders the model's
+    (main) inspection.
+    """
+    model = name.split("/", 1)[0]
+    entry = models.get(model)
+    if entry is None or (name != model and name not in entry.model_types):
+        exit_unknown_component(name, [token for e in models.values() for token in e.model_types], "model")
+        return
+
+    details = {"path": str(entry.path.resolve())}
+    if entry.model_types:
+        details["model-types"] = ", ".join(entry.model_types)
+
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=model,
+        type_noun="model",
+        details=details,
+    )
+
+
 def list_models() -> None:
-    """List model servers, one row per ``--model-type`` value: ``Model`` is the token to pass (``<name>``
-    for the default flavor, ``<name>/<flavor>`` for the rest); ``Model group`` is its model. Optionally
-    filtered by a `query` (the `gym search models` entry point). ``--search-dir`` adds extra roots on top of
-    the cwd and built-ins.
+    """List model servers (one row per ``--model-type`` value: ``Model`` is the token to pass, ``Model group``
+    its model), or inspect one by name (``gym list models <name>``). Optionally filtered by a `query` (the
+    `gym search models` entry point). ``--search-dir`` adds extra roots on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -41,6 +71,11 @@ def list_models() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     models = discover_models()
+
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_model(name, models, global_config_dict)
+        return
 
     # One row per passable `--model-type` value: `model` is the token, `model_group` its model.
     rows = [

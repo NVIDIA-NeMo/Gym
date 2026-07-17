@@ -76,3 +76,21 @@ class TestDiscoverResourcesServers:
 
     def test_missing_directory_yields_no_servers(self, tmp_path: Path) -> None:
         assert _discover_resources_servers_in_dir(tmp_path / "nope") == {}
+
+
+class TestReadResourcesServerValue:
+    def test_reads_value_from_config(self, tmp_path: Path) -> None:
+        from nemo_gym.resources_server_registry import read_resources_server_value
+
+        cfg = tmp_path / "my_server.yaml"
+        cfg.write_text("s:\n  resources_servers:\n    my_server:\n      value: The value\n")
+
+        assert read_resources_server_value(cfg) == "The value"
+
+    def test_returns_none_when_no_value(self, tmp_path: Path) -> None:
+        from nemo_gym.resources_server_registry import read_resources_server_value
+
+        cfg = tmp_path / "my_server.yaml"
+        cfg.write_text("s:\n  resources_servers:\n    my_server:\n      domain: x\n")
+
+        assert read_resources_server_value(cfg) is None

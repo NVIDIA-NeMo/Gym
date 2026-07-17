@@ -27,7 +27,7 @@ from typing import Dict, Optional
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components, read_config_metadata
+from nemo_gym.discovery import discover_components, iter_server_configs, read_config_metadata
 
 
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
@@ -100,3 +100,15 @@ def discover_resources_servers() -> Dict[str, ResourcesServerEntry]:
     root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user servers shadow same-named built-ins.
     """
     return discover_components(RESOURCES_SERVERS_SUBDIR, _discover_resources_servers_in_dir)
+
+
+def read_resources_server_value(config_path: Path) -> Optional[str]:
+    """The ``value`` field declared on a resources server config (for the inspect view). Never raises."""
+    try:
+        raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)
+    except Exception:
+        return None
+    for group_key, _server_name, server_config in iter_server_configs(raw):
+        if group_key == "resources_servers" and server_config.get("value"):
+            return str(server_config["value"])
+    return None
