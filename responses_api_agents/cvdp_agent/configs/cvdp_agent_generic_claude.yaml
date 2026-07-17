@@ -1,6 +1,3 @@
-# cvdp agentic, harness-agnostic agent driving claude_code_agent inside the sim sandbox.
-# claude_code speaks the anthropic api, so its endpoint and key are passed via agent_kwargs.
-# swap the agent_server_* block (and setup_scripts/<key>_deps.sh) to change harness.
 cvdp_agent_generic_claude:
   responses_api_agents:
     cvdp_agent:
@@ -10,14 +7,16 @@ cvdp_agent_generic_claude:
       concurrency: 4
       timeout: 900
 
+      datasets:
+      - name: example_agentic
+        type: example
+        jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
+
       # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
       agent_server_module: responses_api_agents.claude_code_agent.app
       agent_server_class: ClaudeCodeAgent
       agent_config_class: ClaudeCodeAgentConfig
       agent_kwargs:
-        # only `model` is load-bearing when model_server is set: the runner points claude at the
-        # model server, so anthropic_base_url is overridden and anthropic_api_key falls back to a
-        # local token. 
         model: ${anthropic_model_name}
         max_turns: 30
 
