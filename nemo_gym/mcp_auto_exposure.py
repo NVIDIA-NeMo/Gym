@@ -38,6 +38,27 @@ reason: a wrong dispatch would corrupt rollouts silently, while a startup error 
 
 MCP-side engine: the official SDK's public low-level ``mcp.server.lowlevel.Server`` +
 ``StreamableHTTPSessionManager`` — no private-attribute access.
+
+How to read this file
+---------------------
+Two timelines run here, and every function belongs to exactly one. Keep them apart while reading.
+
+STARTUP (runs once at boot, per opted-in server):
+    ``maybe_auto_expose`` (flag gate) -> ``install_auto_exposure``, which:
+      * ``harvest_tools`` — walks the app's POST routes, calls ``bind_route`` on each, and builds the
+        ``{tool name: MCPTool}`` map (advertisement + a direct binding per tool);
+      * wraps endpoints — ``_wrap_seed_session`` makes the /seed_session response hand the client a
+        session token; ``_wrap_verify`` normalizes MCP-namespaced tool-call names for scoring only;
+      * mounts /mcp — registers the ``list_tools``/``call_tool`` handlers and attaches the SDK ASGI app.
+
+PER-CALL (runs on every MCP ``tools/call``):
+    a POST /mcp request -> ``session_claims`` reads the token (session id + any allow-list) ->
+    ``call_direct(binding)`` runs the route's own handler exactly once with a fabricated ``Request``
+    and returns its JSON-able payload.
+
+Reading order: start with the dataclasses ``DirectBinding`` and ``MCPTool``, then ``bind_route``
+(startup classify), then ``call_direct`` (per-call dispatch), then ``harvest_tools`` (startup build),
+then ``install_auto_exposure`` (startup wire-up). Everything else is a helper for those five.
 """
 
 from __future__ import annotations
@@ -104,13 +125,14 @@ _GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
 
 
 # ==================================================================================================
-# The detector: bind_route (route-level) + audit_middleware (server-level)
+# STARTUP — detect & bind routes: bind_route (route-level) + audit_middleware (server-level)
 # ==================================================================================================
 
 
 @dataclass
 class DirectBinding:
-    """Everything needed to invoke one route handler directly, resolved once at startup."""
+    """Everything needed to invoke one route handler directly: resolved once at STARTUP by bind_route,
+    read per-call by call_direct."""
 
     endpoint: Callable
     path: str
@@ -126,6 +148,9 @@ class DirectBinding:
 
 @dataclass
 class BindOutcome:
+    """Holds bind_route's verdict for one route (binding, or reasons it is undispatchable, plus the
+    body model for the schema); built during STARTUP harvesting, consumed there and in _validate_tools."""
+
     binding: Optional[DirectBinding]  # None -> this handler shape is not directly dispatchable
     reasons: list[str] = field(default_factory=list)  # why not, when binding is None
     body_model: Optional[type[BaseModel]] = None  # resolved body model, for the tools/list schema
@@ -138,6 +163,17 @@ def bind_route(route: APIRoute) -> BindOutcome:
     factory-set ``__signature__`` — some servers rewrite it with the real body model while
     ``__annotations__`` still says ``Any``), falling back to ``get_type_hints`` only for deferred
     string annotations (``from __future__ import annotations``).
+
+    Called at up to three sites, all pure and idempotent (no app state is mutated), so re-calling is
+    cheap and safe. This is the deferred-validation pattern: a route the ``mcp_tools()`` override
+    drops is never required to be dispatchable, so bind failures must surface only for tools actually
+    exposed. Accordingly:
+      * ``harvest_tools`` calls it per route to get the ``binding`` + body-model ``schema``, and keeps
+        the ``binding`` (which is ``None`` for an undispatchable route) but not the ``reasons``;
+      * ``_validate_tools`` re-calls it for an exposed-but-unbindable tool, only to regenerate the
+        ``reasons`` for the startup error message;
+      * ``_CatchAll.tool`` calls it the first time an override mints a catch-all-backed tool, both to
+        bind and (on failure) to report reasons.
     """
     endpoint = route.endpoint
     reasons: list[str] = []
@@ -265,7 +301,7 @@ def audit_middleware(app: FastAPI) -> list[str]:
 
 
 # ==================================================================================================
-# Direct invocation: fabricate the Request, call the route handler once
+# PER-CALL — dispatch a frozen handler: fabricate the Request, call the route handler once
 # ==================================================================================================
 
 
@@ -372,7 +408,11 @@ async def call_direct(
             # FastAPI runs sync (def) handlers in a threadpool; do the same so one blocking tool
             # does not stall every concurrent rollout on this event loop.
             result = await run_in_threadpool(binding.endpoint, **kwargs)
-        if inspect.isawaitable(result):  # e.g. a sync wrapper that returns a coroutine
+        # Not a double-await: the call above resolves one level. A sync (def) handler can itself
+        # return a coroutine unawaited — e.g. a thin def wrapper whose body is `return some_async(...)`
+        # — and the threadpool hands that coroutine straight back, so await it here. A plain value is
+        # not awaitable and skips this.
+        if inspect.isawaitable(result):
             result = await result
     except StarletteHTTPException as e:  # fastapi.HTTPException subclasses this
         raise DirectDispatchError(e.status_code, str(e.detail)) from e
@@ -406,12 +446,15 @@ async def call_direct(
 
 
 # ==================================================================================================
-# Harvest: one walk over app.routes -> the tool map (advertisement + direct binding per tool)
+# STARTUP — routes to tool map: one walk over app.routes -> {name: MCPTool} (advertisement + binding)
 # ==================================================================================================
 
 
 @dataclass
 class MCPTool:
+    """Holds one exposed tool: its tools/list advertisement plus how to dispatch it (binding +
+    optional catch-all path value); built during STARTUP harvesting, read per-call by call_tool."""
+
     name: str
     tool: types.Tool  # the tools/list advertisement
     binding: Optional[DirectBinding] = None  # how to invoke the route handler directly; None -> unbindable
@@ -424,7 +467,8 @@ def _schema_for(body_model: Optional[type[BaseModel]]) -> dict:
 
 
 class _CatchAll:
-    """The single parameterized catch-all route, handed to ``mcp_tools()`` overrides.
+    """Holds the single parameterized catch-all route; built during STARTUP harvesting and handed to
+    ``mcp_tools()`` overrides so they can mint catch-all-backed tools.
 
     ``tool(name, input_schema, description)`` binds one MCP tool to that route with its path param set
     to ``name`` (workplace's ``POST /{path}`` pattern), reusing the same direct-dispatch binding.
@@ -437,6 +481,8 @@ class _CatchAll:
 
     def tool(self, name: str, input_schema: Optional[dict] = None, description: Optional[str] = None) -> MCPTool:
         if self._binding is None:
+            # First catch-all-backed tool for this route: bind it once and cache; on failure the
+            # outcome's reasons drive the error (see bind_route's deferred-validation note).
             outcome = bind_route(self.route)
             if outcome.binding is None:
                 raise ValueError(
@@ -478,8 +524,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             catchall_routes.append(route)
             continue
         name = route.path.lstrip("/")
-        # bind_route is deferred-validated in _validate_tools: a route the override drops is never
-        # required to be dispatchable, so binding failures surface only for tools actually exposed.
+        # Keep the binding + schema; a None binding (undispatchable) only errors later, and only if
+        # the override actually exposes this tool. See bind_route's deferred-validation note.
         outcome = bind_route(route)
         description = (route.description or route.summary or "").strip() or None
         harvested.append(
@@ -533,6 +579,8 @@ def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]
         if name in tools:
             raise ValueError(f"Duplicate MCP tool name {name!r} in {type(server).__name__}.mcp_tools().")
         if tool.binding is None:
+            # Exposed but unbindable: re-run bind_route only to regenerate the reasons harvest dropped
+            # (see its deferred-validation note), then fail startup naming the route and why.
             outcome = bind_route(tool.route)
             raise ValueError(
                 f"{type(server).__name__} tool {name!r} (route {tool.route.path!r}) cannot be dispatched "
@@ -543,11 +591,22 @@ def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]
 
 
 # ==================================================================================================
-# /seed_session + /verify augmentation: wrap (never edit) the endpoints the app currently holds
+# STARTUP — wrap /seed_session and /verify: wrap (never edit) the endpoints the app currently holds
 # ==================================================================================================
 
 
 def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
+    """Replace the /seed_session route with a wrapper that appends the MCP session token to its response.
+
+    The wrapper is a ``**kwargs`` function, but FastAPI decides which dependencies to inject by reading
+    the endpoint's *signature* — so ``**kwargs`` alone would receive nothing. The fix is signature
+    surgery: build a parameter list that (a) presents the original handler's params (with string
+    annotations resolved to real types, so FastAPI still validates the body model) and (b) guarantees
+    a ``Request`` param, since the wrapper needs the live Request to read the session and raw body when
+    minting the token. That list is then stamped onto ``__signature__``/``__annotations__`` so FastAPI
+    injects exactly those arguments into ``**kwargs``; ``passthrough`` records the original param names
+    to forward to the real handler (the injected Request, if added, is not among them).
+    """
     found = next(
         ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == "/seed_session"),
         None,
@@ -561,14 +620,18 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     method = route.endpoint
     signature = inspect.signature(method)
     hints = get_type_hints(method)
+    # Does the original handler already declare a Request param? If so, reuse it; the wrapper reads
+    # the Request out of that same name instead of injecting a second one.
     request_param_name = next(
         (n for n, p in signature.parameters.items() if hints.get(n, p.annotation) is Request), None
     )
+    # The handler's own params, with deferred string annotations resolved so FastAPI sees real types.
     params = [p.replace(annotation=hints.get(n, p.annotation)) for n, p in signature.parameters.items()]
-    passthrough = tuple(signature.parameters)
+    passthrough = tuple(signature.parameters)  # names to forward verbatim to the original handler
     if request_param_name is None:
-        # Pick a name the handler does not already use: seed_session may declare a non-Request
-        # parameter named "request", and a second parameter of the same name is a signature error.
+        # No Request declared: prepend one. Pick a name the handler does not already use, because
+        # seed_session may declare a non-Request parameter literally named "request", and two params
+        # sharing a name is a signature error.
         request_param_name = "request"
         while request_param_name in signature.parameters:
             request_param_name = "_" + request_param_name
@@ -604,6 +667,7 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
             payload[NEMO_GYM_MCP_METADATA_KEY] = mint_metadata(request, seed_body)
         return JSONResponse(payload)
 
+    # Stamp the fabricated signature onto the **kwargs wrapper so FastAPI injects exactly `params`.
     seed_session_endpoint.__name__ = "seed_session"
     seed_session_endpoint.__signature__ = inspect.Signature(parameters=params)
     seed_session_endpoint.__annotations__ = {p.name: p.annotation for p in params}
@@ -639,29 +703,38 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
             if getattr(item, "type", None) == "function_call"
         ]
 
+    def _locate_trajectory_arg(args: list, kwargs: dict) -> Optional[tuple[bool, Any, Any]]:
+        """Find the single argument that carries the trajectory (has function_call output items).
+
+        Verify signatures vary ((body), (request, body), ...), so the trajectory argument is found by
+        content, not position. Returns ``(in_kwargs, key, container)`` where ``key`` indexes ``args``
+        (positional) or names ``kwargs`` (keyword); ``None`` when no argument carries a trajectory.
+        """
+        for i, value in enumerate(args):
+            if _function_calls(value):
+                return False, i, value
+        for name, value in kwargs.items():
+            if _function_calls(value):
+                return True, name, value
+        return None
+
     @functools.wraps(endpoint)
     async def verify_normalized(*args: Any, **kwargs: Any) -> Any:
         args = list(args)
-        # Verify signatures vary ((body), (request, body), ...), so find the trajectory-carrying
-        # argument by content.
-        target_key: Any = next((k for k, v in enumerate(args) if _function_calls(v)), None)
-        if target_key is None:
-            target_key = next((k for k, v in kwargs.items() if _function_calls(v)), None)
-            container = kwargs.get(target_key)
-        else:
-            container = args[target_key]
-        if target_key is None:
+        located = _locate_trajectory_arg(args, kwargs)
+        if located is None:
             result = endpoint(*args, **kwargs)
             return await result if inspect.isawaitable(result) else result
+        in_kwargs, key, container = located
 
         emitted = {item.call_id: item.name for item in _function_calls(container)}
         normalized = container.model_copy(deep=True)
         for item in _function_calls(normalized):
             item.name = server.normalize_tool_name(item.name)
-        if isinstance(target_key, int):
-            args[target_key] = normalized
+        if in_kwargs:
+            kwargs[key] = normalized
         else:
-            kwargs[target_key] = normalized
+            args[key] = normalized
 
         result = endpoint(*args, **kwargs)
         if inspect.isawaitable(result):
@@ -678,8 +751,105 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 
 
 # ==================================================================================================
-# The installer + the flag-gated automatic entry point
+# STARTUP — mount /mcp (flag-gated entry point + installer); PER-CALL handlers (session_claims,
+# list_tools, call_tool) are defined here but run once per MCP request
 # ==================================================================================================
+
+
+def _mint_session_metadata(
+    server: Any,
+    serializer: URLSafeSerializer,
+    allowed_tools: Optional[list[str]],
+    allowed_floor: Optional[frozenset],
+    request: Request,
+    seed_body: dict,
+) -> dict:
+    """Mint the session token embedded in a /seed_session response (see ``_wrap_seed_session``).
+
+    Assigns the rollout its session id, asks the server for any per-session tool narrowing
+    (intersected with the install-time floor), and signs ``sid`` + allow-list into the token the
+    agent replays on every ``tools/call``.
+    """
+    session_id = request.session.get(SESSION_ID_KEY)
+    if not session_id:
+        session_id = str(uuid4())
+        request.session[SESSION_ID_KEY] = session_id
+    try:
+        session_allowed = server.mcp_allowed_tools_for_session(seed_body)
+    except Exception as e:
+        # Fail the seed request rather than mint an unrestricted token past a broken hook.
+        raise RuntimeError(
+            f"{type(server).__name__}.mcp_allowed_tools_for_session raised; refusing to mint an MCP "
+            f"session token: {e!r}"
+        ) from e
+    # allowed_tools and allowed_floor are the one install-time allow-list in two shapes: allowed_tools
+    # is the original list (order preserved, goes into the signed token payload); allowed_floor is the
+    # frozenset built from it in install_auto_exposure (fast membership tests). They are None together,
+    # so testing allowed_floor here is the same as testing allowed_tools.
+    if session_allowed is None:
+        # No per-session narrowing: the token carries the whole floor (as its list form) or None.
+        effective = None if allowed_floor is None else list(allowed_tools)
+    else:
+        effective = [t for t in session_allowed if allowed_floor is None or t in allowed_floor]
+    payload: Any = session_id if effective is None else {"sid": session_id, "tools": effective}
+    return MCPServerMetadata(
+        server_name=server.config.name or type(server).__name__,
+        url_path=MCP_URL_PATH,
+        transport="http",
+        headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
+    ).model_dump()
+
+
+def _parse_session_token(
+    serializer: URLSafeSerializer, token: Optional[str], required: bool
+) -> tuple[Optional[str], Optional[frozenset]]:
+    """Decode a Gym MCP session token into ``(session id, token allow-list)``.
+
+    ``required`` callers (tools/call) raise on a missing/forged token; optional callers (tools/list)
+    fall back to ``(None, None)``. A bare-string payload carries only the session id (no narrowing).
+    """
+    if not token:
+        if required:
+            raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
+        return None, None
+    try:
+        # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
+        payload = serializer.loads(token)
+    except BadSignature:
+        if required:
+            raise ValueError("Invalid Gym MCP session token.")
+        return None, None
+    if isinstance(payload, dict):
+        allowed = payload.get("tools")
+        return payload.get("sid"), None if allowed is None else frozenset(allowed)
+    return payload, None
+
+
+def _effective_allowed(allowed_floor: Optional[frozenset], token_allowed: Optional[frozenset]) -> Optional[frozenset]:
+    """Intersect the install-time allow-list floor with a token's narrowing (``None`` == no limit)."""
+    # The install-time allow-list is a floor even for tokenless callers; a token can only narrow it.
+    if allowed_floor is None:
+        return token_allowed
+    if token_allowed is None:
+        return allowed_floor
+    return allowed_floor & token_allowed
+
+
+def _to_result(payload: Any):
+    """Render a handler payload as the MCP call_tool result the plain HTTP route would mirror.
+
+    The return shape is asymmetric on purpose, following the SDK's call_tool contract: returning
+    ``(content, structuredContent)`` populates both fields of the CallToolResult, while returning a
+    bare ``content`` list leaves structuredContent unset. Only a JSON object maps to
+    structuredContent, so the dict branch returns the 2-tuple and the str/other branches return just
+    the content list. In every branch JSONResponse renders the same bytes the plain HTTP route would
+    have returned on success.
+    """
+    if isinstance(payload, dict):
+        return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))], payload
+    if isinstance(payload, str):
+        return [types.TextContent(type="text", text=payload)]
+    return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))]
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
@@ -711,82 +881,39 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
             "and rely on expose_tools_over_mcp."
         )
 
+    # Build the token serializer, then harvest the tool routes into the {name: MCPTool} map.
     secret = server.get_session_middleware_key()
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
     allowed_floor = None if allowed_tools is None else frozenset(allowed_tools)
 
-    def mint_metadata(request: Request, seed_body: dict) -> dict:
-        session_id = request.session.get(SESSION_ID_KEY)
-        if not session_id:
-            session_id = str(uuid4())
-            request.session[SESSION_ID_KEY] = session_id
-        try:
-            session_allowed = server.mcp_allowed_tools_for_session(seed_body)
-        except Exception as e:
-            # Fail the seed request rather than mint an unrestricted token past a broken hook.
-            raise RuntimeError(
-                f"{type(server).__name__}.mcp_allowed_tools_for_session raised; refusing to mint an MCP "
-                f"session token: {e!r}"
-            ) from e
-        if session_allowed is None:
-            effective = None if allowed_floor is None else list(allowed_tools)
-        else:
-            effective = [t for t in session_allowed if allowed_floor is None or t in allowed_floor]
-        payload: Any = session_id if effective is None else {"sid": session_id, "tools": effective}
-        return MCPServerMetadata(
-            server_name=server.config.name or type(server).__name__,
-            url_path=MCP_URL_PATH,
-            transport="http",
-            headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
-        ).model_dump()
-
+    # Wrap (never edit) the endpoints: /seed_session hands the client its session token, /verify
+    # normalizes MCP-namespaced tool-call names for scoring only.
+    mint_metadata = functools.partial(_mint_session_metadata, server, serializer, allowed_tools, allowed_floor)
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
 
+    # Create the SDK low-level Server, then register its list_tools/call_tool handlers below.
     mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
 
+    # session_claims must stay local: it reads the token off the SDK's per-request context. All the
+    # token/allow-list math it and the handlers delegate to lives in the module-level helpers above.
+    #
+    # mcp_server.request_context is a contextvar the SDK sets for the duration of each handler call:
+    # StreamableHTTPSessionManager.handle_request stores the incoming starlette Request on the
+    # low-level Server before it dispatches list_tools/call_tool, and clears it afterward. So this
+    # attribute is only populated while one of the handlers below is on the stack — which is exactly
+    # when session_claims runs. Nothing in this file assigns it; the SDK owns that lifecycle.
     def session_claims(required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
         ctx_request = mcp_server.request_context.request  # the POST /mcp starlette Request
         token = ctx_request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER) if ctx_request is not None else None
-        if not token:
-            if required:
-                raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
-            return None, None
-        try:
-            # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
-            payload = serializer.loads(token)
-        except BadSignature:
-            if required:
-                raise ValueError("Invalid Gym MCP session token.")
-            return None, None
-        if isinstance(payload, dict):
-            allowed = payload.get("tools")
-            return payload.get("sid"), None if allowed is None else frozenset(allowed)
-        return payload, None
-
-    def effective_allowed(token_allowed: Optional[frozenset]) -> Optional[frozenset]:
-        # The install-time allow-list is a floor even for tokenless callers; a token can only narrow it.
-        if allowed_floor is None:
-            return token_allowed
-        if token_allowed is None:
-            return allowed_floor
-        return allowed_floor & token_allowed
+        return _parse_session_token(serializer, token, required)
 
     @mcp_server.list_tools()
     async def list_tools() -> list[types.Tool]:
         _, token_allowed = session_claims(required=False)
-        allowed = effective_allowed(token_allowed)
+        allowed = _effective_allowed(allowed_floor, token_allowed)
         return [t.tool for t in tools.values() if allowed is None or t.name in allowed]
-
-    def _to_result(payload: Any):
-        # dict -> text + structuredContent; str -> text; other JSON -> text. JSONResponse renders
-        # the same bytes the plain HTTP route would have returned on success.
-        if isinstance(payload, dict):
-            return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))], payload
-        if isinstance(payload, str):
-            return [types.TextContent(type="text", text=payload)]
-        return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))]
 
     @mcp_server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict):
@@ -802,7 +929,7 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
                 isError=True,
             )
         session_id, token_allowed = session_claims(required=True)
-        allowed = effective_allowed(token_allowed)
+        allowed = _effective_allowed(allowed_floor, token_allowed)
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
         try:
@@ -829,6 +956,13 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
 
     endpoint = _MCPEndpoint()
     # Insert at the front so a dispatcher's catch-all POST /{path} cannot shadow POST /mcp.
+    #
+    # Two registrations for the same ASGI endpoint, because clients address /mcp two ways and one
+    # registration alone would miss the other:
+    #   * Route("/mcp") matches the bare path exactly ("/mcp", no trailing segment).
+    #   * Mount("/mcp") matches "/mcp" plus any subpath ("/mcp/", "/mcp/messages", ...).
+    # Both forward to the same _MCPEndpoint, so the SDK app receives the request whether a client
+    # posts to the exact path or to a subpath, with no 307 redirect in between.
     app.router.routes.insert(0, Route(MCP_URL_PATH, endpoint, include_in_schema=False))
     app.router.routes.insert(1, Mount(MCP_URL_PATH, app=endpoint))
 
