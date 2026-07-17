@@ -1,0 +1,285 @@
+diff --git a/scripts/lib_agent.py b/scripts/lib_agent.py
+index 6207029..9257b30 100644
+--- a/scripts/lib_agent.py
++++ b/scripts/lib_agent.py
+@@ -222,6 +222,8 @@ def ensure_agent_exists(
+     Returns True if the agent was (re)created.
+     """
+     workspace_dir.mkdir(parents=True, exist_ok=True)
++    agent_ready = False
++    created = False
+ 
+     try:
+         list_result = subprocess.run(
+@@ -257,51 +259,59 @@ def ensure_agent_exists(
+                 current_workspace is not None
+                 and current_workspace.resolve() == workspace_dir.resolve()
+             ):
+-                logger.info("Agent %s already exists with correct workspace", agent_id)
+-                return False
+-            # Workspace is stale or unknown — delete and recreate
+-            delete_name = normalized_id if normalized_id in existing_agents else agent_id
+-            logger.info(
+-                "Agent %s exists with stale workspace (%s != %s), recreating",
+-                agent_id,
+-                current_workspace,
+-                workspace_dir,
+-            )
+-            subprocess.run(
+-                ["openclaw", "agents", "delete", delete_name, "--force"],
++                logger.info(
++                    "Agent %s already exists with correct workspace; refreshing config",
++                    agent_id,
++                )
++                agent_ready = True
++            else:
++                # Workspace is stale or unknown — delete and recreate
++                delete_name = normalized_id if normalized_id in existing_agents else agent_id
++                logger.info(
++                    "Agent %s exists with stale workspace (%s != %s), recreating",
++                    agent_id,
++                    current_workspace,
++                    workspace_dir,
++                )
++                subprocess.run(
++                    ["openclaw", "agents", "delete", delete_name, "--force"],
++                    capture_output=True,
++                    text=True,
++                    check=False,
++                shell=USE_SHELL,
++                )
++
++    if not agent_ready:
++        logger.info("Creating OpenClaw agent %s", agent_id)
++        model_for_cli = f"custom/{model_id}" if base_url else model_id
++        try:
++            create_result = subprocess.run(
++                [
++                    "openclaw",
++                    "agents",
++                    "add",
++                    agent_id,
++                    "--model",
++                    model_for_cli,
++                    "--workspace",
++                    str(workspace_dir),
++                    "--non-interactive",
++                ],
+                 capture_output=True,
+                 text=True,
+                 check=False,
+-            shell=USE_SHELL,
++                shell=USE_SHELL,
+             )
++        except FileNotFoundError:
++            logger.error("openclaw CLI not found while creating agent")
++            return False
+ 
+-    logger.info("Creating OpenClaw agent %s", agent_id)
+-    try:
+-        create_result = subprocess.run(
+-            [
+-                "openclaw",
+-                "agents",
+-                "add",
+-                agent_id,
+-                "--model",
+-                model_id,
+-                "--workspace",
+-                str(workspace_dir),
+-                "--non-interactive",
+-            ],
+-            capture_output=True,
+-            text=True,
+-            check=False,
+-            shell=USE_SHELL,
+-        )
+-    except FileNotFoundError:
+-        logger.error("openclaw CLI not found while creating agent")
+-        return False
+-
+-    if create_result.returncode != 0:
+-        logger.warning(
+-            "Agent creation returned %s: %s", create_result.returncode, create_result.stderr
+-        )
++        if create_result.returncode != 0:
++            logger.warning(
++                "Agent creation returned %s: %s", create_result.returncode, create_result.stderr
++            )
++        else:
++            created = True
+ 
+     # Configure models.json for the bench agent
+     bench_agent_dir = _get_agent_store_dir(agent_id) / "agent"
+@@ -312,16 +322,33 @@ def ensure_agent_exists(
+     if base_url:
+         # Custom OpenAI-compatible endpoint — build a provider entry
+         data: dict[str, Any] = {}
+-        if main_models.exists():
++        source_models = bench_models if bench_models.exists() else main_models
++        if source_models.exists():
+             try:
+-                data = json.loads(main_models.read_text("utf-8-sig"))
++                data = json.loads(source_models.read_text("utf-8-sig"))
+             except (json.JSONDecodeError, OSError):
+                 data = {}
+ 
+-        key_ref = api_key if api_key else "${OPENAI_API_KEY}"
+-        providers = data.setdefault("models", {}).setdefault("providers", {})
+-        data["models"]["mode"] = "merge"
+-        providers["custom"] = {
++        if "models" in data and "providers" not in data and isinstance(data["models"], dict):
++            data = data["models"]
++
++        key_ref = api_key if api_key else os.environ.get("OPENAI_API_KEY", "${OPENAI_API_KEY}")
++        brave_key = os.environ.get("BRAVE_API_KEY", "${BRAVE_API_KEY}")
++        tavily_key = os.environ.get("TAVILY_API_KEY", "${TAVILY_API_KEY}")
++        search_provider = os.environ.get(
++            "PINCHBENCH_WEB_SEARCH_PROVIDER",
++            "tavily" if os.environ.get("TAVILY_API_KEY") else "brave",
++        ).strip()
++        context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "524288"))
++        max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "131072"))
++        runtime_params = {
++            "temperature": 1,
++            "maxTokens": max_tokens,
++            "extra_body": {
++                "top_p": 0.95,
++            },
++        }
++        custom_provider = {
+             "baseUrl": base_url,
+             "apiKey": key_ref,
+             "api": "openai-completions",
+@@ -329,16 +356,72 @@ def ensure_agent_exists(
+                 {
+                     "id": model_id,
+                     "name": model_id,
+-                    "reasoning": False,
+                     "input": ["text"],
+-                    "contextWindow": 200000,
+-                    "maxTokens": 8192,
++                    "contextWindow": context_window,
++                    "maxTokens": max_tokens,
++                    "params": runtime_params,
++                    "compat": {
++                        "requiresStringContent": True,
++                        "supportsUsageInStreaming": True,
++                    },
+                 }
+             ],
+         }
++        providers = data.setdefault("providers", {})
++        data["mode"] = "merge"
++        providers["custom"] = custom_provider
+         data["defaultProvider"] = "custom"
+         data["defaultModel"] = model_id
+         bench_models.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
++        openclaw_config = Path.home() / ".openclaw" / "openclaw.json"
++        if openclaw_config.exists():
++            try:
++                cfg = json.loads(openclaw_config.read_text("utf-8-sig"))
++                cfg.setdefault("models", {}).setdefault("providers", {})["custom"] = custom_provider
++                agents_cfg = cfg.setdefault("agents", {})
++                agent_model = f"custom/{model_id}"
++                for agent in agents_cfg.get("list", []):
++                    if agent.get("id") == agent_id:
++                        agent["model"] = agent_model
++                        agent["params"] = runtime_params
++                agents_cfg.setdefault("defaults", {}).setdefault("models", {})[agent_model] = {
++                    "params": runtime_params
++                }
++                plugin_entries = cfg.setdefault("plugins", {}).setdefault("entries", {})
++                plugin_entries.setdefault("brave", {}).update(
++                    {
++                        "enabled": True,
++                        "config": {
++                            "webSearch": {
++                                "apiKey": brave_key,
++                                "mode": "web",
++                            }
++                        },
++                    }
++                )
++                plugin_entries.setdefault("tavily", {}).update(
++                    {
++                        "enabled": True,
++                        "config": {
++                            "webSearch": {
++                                "apiKey": tavily_key,
++                            }
++                        },
++                    }
++                )
++                cfg.setdefault("tools", {}).setdefault("web", {}).setdefault(
++                    "search", {}
++                ).update(
++                    {
++                        "enabled": True,
++                        "provider": search_provider,
++                        "maxResults": 5,
++                        "timeoutSeconds": 30,
++                    }
++                )
++                openclaw_config.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
++            except (json.JSONDecodeError, OSError) as exc:
++                logger.warning("Failed to refresh OpenClaw runtime config: %s", exc)
+         logger.info(
+             "Configured custom provider (%s) with model %s for agent %s",
+             base_url,
+@@ -377,7 +459,7 @@ def ensure_agent_exists(
+         except OSError as exc:
+             logger.warning("Failed to delete sessions.json: %s", exc)
+ 
+-    return True
++    return created
+ 
+ 
+ def cleanup_agent_sessions(agent_id: str) -> None:
+@@ -579,9 +661,9 @@ def _find_recent_session_path(agent_dir: Path, started_at: float) -> Path | None
+     if not sessions_dir.exists():
+         return None
+     candidates = [
+-        p for p in
+-        list(sessions_dir.rglob("*.jsonl")) + list(sessions_dir.rglob("*.ndjson"))
+-        if ".trajectory" not in p.name and ".trajectory-path" not in p.name
++        p
++        for p in list(sessions_dir.rglob("*.jsonl")) + list(sessions_dir.rglob("*.ndjson"))
++        if ".trajectory-path" not in p.name
+     ]
+ 
+     if not candidates:
+@@ -615,6 +697,7 @@ def _load_transcript(
+             for candidate in (
+                 session_dir / f"{resolved_session_id}.jsonl",
+                 session_dir / f"{resolved_session_id}.ndjson",
++                session_dir / f"{resolved_session_id}.trajectory.jsonl",
+                 session_dir / resolved_session_id / "transcript.jsonl",
+                 session_dir / resolved_session_id / "events.jsonl",
+             ):
+@@ -1184,6 +1267,7 @@ def call_judge_api(
+     """Call a judge model directly via API, bypassing OpenClaw.
+ 
+     Dispatches based on model prefix:
++      - JUDGE_BASE_URL + JUDGE_API_KEY env -> OpenAI-compatible chat completions
+       - openrouter/* -> OpenRouter chat completions API
+       - anthropic/*  -> Anthropic Messages API
+       - openai/*     -> OpenAI chat completions API
+@@ -1191,6 +1275,17 @@ def call_judge_api(
+ 
+     Returns {"status": str, "text": str, "error"?: str}.
+     """
++    custom_base = os.environ.get("JUDGE_BASE_URL") or os.environ.get(
++        "PINCHBENCH_JUDGE_OPENAI_BASE_URL"
++    )
++    custom_key = os.environ.get("JUDGE_API_KEY") or os.environ.get(
++        "PINCHBENCH_JUDGE_API_KEY"
++    )
++    if custom_base and custom_key:
++        endpoint = custom_base.rstrip("/") + "/chat/completions"
++        return _judge_via_openai_compat(
++            prompt, model, endpoint, custom_key, timeout_seconds
++        )
+     if model == "claude" or model.startswith("claude:"):
+         return _judge_via_claude_cli(prompt, model, timeout_seconds)
+     if model.startswith("anthropic/"):

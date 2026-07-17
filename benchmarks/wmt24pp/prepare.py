@@ -29,6 +29,10 @@ Per-row fields are referenced by both the prompt template
 ``wmt_translation`` resource server: ``text``, ``translation``,
 ``source_language``, ``target_language``, ``source_lang_name``,
 ``target_lang_name``.
+
+Note that we need to somehow specify the dialect/locale we want the
+model to generate in. Currently, this is done by setting
+``target_lang_name`` to <language> (<country>) (e.g. "Spanish (Mexico)")
 """
 
 import json
@@ -54,14 +58,71 @@ COMET_MODEL = "Unbabel/XCOMET-XXL"
 # stable is what makes the interleaved JSONL byte-comparable.
 DEFAULT_TARGET_LANGUAGES = ["de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP"]
 
-# Display names for the targets above. Matches NeMo-Skills'
-# `langcodes.Language(tgt[:2]).display_name()` output for these codes.
-_LANG_DISPLAY_NAMES = {
-    "de": "German",
-    "es": "Spanish",
-    "fr": "French",
-    "it": "Italian",
-    "ja": "Japanese",
+# Hardcoding to avoid both dependency on https://github.com/rspeer/langcodes
+#   and network call in prepare.py
+# import langcodes #uv pip install langcodes[data]
+# from datasets import get_dataset_config_names #uv pip install datasets
+# lang_pairs = get_dataset_config_names("google/wmt24pp")
+# _WMT24PP_LANG_MAP = {}
+# for lang_pair in lang_pairs:
+#    _, tgt = lang_pair.split('-')
+#    _WMT24PP_LANG_MAP[tgt] = langcodes.Language.get(tgt).display_name()
+_WMT24PP_LANG_MAP = {
+    "ar_EG": "Arabic (Egypt)",
+    "ar_SA": "Arabic (Saudi Arabia)",
+    "bg_BG": "Bulgarian (Bulgaria)",
+    "bn_IN": "Bangla (India)",
+    "ca_ES": "Catalan (Spain)",
+    "cs_CZ": "Czech (Czechia)",
+    "da_DK": "Danish (Denmark)",
+    "de_DE": "German (Germany)",
+    "el_GR": "Greek (Greece)",
+    "es_MX": "Spanish (Mexico)",
+    "et_EE": "Estonian (Estonia)",
+    "fa_IR": "Persian (Iran)",
+    "fi_FI": "Finnish (Finland)",
+    "fil_PH": "Filipino (Philippines)",
+    "fr_CA": "French (Canada)",
+    "fr_FR": "French (France)",
+    "gu_IN": "Gujarati (India)",
+    "he_IL": "Hebrew (Israel)",
+    "hi_IN": "Hindi (India)",
+    "hr_HR": "Croatian (Croatia)",
+    "hu_HU": "Hungarian (Hungary)",
+    "id_ID": "Indonesian (Indonesia)",
+    "is_IS": "Icelandic (Iceland)",
+    "it_IT": "Italian (Italy)",
+    "ja_JP": "Japanese (Japan)",
+    "kn_IN": "Kannada (India)",
+    "ko_KR": "Korean (South Korea)",
+    "lt_LT": "Lithuanian (Lithuania)",
+    "lv_LV": "Latvian (Latvia)",
+    "ml_IN": "Malayalam (India)",
+    "mr_IN": "Marathi (India)",
+    "nl_NL": "Dutch (Netherlands)",
+    "no_NO": "Norwegian (Norway)",
+    "pa_IN": "Punjabi (India)",
+    "pl_PL": "Polish (Poland)",
+    "pt_BR": "Portuguese (Brazil)",
+    "pt_PT": "Portuguese (Portugal)",
+    "ro_RO": "Romanian (Romania)",
+    "ru_RU": "Russian (Russia)",
+    "sk_SK": "Slovak (Slovakia)",
+    "sl_SI": "Slovenian (Slovenia)",
+    "sr_RS": "Serbian (Serbia)",
+    "sv_SE": "Swedish (Sweden)",
+    "sw_KE": "Swahili (Kenya)",
+    "sw_TZ": "Swahili (Tanzania)",
+    "ta_IN": "Tamil (India)",
+    "te_IN": "Telugu (India)",
+    "th_TH": "Thai (Thailand)",
+    "tr_TR": "Turkish (Türkiye)",
+    "uk_UA": "Ukrainian (Ukraine)",
+    "ur_PK": "Urdu (Pakistan)",
+    "vi_VN": "Vietnamese (Vietnam)",
+    "zh_CN": "Chinese (China)",
+    "zh_TW": "Chinese (Taiwan)",
+    "zu_ZA": "Zulu (South Africa)",
 }
 
 
@@ -104,6 +165,14 @@ def prepare(target_languages: list[str] | None = None, prefetch_comet: bool = Tr
     """
     if target_languages is None:
         target_languages = DEFAULT_TARGET_LANGUAGES
+    else:
+        # check user passed in langs
+        unknown = [lang for lang in target_languages if lang not in _WMT24PP_LANG_MAP]
+        if unknown:
+            raise ValueError(
+                f"requested target languages [{','.join(unknown)}] are not in wmt24pp. "
+                f"Available languages: [{','.join(list(_WMT24PP_LANG_MAP))}]"
+            )
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -126,7 +195,7 @@ def prepare(target_languages: list[str] | None = None, prefetch_comet: bool = Tr
                     "source_language": "en",
                     "target_language": tgt_lang,
                     "source_lang_name": "English",
-                    "target_lang_name": _LANG_DISPLAY_NAMES[tgt_lang[:2]],
+                    "target_lang_name": _WMT24PP_LANG_MAP[tgt_lang],
                 }
                 fout.write(json.dumps(row) + "\n")
                 count += 1
