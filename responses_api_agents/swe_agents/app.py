@@ -1558,8 +1558,14 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         with open(agent_config, "r") as f:
             config = tomlkit.parse(f.read())
 
+        global_config_dict = get_global_config_dict()
+        policy_model_name = global_config_dict.get("policy_model_name")
         config["llm"]["model"] |= {
-            "model": self.config.body.model,
+            # The dataset model is only a request-time alias and can name a
+            # different policy (for example Qwen rows evaluated with Nano 3).
+            # OpenHands/LiteLLM uses this value for model capabilities, so it
+            # must describe the policy server that will actually answer.
+            "model": str(policy_model_name or self.config.body.model),
             "base_url": "",  # May need to populate this
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
@@ -1618,7 +1624,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
 
         workspace_check_cmd = ""
 
-        detailed_runtime_metrics = int(bool(get_global_config_dict().get("detailed_runtime_metrics", False)))
+        detailed_runtime_metrics = int(bool(global_config_dict.get("detailed_runtime_metrics", False)))
         agent_main_cmd = (
             f"{workspace_check_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)

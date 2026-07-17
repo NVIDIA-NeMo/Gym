@@ -1284,6 +1284,25 @@ class TestOpenHandsHarnessProcessor:
             assert "timeout" in result.command
             assert "run_infer.sh" in self._read_agent_script(config)
 
+    def test_get_run_command_uses_served_policy_model_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+
+            with patch.object(
+                swe_app,
+                "get_global_config_dict",
+                return_value={
+                    "policy_model_name": "nvidia/NVIDIA-Nemotron-3-Nano",
+                },
+            ):
+                processor.get_run_command()
+
+            script = self._read_agent_script(config)
+            assert 'model = "nvidia/NVIDIA-Nemotron-3-Nano"' in script
+            assert 'model = "test-model"' not in script
+
     def _read_agent_script(self, config) -> str:
         # The script is written at persistent_dir / agent_script_{agent_run_id}.sh
         script_path = config.persistent_dir / f"agent_script_{config.agent_run_id}.sh"
