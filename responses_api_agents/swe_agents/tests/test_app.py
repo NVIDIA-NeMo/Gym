@@ -1007,6 +1007,7 @@ class TestOpenHandsHarnessProcessor:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
                 MagicMock(returncode=1),  # event-driven-snapshot reverse check
                 MagicMock(returncode=1),  # same-request-metrics reverse check
                 MagicMock(returncode=1),  # deferred-abort reverse check
@@ -1023,7 +1024,7 @@ class TestOpenHandsHarnessProcessor:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 10
+            assert len(commands) == 11
             assert commands[-1][2].endswith("streaming_tool_call_effective_prefill.patch")
 
     def test_cached_deferred_abort_patch_gets_same_request_metrics_upgrade(
@@ -1033,6 +1034,7 @@ class TestOpenHandsHarnessProcessor:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
                 MagicMock(returncode=1),  # event-driven-snapshot reverse check
                 MagicMock(returncode=1),  # same-request-metrics reverse check
                 MagicMock(returncode=0),  # deferred-abort reverse check
@@ -1048,7 +1050,7 @@ class TestOpenHandsHarnessProcessor:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 5
+            assert len(commands) == 6
             assert commands[-1][2].endswith("streaming_tool_call_same_request_metrics.patch")
 
     def test_cached_same_request_patch_gets_event_driven_snapshot_upgrade(
@@ -1058,6 +1060,7 @@ class TestOpenHandsHarnessProcessor:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
                 MagicMock(returncode=1),  # event-driven-snapshot reverse check
                 MagicMock(returncode=0),  # same-request-metrics reverse check
                 MagicMock(returncode=0),  # event-driven-snapshot apply check
@@ -1072,14 +1075,37 @@ class TestOpenHandsHarnessProcessor:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 4
+            assert len(commands) == 5
             assert commands[-1][2].endswith("streaming_tool_call_event_driven_snapshot.patch")
+
+    def test_cached_event_driven_snapshot_gets_toggle_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            command_results = [
+                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
+                MagicMock(returncode=0),  # event-driven-snapshot reverse check
+                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply check
+                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply
+            ]
+
+            with patch.object(
+                swe_app,
+                "subprocess_run",
+                side_effect=command_results,
+            ) as subprocess_run:
+                processor._apply_streaming_tool_call_patch(Path(tmpdir))
+
+            commands = [call.args[0] for call in subprocess_run.call_args_list]
+            assert len(commands) == 4
+            assert commands[-1][2].endswith("streaming_tool_call_event_driven_snapshot_toggle.patch")
 
     def test_cached_admission_patch_gets_remaining_upgrades(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
                 MagicMock(returncode=1),  # event-driven-snapshot reverse check
                 MagicMock(returncode=1),  # same-request-metrics reverse check
                 MagicMock(returncode=1),  # deferred-abort reverse check
@@ -1167,14 +1193,16 @@ class TestOpenHandsHarnessProcessor:
                 MagicMock(returncode=0),  # same-request-metrics apply
                 MagicMock(returncode=0),  # event-driven-snapshot apply check
                 MagicMock(returncode=0),  # event-driven-snapshot apply
+                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply check
+                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply
             ]
 
             with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 87
-            for command in commands[:31]:
+            assert len(commands) == 90
+            for command in commands[:32]:
                 assert command[2:4] == ["--reverse", "--check"]
             expected_applied_patches = [
                 "streaming_tool_call_tokenizer_only.patch",
@@ -1205,9 +1233,10 @@ class TestOpenHandsHarnessProcessor:
                 "streaming_tool_call_deferred_abort.patch",
                 "streaming_tool_call_same_request_metrics.patch",
                 "streaming_tool_call_event_driven_snapshot.patch",
+                "streaming_tool_call_event_driven_snapshot_toggle.patch",
             ]
             for patch_index, patch_name in enumerate(expected_applied_patches):
-                check_command_index = 31 + 2 * patch_index
+                check_command_index = 32 + 2 * patch_index
                 assert commands[check_command_index][2] == "--check"
                 assert commands[check_command_index][3].endswith(patch_name)
                 assert commands[check_command_index + 1][2].endswith(patch_name)
