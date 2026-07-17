@@ -1909,7 +1909,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_opencode_setup"
 
-        with self._setup_directory_lock(setup_dir, "opencode"):
+        with file_lock(setup_dir, "opencode"):
             opencode_dir = setup_dir / "opencode"
             bun_dir = setup_dir / "bun"
 
