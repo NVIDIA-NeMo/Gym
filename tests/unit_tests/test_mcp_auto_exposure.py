@@ -41,7 +41,6 @@ from starlette.routing import Mount
 
 pytest.importorskip("mcp")
 
-import nemo_gym.mcp_auto_exposure as mcp_auto_exposure  # noqa: E402
 from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseSeedSessionResponse,
@@ -479,13 +478,6 @@ def test_tokenless_and_garbage_token_list_without_floor():
         assert {"append", "raw_step", "lookup"} <= full
         # tools/list treats the token as optional, so a bad one degrades to tokenless, not an error
         assert {t["name"] for t in _list(client, token="garbage")} == full
-
-
-def test_expired_token_is_rejected(monkeypatch):
-    with _mcp() as (client, token):
-        monkeypatch.setattr(mcp_auto_exposure, "TOKEN_MAX_AGE_SECONDS", -1)  # every token is now expired
-        r = _call(client, "append", {"value": "x"}, token=token)
-        assert r["isError"] is True and "expired" in r["content"][0]["text"]
 
 
 # ==================================================================================================

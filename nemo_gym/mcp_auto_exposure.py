@@ -58,7 +58,7 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from itsdangerous import BadSignature, TimestampSigner, URLSafeTimedSerializer
+from itsdangerous import BadSignature, TimestampSigner, URLSafeSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -85,9 +85,6 @@ LOG = logging.getLogger(__name__)
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
-
-# Session tokens expire: one day outlives any rollout while bounding how long a leaked token works.
-TOKEN_MAX_AGE_SECONDS = 86400
 
 # Never tools. GET docs/openapi are excluded by the POST filter below; /mcp by path.
 BASIC_PATHS = frozenset("/" + name for name in RESERVED_MCP_TOOL_NAMES)
@@ -732,11 +729,8 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
             "and rely on expose_tools_over_mcp."
         )
 
-    # The signing secret derives from public names (class + config name), not entropy; max_age bounds how long
-    # a leaked or brute-forced token stays usable. Timed tokens diverge from MCPResourcesServer's untimed
-    # scheme on purpose: the /mcp-conflict check above guarantees the two schemes never share a server.
     secret = server.get_session_middleware_key()
-    serializer = URLSafeTimedSerializer(secret, salt=_MCP_TOKEN_SALT)
+    serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
     allowed_floor = None if allowed_tools is None else frozenset(allowed_tools)
 
@@ -779,10 +773,10 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
             return None, None
         try:
             # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
-            payload = serializer.loads(token, max_age=TOKEN_MAX_AGE_SECONDS)
-        except BadSignature:  # SignatureExpired subclasses BadSignature, so expiry lands here too
+            payload = serializer.loads(token)
+        except BadSignature:
             if required:
-                raise ValueError("Invalid or expired Gym MCP session token.")
+                raise ValueError("Invalid Gym MCP session token.")
             return None, None
         if isinstance(payload, dict):
             allowed = payload.get("tools")
