@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import asyncio
-import difflib
 import importlib
 import json
 from copy import deepcopy
@@ -22,19 +21,17 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import (
-    BENCHMARKS_DIR,
     BenchmarkConfig,
     discover_benchmarks,
 )
 from nemo_gym.cli.env import RunHelper
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, fuzzy_matches, print_no_matches, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.discovery import read_config_metadata
 from nemo_gym.global_config import (
@@ -56,21 +53,6 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.train_data_utils import TrainDataProcessor
-
-
-def _fuzzy_matches(query: str, *fields: str) -> bool:
-    """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware)."""
-    needle = query.lower()
-    for field in fields:
-        if not field:
-            continue
-        haystack = field.lower()
-        if needle in haystack:
-            return True
-        tokens = haystack.replace("_", " ").replace("-", " ").split()
-        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
-            return True
-    return False
 
 
 def list_benchmarks() -> None:
@@ -98,7 +80,7 @@ def list_benchmarks() -> None:
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
         benchmarks = {
-            name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, metadata[name][0] or "")
+            name: bench for name, bench in benchmarks.items() if fuzzy_matches(query, name, metadata[name][0] or "")
         }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
@@ -116,11 +98,7 @@ def list_benchmarks() -> None:
         return
 
     if not benchmarks:
-        if query:
-            rich.print(f"[yellow]No benchmarks match '{query}'.[/yellow]")
-            return
-        rich.print("[yellow]No benchmarks found.[/yellow]")
-        rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
+        print_no_matches("benchmarks", query)
         return
 
     title = (

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 from rich.console import Console
 from rich.table import Table
 
-from nemo_gym.cli.utils import print_rich_table
+from nemo_gym.cli.utils import fuzzy_matches, print_rich_table
 
 
 # A cell value wider than Rich's 80-col non-TTY default, so a truncated render would ellipsize it.
@@ -59,3 +59,21 @@ class TestPrintRichTable:
         out = capsys.readouterr().out
         assert _LONG_NAME in out
         assert "…" not in out
+
+
+class TestFuzzyMatches:
+    def test_substring_matches(self) -> None:
+        assert fuzzy_matches("math", "math_with_judge")
+
+    def test_token_typo_matches(self) -> None:
+        # `aimee` is a near-miss for the `aime` token in `aime24`.
+        assert fuzzy_matches("aimee", "aime24")
+
+    def test_matches_any_field(self) -> None:
+        assert fuzzy_matches("judge", "aime24", "math_with_judge_agent")
+
+    def test_skips_empty_fields(self) -> None:
+        assert not fuzzy_matches("math", "", None)
+
+    def test_no_match(self) -> None:
+        assert not fuzzy_matches("zzznomatch", "aime24", "math_with_judge")

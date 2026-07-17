@@ -38,7 +38,7 @@ from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.setup_command import run_command, setup_env_command
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, fuzzy_matches, print_no_matches, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -46,6 +46,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    QUERY_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -919,9 +920,8 @@ def validate():
 
 
 def list_environments() -> None:
-    """List the environments available under environments/, by short name.
-
-    ``--search-dir`` adds extra roots to scan on top of the cwd and built-ins.
+    """List the environments available under environments/, optionally filtered by a `query` (the
+    `gym search environments` entry point). ``--search-dir`` adds extra roots on top of the cwd and built-ins.
 
     Examples:
 
@@ -940,6 +940,13 @@ def list_environments() -> None:
 
     environments = discover_environments()
 
+    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on name + domain.
+    query = global_config_dict.get(QUERY_KEY_NAME)
+    if query:
+        environments = {
+            name: env for name, env in environments.items() if fuzzy_matches(query, name, env.domain or "")
+        }
+
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(
             json.dumps(
@@ -952,10 +959,15 @@ def list_environments() -> None:
         return
 
     if not environments:
-        rich.print("[yellow]No environments found.[/yellow]")
+        print_no_matches("environments", query)
         return
 
-    table = Table(title=f"Available environments in NeMo Gym ({len(environments)})")
+    title = (
+        f"Environments matching '{query}' ({len(environments)})"
+        if query
+        else f"Available environments in NeMo Gym ({len(environments)})"
+    )
+    table = Table(title=title)
     table.add_column("Name")
     table.add_column("Domain")
     table.add_column("Description")

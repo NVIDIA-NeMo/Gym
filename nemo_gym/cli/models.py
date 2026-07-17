@@ -14,13 +14,13 @@
 # limitations under the License.
 import json
 
-import rich
 from rich.table import Table
 
-from nemo_gym.cli.utils import print_rich_table
+from nemo_gym.cli.utils import fuzzy_matches, print_no_matches, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
+    QUERY_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -29,8 +29,9 @@ from nemo_gym.model_registry import discover_models
 
 def list_models() -> None:
     """List model servers, one row per ``--model-type`` value: ``Model`` is the token to pass (``<name>``
-    for the default flavor, ``<name>/<flavor>`` for the rest); ``Model group`` is its model. ``--search-dir``
-    adds extra roots on top of the cwd and built-ins.
+    for the default flavor, ``<name>/<flavor>`` for the rest); ``Model group`` is its model. Optionally
+    filtered by a `query` (the `gym search models` entry point). ``--search-dir`` adds extra roots on top of
+    the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -48,15 +49,20 @@ def list_models() -> None:
         for model_type in entry.model_types
     ]
 
+    # `gym search models <query>` reuses this command, narrowing to rows matching the token or its model.
+    query = global_config_dict.get(QUERY_KEY_NAME)
+    if query:
+        rows = [row for row in rows if fuzzy_matches(query, row["model"], row["model_group"])]
+
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps(rows))
         return
 
     if not rows:
-        rich.print("No models found.")
+        print_no_matches("models", query)
         return
 
-    table = Table(title="NeMo Gym models")
+    table = Table(title=f"Models matching '{query}'" if query else "NeMo Gym models")
     table.add_column("Model", style="bold")
     table.add_column("Model group")
     for row in rows:

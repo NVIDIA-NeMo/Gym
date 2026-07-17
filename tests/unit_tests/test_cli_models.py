@@ -62,6 +62,20 @@ class TestListModels:
             list_models()
         assert "No models found" in capsys.readouterr().out
 
+    def test_query_filters_rows(self, capsys) -> None:
+        # `gym search models <query>` reuses this command via the `query` config key (token + model group).
+        with (
+            patch(
+                "nemo_gym.cli.models.get_global_config_dict",
+                return_value=_mock_global_config({"query": "some_other_flavor"}),
+            ),
+            patch("nemo_gym.cli.models.discover_models", return_value=_MODELS),
+        ):
+            list_models()
+        out = capsys.readouterr().out
+        assert "my_model/some_other_flavor" in out and "Models matching" in out
+        assert "another_model" not in out
+
     def test_json_output_is_per_variant_rows(self, capsys) -> None:
         with (
             patch("nemo_gym.cli.models.get_global_config_dict", return_value=_mock_global_config({"json": True})),
