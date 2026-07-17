@@ -19,6 +19,7 @@ from glob import glob
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import yaml
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
@@ -125,17 +126,37 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
     return benchmarks_dict
 
 
+def _is_benchmark_config(config_path: Path) -> bool:
+    """True if the config declares a `type: benchmark` dataset anywhere in its structure.
+
+    A raw single-file parse (no `config_paths`/interpolation resolution), so it's format-agnostic and can't
+    fail on includes. An unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
+    """
+
+    def declares(node: object) -> bool:
+        if isinstance(node, dict):
+            return node.get("type") == "benchmark" or any(declares(v) for v in node.values())
+        if isinstance(node, list):
+            return any(declares(v) for v in node)
+        return False
+
+    try:
+        return declares(yaml.safe_load(config_path.read_text(errors="ignore")))
+    except yaml.YAMLError:
+        return True
+
+
 def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
     A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
-    every yaml. The `type: benchmark` text check is a cheap prefilter (pay the resolve cost only on real
+    every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
     candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
     """
     if not benchmarks_dir.is_dir():
         return []
     config_paths = [benchmarks_dir / p for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)]
-    return sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+    return sorted(p for p in config_paths if _is_benchmark_config(p))
 
 
 def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:

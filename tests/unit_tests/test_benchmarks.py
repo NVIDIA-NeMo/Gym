@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from glob import glob
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,6 +48,39 @@ class TestListBenchmarks:
 
         found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
         assert found == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
+
+    @pytest.mark.parametrize(
+        ("text", "is_benchmark"),
+        [
+            pytest.param('x:\n  datasets:\n  - type: "benchmark"\n', True, id="double_quoted"),
+            pytest.param("x:\n  datasets:\n  - type: 'benchmark'\n", True, id="single_quoted"),
+            pytest.param("x:\n  datasets:\n  - type : benchmark\n", True, id="space_before_colon"),
+            pytest.param("x:\n  datasets:\n  - type: benchmark  # the dataset kind\n", True, id="inline_comment"),
+            pytest.param("x:\n  datasets: [{name: a, type: benchmark}]\n", True, id="flow_style"),
+            pytest.param("x:\n  datasets:\n  - type: benchmark_suite\n", False, id="longer_token"),
+            pytest.param("x:\n  # NOTE: a type: benchmark dataset would go here\n", False, id="only_in_comment"),
+        ],
+    )
+    def test_prefilter_matches_type_benchmark_across_yaml_formatting(self, tmp_path, text, is_benchmark) -> None:
+        # The prefilter parses each file, so any YAML spelling of a `type: benchmark` dataset is found
+        # (quotes, spacing, flow style) while lookalikes that aren't that value (a longer token, or the
+        # string only inside a comment) are rejected.
+        from nemo_gym.benchmarks import _is_benchmark_config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(text)
+        assert _is_benchmark_config(config_path) is is_benchmark
+
+    def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
+        # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
+        # diagnose rather than silently dropped.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        (tmp_path / "broken").mkdir()
+        (tmp_path / "broken" / "config.yaml").write_text("x:\n  - : : not valid yaml : :\n")
+
+        found = {p.relative_to(tmp_path).parts[0] for p in _benchmark_config_paths(tmp_path)}
+        assert "broken" in found
 
     def test_no_benchmarks(self, capsys) -> None:
         with (
@@ -116,10 +148,9 @@ class TestLoadBenchmarksFromConfigPaths:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve
         # failure. Mirrors the content-based discovery in `list_benchmarks`.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR, _load_benchmarks_from_config_paths
+        from nemo_gym.benchmarks import BENCHMARKS_DIR, _benchmark_config_paths, _load_benchmarks_from_config_paths
 
-        config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
-        config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+        config_paths = _benchmark_config_paths(BENCHMARKS_DIR)
         assert config_paths, "no benchmark configs discovered under BENCHMARKS_DIR"
 
         benchmarks = _load_benchmarks_from_config_paths(config_paths)
