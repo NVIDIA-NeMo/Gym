@@ -23,11 +23,12 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import logging
 import subprocess
 import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -103,8 +104,8 @@ class Store(SimpleResourcesServer):
 
         return app
 
-    def mcp_tool_inventory(self) -> list[dict]:
-        return [{"name": "lookup", "input_schema": {"type": "object", "additionalProperties": True}}]
+    def mcp_tools(self, harvested, catchall):
+        return harvested + [catchall.tool("lookup", {"type": "object", "additionalProperties": True})]
 
 
 class Shapes(SimpleResourcesServer):
@@ -115,10 +116,6 @@ class Shapes(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-
-        @app.post("/opt_body")
-        async def opt_body(body: Optional[EchoBody] = None):
-            return {"got": None if body is None else body.value}
 
         @app.post("/typed_dict_body")
         async def typed_dict_body(body: dict[str, Any]):
@@ -359,22 +356,30 @@ def test_error_mapping():
 # ==================================================================================================
 
 
-def test_optional_body_model_receives_arguments():
-    # Optional[Model] = None is still a body param; the arguments must not be dropped as a default.
-    with _mcp(Shapes, "shapes") as (client, token):
-        payload = _payload(_call(client, "opt_body", {"value": "x"}, token=token))
-        assert payload == {"got": "x"}
+def test_optional_body_model_is_refused_at_install():
+    # Optional[Model] = None has no proven-equivalent direct dispatch, so exposure refuses by name.
+    class OptionalBody(Store):
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            @app.post("/opt_body")
+            async def opt_body(body: Optional[EchoBody] = None):
+                return {"got": None if body is None else body.value}
+
+            return app
+
+    server = _server(OptionalBody)
+    with pytest.raises(ValueError, match="opt_body"):
+        install_auto_exposure(server, server.setup_webserver())
 
 
-def test_optional_body_model_advertises_the_model_schema():
-    server = _server(Shapes, "shapes")
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
-        tools = {t["name"]: t for t in _list(client, token)}
-        assert "value" in tools["opt_body"]["inputSchema"].get("properties", {})
+def test_optional_body_model_bind_route_refuses_with_reason():
+    async def opt_body(body: Optional[EchoBody] = None):
+        pass
+
+    outcome = bind_route(_stub_route(opt_body))
+    assert outcome.binding is None
+    assert any("optional/union body param" in r for r in outcome.reasons), outcome.reasons
 
 
 def test_parameterized_dict_body_dispatches():
@@ -570,7 +575,7 @@ def test_refuses_dependency_injection_handler():
         install_auto_exposure(server, app)
 
 
-def test_refuses_catchall_without_inventory_or_toolless_declaration():
+def test_dispatcher_ignoring_catchall_soft_warns_instead_of_raising(caplog):
     class NoInventoryDispatcher(SimpleResourcesServer):
         async def verify(self, body):
             pass
@@ -584,33 +589,24 @@ def test_refuses_catchall_without_inventory_or_toolless_declaration():
 
             return app
 
-    server = _server(NoInventoryDispatcher, "dispatcher")
-    with pytest.raises(ValueError, match="mcp_tool_inventory"):
-        install_auto_exposure(server, server.setup_webserver())
+    server = _server(NoInventoryDispatcher, "dispatcher")  # default mcp_tools ignores the catch-all
+    with caplog.at_level(logging.WARNING):
+        tools = install_auto_exposure(server, server.setup_webserver())
+    assert tools == {}
+    assert "catch-all" in caplog.text
 
 
-def test_refuses_inventory_name_colliding_with_reserved_endpoint():
+def test_refuses_reserved_tool_name():
     class ReservedInventory(Store):
-        def mcp_tool_inventory(self) -> list[dict]:
-            return [{"name": "verify"}]
+        def mcp_tools(self, harvested, catchall):
+            return harvested + [catchall.tool("verify")]
 
     server = _server(ReservedInventory)
     with pytest.raises(ValueError, match="reserved"):
         install_auto_exposure(server, server.setup_webserver())
 
 
-def test_refuses_unknown_toolless_catchall_declaration():
-    class TypoDeclared(Store):
-        mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset({"/{typo}"})
-
-    server = _server(TypoDeclared)
-    with pytest.raises(ValueError, match="Fix the declaration"):
-        install_auto_exposure(server, server.setup_webserver())
-
-
 class Excluding(SimpleResourcesServer):
-    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
-
     async def verify(self, body):
         pass
 
@@ -627,6 +623,9 @@ class Excluding(SimpleResourcesServer):
 
         return app
 
+    def mcp_tools(self, harvested, catchall):
+        return [t for t in harvested if t.name != "end_session"]
+
 
 def test_excluded_route_is_not_a_tool_but_plain_http_still_works():
     with _mcp(Excluding, "excl") as (client, token):
@@ -637,19 +636,10 @@ def test_excluded_route_is_not_a_tool_but_plain_http_still_works():
         assert resp.status_code == 200 and resp.json() == {"ended": "x"}
 
 
-def test_refuses_unknown_excluded_path_declaration():
-    class TypoExcluded(Store):
-        mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/nope"})
-
-    server = _server(TypoExcluded)
-    with pytest.raises(ValueError, match=r"mcp_excluded_paths.*'/nope'"):
-        install_auto_exposure(server, server.setup_webserver())
-
-
 def test_excluded_route_with_depends_param_does_not_refuse():
+    # A route dropped by mcp_tools() is never required to be dispatchable, so its Depends param
+    # (which direct dispatch cannot reproduce) does not refuse exposure of the surviving tools.
     class ExcludedDepends(Excluding):
-        mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session", "/gated"})
-
         def setup_webserver(self) -> FastAPI:
             app = super().setup_webserver()
 
@@ -659,28 +649,18 @@ def test_excluded_route_with_depends_param_does_not_refuse():
 
             return app
 
+        def mcp_tools(self, harvested, catchall):
+            return [t for t in harvested if t.name not in ("end_session", "gated")]
+
     server = _server(ExcludedDepends, "excl")
     tools = install_auto_exposure(server, server.setup_webserver())
     assert set(tools) == {"append"}
 
 
-def test_refuses_inventory_without_a_catchall_route():
-    class InventoryNoCatchall(SimpleResourcesServer):
-        async def verify(self, body):
-            pass
-
-        def mcp_tool_inventory(self) -> list[dict]:
-            return [{"name": "ghost"}]
-
-    server = _server(InventoryNoCatchall, "ghostly")
-    with pytest.raises(ValueError, match="no catch-all"):
-        install_auto_exposure(server, server.setup_webserver())
-
-
-def test_refuses_duplicate_tool_name_between_routes_and_inventory():
+def test_refuses_duplicate_tool_name():
     class DuplicateInventory(Store):
-        def mcp_tool_inventory(self) -> list[dict]:
-            return [{"name": "append"}]
+        def mcp_tools(self, harvested, catchall):
+            return harvested + [catchall.tool("append")]
 
     server = _server(DuplicateInventory)
     with pytest.raises(ValueError, match="Duplicate MCP tool name"):
@@ -777,15 +757,11 @@ def test_bind_route_accepts_defaulted_query_param():
 
 
 def test_silently_wrong_shapes_are_classified_not_degraded():
-    """The shapes that would dispatch wrongly if misclassified: Optional body is a body param (not a
-    dropped default), response_model is recorded for filtering, and a sync (def) handler is recorded
-    as is_coroutine=False."""
+    """The shapes that would dispatch wrongly if misclassified: response_model is recorded for
+    filtering, and a sync (def) handler is recorded as is_coroutine=False."""
     server = _server(Shapes, "shapes")
     app = server.setup_webserver()
     routes = {r.path: r for r in app.routes if isinstance(r, APIRoute)}
-
-    opt = bind_route(routes["/opt_body"]).binding
-    assert opt is not None and opt.body_model is EchoBody and not opt.defaulted_params
 
     filt = bind_route(routes["/filtered"]).binding
     assert filt is not None and filt.return_model is PublicView
@@ -872,8 +848,8 @@ def test_litmus_pattern_reregistered_verify_is_still_normalized():
     seen: dict[str, list] = {}
 
     class LitmusStore(Store):
-        def mcp_tool_inventory(self) -> Optional[list[dict]]:
-            return None
+        def mcp_tools(self, harvested, catchall):  # the catch-all is dropped below, so expose only typed routes
+            return harvested
 
         def setup_webserver(self) -> FastAPI:
             app = super().setup_webserver()

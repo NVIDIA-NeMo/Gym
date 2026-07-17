@@ -20,13 +20,14 @@ handlers keep their ``request: Request`` parameter and their ``request.session[S
 reads exactly as written; this module never touches them.
 
 ``run_webserver`` calls :func:`maybe_auto_expose` after building the app, so exposure is automatic
-for any server that sets the flag. Dispatcher servers (one catch-all route backing many tools, whose
-per-tool schemas live in data) additionally override one method, ``mcp_tool_inventory()``. Routes
-named in ``mcp_excluded_paths`` are not tools at all: never advertised, never callable over MCP,
-never shape-checked — the plain HTTP route is untouched. A server can narrow one rollout's token to
-a subset of tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token minted by
-that /seed_session response then lists and calls only those tools, intersected with any
-install-time allow-list.
+for any server that sets the flag. A server tailors what it exposes by overriding one method,
+``mcp_tools(harvested, catchall)``: the default returns the auto-harvested typed POST routes, and an
+override may filter them (exclude a route), append catch-all-backed tools (dispatcher servers whose
+per-tool schemas live in data: ``harvested + [catchall.tool(name, input_schema, description)]``), or
+return ``None``/``[]`` to expose nothing. A server can narrow one rollout's token to a subset of
+tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token minted by that
+/seed_session response then lists and calls only those tools, intersected with any install-time
+allow-list.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -179,19 +180,15 @@ def bind_route(route: APIRoute) -> BindOutcome:
             body_param, body_model = name, annotation
             continue
         if get_origin(annotation) in (Union, UnionType):
-            # ``body: Optional[Model] = None`` is still a body param to FastAPI; without unwrapping
-            # it here it would fall through to the defaulted-query bucket and MCP arguments would be
-            # dropped silently.
+            # ``body: Optional[Model]``/``Model | None`` reaches FastAPI as a body param, but direct
+            # MCP dispatch has no proven-equivalent unwrapping for it, so refuse rather than guess.
             members = [a for a in get_args(annotation) if a is not type(None)]
             model_members = [m for m in members if isinstance(m, type) and issubclass(m, BaseModel)]
             if model_members:
                 if len(members) > 1:
                     reasons.append(f"ambiguous union body param {name!r}: {annotation!r}")
-                    continue
-                if body_param is not None:
-                    reasons.append(f"multiple body models ({body_param!r}, {name!r})")
-                    continue
-                body_param, body_model = name, model_members[0]
+                else:
+                    reasons.append(f"optional/union body param {name!r} is not supported over MCP: {annotation!r}")
                 continue
         if annotation is dict or get_origin(annotation) is dict:
             # ``body: dict`` — FastAPI parses the JSON body and passes the dict through with no
@@ -417,22 +414,51 @@ async def call_direct(
 class MCPTool:
     name: str
     tool: types.Tool  # the tools/list advertisement
-    binding: DirectBinding  # how to invoke the route handler directly
+    binding: Optional[DirectBinding] = None  # how to invoke the route handler directly; None -> unbindable
     path_value: Optional[str] = None  # catch-all tools: value bound to the path param
+    route: Optional[APIRoute] = None  # source route, kept to re-derive the bind-failure reason on demand
 
 
 def _schema_for(body_model: Optional[type[BaseModel]]) -> dict:
     return body_model.model_json_schema() if body_model is not None else dict(PERMISSIVE_SCHEMA)
 
 
+class _CatchAll:
+    """The single parameterized catch-all route, handed to ``mcp_tools()`` overrides.
+
+    ``tool(name, input_schema, description)`` binds one MCP tool to that route with its path param set
+    to ``name`` (workplace's ``POST /{path}`` pattern), reusing the same direct-dispatch binding.
+    """
+
+    def __init__(self, server: Any, route: APIRoute):
+        self.server = server
+        self.route = route
+        self._binding: Optional[DirectBinding] = None
+
+    def tool(self, name: str, input_schema: Optional[dict] = None, description: Optional[str] = None) -> MCPTool:
+        if self._binding is None:
+            outcome = bind_route(self.route)
+            if outcome.binding is None:
+                raise ValueError(
+                    f"{type(self.server).__name__} catch-all route {self.route.path!r} cannot be dispatched "
+                    f"directly: {'; '.join(outcome.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
+                )
+            self._binding = outcome.binding
+        return MCPTool(
+            name=name,
+            tool=types.Tool(name=name, description=description, inputSchema=input_schema or dict(PERMISSIVE_SCHEMA)),
+            binding=self._binding,
+            path_value=name,
+        )
+
+
 def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     """Scan app.routes once; return {tool name -> MCPTool}. Also runs the server-level middleware gate.
 
-    Dispatcher servers (one catch-all route backing many data-defined tools) override
-    ``mcp_tool_inventory(self) -> list[dict]`` returning ``{"name", "input_schema", "description"}``
-    items (plus ``"route"`` naming the catch-all path when the app has more than one); those tools
-    dispatch through the catch-all with its path param bound to the tool name. Catch-alls that back
-    no tools are declared via ``mcp_toolless_catchall_paths``.
+    Each non-parameterized typed POST route becomes a harvested tool. The single parameterized
+    catch-all route (if any) is offered to the server via ``mcp_tools(harvested, catchall)``, whose
+    return value is the final tool list — the default returns ``harvested`` unchanged; an override may
+    filter it, append ``catchall.tool(...)`` entries, or return ``None``/``[]`` to expose nothing.
     """
     custom_middleware = audit_middleware(app)
     if custom_middleware:
@@ -441,122 +467,78 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             "dispatch would silently skip. Remove the middleware, or leave expose_tools_over_mcp off in the config."
         )
 
-    # A typo'd exclusion would silently expose the route it meant to hide.
-    excluded = frozenset(server.mcp_excluded_paths)
-    post_paths = {r.path for r in app.routes if isinstance(r, APIRoute) and "POST" in (r.methods or set())}
-    unknown_excluded = excluded - post_paths
-    if unknown_excluded:
-        raise ValueError(
-            f"mcp_excluded_paths on {type(server).__name__} names route(s) {sorted(unknown_excluded)} "
-            f"but the app's POST routes are {sorted(post_paths)}. Fix the declaration."
-        )
-
-    typed_routes: dict[str, APIRoute] = {}
+    harvested: list[MCPTool] = []
     catchall_routes: list[APIRoute] = []
     for route in app.routes:
         if not isinstance(route, APIRoute) or "POST" not in (route.methods or set()):
             continue
-        if route.path in BASIC_PATHS or route.path in excluded:
+        if route.path in BASIC_PATHS:
             continue
         if "{" in route.path:
             catchall_routes.append(route)
             continue
         name = route.path.lstrip("/")
-        if not _MCP_TOOL_NAME_RE.fullmatch(name):
-            raise ValueError(
-                f"{type(server).__name__} route {route.path!r} derives MCP tool name {name!r}, which does not "
-                "match ^[A-Za-z0-9_-]+$; MCP clients reject such names and verify-time normalization cannot "
-                "round-trip them. Rename the route, or leave expose_tools_over_mcp off in the config."
-            )
-        typed_routes[name] = route
-
-    # A catch-all backs tools (workplace's /{path}) or only returns errors (finance's /{tool_name});
-    # only the author knows. Declaring toolless is what waives the missing-inventory error below; a
-    # declaration naming no real catch-all is a hard error (a typo would re-hide the tools it guards).
-    declared_toolless = frozenset(server.mcp_toolless_catchall_paths)
-    unknown_declared = declared_toolless - {r.path for r in catchall_routes}
-    if unknown_declared:
-        raise ValueError(
-            f"mcp_toolless_catchall_paths on {type(server).__name__} names route(s) {sorted(unknown_declared)} "
-            f"but the app's catch-all routes are {sorted(r.path for r in catchall_routes)}. Fix the declaration."
-        )
-
-    def make(
-        name: str, description: Optional[str], schema: dict, route: APIRoute, path_value: Optional[str]
-    ) -> MCPTool:
-        outcome = bind_route(route)
-        if outcome.binding is None:
-            raise ValueError(
-                f"{type(server).__name__} tool {name!r} (route {route.path!r}) cannot be dispatched directly: "
-                f"{'; '.join(outcome.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
-            )
-        return MCPTool(
-            name=name,
-            tool=types.Tool(name=name, description=description, inputSchema=schema),
-            binding=outcome.binding,
-            path_value=path_value,
-        )
-
-    tools: dict[str, MCPTool] = {}
-    for name, route in typed_routes.items():
+        # bind_route is deferred-validated in _validate_tools: a route the override drops is never
+        # required to be dispatchable, so binding failures surface only for tools actually exposed.
         outcome = bind_route(route)
         description = (route.description or route.summary or "").strip() or None
-        # schema comes from the same bind_route resolution that decides dispatch, so they cannot diverge
-        tools[name] = make(name, description, _schema_for(outcome.body_model), route, None)
+        harvested.append(
+            MCPTool(
+                name=name,
+                tool=types.Tool(name=name, description=description, inputSchema=_schema_for(outcome.body_model)),
+                binding=outcome.binding,
+                route=route,
+            )
+        )
 
-    inventory_catchalls = [r for r in catchall_routes if r.path not in declared_toolless]
-    inventory_items = server.mcp_tool_inventory()
-    if inventory_items is None:
-        if inventory_catchalls:
-            raise ValueError(
-                f"{type(server).__name__} has parameterized catch-all route(s) "
-                f"{sorted(r.path for r in inventory_catchalls)} but mcp_tool_inventory() returns None, so the "
-                "tools behind them would not be exposed over MCP and every rollout would score 0. Override "
-                "mcp_tool_inventory(), or declare the route(s) toolless via mcp_toolless_catchall_paths."
-            )
-    else:
-        if inventory_items and not inventory_catchalls:
-            raise ValueError(
-                f"{type(server).__name__}.mcp_tool_inventory() names tools but the app has no catch-all "
-                "route to dispatch them through."
-            )
-        inventory_by_path = {r.path: r for r in inventory_catchalls}
-        for item in inventory_items:
-            name = item["name"]
-            if name in RESERVED_MCP_TOOL_NAMES:
-                raise ValueError(
-                    f"{type(server).__name__}.mcp_tool_inventory() tool {name!r} collides with a reserved "
-                    f"endpoint name {sorted(RESERVED_MCP_TOOL_NAMES)}; rename the tool."
-                )
-            if not _MCP_TOOL_NAME_RE.fullmatch(name):
-                raise ValueError(
-                    f"{type(server).__name__}.mcp_tool_inventory() tool {name!r} does not match "
-                    "^[A-Za-z0-9_-]+$; MCP clients reject such names and verify-time normalization cannot "
-                    "round-trip them. Rename the tool."
-                )
-            if name in tools:
-                raise ValueError(f"Duplicate MCP tool name {name!r} (route harvest vs inventory override)")
-            route_path = item.get("route")
-            if route_path is not None:
-                catch_route = inventory_by_path.get(route_path)
-                if catch_route is None:
-                    raise ValueError(
-                        f"{type(server).__name__}.mcp_tool_inventory() tool {name!r} names route "
-                        f"{route_path!r}, but the tool-backing catch-all routes are {sorted(inventory_by_path)}."
-                    )
-            elif len(inventory_catchalls) > 1:
-                # Guessing between catch-alls would dispatch tools through the wrong handler.
-                raise ValueError(
-                    f"{type(server).__name__} has multiple tool-backing catch-all routes "
-                    f"{sorted(inventory_by_path)}; mcp_tool_inventory() item {name!r} must name its dispatch "
-                    "route via a 'route' key."
-                )
-            else:
-                catch_route = inventory_catchalls[0]
-            schema = item.get("input_schema") or dict(PERMISSIVE_SCHEMA)
-            tools[name] = make(name, item.get("description"), schema, catch_route, name)
+    if len(catchall_routes) > 1:
+        raise ValueError(
+            f"{type(server).__name__} has multiple parameterized catch-all routes "
+            f"{sorted(r.path for r in catchall_routes)}; MCP auto-exposure cannot tell which backs the tools. "
+            "Collapse them to one, or leave expose_tools_over_mcp off in the config."
+        )
+    catchall = _CatchAll(server, catchall_routes[0]) if catchall_routes else None
+
+    tools = _validate_tools(server, server.mcp_tools(harvested, catchall))
+
+    if catchall is not None and not any(t.path_value is not None for t in tools.values()):
+        LOG.warning(
+            "%s has a parameterized catch-all route %r but no exposed MCP tool dispatches through it; tools "
+            "behind that route are not callable over MCP (rollouts needing them would score 0). Override "
+            "mcp_tools() to add catch-all-backed tools via harvested + [catchall.tool(...)].",
+            type(server).__name__,
+            catchall.route.path,
+        )
 
     LOG.info("%s MCP: exposing %d tool(s) over direct dispatch", type(server).__name__, len(tools))
+    return tools
+
+
+def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]:
+    """Validate the final tool list from ``mcp_tools()``: legal name, not reserved, unique, dispatchable."""
+    tools: dict[str, MCPTool] = {}
+    for tool in selected or []:
+        name = tool.name
+        if not _MCP_TOOL_NAME_RE.fullmatch(name):
+            raise ValueError(
+                f"{type(server).__name__} exposes MCP tool name {name!r}, which does not match "
+                "^[A-Za-z0-9_-]+$; MCP clients reject such names and verify-time normalization cannot "
+                "round-trip them. Rename the route or tool, or leave expose_tools_over_mcp off in the config."
+            )
+        if name in RESERVED_MCP_TOOL_NAMES:
+            raise ValueError(
+                f"{type(server).__name__} exposes MCP tool {name!r}, which collides with a reserved endpoint "
+                f"name {sorted(RESERVED_MCP_TOOL_NAMES)}; rename the tool."
+            )
+        if name in tools:
+            raise ValueError(f"Duplicate MCP tool name {name!r} in {type(server).__name__}.mcp_tools().")
+        if tool.binding is None:
+            outcome = bind_route(tool.route)
+            raise ValueError(
+                f"{type(server).__name__} tool {name!r} (route {tool.route.path!r}) cannot be dispatched "
+                f"directly: {'; '.join(outcome.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
+            )
+        tools[name] = tool
     return tools
 
 

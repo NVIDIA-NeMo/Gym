@@ -17,7 +17,7 @@ import inspect
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, ClassVar, Optional, get_type_hints
+from typing import Any, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -151,14 +151,6 @@ class _MCPHeaderSessionMiddleware:
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
-    # Catch-all routes (as registered, e.g. "/{tool_name}") that back no tools. Declaring one tells MCP
-    # auto-exposure not to refuse (raise ValueError at startup) over a missing mcp_tool_inventory()
-    # override for that route.
-    mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset()
-
-    # Routes as registered (e.g. "/end_session") that must not be advertised or callable over MCP.
-    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset()
-
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -174,16 +166,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)
 
-    def mcp_tool_inventory(self) -> Optional[list[dict]]:
-        """List the tools this server serves through a single catch-all route (POST /{path}).
+    def mcp_tools(self, harvested: list, catchall: Optional[Any]) -> Optional[list]:
+        """Return the MCP tools to expose (default: the auto-harvested typed POST routes).
 
-        MCP auto-exposure harvests one tool per typed route, so it cannot see tools that all live
-        behind one parameterized route. A server built that way overrides this to return
-        ``{"name", "input_schema", "description"}`` items; those tools dispatch through the
-        catch-all with its path parameter bound to the tool name. ``None`` (the default) means the
-        server has no such tools.
+        Override to exclude (filter harvested), add catch-all-backed tools (harvested + [catchall.tool(...)]),
+        or disable (return None). 'catchall' is None unless the server has one parameterized catch-all route.
         """
-        return None
+        return harvested
 
     def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
         """Per-session tool restriction: return the tool names allowed for this rollout's MCP token,
