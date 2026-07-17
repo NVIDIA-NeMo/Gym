@@ -14,9 +14,8 @@
 # limitations under the License.
 """Build the SpartQA Gym dataset from the public ``mteb/SpartQA`` HF dataset.
 
-Ports ``benchmarks/spartqa/byob_spartqa.py::build_records``: joins the MTEB
-``queries`` / ``corpus`` / ``qrels`` splits into one row per query whose
-``target`` is the accepted answer phrase (all accepted phrases in
+Joins the MTEB ``queries`` / ``corpus`` / ``qrels`` splits into one row per
+query whose ``target`` is the accepted answer phrase (all accepted phrases in
 ``all_targets``), then renders the shared ``PROMPT`` and writes a Gym task per
 query. ``target`` / ``all_targets`` ride along as extra fields consumed by
 ``app.py``'s verify().

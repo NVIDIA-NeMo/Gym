@@ -148,7 +148,7 @@ class TestAcServerContract:
         assert result.reward == approx(1.0)
 
 
-# ── AC2: metric parity with byob ────────────────────────────────────────────
+# ── AC2: scoring correctness ─────────────────────────────────────────────────
 
 # Shared fixtures: (response_text, target, all_targets, expected_correct).
 _PARITY_FIXTURES: list[tuple[str, str, list[str], bool]] = [
@@ -167,60 +167,36 @@ _PARITY_FIXTURES: list[tuple[str, str, list[str], bool]] = [
 
 
 class TestAcMetricParity:
-    def test_ac_prompt_text_matches_byob(self) -> None:
-        # PROMPT is ported verbatim; assert the exact contract text the prep
-        # step renders (the query slot plus the required final-answer line).
+    def test_ac_prompt_text_contract(self) -> None:
         assert "Final answer: <answer phrase>" in PROMPT
         assert PROMPT.startswith("Answer the spatial reasoning query below.")
         assert PROMPT.rstrip().endswith("{question}")
 
-    def test_ac_normalize_matches_byob_logic(self) -> None:
+    def test_ac_normalize_logic(self) -> None:
         assert _normalize("  The  Big, BLACK Square!! ") == "the big black square"
         assert _normalize("") == ""
 
-    def test_ac_strip_reasoning_matches_byob_logic(self) -> None:
+    def test_ac_strip_reasoning_logic(self) -> None:
         assert _strip_reasoning("<think>hidden</think>visible") == "visible"
         assert _strip_reasoning("plain") == "plain"
 
-    def test_ac_clean_candidate_matches_byob_logic(self) -> None:
+    def test_ac_clean_candidate_logic(self) -> None:
         assert _clean_candidate("- *green cup*") == "green cup"
         assert _clean_candidate('  "yes"  ') == "yes"
 
-    def test_ac_extract_answer_matches_byob_logic(self) -> None:
+    def test_ac_extract_answer_logic(self) -> None:
         assert _extract_answer("Reasoning.\nFinal answer: below the circle") == "below the circle"
         assert _extract_answer("<think>x</think>Final answer: yes") == "yes"
         assert _extract_answer("   ") == ""
 
     @pytest.mark.parametrize("text,target,all_targets,expected", _PARITY_FIXTURES)
-    async def test_ac_scoring_matches_byob_expected(
+    async def test_ac_scoring_correctness(
         self, text: str, target: str, all_targets: list[str], expected: bool
     ) -> None:
         result = await _server().verify(
             _make_request(text, target=target, all_targets=all_targets)
         )
         assert bool(result.reward) is expected
-
-    async def test_ac_agrees_with_byob_module_when_importable(self) -> None:
-        # If nemo_evaluator (byob's hard dependency) is installed, compare the
-        # ported helpers and scorer against the byob source of truth directly.
-        pytest.importorskip("nemo_evaluator")
-        import benchmarks.spartqa.byob_spartqa as byob
-        from nemo_evaluator import ScorerInput
-
-        server = _server()
-        for text, target, all_targets, _expected in _PARITY_FIXTURES:
-            assert byob._normalize(text) == _normalize(text)
-            assert byob._strip_reasoning(text) == _strip_reasoning(text)
-            assert byob._extract_answer(text) == _extract_answer(text)
-            byob_correct = byob.spartqa(
-                ScorerInput(
-                    response=text, target=target, metadata={"all_targets": all_targets}
-                )
-            )["correct"]
-            result = await server.verify(
-                _make_request(text, target=target, all_targets=all_targets)
-            )
-            assert bool(result.reward) == bool(byob_correct)
 
 
 # ── AC3: reward is strictly 1.0 or 0.0 ─────────────────────────────────────

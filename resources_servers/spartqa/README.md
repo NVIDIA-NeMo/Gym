@@ -1,18 +1,17 @@
 # SpartQA Resources Server
 
-Spatial-reasoning **answer generation**, ported from the nemo-evaluator BYOB
-benchmark `spartqa` (`benchmarks/spartqa/byob_spartqa.py`). The model is shown a
+Spatial-reasoning **answer generation** benchmark. The model is shown a
 spatial-reasoning query and must return the matching answer phrase, ending with
 a `Final answer: <phrase>` line. The per-sample reward is `1.0` on an
 exact-or-answer-containing match against any accepted answer phrase, else `0.0`.
 
 Source dataset: [`mteb/SpartQA`](https://huggingface.co/datasets/mteb/SpartQA)
 (MTEB retrieval form — `queries` / `corpus` / `qrels` splits joined at prep
-time). Upstream eval: `benchmarks/spartqa/byob_spartqa.py`.
+time by `prepare_spartqa.py`).
 
 ## Scoring
 
-`verify()` (ported verbatim from the BYOB scorer) extracts the model's final
+`verify()` extracts the model's final
 answer (`_extract_answer` / `_strip_reasoning` / `_clean_candidate`), normalizes
 it (`_normalize`: lowercase, strip punctuation, collapse whitespace), and
 compares against every accepted phrase in `all_targets` (falling back to

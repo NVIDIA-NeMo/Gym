@@ -14,20 +14,16 @@
 # limitations under the License.
 """SpartQA resources server — spatial reasoning as direct answer generation.
 
-Ported from the nemo-evaluator BYOB benchmark ``spartqa``
-(``benchmarks/spartqa/byob_spartqa.py``). The MTEB ``mteb/SpartQA`` retrieval
-dataset is joined at prep time (``prepare_spartqa.py``) into one row per query
-whose ``target`` is the accepted answer phrase (all accepted phrases in
-``all_targets``). The model is shown the query and must return the matching
-answer phrase, ending with a ``Final answer: <phrase>`` line.
+The MTEB ``mteb/SpartQA`` retrieval dataset is joined at prep time
+(``prepare_spartqa.py``) into one row per query whose ``target`` is the
+accepted answer phrase (all accepted phrases in ``all_targets``). The model is
+shown the query and must return the matching answer phrase, ending with a
+``Final answer: <phrase>`` line.
 
 The per-sample reward is ``1.0`` on an exact-or-answer-containing match against
 any accepted answer, else ``0.0`` — so ``compute_metrics``'s mean-of-rewards
 equals corpus accuracy. ``exact`` (strict match) and ``parsed`` (a non-empty
 answer was extracted) ride on each row for downstream inspection.
-
-The prompt and answer-extraction / scoring logic are ported verbatim from
-``byob_spartqa.py`` so the metric is identical.
 """
 
 from __future__ import annotations
@@ -61,7 +57,7 @@ Query:
 """
 
 
-# ── Answer extraction + normalization (verbatim from byob_spartqa.py) ──────
+# ── Answer extraction + normalization ───────────────────────────────────────
 
 
 def _normalize(text: str) -> str:

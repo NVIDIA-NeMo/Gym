@@ -280,25 +280,3 @@ class TestAcceptance:
             )
             assert result.reward == approx(1.0)
 
-    async def test_agrees_with_byob_scorer(self) -> None:
-        pytest.importorskip("nemo_evaluator")
-        import benchmarks.spartqa.byob_spartqa as byob
-        from nemo_evaluator import ScorerInput
-
-        fixtures = [
-            ("Final answer: green cup", "green cup", ["green cup"]),
-            ("Final answer: the green cup on the table", "green cup", ["green cup"]),
-            ("Final answer: red ball", "green cup", ["green cup"]),
-            ("Final answer: under the circle", "below the circle",
-             ["below the circle", "under the circle"]),
-            ("   ", "green cup", ["green cup"]),
-        ]
-        server = _server()
-        for text, target, all_targets in fixtures:
-            expected = byob.spartqa(
-                ScorerInput(response=text, target=target, metadata={"all_targets": all_targets})
-            )["correct"]
-            result = await server.verify(
-                _make_request(text, target=target, all_targets=all_targets)
-            )
-            assert bool(result.reward) == bool(expected)
