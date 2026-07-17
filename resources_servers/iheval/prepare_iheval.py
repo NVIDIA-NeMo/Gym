@@ -12,26 +12,45 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build the IHEval Gym datasets from the upstream ``ytyz1307zzh/IHEval`` repo.
+"""Build the IHEval Gym dataset in **Chat-Completions** shape, straight from the
+upstream ``ytyz1307zzh/IHEval`` raw ``input_data.json`` files.
 
-Iterates the eight single-turn IHEval tasks, loads every ``input_data.json``
-under each task directory (``aligned/``, ``conflict/``, ``reference/``), and
-writes:
+Writes:
 
 * ``data/test.jsonl``    — all rows across all tasks.
 * ``data/example.jsonl`` — a small mixed sample for smoke testing (committed).
 
-Each row becomes a Gym task. The prompt (system + user instruction) goes into
-``responses_create_params.input``; tool-use tasks additionally carry the
-function schema in ``responses_create_params.tools`` and the canned tool-call
-trajectory as Responses-API ``function_call`` / ``function_call_output`` input
-items. The nemo-evaluator native driver translates those into the upstream
-chat-completions tool turn at seed time (see ``_tool_trajectory``). The gold
-answer and routing metadata travel in ``verifier_metadata``.
+Why Chat-Completions shape
+--------------------------
+IHEval is driven by the nemo-evaluator ``simple`` solver via the
+``gym://...protocol=native`` scheme. The solver forwards
+``responses_create_params.input`` and ``responses_create_params.tools``
+**verbatim** to the vLLM ``/chat/completions`` endpoint — there is no
+Responses→Chat conversion on that path. So the dataset must already be
+Chat-Completions-shaped, or the native tool-use rows 400 ("tools.0.function:
+Field required").
 
-Source: on first run the upstream repo is downloaded as a zip into
-``$XDG_CACHE_HOME/byob_iheval`` (or ``~/.cache/byob_iheval``). Set
-``IHEVAL_REPO_DIR`` to point at an existing checkout instead.
+This reproduces the upstream benchmark's own request builder exactly, so the
+prompt the model sees is byte-for-byte what upstream IHEval sends:
+
+* message assembly  → ``src/model/run_model.py::main`` (vLLM backend branch):
+  optional ``conversation_history`` (alternating user/assistant), then the
+  ``user`` instruction, with ``system`` inserted at position 0.
+* tool turn         → ``src/utils/call_api.py::tool_call_openai``: the OpenAI
+  chat tool ``definition`` plus an ``assistant`` message carrying ``tool_calls``
+  and a ``role: "tool"`` result (``arguments`` JSON-encoded, ``name`` kept).
+
+The assembled chat ``messages`` go into ``responses_create_params.input`` and
+the tool ``definition`` into ``responses_create_params.tools`` (both already the
+shape vLLM chat accepts). Routing/gold fields ride at the ROW TOP LEVEL
+(``task``, ``domain``, ``setting``, ``instruction``, ``answer``) so they survive
+the native driver, which forwards top-level scalars but drops nested objects;
+``answer`` is JSON-encoded and ``verify()`` JSON-decodes it (see app.py
+``_decode_answer``).
+
+Source: set ``IHEVAL_REPO_DIR`` to a local checkout (defaults to the in-repo
+``benchmarks/iheval/IHEval`` if present); otherwise the upstream repo is
+downloaded as a zip into ``$XDG_CACHE_HOME/byob_iheval`` (or ``~/.cache``).
 
 Usage::
 
@@ -59,6 +78,9 @@ _ZIP_TOP_DIR = "IHEval-main"
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 _AGENT = "iheval_simple_agent"
+
+# In-repo checkout of the upstream benchmark, used when IHEVAL_REPO_DIR is unset.
+_LOCAL_REPO = Path(__file__).resolve().parents[3] / "benchmarks" / "iheval" / "IHEval"
 
 # (domain, task) pairs. ``task`` doubles as the verifier's scorer key.
 # ``multi-turn`` rule-following is included: its ``conversation_history`` is
@@ -106,6 +128,9 @@ def _repo_root() -> Path:
             raise FileNotFoundError(f"IHEVAL_REPO_DIR missing 'benchmark/': {root}")
         return root
 
+    if (_LOCAL_REPO / "benchmark").is_dir():
+        return _LOCAL_REPO.resolve()
+
     cache = _cache_dir()
     target = cache / _ZIP_TOP_DIR
     sentinel = target / "benchmark"
@@ -141,107 +166,116 @@ def _iter_rows(root: Path, domain: str, task: str) -> List[Dict[str, Any]]:
     return rows
 
 
-# ── Row → Gym task conversion ────────────────────────────────────────────
+# ── Upstream request building (verbatim from run_model.py + call_api.py) ──
 
 
-def _tool_schema(definition: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert IHEval's flat tool definition to a Responses-API function tool.
+def _tool_call_openai(tool: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    """Port of ``src/utils/call_api.py::tool_call_openai``.
 
-    Upstream stores ``parameters`` as ``{<arg>: {description, type}}`` with no
-    ``type: object`` wrapper; the Responses API expects a JSON-Schema object.
-    Every IHEval tool has all positional args required.
+    Returns the OpenAI-chat ``definition`` list plus the pre-canned ``assistant``
+    tool-call message and the ``role: "tool"`` result message.
     """
-    raw_params = definition.get("parameters", {}) or {}
-    properties = {name: dict(spec) for name, spec in raw_params.items()}
-    return {
-        "type": "function",
-        "name": definition.get("name", ""),
-        "description": definition.get("description", ""),
-        "parameters": {
-            "type": "object",
-            "properties": properties,
-            "required": list(raw_params.keys()),
-            "additionalProperties": False,
-        },
-        # ``strict`` is a required field on the Responses-API FunctionToolParam.
-        # We keep it False: the canned trajectory already supplies the call, so
-        # constrained decoding of arguments is unnecessary and would reject the
-        # loosely-typed IHEval parameter schemas on some backends.
-        "strict": False,
-    }
+    raw_definition = tool["definition"]
+    raw_tool_call = tool["call"]
+    raw_tool_return = tool["return"]
 
-
-def _tool_trajectory(tool: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Canned ``[function_call, function_call_output]`` Responses-API items.
-
-    The canonical Responses-API encoding (kept here so the gym-native model
-    server, whose input schema has no ``role: "tool"``, accepts the row). The
-    nemo-evaluator ``gym://...protocol=native`` driver's ``messages_from_rcp``
-    translates these typed items into the upstream chat-completions form — an
-    ``assistant`` message with ``tool_calls`` followed by a ``role: "tool"``
-    result whose ``content`` carries the tool output — matching
-    ``run_vllm_model.py::prepare_tool_call``.
-    """
-    call = tool.get("call", {}) or {}
-    ret = tool.get("return", {}) or {}
-    call_id = str(call.get("id") or "call_iheval_0")
-    return [
+    definition = [
         {
-            "type": "function_call",
-            "call_id": call_id,
-            "name": call.get("name", ""),
-            "arguments": json.dumps(call.get("arguments", {}), ensure_ascii=False),
-        },
-        {
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": str(ret.get("content", "")),
-        },
+            "type": "function",
+            "function": {
+                "name": raw_definition["name"],
+                "description": raw_definition["description"],
+                "parameters": {
+                    "type": "object",
+                    "properties": raw_definition["parameters"],
+                    "required": list(raw_definition["parameters"].keys()),
+                },
+            },
+        }
     ]
 
+    tool_call = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": raw_tool_call["id"],
+                "type": "function",
+                "function": {
+                    "name": raw_tool_call["name"],
+                    "arguments": json.dumps(raw_tool_call["arguments"]),
+                },
+            }
+        ],
+    }
 
-def _history_messages(history: List[str]) -> List[Dict[str, Any]]:
-    """Alternating user/assistant turns from a multi-turn ``conversation_history``.
+    tool_return = {
+        "role": "tool",
+        "tool_call_id": raw_tool_return["id"],
+        "name": raw_tool_return["name"],
+        "content": raw_tool_return["content"],
+    }
 
-    Mirrors ``run_model.py``: even indices are prior user turns, odd indices are
-    the (pre-canned) assistant replies. These precede the final instruction.
+    return definition, tool_call, tool_return
+
+
+def _build_messages(example: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """Assemble chat ``messages`` (+ optional ``tools``) exactly like upstream.
+
+    Mirrors ``run_model.py::main`` (message assembly) followed by
+    ``call_api.py::call_openai`` (tool turn extension + system insertion). Net
+    order: ``[system?, <history?>, user(instruction), assistant(tool_call)?,
+    tool(result)?]``.
     """
-    return [{"role": "user" if i % 2 == 0 else "assistant", "content": str(msg)} for i, msg in enumerate(history)]
+    messages: List[Dict[str, Any]] = []
+
+    history = example.get("conversation_history")
+    if history:
+        messages.extend(
+            [
+                {"role": "user", "content": msg} if i % 2 == 0 else {"role": "assistant", "content": msg}
+                for i, msg in enumerate(history)
+            ]
+        )
+
+    messages.append({"role": "user", "content": example["instruction"]})
+
+    tools: Optional[List[Dict[str, Any]]] = None
+    if "tool" in example and example["tool"] is not None:
+        definition, tool_call, tool_return = _tool_call_openai(example["tool"])
+        messages.extend([tool_call, tool_return])
+        tools = definition
+
+    # System prompt goes first (call_api.py inserts at position 0 after the tool
+    # turn is appended, so it precedes everything regardless).
+    system = example.get("system")
+    if system is not None:
+        messages.insert(0, {"role": "system", "content": system})
+
+    return messages, tools
+
+
+# ── Row → Gym task ───────────────────────────────────────────────────────
 
 
 def _to_task(row: Dict[str, Any], domain: str, task: str) -> Dict[str, Any]:
-    instruction = str(row.get("instruction", ""))
-    system = row.get("system")
-    tool = row.get("tool") or None
-    history = row.get("conversation_history") or []
-
-    messages: List[Dict[str, Any]] = []
-    if system:
-        messages.append({"role": "system", "content": str(system)})
-    if history:
-        messages.extend(_history_messages(history))
-    messages.append({"role": "user", "content": instruction})
+    messages, tools = _build_messages(row)
 
     params: Dict[str, Any] = {"input": messages}
-    if tool:
-        messages.extend(_tool_trajectory(tool))
-        params["tools"] = [_tool_schema(tool.get("definition", {}))]
+    if tools is not None:
+        params["tools"] = tools
 
-    # Routing/gold fields live at the ROW TOP LEVEL (not nested under a
-    # ``verifier_metadata`` object), mirroring the rolemrc / ragtruth servers.
-    # The nemo-evaluator ``gym://...protocol=native`` driver forwards a row's
-    # top-level SCALAR fields onto the ``/verify`` request but drops nested
-    # objects — so ``answer`` (a dict/list for safety, rule-following and
-    # get-webpage) must be JSON-ENCODED to a string to survive, matching the
-    # legacy byob port's ``json.dumps(answer)``. verify() json-decodes it. See
-    # app.py ``IHEvalRunRequest`` / ``_decode_answer``.
+    # Routing/gold fields ride at the ROW TOP LEVEL so they survive the
+    # nemo-evaluator ``gym://...protocol=native`` driver, which forwards
+    # top-level SCALARS but drops nested objects. ``answer`` is a dict/list for
+    # safety, rule-following and get-webpage, so JSON-encode it; verify()
+    # JSON-decodes via ``_decode_answer``.
     return {
         "responses_create_params": params,
         "id": row.get("id"),
         "task": task,
         "domain": domain,
         "setting": row.get("_setting", ""),
-        "instruction": instruction,
+        "instruction": str(row.get("instruction", "")),
         "answer": json.dumps(row.get("answer"), ensure_ascii=False),
         "agent_ref": {"type": "responses_api_agents", "name": _AGENT},
     }
@@ -261,11 +295,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     root = _repo_root()
+    LOG.info("Using IHEval source at %s", root)
     all_rows: List[Dict[str, Any]] = []
     example_rows: List[Dict[str, Any]] = []
+    n_tool_rows = 0
     for domain, task in _TASKS:
         rows = _iter_rows(root, domain, task)
         tasks = [_to_task(r, domain, task) for r in rows]
+        n_tool_rows += sum(1 for t in tasks if "tools" in t["responses_create_params"])
         all_rows.extend(tasks)
         for t in tasks[: _EXAMPLE_PER_TASK.get(task, 0)]:
             example_rows.append(t)
@@ -274,6 +311,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     _write_jsonl(_DATA_DIR / "example.jsonl", example_rows)
     if not args.example_only:
         _write_jsonl(_DATA_DIR / "test.jsonl", all_rows)
+    print(f"IHEval: {n_tool_rows} rows carry a tool turn")
 
 
 if __name__ == "__main__":
