@@ -303,6 +303,22 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prompt_reuse_token_equivalent_matches: Optional[int] = None
     streaming_tool_call_prompt_reuse_mismatches: Optional[int] = None
     streaming_tool_call_prompt_reuse_missing: Optional[int] = None
+    streaming_tool_call_same_request_attempts: Optional[int] = None
+    streaming_tool_call_same_request_successes: Optional[int] = None
+    streaming_tool_call_same_request_fallbacks: Optional[int] = None
+    streaming_tool_call_same_request_status_used: Optional[int] = None
+    streaming_tool_call_same_request_status_fallback_missing: Optional[int] = None
+    streaming_tool_call_same_request_status_fallback_incompatible: Optional[int] = None
+    streaming_tool_call_same_request_status_fallback_engine_error: Optional[int] = None
+    streaming_tool_call_same_request_status_fallback_error: Optional[int] = None
+    streaming_tool_call_same_request_used_model_call_count: Optional[int] = None
+    streaming_tool_call_same_request_used_model_call_seconds: Optional[float] = None
+    streaming_tool_call_same_request_used_model_call_prompt_tokens: Optional[int] = None
+    streaming_tool_call_same_request_used_model_call_completion_tokens: Optional[int] = None
+    streaming_tool_call_same_request_fallback_model_call_count: Optional[int] = None
+    streaming_tool_call_same_request_fallback_model_call_seconds: Optional[float] = None
+    streaming_tool_call_same_request_fallback_model_call_prompt_tokens: Optional[int] = None
+    streaming_tool_call_same_request_fallback_model_call_completion_tokens: Optional[int] = None
     streaming_tool_call_prefill_reuse_model_call_count: Optional[int] = None
     streaming_tool_call_prefill_reuse_model_call_seconds: Optional[float] = None
     streaming_tool_call_prefill_reuse_model_call_prompt_tokens: Optional[int] = None
@@ -1353,6 +1369,9 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             self.parent_dir / "patches" / "streaming_tool_call_skip_unadmitted_finalization.patch"
         )
         deferred_abort_patch_path = self.parent_dir / "patches" / "streaming_tool_call_deferred_abort.patch"
+        same_request_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_same_request_metrics.patch"
+        )
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1380,7 +1399,10 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
+        if is_applied(same_request_metrics_patch_path):
+            return
         if is_applied(deferred_abort_patch_path):
+            apply_patch(same_request_metrics_patch_path)
             return
         if is_applied(skip_unadmitted_finalization_patch_path):
             apply_patch(deferred_abort_patch_path)
@@ -1475,6 +1497,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         apply_patch(cached_token_metrics_patch_path)
         apply_patch(skip_unadmitted_finalization_patch_path)
         apply_patch(deferred_abort_patch_path)
+        apply_patch(same_request_metrics_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -2540,6 +2563,22 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_prompt_reuse_token_equivalent_matches": 0,
                     "streaming_tool_call_prompt_reuse_mismatches": 0,
                     "streaming_tool_call_prompt_reuse_missing": 0,
+                    "streaming_tool_call_same_request_attempts": 0,
+                    "streaming_tool_call_same_request_successes": 0,
+                    "streaming_tool_call_same_request_fallbacks": 0,
+                    "streaming_tool_call_same_request_status_used": 0,
+                    "streaming_tool_call_same_request_status_fallback_missing": 0,
+                    "streaming_tool_call_same_request_status_fallback_incompatible": 0,
+                    "streaming_tool_call_same_request_status_fallback_engine_error": 0,
+                    "streaming_tool_call_same_request_status_fallback_error": 0,
+                    "streaming_tool_call_same_request_used_model_call_count": 0,
+                    "streaming_tool_call_same_request_used_model_call_seconds": 0.0,
+                    "streaming_tool_call_same_request_used_model_call_prompt_tokens": 0,
+                    "streaming_tool_call_same_request_used_model_call_completion_tokens": 0,
+                    "streaming_tool_call_same_request_fallback_model_call_count": 0,
+                    "streaming_tool_call_same_request_fallback_model_call_seconds": 0.0,
+                    "streaming_tool_call_same_request_fallback_model_call_prompt_tokens": 0,
+                    "streaming_tool_call_same_request_fallback_model_call_completion_tokens": 0,
                     "streaming_tool_call_prefill_reuse_model_call_count": 0,
                     "streaming_tool_call_prefill_reuse_model_call_seconds": 0.0,
                     "streaming_tool_call_prefill_reuse_model_call_prompt_tokens": 0,

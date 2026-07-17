@@ -2253,6 +2253,7 @@ class TestApp:
             "model": "dummy_model",
             "messages": [{"role": "user", "content": "hello"}],
             "required_full_prompt_token_ids": [1, 2, 3],
+            "streaming_tool_call_session_id": "session",
         }
         assert "required_full_prompt_token_ids" not in (mock_client.create_chat_completion.await_args_list[1].kwargs)
 
@@ -2314,6 +2315,7 @@ class TestApp:
                 "object": "chat.completion",
                 "created": FIXED_TIME,
                 "model": "dummy_model",
+                "streaming_tool_call_same_request_status": "used",
                 "choices": [
                     {
                         "index": 0,
@@ -2368,12 +2370,14 @@ class TestApp:
         assert completion_response.status_code == 200
         assert completion_response.json()["streaming_prompt_reuse_status"] == "matched"
         assert completion_response.json()["streaming_prompt_reuse_match_kind"] == ("exact")
+        assert completion_response.json()["streaming_tool_call_same_request_status"] == "used"
         assert mock_client.create_tokenize.await_count == 1
         assert mock_client.create_tokenize.await_args.kwargs["messages"] == [
             {"role": "assistant", "content": "old"},
             latest_assistant,
         ]
         assert mock_client.create_chat_completion.await_args.kwargs["required_full_prompt_token_ids"] == [1, 2, 3]
+        assert mock_client.create_chat_completion.await_args.kwargs["streaming_tool_call_session_id"] == "session"
 
     def test_streaming_prompt_reuse_skips_prompt_logging_tokenize(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -2425,8 +2429,10 @@ class TestApp:
             "model": "dummy_model",
             "messages": [{"role": "user", "content": "hello"}],
             "logprobs": True,
+            "top_logprobs": 0,
             "return_tokens_as_token_ids": True,
             "required_full_prompt_token_ids": [1, 2, 3],
+            "streaming_tool_call_session_id": "session",
         }
 
     def test_streaming_tool_call_token_reuse_requires_exact_prompt(self, monkeypatch: MonkeyPatch):
@@ -2475,6 +2481,7 @@ class TestApp:
         assert completion_response.status_code == 200
         assert completion_response.json()["streaming_prompt_reuse_status"] == ("mismatch")
         assert "required_full_prompt_token_ids" not in (mock_client.create_chat_completion.await_args.kwargs)
+        assert "streaming_tool_call_session_id" not in (mock_client.create_chat_completion.await_args.kwargs)
 
     def test_streaming_tool_call_token_reuse_accepts_token_equivalent_prompt(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -2523,6 +2530,7 @@ class TestApp:
         assert completion_response.json()["streaming_prompt_reuse_status"] == "matched"
         assert completion_response.json()["streaming_prompt_reuse_match_kind"] == ("token_equivalent")
         assert mock_client.create_chat_completion.await_args.kwargs["required_full_prompt_token_ids"] == [1, 2, 3]
+        assert mock_client.create_chat_completion.await_args.kwargs["streaming_tool_call_session_id"] == "session"
 
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)

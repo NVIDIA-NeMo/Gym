@@ -1,0 +1,148 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+index 63e2e69f5..a99ff0b0f 100644
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -159,6 +159,9 @@ class NemoGymClient:
+         streaming_prompt_reuse_match_kind = model_response_json.pop(
+             "streaming_prompt_reuse_match_kind", None
+         )
++        streaming_tool_call_same_request_status = model_response_json.pop(
++            "streaming_tool_call_same_request_status", None
++        )
+         latency = time.perf_counter() - latency_start
+         self.llm.metrics.add_response_latency(
+             latency, model_response_json.get("id", "unknown")
+@@ -171,6 +174,7 @@ class NemoGymClient:
+             self._update_streaming_prompt_reuse_metrics(
+                 streaming_prompt_reuse_status,
+                 streaming_prompt_reuse_match_kind,
++                same_request_status=streaming_tool_call_same_request_status,
+                 latency=latency,
+                 prefill_reused_tokens=(
+                     streaming_prompt_reuse_prefill_tokens
+@@ -457,6 +461,7 @@ class NemoGymClient:
+         status: str | None,
+         match_kind: str | None,
+         *,
++        same_request_status: str | None,
+         latency: float,
+         prefill_reused_tokens: int,
+         prefill_attempted: bool,
+@@ -489,6 +494,42 @@ class NemoGymClient:
+                 existing_dict.get(match_kind_metric_name, 0) + 1
+             )
+ 
++        if same_request_status is not None:
++            existing_dict["streaming_tool_call_same_request_attempts"] = (
++                existing_dict.get(
++                    "streaming_tool_call_same_request_attempts", 0
++                )
++                + 1
++            )
++            used_same_request = same_request_status == "used"
++            outcome = "successes" if used_same_request else "fallbacks"
++            outcome_metric = f"streaming_tool_call_same_request_{outcome}"
++            existing_dict[outcome_metric] = (
++                existing_dict.get(outcome_metric, 0) + 1
++            )
++            status_metric = (
++                "streaming_tool_call_same_request_status_"
++                f"{same_request_status}"
++            )
++            existing_dict[status_metric] = (
++                existing_dict.get(status_metric, 0) + 1
++            )
++            model_call_outcome = "used" if used_same_request else "fallback"
++            model_call_prefix = (
++                "streaming_tool_call_same_request_"
++                f"{model_call_outcome}_model_call_"
++            )
++            for suffix, value in (
++                ("count", 1),
++                ("seconds", latency),
++                ("prompt_tokens", prompt_tokens),
++                ("completion_tokens", completion_tokens),
++            ):
++                metric_name = f"{model_call_prefix}{suffix}"
++                existing_dict[metric_name] = (
++                    existing_dict.get(metric_name, 0) + value
++                )
++
+         if status != "matched":
+             model_call_kind = "prompt_reuse_miss"
+         elif prefill_attempted or prefill_reused_tokens > 0:
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+index cb22d36c0..1d38555d1 100644
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -375,6 +375,7 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+                 ],
+                 "streaming_prompt_reuse_status": "matched",
+                 "streaming_prompt_reuse_match_kind": "token_equivalent",
++                "streaming_tool_call_same_request_status": "used",
+                 "usage": {
+                     "prompt_tokens": 100,
+                     "completion_tokens": 5,
+@@ -408,6 +409,7 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     client._update_streaming_prompt_reuse_metrics.assert_called_once_with(
+         "matched",
+         "token_equivalent",
++        same_request_status="used",
+         latency=2.0,
+         prefill_reused_tokens=64,
+         prefill_attempted=True,
+@@ -447,6 +449,7 @@ def test_streaming_prompt_reuse_model_call_attribution(
+     NemoGymClient._update_streaming_prompt_reuse_metrics(
+         status,
+         "exact" if status == "matched" else None,
++        same_request_status=None,
+         latency=2.5,
+         prefill_reused_tokens=prefill_reused_tokens,
+         prefill_attempted=prefill_attempted,
+@@ -471,3 +474,46 @@ def test_streaming_prompt_reuse_model_call_attribution(
+         assert metrics[f"{metric_prefix}required_prefix_tokens"] == 64
+         assert metrics[f"{metric_prefix}observed_prefill_cached_tokens"] == 16
+         assert metrics[f"{metric_prefix}observed_prefill_actions"] == 1
++
++
++@pytest.mark.parametrize(
++    ("same_request_status", "outcome"),
++    (
++        ("used", "used"),
++        ("fallback_incompatible", "fallback"),
++    ),
++)
++def test_streaming_same_request_model_call_attribution(
++    monkeypatch,
++    tmp_path,
++    same_request_status,
++    outcome,
++):
++    metrics_path = tmp_path / "metrics.json"
++    metrics_path.write_text("{}")
++    monkeypatch.setenv("NEMO_GYM_METRICS_FPATH", str(metrics_path))
++
++    NemoGymClient._update_streaming_prompt_reuse_metrics(
++        "matched",
++        "exact",
++        same_request_status=same_request_status,
++        latency=2.5,
++        prefill_reused_tokens=64,
++        prefill_attempted=True,
++        prompt_tokens=100,
++        completion_tokens=5,
++        cached_prompt_tokens=80,
++        required_prefix_tokens=64,
++    )
++
++    metrics = orjson.loads(metrics_path.read_bytes())
++    assert metrics["streaming_tool_call_same_request_attempts"] == 1
++    assert metrics[
++        f"streaming_tool_call_same_request_status_{same_request_status}"
++    ] == 1
++    assert metrics[
++        f"streaming_tool_call_same_request_{outcome}_model_call_count"
++    ] == 1
++    assert metrics[
++        f"streaming_tool_call_same_request_{outcome}_model_call_seconds"
++    ] == 2.5

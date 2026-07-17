@@ -15,12 +15,11 @@
 import base64
 import json
 import os
-import re
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter, time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -985,6 +984,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     )
             if reused_prompt_token_ids is not None:
                 body_dict["required_full_prompt_token_ids"] = reused_prompt_token_ids
+                body_dict["streaming_tool_call_session_id"] = streaming_prompt_reuse_id
 
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
@@ -1020,6 +1020,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
+        streaming_tool_call_same_request_status = chat_completion_dict.pop(
+            "streaming_tool_call_same_request_status",
+            None,
+        )
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
@@ -1103,6 +1107,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict["streaming_prompt_reuse_status"] = streaming_prompt_reuse_status
         if streaming_prompt_reuse_match_kind is not None:
             chat_completion_dict["streaming_prompt_reuse_match_kind"] = streaming_prompt_reuse_match_kind
+        if streaming_tool_call_same_request_status is not None:
+            chat_completion_dict["streaming_tool_call_same_request_status"] = streaming_tool_call_same_request_status
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

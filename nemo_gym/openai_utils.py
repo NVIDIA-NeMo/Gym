@@ -338,6 +338,15 @@ class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
     streaming_prompt_reuse_status: Optional[Literal["matched", "mismatch", "missing"]] = None
     streaming_prompt_reuse_match_kind: Optional[Literal["exact", "token_equivalent"]] = None
+    streaming_tool_call_same_request_status: Optional[
+        Literal[
+            "used",
+            "fallback_missing",
+            "fallback_incompatible",
+            "fallback_engine_error",
+            "fallback_error",
+        ]
+    ] = None
 
 
 ########################################
