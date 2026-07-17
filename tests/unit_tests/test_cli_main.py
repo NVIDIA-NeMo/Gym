@@ -1012,19 +1012,17 @@ class TestSearchDir:
         )
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gsm8k/config.yaml'}]"]
 
-    def test_ambiguous_match_errors(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
-        # A built-in name also present in a --search-dir is ambiguous; the user must disambiguate with --config.
+    def test_collision_prefers_search_dir_and_warns(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        # A built-in name also present in a --search-dir resolves to the higher-priority --search-dir copy
+        # (matching `gym list`'s earlier-root-wins rule), with a warning about the shadowed built-in.
         self._make_user_benchmark(tmp_path, name="gsm8k")  # gsm8k also exists under WORKING_DIR
-        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(
-            sys, "argv", ["gym", "eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
-        )
-        with pytest.raises(SystemExit):
-            main()
-        err = capsys.readouterr().err
-        assert "ambiguous" in err
-        assert str(WORKING_DIR / "benchmarks" / "gsm8k" / "config.yaml") in err
-        assert str(tmp_path / "benchmarks" / "gsm8k" / "config.yaml") in err
+        with caplog.at_level(logging.WARNING):
+            _, overrides = _dispatch_for(
+                monkeypatch, ["eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
+            )
+        assert overrides == [f"+config_paths=[{tmp_path / 'benchmarks' / 'gsm8k' / 'config.yaml'}]"]
+        assert "matches multiple configs" in caplog.text
+        assert str(WORKING_DIR / "benchmarks" / "gsm8k" / "config.yaml") in caplog.text
 
     def test_search_dir_alone_emits_nothing(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # --search-dir is consumed by the selectors; on its own it is not a Hydra override.
@@ -1082,8 +1080,8 @@ class TestInstallRootResolution:
         resolved = cli_main._asset_config_path("resources-server", "myenv")
         assert resolved == str(user_cwd / "resources_servers" / "myenv" / "configs" / "myenv.yaml")
 
-    def test_same_name_in_install_root_and_cwd_is_ambiguous(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
-        # A user asset shadowing a built-in of the same name is ambiguous; they must disambiguate with --config.
+    def test_same_name_in_install_root_and_cwd_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        # A user asset in cwd shadows a built-in of the same name (cwd outranks the install root), with a warning.
         install_root = tmp_path / "site-packages"
         user_cwd = tmp_path / "my-project"
         install_root.mkdir()
@@ -1094,8 +1092,10 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
-        with pytest.raises(ValueError, match="ambiguous"):
-            cli_main._asset_config_path("resources-server", "foo")
+        with caplog.at_level(logging.WARNING):
+            resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(user_cwd / "resources_servers" / "foo" / "configs" / "foo.yaml")
+        assert "matches multiple configs" in caplog.text
 
     def test_editable_layout_single_root_not_self_ambiguous(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # Editable install: PARENT_DIR == WORKING_DIR == cwd. The same file found via all three roots

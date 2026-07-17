@@ -171,7 +171,8 @@ def _asset_config_path(flag: str, value: str) -> str:
 
     Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
     cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
-    discovery agree on where components live. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
+    discovery agree on where components live. On a name collision across roots the highest-priority root wins
+    (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
     in ``main``). Searching the install root is what lets built-ins resolve by name from an arbitrary cwd
     (e.g. a wheel install), not just inside the repo checkout.
     """
@@ -192,10 +193,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 matches.append(resolved)
 
     if len(matches) > 1:
-        matches_str = ", ".join(f"`{m}`" for m in matches)
-        raise ValueError(
-            f"`--{flag} {value}` is ambiguous: it matches multiple configs ({matches_str}). "
-            f"Pass the intended config directly with `--config <path>` instead."
+        shadowed = ", ".join(f"`{m}`" for m in matches[1:])
+        logger.warning(
+            f"`--{flag} {value}` matches multiple configs; using `{matches[0]}` from the highest-priority root "
+            f"and ignoring {shadowed}. Pass `--config <path>` to select a different one."
         )
     if matches:
         return str(matches[0])
