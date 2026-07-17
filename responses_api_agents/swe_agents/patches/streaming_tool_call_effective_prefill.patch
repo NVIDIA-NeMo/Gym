@@ -1,0 +1,486 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -676,8 +676,18 @@
+         prefill_after_admission_requests = 0
+         prefill_after_admission_tokens = 0
+         prefill_after_admission_request_seconds = 0.0
++        prefill_committed_tokens = 0
++        prefill_dynamic_tokens = 0
++        prefill_effective_requests = 0
+         deferred_prefill_admissions = 0
+         final_prefix_tokenizations = 0
++        stable_first_snapshot_prefill_attempts = 0
++        stable_first_snapshot_prefill_successes = 0
++        stable_first_snapshot_prefill_fallbacks = 0
++        stable_first_snapshot_prefill_seconds = 0.0
++        stable_first_snapshot_prefill_stable_tokens = 0
++        stable_first_snapshot_prefill_committable_tokens = 0
++        stable_first_snapshot_prefill_dynamic_tokens = 0
+         prefill_race_attempts = 0
+         prefill_race_prefill_first = 0
+         prefill_race_command_first = 0
+@@ -688,6 +698,7 @@
+         prefill_race_abort_failures = 0
+         prefill_race_abort_seconds = 0.0
+         prefill_race_cancelled_request_seconds = 0.0
++        command_finished_during_prefill_request = False
+         prefix_seed_attempts = 0
+         prefix_seed_successes = 0
+         prefix_seed_fallbacks = 0
+@@ -859,6 +870,9 @@
+             nonlocal prefill_after_admission_request_seconds
+             nonlocal prefill_after_admission_requests
+             nonlocal prefill_after_admission_tokens
++            nonlocal prefill_committed_tokens
++            nonlocal prefill_dynamic_tokens
++            nonlocal prefill_effective_requests
+             nonlocal prefill_completed_chunks
+             nonlocal prefill_dummy_tokens
+             nonlocal prefill_prefix_matched
+@@ -869,6 +883,13 @@
+             nonlocal prefix_seed_fallbacks
+             nonlocal prefix_seed_seconds
+             nonlocal prefix_seed_successes
++            nonlocal stable_first_snapshot_prefill_attempts
++            nonlocal stable_first_snapshot_prefill_successes
++            nonlocal stable_first_snapshot_prefill_fallbacks
++            nonlocal stable_first_snapshot_prefill_seconds
++            nonlocal stable_first_snapshot_prefill_stable_tokens
++            nonlocal stable_first_snapshot_prefill_committable_tokens
++            nonlocal stable_first_snapshot_prefill_dynamic_tokens
+             nonlocal prefill_session_active
+             nonlocal session_started
+             nonlocal streaming_request_seconds
+@@ -933,6 +954,16 @@
+                 "prefill_control_plane_requests", 0
+             )
+             prefill_tokens += tokenize_result.get("prefill_tokens", 0)
++            prefill_committed_tokens = max(
++                prefill_committed_tokens,
++                tokenize_result.get("prefill_committed_tokens", 0),
++            )
++            prefill_dynamic_tokens += tokenize_result.get(
++                "prefill_dynamic_tokens", 0
++            )
++            prefill_effective_requests += tokenize_result.get(
++                "prefill_effective_requests", 0
++            )
+             prefill_completed_chunks += tokenize_result.get(
+                 "prefill_completed_chunks", 0
+             )
+@@ -958,6 +989,33 @@
+             prefix_seed_seconds += tokenize_result.get(
+                 "prefix_seed_seconds", 0.0
+             )
++            stable_first_snapshot_prefill_attempts += tokenize_result.get(
++                "stable_first_snapshot_prefill_attempts", 0
++            )
++            stable_first_snapshot_prefill_successes += tokenize_result.get(
++                "stable_first_snapshot_prefill_successes", 0
++            )
++            stable_first_snapshot_prefill_fallbacks += tokenize_result.get(
++                "stable_first_snapshot_prefill_fallbacks", 0
++            )
++            stable_first_snapshot_prefill_seconds += tokenize_result.get(
++                "stable_first_snapshot_prefill_seconds", 0.0
++            )
++            stable_first_snapshot_prefill_stable_tokens = max(
++                stable_first_snapshot_prefill_stable_tokens,
++                tokenize_result.get(
++                    "stable_first_snapshot_prefill_stable_tokens", 0
++                ),
++            )
++            stable_first_snapshot_prefill_committable_tokens = max(
++                stable_first_snapshot_prefill_committable_tokens,
++                tokenize_result.get(
++                    "stable_first_snapshot_prefill_committable_tokens", 0
++                ),
++            )
++            stable_first_snapshot_prefill_dynamic_tokens += tokenize_result.get(
++                "stable_first_snapshot_prefill_dynamic_tokens", 0
++            )
+             if request_prefill and sequence_no == 0:
+                 prefill_session_active = bool(
+                     prefill_after_admission
+@@ -1027,6 +1085,70 @@
+             fallback_stage = "other"
+             return tokenize_result
+ 
++        async def tokenize_snapshot_while_command_runs(
++            tool_output: str,
++        ) -> dict | None:
++            """Cancel speculative prefill if command execution finishes first."""
++            nonlocal command_finished_during_prefill_request
++            nonlocal prefill_race_abort_existing_sessions
++            nonlocal prefill_race_abort_failures
++            nonlocal prefill_race_abort_requests
++            nonlocal prefill_race_abort_seconds
++            nonlocal prefill_race_attempts
++            nonlocal prefill_race_cancelled_request_seconds
++            nonlocal prefill_race_cancellations
++            nonlocal prefill_race_command_first
++            nonlocal prefill_race_prefill_first
++            nonlocal streaming_request_seconds
++
++            prefill_race_attempts += 1
++            request_started_at = time.monotonic()
++            request_task = asyncio.create_task(tokenize_snapshot(tool_output))
++            completed_tasks, _ = await asyncio.wait(
++                (post_task, request_task),
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++            if request_task in completed_tasks:
++                prefill_race_prefill_first += 1
++                return await request_task
++
++            command_finished_during_prefill_request = True
++            prefill_race_command_first += 1
++            prefill_race_cancellations += 1
++            prefill_race_abort_requests += 1
++            abort_started_at = time.monotonic()
++            assert streaming_http_session is not None
++            abort_task = asyncio.create_task(
++                context.client.streaming_tool_call_request(
++                    action="abort",
++                    session_id=session_id,
++                    context=context,
++                    http_session=streaming_http_session,
++                )
++            )
++            request_task.cancel()
++            await asyncio.gather(request_task, return_exceptions=True)
++            cancelled_request_seconds = time.monotonic() - request_started_at
++            prefill_race_cancelled_request_seconds += cancelled_request_seconds
++            try:
++                abort_result = await abort_task
++            except Exception as abort_error:
++                prefill_race_abort_failures += 1
++                logger.debug(
++                    "Failed to abort command-lost continuation prefill race: "
++                    f"{abort_error}"
++                )
++            else:
++                prefill_race_abort_existing_sessions += int(
++                    bool(abort_result.get("aborted"))
++                )
++            request_abort_seconds = time.monotonic() - abort_started_at
++            prefill_race_abort_seconds += request_abort_seconds
++            streaming_request_seconds += (
++                cancelled_request_seconds + request_abort_seconds
++            )
++            return None
++
+         def has_valid_final_only_prefill() -> bool:
+             return bool(
+                 final_only_prefill
+@@ -1064,10 +1186,13 @@
+                 ),
+                 "streaming_tool_call_valid_prefill_after_admission_actions": int(
+                     prefill_after_admission_used
+-                    and prefill_after_admission_requests > 0
++                    and prefill_effective_requests > 0
+                     and prefill_prefix_matched
+                     and final_only_prefill_failures == 0
+                 ),
++                "streaming_tool_call_effective_prefill_after_admission_actions": int(
++                    prefill_after_admission_used and prefill_effective_requests > 0
++                ),
+                 "streaming_tool_call_prefill_after_admission_requests": (
+                     prefill_after_admission_requests
+                 ),
+@@ -1077,6 +1202,13 @@
+                 "streaming_tool_call_prefill_after_admission_request_seconds": (
+                     prefill_after_admission_request_seconds
+                 ),
++                "streaming_tool_call_prefill_committed_tokens": (
++                    prefill_committed_tokens
++                ),
++                "streaming_tool_call_prefill_dynamic_tokens": prefill_dynamic_tokens,
++                "streaming_tool_call_prefill_effective_requests": (
++                    prefill_effective_requests
++                ),
+                 "streaming_tool_call_deferred_prefill_admissions": (
+                     deferred_prefill_admissions
+                 ),
+@@ -1095,6 +1227,27 @@
+                 "streaming_tool_call_prefix_seed_seconds": (
+                     prefix_seed_seconds
+                 ),
++                "streaming_tool_call_stable_first_snapshot_prefill_attempts": (
++                    stable_first_snapshot_prefill_attempts
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_successes": (
++                    stable_first_snapshot_prefill_successes
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_fallbacks": (
++                    stable_first_snapshot_prefill_fallbacks
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_seconds": (
++                    stable_first_snapshot_prefill_seconds
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_stable_tokens": (
++                    stable_first_snapshot_prefill_stable_tokens
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_committable_tokens": (
++                    stable_first_snapshot_prefill_committable_tokens
++                ),
++                "streaming_tool_call_stable_first_snapshot_prefill_dynamic_tokens": (
++                    stable_first_snapshot_prefill_dynamic_tokens
++                ),
+                 "streaming_tool_call_incremental_tokenizer_requests": (
+                     tokenizer_requests
+                 ),
+@@ -1348,7 +1501,11 @@
+                         continue
+                     if post_task.done():
+                         break
+-                    await tokenize_snapshot(content)
++                    tokenize_result = await tokenize_snapshot_while_command_runs(
++                        content
++                    )
++                    if tokenize_result is None:
++                        break
+                     incremental_started = True
+                     sequence_no += 1
+                     last_sent_content = content
+@@ -1477,6 +1634,45 @@
+                     last_send_time = time.monotonic()
+ 
+             response = await post_task
++            if command_finished_during_prefill_request:
++                metrics = snapshot_metrics()
++                metrics.update(streaming_timing_metrics())
++                metrics.update(prefill_race_metrics())
++                metrics.update(
++                    {
++                        "streaming_tool_call_sessions_started": int(session_started),
++                        "streaming_tool_call_prefill_requests": prefill_requests,
++                        "streaming_tool_call_prefill_control_plane_requests": (
++                            prefill_control_plane_requests
++                        ),
++                        "streaming_tool_call_prefill_tokens": prefill_tokens,
++                        "streaming_tool_call_completed_chunks": (
++                            prefill_completed_chunks
++                        ),
++                        "streaming_tool_call_dummy_tokens": prefill_dummy_tokens,
++                        "streaming_tool_call_prefix_matches": 0,
++                        "streaming_tool_call_valid_prefill_actions": 0,
++                        "streaming_tool_call_tokenizer_only_actions": int(
++                            incremental_started
++                        ),
++                        "streaming_tool_call_valid_tokenizer_actions": 0,
++                        "streaming_tool_call_skipped_no_stable_output": int(
++                            not incremental_started
++                        ),
++                        "streaming_tool_call_skipped_completed_before_admission": int(
++                            not incremental_started
++                        ),
++                        "streaming_tool_call_fallbacks": int(
++                            prefill_race_abort_failures > 0
++                        ),
++                        "streaming_tool_call_overhead_seconds": (
++                            streaming_request_seconds
++                        ),
++                    }
++                )
++                metrics.update(incremental_tokenizer_metrics())
++                _update_streaming_tool_call_metrics(metrics)
++                return response
+             if not incremental_started and not (
+                 tokenizer_only
+                 and final_only_incremental_tokenizer
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1081,6 +1081,11 @@
+                 "prefill_requests": int(sequence_no in (0, 1)),
+                 "prefill_control_plane_requests": 0,
+                 "prefill_tokens": request_tokens,
++                "prefill_committed_tokens": 100 + request_tokens,
++                "prefill_dynamic_tokens": (
++                    request_tokens if sequence_no in (0, 1) else 0
++                ),
++                "prefill_effective_requests": int(sequence_no in (0, 1)),
+                 "prefill_completed_chunks": int(sequence_no in (0, 1)),
+                 "prefill_dummy_tokens": int(sequence_no in (0, 1)),
+                 "prefill_prefix_matched": kwargs["final"],
+@@ -1090,6 +1095,21 @@
+                 "prefix_seed_successes": int(sequence_no == 0),
+                 "prefix_seed_fallbacks": 0,
+                 "prefix_seed_seconds": 0.01 if sequence_no == 0 else 0.0,
++                "stable_first_snapshot_prefill_attempts": int(sequence_no == 0),
++                "stable_first_snapshot_prefill_successes": int(sequence_no == 0),
++                "stable_first_snapshot_prefill_fallbacks": 0,
++                "stable_first_snapshot_prefill_seconds": (
++                    0.005 if sequence_no == 0 else 0.0
++                ),
++                "stable_first_snapshot_prefill_stable_tokens": (
++                    105 if sequence_no == 0 else 0
++                ),
++                "stable_first_snapshot_prefill_committable_tokens": (
++                    105 if sequence_no == 0 else 0
++                ),
++                "stable_first_snapshot_prefill_dynamic_tokens": (
++                    5 if sequence_no == 0 else 0
++                ),
+                 "server_materialize_seconds": 0.001,
+                 "server_render_seconds": 0.002,
+                 "server_prefix_render_seconds": 0.003,
+@@ -1100,7 +1120,7 @@
+                 "final_prefix_tokenizations": 0,
+             }
+             if sequence_no == 1:
+-                release_post.set()
++                asyncio.get_running_loop().call_later(0.01, release_post.set)
+             if kwargs["final"]:
+                 result["reuse_id"] = "runtime-session:response:call"
+             return result
+@@ -1208,6 +1228,28 @@
+         assert metrics["streaming_tool_call_prefill_after_admission_tokens"] == 33
+         assert (
+             metrics[
++                "streaming_tool_call_effective_prefill_after_admission_actions"
++            ]
++            == 1
++        )
++        assert metrics["streaming_tool_call_prefill_committed_tokens"] == 120
++        assert metrics["streaming_tool_call_prefill_dynamic_tokens"] == 33
++        assert metrics["streaming_tool_call_prefill_effective_requests"] == 2
++        assert (
++            metrics["streaming_tool_call_stable_first_snapshot_prefill_attempts"] == 1
++        )
++        assert (
++            metrics["streaming_tool_call_stable_first_snapshot_prefill_successes"] == 1
++        )
++        assert (
++            metrics["streaming_tool_call_stable_first_snapshot_prefill_fallbacks"] == 0
++        )
++        assert (
++            metrics["streaming_tool_call_stable_first_snapshot_prefill_dynamic_tokens"]
++            == 5
++        )
++        assert (
++            metrics[
+                 "streaming_tool_call_prefill_after_admission_request_seconds"
+             ]
+             > 0
+@@ -1347,6 +1389,120 @@
+         streaming_http_session.close.assert_awaited_once()
+ 
+     @pytest.mark.asyncio
++    async def test_execute_action_cancels_prefill_request_when_command_finishes(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        request_started = threading.Event()
++        request_cancelled = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="x" * 300,
++            command="produce output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert request_started.wait(timeout=1)
++            return post_response
++
++        session.post.side_effect = post
++        streaming_http_session = MagicMock()
++        streaming_http_session.get.return_value = _async_response_context(
++            {"revision": 1, "content": "x" * 300}
++        )
++        streaming_http_session.close = AsyncMock()
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++
++        async def streaming_request(**kwargs):
++            if kwargs["action"] == "abort":
++                return {"aborted": True}
++            request_started.set()
++            try:
++                await asyncio.Event().wait()
++            except asyncio.CancelledError:
++                request_cancelled.set()
++                raise
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=streaming_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "prefill_after_admission": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
++                "snapshot_poll_interval_seconds": 0.05,
++                "snapshot_long_poll_timeout_seconds": 2.0,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="produce output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++            patch(
++                "openhands.runtime.impl.local.local_runtime.ClientSession",
++                return_value=streaming_http_session,
++            ),
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        assert request_cancelled.is_set()
++        requests = streaming_client.streaming_tool_call_request.await_args_list
++        assert [request.kwargs["action"] for request in requests] == [
++            "tokenize",
++            "abort",
++        ]
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_prefill_race_attempts"] == 1
++        assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 0
++        assert metrics["streaming_tool_call_prefill_race_command_first"] == 1
++        assert metrics["streaming_tool_call_prefill_race_cancellations"] == 1
++        assert metrics["streaming_tool_call_prefill_race_abort_requests"] == 1
++        assert metrics["streaming_tool_call_prefill_race_abort_existing_sessions"] == 1
++        assert metrics["streaming_tool_call_valid_prefill_actions"] == 0
++        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 0
++        streaming_http_session.close.assert_awaited_once()
++
++    @pytest.mark.asyncio
+     async def test_execute_action_finalizes_short_command_from_model_prefix(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"

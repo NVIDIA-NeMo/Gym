@@ -1,0 +1,459 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -237,6 +237,7 @@
+         tool_output: str | None = None,
+         final: bool = False,
+         prefill: bool = False,
++        prefill_continuation: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
+         payload: dict = {"session_id": session_id}
+@@ -271,11 +272,18 @@
+                 "session_ttl_seconds"
+             ]
+         if prefill:
+-            if action != "tokenize" or sequence_no != 0 or final:
++            if action != "tokenize" or sequence_no is None:
+                 raise ValueError(
+-                    "prefill requires a non-final sequence-zero tokenizer request"
++                    "prefill requires a sequenced tokenizer request"
++                )
++            if not prefill_continuation and (sequence_no != 0 or final):
++                raise ValueError(
++                    "one-shot prefill requires a non-final sequence-zero request"
+                 )
+             payload["prefill"] = True
++            payload["prefill_continuation"] = prefill_continuation
++        elif prefill_continuation:
++            raise ValueError("prefill continuation requires prefill")
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -599,6 +599,9 @@
+         final_only_prefill = final_only_incremental_tokenizer and bool(
+             context.config.get("final_only_prefill")
+         )
++        prefill_after_admission = final_only_prefill and bool(
++            context.config.get("prefill_after_admission")
++        )
+         final_only_prefill_completion_grace_seconds = (
+             float(
+                 context.config[
+@@ -614,6 +617,8 @@
+             )
+         incremental_started = False
+         session_started = False
++        prefill_session_active = False
++        prefill_after_admission_used = False
+         last_sent_content = ""
+         last_revision = -1
+         last_send_time = time.monotonic()
+@@ -629,6 +634,9 @@
+         final_only_prefill_failures = 0
+         final_only_prefill_seconds = 0.0
+         final_only_prefill_reused_tokens = 0
++        prefill_after_admission_requests = 0
++        prefill_after_admission_tokens = 0
++        prefill_after_admission_request_seconds = 0.0
+         prefill_race_attempts = 0
+         prefill_race_prefill_first = 0
+         prefill_race_command_first = 0
+@@ -711,6 +719,10 @@
+             nonlocal final_only_prefill_failures
+             nonlocal final_only_prefill_reused_tokens
+             nonlocal final_only_prefill_seconds
++            nonlocal prefill_after_admission_used
++            nonlocal prefill_after_admission_request_seconds
++            nonlocal prefill_after_admission_requests
++            nonlocal prefill_after_admission_tokens
+             nonlocal prefill_completed_chunks
+             nonlocal prefill_dummy_tokens
+             nonlocal prefill_prefix_matched
+@@ -721,12 +733,17 @@
+             nonlocal prefix_seed_fallbacks
+             nonlocal prefix_seed_seconds
+             nonlocal prefix_seed_successes
++            nonlocal prefill_session_active
+             nonlocal session_started
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+             nonlocal tokenizer_tokens
+ 
+             assert streaming_http_session is not None
++            request_prefill = final_only_prefill and (
++                (sequence_no == 0 and not final)
++                or (prefill_after_admission and prefill_session_active)
++            )
+             request_start_time = time.monotonic()
+             tokenize_result = await context.client.streaming_tool_call_request(
+                 action="tokenize",
+@@ -735,8 +752,9 @@
+                 sequence_no=sequence_no,
+                 tool_output=tool_output,
+                 final=final,
+-                prefill=(
+-                    final_only_prefill and sequence_no == 0 and not final
++                prefill=request_prefill,
++                prefill_continuation=(
++                    prefill_after_admission and request_prefill
+                 ),
+                 http_session=streaming_http_session,
+             )
+@@ -748,9 +766,13 @@
+                 incremental_tokenizer_start_seconds += request_seconds
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
+-            session_started = session_started or bool(
++            request_sessions_started = bool(
+                 tokenize_result.get("prefill_sessions_started", 0)
+             )
++            request_prefill_failures = tokenize_result.get(
++                "prefill_failures", 0
++            )
++            session_started = session_started or request_sessions_started
+             prefill_requests += tokenize_result.get("prefill_requests", 0)
+             prefill_control_plane_requests += tokenize_result.get(
+                 "prefill_control_plane_requests", 0
+@@ -765,9 +787,7 @@
+             prefill_prefix_matched = prefill_prefix_matched or bool(
+                 tokenize_result.get("prefill_prefix_matched", False)
+             )
+-            final_only_prefill_failures += tokenize_result.get(
+-                "prefill_failures", 0
+-            )
++            final_only_prefill_failures += request_prefill_failures
+             final_only_prefill_seconds += tokenize_result.get(
+                 "prefill_seconds", 0.0
+             )
+@@ -783,6 +803,23 @@
+             prefix_seed_seconds += tokenize_result.get(
+                 "prefix_seed_seconds", 0.0
+             )
++            if request_prefill and sequence_no == 0:
++                prefill_session_active = bool(
++                    prefill_after_admission
++                    and request_sessions_started
++                    and request_prefill_failures == 0
++                )
++            elif request_prefill and not final:
++                prefill_after_admission_used = True
++                prefill_after_admission_requests += tokenize_result.get(
++                    "prefill_requests", 0
++                )
++                prefill_after_admission_tokens += tokenize_result.get(
++                    "prefill_tokens", 0
++                )
++                prefill_after_admission_request_seconds += request_seconds
++            if request_prefill_failures > 0 or final:
++                prefill_session_active = False
+             incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
+             incremental_encoded_tokens += tokenize_result.get("encoded_tokens", 0)
+             incremental_reused_tokens += tokenize_result.get("reused_tokens", 0)
+@@ -838,6 +875,24 @@
+                 "streaming_tool_call_final_only_prefill_reused_tokens": (
+                     final_only_prefill_reused_tokens
+                 ),
++                "streaming_tool_call_prefill_after_admission_actions": int(
++                    prefill_after_admission_used
++                ),
++                "streaming_tool_call_valid_prefill_after_admission_actions": int(
++                    prefill_after_admission_used
++                    and prefill_after_admission_requests > 0
++                    and prefill_prefix_matched
++                    and final_only_prefill_failures == 0
++                ),
++                "streaming_tool_call_prefill_after_admission_requests": (
++                    prefill_after_admission_requests
++                ),
++                "streaming_tool_call_prefill_after_admission_tokens": (
++                    prefill_after_admission_tokens
++                ),
++                "streaming_tool_call_prefill_after_admission_request_seconds": (
++                    prefill_after_admission_request_seconds
++                ),
+                 "streaming_tool_call_prefix_seed_attempts": (
+                     prefix_seed_attempts
+                 ),
+@@ -1049,6 +1104,60 @@
+                 incremental_started = True
+                 sequence_no += 1
+                 last_send_time = time.monotonic()
++
++                # Admission is decided by the cheap empty-output prime above.
++                # Only an admitted session polls command output, and it sends a
++                # continuation after a full character bucket has accumulated.
++                # The final unsent tail is intentionally left for the normal
++                # generation request because it can no longer overlap command
++                # execution.
++                while (
++                    prefill_after_admission
++                    and prefill_session_active
++                    and not post_task.done()
++                ):
++                    await asyncio.sleep(snapshot_poll_interval)
++                    if post_task.done():
++                        break
++                    snapshot_polls += 1
++                    snapshot_request_start = time.monotonic()
++                    snapshot_response = await call_sync_from_async(
++                        lambda: self.session.get(
++                            f"{self.api_url}/shell_stream_snapshot"
++                        )
++                    )
++                    snapshot_request_seconds += (
++                        time.monotonic() - snapshot_request_start
++                    )
++                    snapshot_response.raise_for_status()
++                    snapshot = snapshot_response.json()
++                    if snapshot["revision"] == last_revision:
++                        continue
++                    last_revision = snapshot["revision"]
++                    snapshot_revisions += 1
++                    content = snapshot["content"]
++                    if not content:
++                        continue
++                    nonempty_snapshots += 1
++                    if len(content) >= min_chunk_chars:
++                        snapshots_at_or_above_min_chunk_chars += 1
++                    if content == last_sent_content:
++                        continue
++                    if last_sent_content and not content.startswith(
++                        last_sent_content
++                    ):
++                        raise RuntimeError(
++                            "shell output changed a previously streamed prefix"
++                        )
++                    new_characters = len(content) - len(last_sent_content)
++                    if new_characters < min_chunk_chars:
++                        continue
++                    if post_task.done():
++                        break
++                    await tokenize_snapshot(content)
++                    sequence_no += 1
++                    last_sent_content = content
++                    last_send_time = time.monotonic()
+             else:
+                 while not post_task.done():
+                     await asyncio.sleep(snapshot_poll_interval)
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -147,6 +147,21 @@
+     )
+     prefill_request = http_session.post.await_args.kwargs["json"]
+     assert prefill_request["prefill"] is True
++    assert prefill_request["prefill_continuation"] is False
++
++    await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="session",
++        context=context,
++        sequence_no=1,
++        tool_output="partial continuation",
++        prefill=True,
++        prefill_continuation=True,
++        http_session=http_session,
++    )
++    continuation_request = http_session.post.await_args.kwargs["json"]
++    assert continuation_request["prefill"] is True
++    assert continuation_request["prefill_continuation"] is True
+ 
+     await client.streaming_tool_call_request(
+         action="abort",
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -824,6 +824,189 @@
+         )
+ 
+     @pytest.mark.asyncio
++    async def test_execute_action_prefills_bucket_after_admission(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        first_streamed_content = "x" * 300
++        second_streamed_content = "x" * 600
++        snapshot_responses = []
++        for revision, content in enumerate(
++            (first_streamed_content, second_streamed_content), start=1
++        ):
++            snapshot_response = MagicMock()
++            snapshot_response.json.return_value = {
++                "revision": revision,
++                "content": content,
++            }
++            snapshot_responses.append(snapshot_response)
++        snapshot_index = 0
++
++        def get_snapshot(*args, **kwargs):
++            nonlocal snapshot_index
++            response = snapshot_responses[min(snapshot_index, 1)]
++            snapshot_index += 1
++            return response
++
++        session.get.side_effect = get_snapshot
++        final_observation = CmdOutputObservation(
++            content=f"{second_streamed_content} done",
++            command="produce output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        session.post.side_effect = post
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++
++        async def tokenize_request(**kwargs):
++            sequence_no = kwargs["sequence_no"]
++            if sequence_no == 1:
++                request_tokens = 13
++            elif sequence_no == 2:
++                request_tokens = 20
++            else:
++                request_tokens = 0
++            result = {
++                "sequence_no": sequence_no,
++                "token_count": 40,
++                "encoded_chars": 300 if sequence_no > 0 else 0,
++                "encoded_tokens": 20 if sequence_no > 0 else 0,
++                "reused_tokens": 33 if kwargs["final"] else 0,
++                "rollback_tokens": 0,
++                "checkpoint_count": 0,
++                "checkpoint_tokens": 0,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
++                "prefill_sessions_started": int(sequence_no == 0),
++                "prefill_requests": int(sequence_no in (1, 2)),
++                "prefill_control_plane_requests": 0,
++                "prefill_tokens": request_tokens,
++                "prefill_completed_chunks": int(sequence_no in (1, 2)),
++                "prefill_dummy_tokens": int(sequence_no in (1, 2)),
++                "prefill_prefix_matched": kwargs["final"],
++                "prefill_failures": 0,
++                "prefill_seconds": 0.01,
++                "prefix_seed_attempts": int(sequence_no == 0),
++                "prefix_seed_successes": int(sequence_no == 0),
++                "prefix_seed_fallbacks": 0,
++                "prefix_seed_seconds": 0.01 if sequence_no == 0 else 0.0,
++            }
++            if sequence_no == 2:
++                release_post.set()
++            if kwargs["final"]:
++                result["reuse_id"] = "runtime-session:response:call"
++            return result
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=tokenize_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "prefill_after_admission": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "snapshot_poll_interval_seconds": 0.001,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="produce output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        assert session.get.call_count >= 2
++        requests = streaming_client.streaming_tool_call_request.await_args_list
++        assert [request.kwargs["sequence_no"] for request in requests] == [
++            0,
++            1,
++            2,
++            3,
++        ]
++        assert [request.kwargs["tool_output"] for request in requests[:3]] == [
++            "",
++            first_streamed_content,
++            second_streamed_content,
++        ]
++        assert [request.kwargs["final"] for request in requests] == [
++            False,
++            False,
++            False,
++            True,
++        ]
++        assert all(request.kwargs["prefill"] for request in requests)
++        assert all(
++            request.kwargs["prefill_continuation"] for request in requests
++        )
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_prefill_after_admission_actions"] == 1
++        assert (
++            metrics[
++                "streaming_tool_call_valid_prefill_after_admission_actions"
++            ]
++            == 1
++        )
++        assert metrics["streaming_tool_call_prefill_after_admission_requests"] == 2
++        assert metrics["streaming_tool_call_prefill_after_admission_tokens"] == 33
++        assert (
++            metrics[
++                "streaming_tool_call_prefill_after_admission_request_seconds"
++            ]
++            > 0
++        )
++        assert metrics["streaming_tool_call_prefill_requests"] == 2
++        assert metrics["streaming_tool_call_prefill_tokens"] == 33
++        assert metrics["streaming_tool_call_completed_chunks"] == 2
++        assert metrics["streaming_tool_call_dummy_tokens"] == 2
++        assert metrics["streaming_tool_call_prefix_matches"] == 1
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call"
++        )
++
++    @pytest.mark.asyncio
+     async def test_execute_action_cancels_prefill_when_command_finishes_first(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"

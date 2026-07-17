@@ -1,0 +1,88 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -646,6 +646,10 @@
+         prefill_race_abort_failures = 0
+         prefill_race_abort_seconds = 0.0
+         prefill_race_cancelled_request_seconds = 0.0
++        prefix_seed_attempts = 0
++        prefix_seed_successes = 0
++        prefix_seed_fallbacks = 0
++        prefix_seed_seconds = 0.0
+         tokenizer_requests = 0
+         tokenizer_tokens = 0
+         incremental_encoded_chars = 0
+@@ -728,6 +733,10 @@
+             nonlocal prefill_control_plane_requests
+             nonlocal prefill_requests
+             nonlocal prefill_tokens
++            nonlocal prefix_seed_attempts
++            nonlocal prefix_seed_fallbacks
++            nonlocal prefix_seed_seconds
++            nonlocal prefix_seed_successes
+             nonlocal session_started
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+@@ -777,6 +786,18 @@
+             final_only_prefill_seconds += tokenize_result.get(
+                 "prefill_seconds", 0.0
+             )
++            prefix_seed_attempts += tokenize_result.get(
++                "prefix_seed_attempts", 0
++            )
++            prefix_seed_successes += tokenize_result.get(
++                "prefix_seed_successes", 0
++            )
++            prefix_seed_fallbacks += tokenize_result.get(
++                "prefix_seed_fallbacks", 0
++            )
++            prefix_seed_seconds += tokenize_result.get(
++                "prefix_seed_seconds", 0.0
++            )
+             incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
+             incremental_encoded_tokens += tokenize_result.get("encoded_tokens", 0)
+             incremental_reused_tokens += tokenize_result.get("reused_tokens", 0)
+@@ -833,6 +852,18 @@
+                 "streaming_tool_call_final_only_prefill_reused_tokens": (
+                     final_only_prefill_reused_tokens
+                 ),
++                "streaming_tool_call_prefix_seed_attempts": (
++                    prefix_seed_attempts
++                ),
++                "streaming_tool_call_prefix_seed_successes": (
++                    prefix_seed_successes
++                ),
++                "streaming_tool_call_prefix_seed_fallbacks": (
++                    prefix_seed_fallbacks
++                ),
++                "streaming_tool_call_prefix_seed_seconds": (
++                    prefix_seed_seconds
++                ),
+                 "streaming_tool_call_incremental_tokenizer_requests": (
+                     tokenizer_requests
+                 ),
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -704,6 +704,10 @@
+                 "checkpoint_tokens": 13 if kwargs["sequence_no"] == 0 else 0,
+                 "checkpoint_mismatches": 0,
+                 "incremental_valid": True,
++                "prefix_seed_attempts": int(kwargs["sequence_no"] == 0),
++                "prefix_seed_successes": int(kwargs["sequence_no"] == 0),
++                "prefix_seed_fallbacks": 0,
++                "prefix_seed_seconds": 0.01 if kwargs["sequence_no"] == 0 else 0.0,
+             }
+             if kwargs["prefill"]:
+                 result.update(
+@@ -819,6 +823,10 @@
+         assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 1
+         assert metrics["streaming_tool_call_prefill_race_command_first"] == 0
+         assert metrics["streaming_tool_call_prefill_race_cancellations"] == 0
++        assert metrics["streaming_tool_call_prefix_seed_attempts"] == 1
++        assert metrics["streaming_tool_call_prefix_seed_successes"] == 1
++        assert metrics["streaming_tool_call_prefix_seed_fallbacks"] == 0
++        assert metrics["streaming_tool_call_prefix_seed_seconds"] == 0.01
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"
+         )

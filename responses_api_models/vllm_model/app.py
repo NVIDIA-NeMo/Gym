@@ -19,12 +19,12 @@ import re
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass
-from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from time import perf_counter, time
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -90,16 +90,60 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class StreamingToolCallPromptRequest(BaseModel):
     session_id: str
     sequence_no: int
-    chat_completion: Dict[str, Any]
+    chat_completion: Optional[Dict[str, Any]] = None
+    tool_output: Optional[str] = None
+    compact_context: bool = False
+    max_contexts: Optional[int] = Field(default=None, gt=0)
+    context_ttl_seconds: Optional[float] = Field(default=None, gt=0)
     final: bool = False
     exact_incremental_tokenizer: bool = False
+    prefill: bool = False
+    prefill_continuation: bool = False
+    prefill_from_required_prefix: bool = False
+    finalize_from_required_prefix: bool = False
     max_candidates: Optional[int] = Field(default=None, gt=0)
     candidate_ttl_seconds: Optional[float] = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_final_candidate_limits(self):
+        if self.compact_context:
+            if not self.exact_incremental_tokenizer:
+                raise ValueError("compact context requires exact incremental tokenization")
+            if (self.chat_completion is None) == (self.tool_output is None):
+                raise ValueError("compact requests require exactly one of chat_completion or tool_output")
+            if self.tool_output is not None and self.sequence_no <= 0:
+                raise ValueError("compact tool-output requests require a positive sequence")
+            if self.chat_completion is not None and self.sequence_no != 0:
+                raise ValueError("compact full-context requests require sequence zero")
+            if (
+                self.chat_completion is not None
+                and self.sequence_no == 0
+                and not self.final
+                and (self.max_contexts is None or self.context_ttl_seconds is None)
+            ):
+                raise ValueError("compact sequence-zero requests require context limits")
+        elif self.chat_completion is None or self.tool_output is not None:
+            raise ValueError("non-compact requests require chat_completion")
         if self.final and (self.max_candidates is None or self.candidate_ttl_seconds is None):
             raise ValueError("final tokenizer requests require max_candidates and candidate_ttl_seconds")
+        if self.prefill and not self.exact_incremental_tokenizer:
+            raise ValueError("prefill requires an exact incremental tokenizer request")
+        if self.prefill and not self.prefill_continuation and (self.final or self.sequence_no != 0):
+            raise ValueError("one-shot prefill requires a non-final sequence-zero request")
+        if self.prefill_continuation and not self.prefill:
+            raise ValueError("prefill continuation requires prefill")
+        if (
+            self.prefill_from_required_prefix or self.finalize_from_required_prefix
+        ) and not self.exact_incremental_tokenizer:
+            raise ValueError("required-prefix optimization requires exact incremental tokenization")
+        if self.prefill_from_required_prefix and (
+            not self.prefill_continuation or self.sequence_no != 0 or self.final
+        ):
+            raise ValueError("prefill from required prefix requires a non-final sequence-zero prefill continuation")
+        if self.finalize_from_required_prefix and (not self.final or self.sequence_no != 0 or self.prefill):
+            raise ValueError(
+                "finalization from required prefix requires a final sequence-zero request without prefill"
+            )
         return self
 
 
@@ -111,6 +155,7 @@ class StreamingToolCallCloseRequest(BaseModel):
 class StreamingToolCallAbortRequest(BaseModel):
     session_id: str
     exact_incremental_tokenizer: bool = False
+    defer: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +163,14 @@ class StreamingPromptTokenCandidate:
     client: NeMoGymAsyncOpenAI
     prompt: Dict[str, Any]
     prompt_token_ids: tuple[int, ...]
+    expires_at: float
+
+
+@dataclass
+class StreamingToolCallTokenizationContext:
+    client: NeMoGymAsyncOpenAI
+    tokenize_body: Dict[str, Any]
+    ttl_seconds: float
     expires_at: float
 
 
@@ -159,8 +212,85 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
         self._streaming_prompt_token_candidates: OrderedDict[str, StreamingPromptTokenCandidate] = OrderedDict()
+        self._streaming_tool_call_tokenization_contexts: OrderedDict[str, StreamingToolCallTokenizationContext] = (
+            OrderedDict()
+        )
 
         self._converter = self.get_converter()
+
+    def _expire_streaming_tool_call_tokenization_contexts(self) -> None:
+        now = time()
+        expired_session_ids = [
+            session_id
+            for session_id, context in (self._streaming_tool_call_tokenization_contexts.items())
+            if context.expires_at <= now
+        ]
+        for session_id in expired_session_ids:
+            self._streaming_tool_call_tokenization_contexts.pop(session_id, None)
+
+    def _store_streaming_tool_call_tokenization_context(
+        self,
+        *,
+        session_id: str,
+        client: NeMoGymAsyncOpenAI,
+        tokenize_body: Dict[str, Any],
+        max_contexts: int,
+        context_ttl_seconds: float,
+    ) -> None:
+        self._expire_streaming_tool_call_tokenization_contexts()
+        self._streaming_tool_call_tokenization_contexts.pop(session_id, None)
+        self._streaming_tool_call_tokenization_contexts[session_id] = StreamingToolCallTokenizationContext(
+            client=client,
+            tokenize_body=tokenize_body,
+            ttl_seconds=context_ttl_seconds,
+            expires_at=time() + context_ttl_seconds,
+        )
+        while len(self._streaming_tool_call_tokenization_contexts) > max_contexts:
+            self._streaming_tool_call_tokenization_contexts.popitem(last=False)
+
+    def _get_streaming_tool_call_tokenization_context(
+        self,
+        *,
+        session_id: str,
+        client: NeMoGymAsyncOpenAI,
+    ) -> StreamingToolCallTokenizationContext:
+        self._expire_streaming_tool_call_tokenization_contexts()
+        context = self._streaming_tool_call_tokenization_contexts.get(session_id)
+        if context is None:
+            raise HTTPException(
+                status_code=409,
+                detail="compact tokenization context is missing or expired",
+            )
+        if context.client is not client:
+            self._streaming_tool_call_tokenization_contexts.pop(session_id, None)
+            raise HTTPException(
+                status_code=409,
+                detail="compact tokenization context was routed to another client",
+            )
+        context.expires_at = time() + context.ttl_seconds
+        self._streaming_tool_call_tokenization_contexts.move_to_end(session_id)
+        return context
+
+    @staticmethod
+    def _replace_streaming_tool_output(
+        tokenize_body: Dict[str, Any],
+        tool_output: str,
+    ) -> Dict[str, Any]:
+        messages = tokenize_body.get("messages")
+        if not messages or messages[-1].get("role") != "tool":
+            raise HTTPException(
+                status_code=409,
+                detail="compact tokenization context has no trailing tool message",
+            )
+        updated_messages = list(messages)
+        updated_messages[-1] = {
+            **messages[-1],
+            "content": tool_output,
+        }
+        return {
+            **tokenize_body,
+            "messages": updated_messages,
+        }
 
     @staticmethod
     def _streaming_prompt_tokenize_body(
@@ -318,6 +448,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         request: Request,
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
+        assert body.chat_completion is not None
         client, prompt_token_ids, _ = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
         return await client.create_streaming_tool_call(
             "start",
@@ -332,20 +463,77 @@ class VLLMModel(SimpleResponsesAPIModel):
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
         """Tokenize a partial tool result without starting a prefill session."""
-        tokenization_body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body.chat_completion)
-        tokenization_body_dict = tokenization_body.model_dump(exclude_unset=True)
-        tokenization_body_dict = self._preprocess_chat_completion_create_params(request, tokenization_body_dict)
-        tokenize_body = self._streaming_prompt_tokenize_body(tokenization_body_dict)
+        request_handler_started_at = perf_counter()
+        preprocess_started_at = perf_counter()
         client = self._resolve_client(request)
-        if body.exact_incremental_tokenizer:
-            tokenization_result = await client.create_incremental_tokenize(
-                **tokenize_body,
+        compact_context_hit = False
+        compact_context_rebuild_seconds = 0.0
+        if body.compact_context and body.tool_output is not None:
+            compact_context_rebuild_started_at = perf_counter()
+            context = self._get_streaming_tool_call_tokenization_context(
                 session_id=body.session_id,
-                sequence_no=body.sequence_no,
-                final=body.final,
+                client=client,
             )
+            tokenize_body = self._replace_streaming_tool_output(
+                context.tokenize_body,
+                body.tool_output,
+            )
+            compact_context_rebuild_seconds = perf_counter() - compact_context_rebuild_started_at
+            compact_context_hit = True
+        else:
+            assert body.chat_completion is not None
+            tokenization_body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body.chat_completion)
+            tokenization_body_dict = tokenization_body.model_dump(exclude_unset=True)
+            tokenization_body_dict = self._preprocess_chat_completion_create_params(request, tokenization_body_dict)
+            tokenize_body = self._streaming_prompt_tokenize_body(tokenization_body_dict)
+        preprocess_seconds = perf_counter() - preprocess_started_at
+        compact_context_registered = False
+        compact_context_registration_seconds = 0.0
+        if body.exact_incremental_tokenizer:
+            incremental_kwargs = {
+                "session_id": body.session_id,
+                "sequence_no": body.sequence_no,
+                "final": body.final,
+                "prefill": body.prefill,
+            }
+            if body.prefill_continuation:
+                incremental_kwargs["prefill_continuation"] = True
+            if body.prefill_from_required_prefix:
+                incremental_kwargs["prefill_from_required_prefix"] = True
+            if body.finalize_from_required_prefix:
+                incremental_kwargs["finalize_from_required_prefix"] = True
+            vllm_request_started_at = perf_counter()
+            if compact_context_hit:
+                assert body.tool_output is not None
+                tokenization_result = await client.create_incremental_tokenize_compact(
+                    tool_output=body.tool_output,
+                    **incremental_kwargs,
+                )
+            else:
+                if body.compact_context:
+                    incremental_kwargs["compact_context"] = True
+                    if not body.final:
+                        assert body.max_contexts is not None
+                        assert body.context_ttl_seconds is not None
+                        incremental_kwargs["max_contexts"] = body.max_contexts
+                        incremental_kwargs["context_ttl_seconds"] = body.context_ttl_seconds
+                tokenization_result = await client.create_incremental_tokenize(**tokenize_body, **incremental_kwargs)
+            vllm_request_seconds = perf_counter() - vllm_request_started_at
             prompt_token_ids = tokenization_result.pop("tokens", None)
             result = dict(tokenization_result)
+            if body.compact_context and not body.final and not compact_context_hit:
+                assert body.max_contexts is not None
+                assert body.context_ttl_seconds is not None
+                compact_context_registration_started_at = perf_counter()
+                self._store_streaming_tool_call_tokenization_context(
+                    session_id=body.session_id,
+                    client=client,
+                    tokenize_body=tokenize_body,
+                    max_contexts=body.max_contexts,
+                    context_ttl_seconds=body.context_ttl_seconds,
+                )
+                compact_context_registration_seconds = perf_counter() - compact_context_registration_started_at
+                compact_context_registered = True
         else:
             tokenization_result = await client.create_tokenize(**tokenize_body)
             prompt_token_ids = tokenization_result["tokens"]
@@ -366,6 +554,19 @@ class VLLMModel(SimpleResponsesAPIModel):
                 candidate_ttl_seconds=body.candidate_ttl_seconds,
             )
             result["reuse_id"] = body.session_id
+            self._streaming_tool_call_tokenization_contexts.pop(body.session_id, None)
+        if body.exact_incremental_tokenizer:
+            result.update(
+                {
+                    "gym_compact_context_registrations": int(compact_context_registered),
+                    "gym_compact_context_hits": int(compact_context_hit),
+                    "gym_compact_context_rebuild_seconds": (compact_context_rebuild_seconds),
+                    "gym_compact_context_registration_seconds": (compact_context_registration_seconds),
+                    "gym_preprocess_seconds": preprocess_seconds,
+                    "gym_vllm_request_seconds": vllm_request_seconds,
+                    "gym_request_handler_seconds": (perf_counter() - request_handler_started_at),
+                }
+            )
         return result
 
     async def append_streaming_tool_call(
@@ -373,6 +574,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         request: Request,
         body: StreamingToolCallPromptRequest = Body(),
     ) -> Dict[str, Any]:
+        assert body.chat_completion is not None
         client, prompt_token_ids, _ = await self._tokenize_streaming_tool_call_prompt(request, body.chat_completion)
         return await client.create_streaming_tool_call(
             "append",
@@ -396,10 +598,18 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def abort_streaming_tool_call(
         self,
         request: Request,
+        background_tasks: BackgroundTasks,
         body: StreamingToolCallAbortRequest = Body(),
     ) -> Dict[str, Any]:
         client = self._resolve_client(request)
         if body.exact_incremental_tokenizer:
+            self._streaming_tool_call_tokenization_contexts.pop(body.session_id, None)
+            if body.defer:
+                background_tasks.add_task(
+                    client.abort_incremental_tokenize,
+                    session_id=body.session_id,
+                )
+                return {"aborted": False, "scheduled": True}
             return await client.abort_incremental_tokenize(session_id=body.session_id)
         return await client.create_streaming_tool_call("abort", session_id=body.session_id)
 

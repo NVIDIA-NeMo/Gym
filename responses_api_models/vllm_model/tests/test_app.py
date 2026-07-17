@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -54,6 +56,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.vllm_model.app import (
+    StreamingToolCallAbortRequest,
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
@@ -63,6 +66,20 @@ from responses_api_models.vllm_model.app import (
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+GYM_STREAMING_REQUEST_METRIC_NAMES = (
+    "gym_compact_context_registrations",
+    "gym_compact_context_hits",
+    "gym_compact_context_rebuild_seconds",
+    "gym_compact_context_registration_seconds",
+    "gym_preprocess_seconds",
+    "gym_vllm_request_seconds",
+    "gym_request_handler_seconds",
+)
+
+
+def _pop_gym_streaming_request_metrics(result: dict[str, Any]) -> dict[str, Any]:
+    return {metric_name: result.pop(metric_name) for metric_name in GYM_STREAMING_REQUEST_METRIC_NAMES}
 
 
 class FakeUUID:
@@ -1658,6 +1675,256 @@ class TestApp:
         )
         mock_client.create_streaming_tool_call.assert_not_awaited()
 
+    def test_streaming_tool_call_exact_tokenizer_primes_prefill(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 0,
+                "token_count": 3,
+                "encoded_chars": 0,
+                "incremental_valid": True,
+                "prefill_sessions_started": 1,
+                "prefill_requests": 1,
+                "prefill_control_plane_requests": 0,
+                "prefill_tokens": 2,
+                "prefill_completed_chunks": 1,
+                "prefill_dummy_tokens": 1,
+                "prefill_prefix_matched": True,
+                "prefill_failures": 0,
+                "prefill_seconds": 0.25,
+            }
+        )
+        mock_client.create_streaming_tool_call = AsyncMock()
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "exact_incremental_tokenizer": True,
+                "prefill": True,
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+        prefill_seconds = result.pop("prefill_seconds")
+        request_metrics = _pop_gym_streaming_request_metrics(result)
+        assert result == {
+            "sequence_no": 0,
+            "token_count": 3,
+            "encoded_chars": 0,
+            "incremental_valid": True,
+            "prefill_sessions_started": 1,
+            "prefill_requests": 1,
+            "prefill_control_plane_requests": 0,
+            "prefill_tokens": 2,
+            "prefill_completed_chunks": 1,
+            "prefill_dummy_tokens": 1,
+            "prefill_prefix_matched": True,
+            "prefill_failures": 0,
+        }
+        assert prefill_seconds > 0
+        assert request_metrics["gym_compact_context_registrations"] == 0
+        assert request_metrics["gym_compact_context_hits"] == 0
+        assert request_metrics["gym_compact_context_rebuild_seconds"] == 0
+        assert request_metrics["gym_compact_context_registration_seconds"] == 0
+        assert request_metrics["gym_preprocess_seconds"] >= 0
+        assert request_metrics["gym_vllm_request_seconds"] >= 0
+        assert request_metrics["gym_request_handler_seconds"] >= request_metrics["gym_preprocess_seconds"]
+        assert request_metrics["gym_request_handler_seconds"] >= request_metrics["gym_vllm_request_seconds"]
+        mock_client.create_streaming_tool_call.assert_not_awaited()
+        mock_client.create_incremental_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+            session_id="session",
+            sequence_no=0,
+            final=False,
+            prefill=True,
+        )
+
+    def test_streaming_tool_call_exact_tokenizer_continues_prefill(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 1,
+                "token_count": 4,
+                "encoded_chars": 300,
+                "incremental_valid": True,
+                "prefill_sessions_started": 0,
+                "prefill_requests": 1,
+                "prefill_tokens": 2,
+                "prefill_completed_chunks": 1,
+                "prefill_dummy_tokens": 1,
+                "prefill_prefix_matched": False,
+                "prefill_failures": 0,
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 1,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "exact_incremental_tokenizer": True,
+                "prefill": True,
+                "prefill_continuation": True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["prefill_requests"] == 1
+        mock_client.create_incremental_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+            session_id="session",
+            sequence_no=1,
+            final=False,
+            prefill=True,
+            prefill_continuation=True,
+        )
+
+    def test_streaming_tool_call_admits_prefill_from_required_prefix(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 0,
+                "token_count": 4,
+                "incremental_valid": True,
+                "prefill_sessions_started": 1,
+                "prefill_requests": 1,
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "exact_incremental_tokenizer": True,
+                "prefill": True,
+                "prefill_continuation": True,
+                "prefill_from_required_prefix": True,
+            },
+        )
+
+        assert response.status_code == 200
+        mock_client.create_incremental_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+            session_id="session",
+            sequence_no=0,
+            final=False,
+            prefill=True,
+            prefill_continuation=True,
+            prefill_from_required_prefix=True,
+        )
+
+    def test_streaming_tool_call_finalizes_directly_from_required_prefix(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 0,
+                "token_count": 4,
+                "incremental_valid": True,
+                "tokens": [1, 2, 3, 4],
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "exact_incremental_tokenizer": True,
+                "final": True,
+                "finalize_from_required_prefix": True,
+                "max_candidates": 256,
+                "candidate_ttl_seconds": 900,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["reuse_id"] == "session"
+        mock_client.create_incremental_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+            session_id="session",
+            sequence_no=0,
+            final=True,
+            prefill=False,
+            finalize_from_required_prefix=True,
+        )
+
+    def test_streaming_tool_call_prefill_failure_preserves_tokenizer_result(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 0,
+                "token_count": 3,
+                "incremental_valid": True,
+                "prefill_sessions_started": 0,
+                "prefill_requests": 0,
+                "prefill_control_plane_requests": 0,
+                "prefill_tokens": 0,
+                "prefill_completed_chunks": 0,
+                "prefill_dummy_tokens": 0,
+                "prefill_prefix_matched": False,
+                "prefill_failures": 1,
+                "prefill_seconds": 0.01,
+            }
+        )
+        mock_client.create_streaming_tool_call = AsyncMock()
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "exact_incremental_tokenizer": True,
+                "prefill": True,
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["token_count"] == 3
+        assert result["incremental_valid"] is True
+        assert result["prefill_sessions_started"] == 0
+        assert result["prefill_requests"] == 0
+        assert result["prefill_failures"] == 1
+        mock_client.create_streaming_tool_call.assert_not_awaited()
+
     def test_streaming_tool_call_uses_exact_incremental_tokenizer(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -1716,20 +1983,28 @@ class TestApp:
         )
 
         assert first_response.status_code == 200
-        assert first_response.json() == {
+        first_result = first_response.json()
+        first_request_metrics = _pop_gym_streaming_request_metrics(first_result)
+        assert first_result == {
             "sequence_no": 0,
             "token_count": 3,
             "encoded_chars": 0,
             "incremental_valid": True,
         }
+        assert first_request_metrics["gym_compact_context_registrations"] == 0
+        assert first_request_metrics["gym_compact_context_hits"] == 0
         assert final_response.status_code == 200
-        assert final_response.json() == {
+        final_result = final_response.json()
+        final_request_metrics = _pop_gym_streaming_request_metrics(final_result)
+        assert final_result == {
             "sequence_no": 1,
             "token_count": 4,
             "encoded_chars": 8,
             "incremental_valid": True,
             "reuse_id": "session",
         }
+        assert final_request_metrics["gym_compact_context_registrations"] == 0
+        assert final_request_metrics["gym_compact_context_hits"] == 0
         assert abort_response.json() == {"aborted": True}
         assert mock_client.create_incremental_tokenize.await_args_list[0].kwargs == {
             "model": "dummy_model",
@@ -1737,8 +2012,185 @@ class TestApp:
             "session_id": "session",
             "sequence_no": 0,
             "final": False,
+            "prefill": False,
         }
         mock_client.create_tokenize.assert_not_awaited()
+        mock_client.abort_incremental_tokenize.assert_awaited_once_with(session_id="session")
+
+    def test_streaming_tool_call_compact_context_reuses_validated_request(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(
+            return_value={
+                "sequence_no": 0,
+                "token_count": 3,
+                "incremental_valid": True,
+                "server_compact_context_registrations": 1,
+                "server_compact_context_hits": 0,
+            }
+        )
+        mock_client.create_incremental_tokenize_compact = AsyncMock(
+            return_value={
+                "sequence_no": 1,
+                "token_count": 4,
+                "incremental_valid": True,
+                "tokens": [1, 2, 3, 4],
+                "server_compact_context_registrations": 0,
+                "server_compact_context_hits": 1,
+            }
+        )
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+        chat_completion = {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "tool", "content": "first", "tool_call_id": "call"},
+            ],
+        }
+
+        initial_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": chat_completion,
+                "compact_context": True,
+                "max_contexts": 8,
+                "context_ttl_seconds": 60,
+                "exact_incremental_tokenizer": True,
+            },
+        )
+        final_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 1,
+                "tool_output": "first plus final output",
+                "compact_context": True,
+                "exact_incremental_tokenizer": True,
+                "final": True,
+                "max_candidates": 8,
+                "candidate_ttl_seconds": 60,
+            },
+        )
+
+        assert initial_response.status_code == 200
+        assert initial_response.json()["gym_compact_context_registrations"] == 1
+        assert initial_response.json()["gym_compact_context_hits"] == 0
+        assert initial_response.json()["gym_compact_context_registration_seconds"] >= 0
+        assert initial_response.json()["gym_compact_context_rebuild_seconds"] == 0
+        assert final_response.status_code == 200
+        assert final_response.json()["gym_compact_context_registrations"] == 0
+        assert final_response.json()["gym_compact_context_hits"] == 1
+        assert final_response.json()["gym_compact_context_registration_seconds"] == 0
+        assert final_response.json()["gym_compact_context_rebuild_seconds"] >= 0
+        assert final_response.json()["reuse_id"] == "session"
+        mock_client.create_incremental_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=chat_completion["messages"],
+            session_id="session",
+            sequence_no=0,
+            final=False,
+            prefill=False,
+            compact_context=True,
+            max_contexts=8,
+            context_ttl_seconds=60.0,
+        )
+        mock_client.create_incremental_tokenize_compact.assert_awaited_once_with(
+            tool_output="first plus final output",
+            session_id="session",
+            sequence_no=1,
+            final=True,
+            prefill=False,
+        )
+        assert not server._streaming_tool_call_tokenization_contexts
+
+        missing_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 2,
+                "tool_output": "too late",
+                "compact_context": True,
+                "exact_incremental_tokenizer": True,
+            },
+        )
+        assert missing_response.status_code == 409
+
+    def test_streaming_tool_call_abort_clears_compact_context(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize = AsyncMock(return_value={"sequence_no": 0, "token_count": 3})
+        mock_client.abort_incremental_tokenize = AsyncMock(return_value={"aborted": True})
+        server._clients = [mock_client]
+        client = TestClient(server.setup_webserver())
+
+        initial_response = client.post(
+            "/v1/streaming_tool_call/tokenize",
+            json={
+                "session_id": "session",
+                "sequence_no": 0,
+                "chat_completion": {"messages": [{"role": "tool", "content": "first", "tool_call_id": "call"}]},
+                "compact_context": True,
+                "max_contexts": 8,
+                "context_ttl_seconds": 60,
+                "exact_incremental_tokenizer": True,
+            },
+        )
+        abort_response = client.post(
+            "/v1/streaming_tool_call/abort",
+            json={
+                "session_id": "session",
+                "exact_incremental_tokenizer": True,
+                "defer": True,
+            },
+        )
+
+        assert initial_response.status_code == 200
+        assert abort_response.status_code == 200
+        assert abort_response.json() == {"aborted": False, "scheduled": True}
+        assert not server._streaming_tool_call_tokenization_contexts
+        mock_client.abort_incremental_tokenize.assert_awaited_once_with(session_id="session")
+
+    @mark.asyncio
+    async def test_streaming_tool_call_deferred_abort_returns_before_cleanup(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        cleanup_started = asyncio.Event()
+        cleanup_release = asyncio.Event()
+
+        async def abort_incremental_tokenize(*, session_id: str):
+            assert session_id == "session"
+            cleanup_started.set()
+            await cleanup_release.wait()
+            return {"aborted": True}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.abort_incremental_tokenize = AsyncMock(side_effect=abort_incremental_tokenize)
+        monkeypatch.setattr(
+            server,
+            "_resolve_client",
+            MagicMock(return_value=mock_client),
+        )
+        background_tasks = BackgroundTasks()
+
+        result = await server.abort_streaming_tool_call(
+            MagicMock(),
+            background_tasks,
+            StreamingToolCallAbortRequest(
+                session_id="session",
+                exact_incremental_tokenizer=True,
+                defer=True,
+            ),
+        )
+
+        assert result == {"aborted": False, "scheduled": True}
+        mock_client.abort_incremental_tokenize.assert_not_awaited()
+
+        cleanup_task = asyncio.create_task(background_tasks())
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        assert not cleanup_task.done()
+        cleanup_release.set()
+        await asyncio.wait_for(cleanup_task, timeout=1)
         mock_client.abort_incremental_tokenize.assert_awaited_once_with(session_id="session")
 
     def test_streaming_tool_call_final_tokens_are_reused_once(self, monkeypatch: MonkeyPatch):

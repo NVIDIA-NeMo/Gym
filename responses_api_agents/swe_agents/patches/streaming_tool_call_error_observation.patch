@@ -1,0 +1,213 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -27,6 +27,8 @@ from openhands.events.action import (
+     CmdRunAction,
+ )
+ from openhands.events.observation import (
++    CmdOutputObservation,
++    ErrorObservation,
+     Observation,
+ )
+ from openhands.events.serialization import (
+@@ -111,6 +113,24 @@ def _streaming_tool_call_fallback_metrics(stage: str) -> dict[str, int]:
+     return metrics
+ 
+ 
++def _streaming_tool_call_observation_text(
++    observation: Observation,
++    max_message_chars: int | None,
++) -> str:
++    """Match the command observation text added by ConversationMemory."""
++    if isinstance(observation, CmdOutputObservation):
++        return truncate_content(
++            observation.to_agent_observation(), max_message_chars
++        )
++    if isinstance(observation, ErrorObservation):
++        content = truncate_content(observation.content, max_message_chars)
++        return f"{content}\n[Error occurred in processing last action]"
++    raise TypeError(
++        "streaming command execution returned unsupported observation "
++        f"{type(observation).__name__}"
++    )
++
++
+ def get_user_info() -> tuple[int, str | None]:
+     """Get user ID and username in a cross-platform way."""
+     username = os.getenv("USER")
+@@ -1448,15 +1467,11 @@ class LocalRuntime(ActionExecutionClient):
+                 return response
+ 
+             observation = observation_from_dict(response.json())
+-            raw_final_tool_output = observation.to_agent_observation()
+             if tokenizer_only:
+                 assert streaming_http_session is not None
+                 finalized_without_prefill_admission = not incremental_started
+-                # ConversationMemory applies this same truncation before the
+-                # observation becomes the next tool message. Tokenize that
+-                # authoritative prompt, not the longer runtime observation.
+-                final_tool_output = truncate_content(
+-                    raw_final_tool_output,
++                final_tool_output = _streaming_tool_call_observation_text(
++                    observation,
+                     context.client.llm.config.max_message_chars,
+                 )
+                 final_tokenize_result = await tokenize_snapshot(
+@@ -1536,6 +1551,12 @@ class LocalRuntime(ActionExecutionClient):
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
++            if not isinstance(observation, CmdOutputObservation):
++                raise TypeError(
++                    "prefill streaming requires CmdOutputObservation, got "
++                    f"{type(observation).__name__}"
++                )
++            raw_final_tool_output = observation.to_agent_observation()
+             fallback_stage = "output_prefix_change"
+             if not raw_final_tool_output.startswith(last_sent_content):
+                 raise RuntimeError(
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -16,7 +16,7 @@ from openhands.agenthub.nemo_gym_client import (
+ )
+ from openhands.events import EventStream
+ from openhands.events.action import CmdRunAction
+-from openhands.events.observation import CmdOutputObservation
++from openhands.events.observation import CmdOutputObservation, ErrorObservation
+ from openhands.events.observation.commands import CmdOutputMetadata
+ from openhands.events.serialization import event_from_dict, event_to_dict
+ from openhands.events.serialization.event import truncate_content
+@@ -28,6 +28,7 @@ from openhands.runtime.impl.action_execution.action_execution_client import (
+ from openhands.runtime.impl.local.local_runtime import (
+     LocalRuntime,
+     _streaming_tool_call_fallback_metrics,
++    _streaming_tool_call_observation_text,
+ )
+ 
+ 
+@@ -94,6 +95,14 @@ class TestLocalRuntime:
+         assert sum(metrics.values()) == 1
+         assert metrics[expected_metric] == 1
+ 
++    def test_streaming_error_observation_matches_conversation_memory(self):
++        observation = ErrorObservation(content="runtime failed")
++
++        assert _streaming_tool_call_observation_text(observation, 7) == (
++            "run\n[... Observation truncated due to length ...]\nled"
++            "\n[Error occurred in processing last action]"
++        )
++
+     def test_detailed_action_timing_metrics(self, tmp_path, monkeypatch):
+         metrics_path = tmp_path / "metrics.json"
+         metrics_path.write_text("{}")
+@@ -853,6 +862,109 @@ class TestLocalRuntime:
+             "runtime-session:response:call"
+         )
+ 
++    @pytest.mark.asyncio
++    async def test_execute_action_final_only_tokenizer_handles_error_observation(
++        self,
++    ):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        session = MagicMock()
++        runtime.session = session
++        final_observation = ErrorObservation(
++            content="The command was rejected before execution.",
++            error_id="runtime_error",
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++        session.post.return_value = post_response
++
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            return_value={
++                "sequence_no": 0,
++                "token_count": 17,
++                "encoded_chars": 20,
++                "encoded_tokens": 4,
++                "reused_tokens": 13,
++                "rollback_tokens": 2,
++                "checkpoint_count": 1,
++                "checkpoint_tokens": 13,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
++                "final_prefix_tokenizations": 1,
++                "reuse_id": "runtime-session:response:call",
++            }
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "prefill_after_admission": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
++                "snapshot_poll_interval_seconds": 0.05,
++                "snapshot_long_poll_timeout_seconds": 1.0,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        requests = streaming_client.streaming_tool_call_request.await_args_list
++        assert len(requests) == 1
++        final_request = requests[0].kwargs
++        assert final_request["action"] == "tokenize"
++        assert final_request["sequence_no"] == 0
++        assert final_request["final"] is True
++        assert final_request["prefill"] is False
++        assert final_request["finalize_from_required_prefix"] is True
++        assert final_request["tool_output"] == (
++            "The command was rejected before execution."
++            "\n[Error occurred in processing last action]"
++        )
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call"
++        )
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_fallbacks"] == 0
++        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
++        assert metrics["streaming_tool_call_prompt_reuse_candidates"] == 1
++        assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
++
+     @pytest.mark.asyncio
+     async def test_execute_action_prefills_bucket_after_admission(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)

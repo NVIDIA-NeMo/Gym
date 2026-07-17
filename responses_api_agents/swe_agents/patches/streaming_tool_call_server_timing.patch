@@ -1,0 +1,83 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 1774e4e5e..ab7e1db44 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -668,6 +668,14 @@ class LocalRuntime(ActionExecutionClient):
+             "streaming_tool_call_counterfactual_full_tokenizer_mismatches": 0,
+             "streaming_tool_call_counterfactual_full_tokenizer_failures": 0,
+         }
++        server_timing_metrics = {
++            "streaming_tool_call_server_materialize_seconds": 0.0,
++            "streaming_tool_call_server_render_seconds": 0.0,
++            "streaming_tool_call_server_prefix_render_seconds": 0.0,
++            "streaming_tool_call_server_incremental_tokenizer_seconds": 0.0,
++            "streaming_tool_call_server_authoritative_tokenizer_seconds": 0.0,
++            "streaming_tool_call_server_request_handler_seconds": 0.0,
++        }
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+         initial_chunk_chars = context.config["initial_chunk_chars"]
+@@ -901,6 +909,13 @@ class LocalRuntime(ActionExecutionClient):
+                 counterfactual_tokenizer_metrics[metric_name] += (
+                     tokenize_result.get(response_key, 0)
+                 )
++            for metric_name in server_timing_metrics:
++                response_key = metric_name.removeprefix(
++                    "streaming_tool_call_"
++                )
++                server_timing_metrics[metric_name] += tokenize_result.get(
++                    response_key, 0.0
++                )
+             return tokenize_result
+ 
+         def incremental_tokenizer_metrics() -> dict[str, int | float]:
+@@ -997,6 +1012,7 @@ class LocalRuntime(ActionExecutionClient):
+                     incremental_tokenizer_final_seconds
+                 ),
+                 **counterfactual_tokenizer_metrics,
++                **server_timing_metrics,
+             }
+ 
+         def prefill_race_metrics() -> dict[str, int | float]:
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index d61879e83..a878557f0 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -909,6 +909,12 @@ class TestLocalRuntime:
+                 "prefix_seed_successes": int(sequence_no == 0),
+                 "prefix_seed_fallbacks": 0,
+                 "prefix_seed_seconds": 0.01 if sequence_no == 0 else 0.0,
++                "server_materialize_seconds": 0.001,
++                "server_render_seconds": 0.002,
++                "server_prefix_render_seconds": 0.003,
++                "server_incremental_tokenizer_seconds": 0.004,
++                "server_authoritative_tokenizer_seconds": 0.0,
++                "server_request_handler_seconds": 0.02,
+             }
+             if sequence_no == 2:
+                 release_post.set()
+@@ -1025,6 +1031,24 @@ class TestLocalRuntime:
+             ]
+             == 2
+         )
++        assert metrics["streaming_tool_call_server_materialize_seconds"] == (
++            pytest.approx(0.004)
++        )
++        assert metrics["streaming_tool_call_server_render_seconds"] == (
++            pytest.approx(0.008)
++        )
++        assert metrics["streaming_tool_call_server_prefix_render_seconds"] == (
++            pytest.approx(0.012)
++        )
++        assert metrics[
++            "streaming_tool_call_server_incremental_tokenizer_seconds"
++        ] == pytest.approx(0.016)
++        assert metrics[
++            "streaming_tool_call_server_authoritative_tokenizer_seconds"
++        ] == 0.0
++        assert metrics[
++            "streaming_tool_call_server_request_handler_seconds"
++        ] == pytest.approx(0.08)
+         assert metrics["streaming_tool_call_snapshot_wait_cancellations"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"

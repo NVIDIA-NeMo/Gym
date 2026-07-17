@@ -1,0 +1,44 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -701,6 +701,21 @@
+             "streaming_tool_call_counterfactual_full_tokenizer_mismatches": 0,
+             "streaming_tool_call_counterfactual_full_tokenizer_failures": 0,
+         }
++        background_prefill_metrics = {
++            "streaming_tool_call_prefill_background_scheduled_chunks": 0,
++            "streaming_tool_call_prefill_background_scheduled_tokens": 0,
++            "streaming_tool_call_prefill_background_completed_chunks": 0,
++            "streaming_tool_call_prefill_background_completed_tokens": 0,
++            "streaming_tool_call_prefill_background_completed_dummy_tokens": 0,
++            "streaming_tool_call_prefill_background_effective_chunks": 0,
++            "streaming_tool_call_prefill_background_dynamic_tokens": 0,
++            "streaming_tool_call_prefill_background_cancelled_chunks": 0,
++            "streaming_tool_call_prefill_background_cancelled_tokens": 0,
++            "streaming_tool_call_prefill_background_failed_chunks": 0,
++            "streaming_tool_call_prefill_background_failed_tokens": 0,
++            "streaming_tool_call_prefill_background_enqueue_seconds": 0.0,
++            "streaming_tool_call_prefill_background_completion_seconds": 0.0,
++        }
+         server_timing_metrics = {
+             "streaming_tool_call_server_materialize_seconds": 0.0,
+             "streaming_tool_call_server_render_seconds": 0.0,
+@@ -939,6 +951,11 @@
+             prefill_effective_requests += tokenize_result.get(
+                 "prefill_effective_requests", 0
+             )
++            for metric_name in background_prefill_metrics:
++                response_key = metric_name.removeprefix("streaming_tool_call_")
++                background_prefill_metrics[metric_name] += tokenize_result.get(
++                    response_key, 0
++                )
+             prefill_completed_chunks += tokenize_result.get(
+                 "prefill_completed_chunks", 0
+             )
+@@ -1192,6 +1212,7 @@
+                 "streaming_tool_call_final_prefix_tokenizations": (
+                     final_prefix_tokenizations
+                 ),
++                **background_prefill_metrics,
+                 "streaming_tool_call_prefix_seed_attempts": (
+                     prefix_seed_attempts
+                 ),

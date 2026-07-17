@@ -1,0 +1,127 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -241,6 +241,7 @@ class NemoGymClient:
+         finalize_from_required_prefix: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
++        payload_build_started_at = time.perf_counter()
+         payload: dict = {"session_id": session_id}
+         if context is not None:
+             payload["exact_incremental_tokenizer"] = bool(
+@@ -299,9 +300,11 @@ class NemoGymClient:
+                     "sequence-zero request without prefill"
+                 )
+             payload["finalize_from_required_prefix"] = True
++        payload_build_seconds = time.perf_counter() - payload_build_started_at
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
++        http_round_trip_started_at = time.perf_counter()
+         if http_session is None:
+             response = await self.ng_server_client.post(
+                 server_name=server_name,
+@@ -321,7 +324,15 @@ class NemoGymClient:
+             )
+         await raise_for_status(response)
+         self.model_server_cookies = response.cookies
+-        return await get_response_json(response)
++        response_json_started_at = time.perf_counter()
++        result = await get_response_json(response)
++        response_json_seconds = time.perf_counter() - response_json_started_at
++        result["client_payload_build_seconds"] = payload_build_seconds
++        result["client_http_round_trip_seconds"] = (
++            time.perf_counter() - http_round_trip_started_at
++        )
++        result["client_response_json_seconds"] = response_json_seconds
++        return result
+ 
+     def _log_completion(
+         self,
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -709,6 +709,14 @@ class LocalRuntime(ActionExecutionClient):
+             "streaming_tool_call_server_authoritative_tokenizer_seconds": 0.0,
+             "streaming_tool_call_server_request_handler_seconds": 0.0,
+         }
++        request_timing_metrics = {
++            "streaming_tool_call_client_payload_build_seconds": 0.0,
++            "streaming_tool_call_client_http_round_trip_seconds": 0.0,
++            "streaming_tool_call_client_response_json_seconds": 0.0,
++            "streaming_tool_call_gym_preprocess_seconds": 0.0,
++            "streaming_tool_call_gym_vllm_request_seconds": 0.0,
++            "streaming_tool_call_gym_request_handler_seconds": 0.0,
++        }
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+         initial_chunk_chars = context.config["initial_chunk_chars"]
+@@ -991,6 +999,13 @@ class LocalRuntime(ActionExecutionClient):
+                 server_timing_metrics[metric_name] += tokenize_result.get(
+                     response_key, 0.0
+                 )
++            for metric_name in request_timing_metrics:
++                response_key = metric_name.removeprefix(
++                    "streaming_tool_call_"
++                )
++                request_timing_metrics[metric_name] += tokenize_result.get(
++                    response_key, 0.0
++                )
+             fallback_stage = "other"
+             return tokenize_result
+ 
+@@ -1105,6 +1120,7 @@ class LocalRuntime(ActionExecutionClient):
+                 ),
+                 **counterfactual_tokenizer_metrics,
+                 **server_timing_metrics,
++                **request_timing_metrics,
+             }
+ 
+         def prefill_race_metrics() -> dict[str, int | float]:
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -106,7 +106,11 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         http_session=http_session,
+     )
+ 
+-    assert result == {"sequence_no": 0, "chunk_tokens": 0}
++    assert result["sequence_no"] == 0
++    assert result["chunk_tokens"] == 0
++    assert result["client_payload_build_seconds"] >= 0
++    assert result["client_http_round_trip_seconds"] >= 0
++    assert result["client_response_json_seconds"] >= 0
+     client.ng_server_client.post.assert_not_awaited()
+     request_call = http_session.post.await_args
+     assert request_call.args == (
+         "http://model-host:1234/v1/streaming_tool_call/start",
+     )
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -890,6 +890,12 @@ class TestLocalRuntime:
+                 "incremental_valid": True,
+                 "final_prefix_tokenizations": 1,
+                 "reuse_id": "runtime-session:response:call",
++                "client_payload_build_seconds": 0.01,
++                "client_http_round_trip_seconds": 0.1,
++                "client_response_json_seconds": 0.005,
++                "gym_preprocess_seconds": 0.02,
++                "gym_vllm_request_seconds": 0.05,
++                "gym_request_handler_seconds": 0.08,
+             }
+         )
+         context = StreamingToolCallContext(
+@@ -961,6 +967,12 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
+         assert metrics["streaming_tool_call_prompt_reuse_candidates"] == 1
+         assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
++        assert metrics["streaming_tool_call_client_payload_build_seconds"] == 0.01
++        assert metrics["streaming_tool_call_client_http_round_trip_seconds"] == 0.1
++        assert metrics["streaming_tool_call_client_response_json_seconds"] == 0.005
++        assert metrics["streaming_tool_call_gym_preprocess_seconds"] == 0.02
++        assert metrics["streaming_tool_call_gym_vllm_request_seconds"] == 0.05
++        assert metrics["streaming_tool_call_gym_request_handler_seconds"] == 0.08
+ 
+     @pytest.mark.asyncio
+     async def test_execute_action_prefills_bucket_after_admission(self):

@@ -1,0 +1,229 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -282,6 +282,7 @@ class NemoGymClient:
+         prefill_continuation: bool = False,
+         prefill_from_required_prefix: bool = False,
+         finalize_from_required_prefix: bool = False,
++        defer_abort: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
+         payload_build_started_at = time.perf_counter()
+@@ -374,5 +375,9 @@ class NemoGymClient:
+                 )
+             payload["finalize_from_required_prefix"] = True
++        if defer_abort:
++            if action != "abort":
++                raise ValueError("deferred cleanup requires an abort request")
++            payload["defer"] = True
+         payload_build_seconds = time.perf_counter() - payload_build_started_at
+         payload_serialize_started_at = time.perf_counter()
+         serialized_payload = orjson.dumps(payload)
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -696,8 +696,10 @@ class LocalRuntime(ActionExecutionClient):
+         prefill_race_abort_requests = 0
+         prefill_race_abort_existing_sessions = 0
+         prefill_race_abort_failures = 0
++        prefill_race_deferred_aborts = 0
+         prefill_race_abort_seconds = 0.0
+         prefill_race_cancelled_request_seconds = 0.0
++        prefill_race_cancel_drain_seconds = 0.0
+         command_finished_during_prefill_request = False
+         prefix_seed_attempts = 0
+         prefix_seed_successes = 0
+@@ -1114,10 +1116,12 @@ class LocalRuntime(ActionExecutionClient):
+             nonlocal prefill_race_abort_failures
+             nonlocal prefill_race_abort_requests
+             nonlocal prefill_race_abort_seconds
++            nonlocal prefill_race_cancel_drain_seconds
+             nonlocal prefill_race_attempts
+             nonlocal prefill_race_cancelled_request_seconds
+             nonlocal prefill_race_cancellations
+             nonlocal prefill_race_command_first
++            nonlocal prefill_race_deferred_aborts
+             nonlocal prefill_race_prefill_first
+             nonlocal streaming_request_seconds
+ 
+@@ -1144,12 +1148,16 @@ class LocalRuntime(ActionExecutionClient):
+                     action="abort",
+                     session_id=session_id,
+                     context=context,
++                    defer_abort=True,
+                     http_session=streaming_http_session,
+                 )
+             )
++            cancel_started_at = time.monotonic()
+             request_task.cancel()
+             await asyncio.gather(request_task, return_exceptions=True)
++            cancel_drain_seconds = time.monotonic() - cancel_started_at
+             cancelled_request_seconds = time.monotonic() - request_started_at
++            prefill_race_cancel_drain_seconds += cancel_drain_seconds
+             prefill_race_cancelled_request_seconds += cancelled_request_seconds
+             try:
+                 abort_result = await abort_task
+@@ -1162,10 +1170,13 @@ class LocalRuntime(ActionExecutionClient):
+                 prefill_race_abort_existing_sessions += int(
+                     bool(abort_result.get("aborted"))
+                 )
++                prefill_race_deferred_aborts += int(
++                    bool(abort_result.get("scheduled"))
++                )
+             request_abort_seconds = time.monotonic() - abort_started_at
+             prefill_race_abort_seconds += request_abort_seconds
+             streaming_request_seconds += (
+-                cancelled_request_seconds + request_abort_seconds
++                cancel_drain_seconds + request_abort_seconds
+             )
+             return None
+ 
+@@ -1336,12 +1347,18 @@ class LocalRuntime(ActionExecutionClient):
+                 "streaming_tool_call_prefill_race_abort_failures": (
+                     prefill_race_abort_failures
+                 ),
++                "streaming_tool_call_prefill_race_deferred_aborts": (
++                    prefill_race_deferred_aborts
++                ),
+                 "streaming_tool_call_prefill_race_abort_seconds": (
+                     prefill_race_abort_seconds
+                 ),
+                 "streaming_tool_call_prefill_race_cancelled_request_seconds": (
+                     prefill_race_cancelled_request_seconds
+                 ),
++                "streaming_tool_call_prefill_race_cancel_drain_seconds": (
++                    prefill_race_cancel_drain_seconds
++                ),
+             }
+ 
+         try:
+@@ -1392,11 +1409,16 @@ class LocalRuntime(ActionExecutionClient):
+                                 action="abort",
+                                 session_id=session_id,
+                                 context=context,
++                                defer_abort=True,
+                                 http_session=streaming_http_session,
+                             )
+                         )
++                        cancel_started_at = time.monotonic()
+                         prime_task.cancel()
+                         await asyncio.gather(prime_task, return_exceptions=True)
++                        prefill_race_cancel_drain_seconds = (
++                            time.monotonic() - cancel_started_at
++                        )
+                         if prime_task.cancelled():
+                             prefill_race_cancelled_request_seconds = (
+                                 time.monotonic() - prime_started_at
+@@ -1413,11 +1435,14 @@ class LocalRuntime(ActionExecutionClient):
+                             prefill_race_abort_existing_sessions = int(
+                                 bool(abort_result.get("aborted"))
+                             )
++                            prefill_race_deferred_aborts = int(
++                                bool(abort_result.get("scheduled"))
++                            )
+                         prefill_race_abort_seconds = (
+                             time.monotonic() - abort_started_at
+                         )
+                         streaming_request_seconds += (
+-                            prefill_race_cancelled_request_seconds
++                            prefill_race_cancel_drain_seconds
+                             + prefill_race_abort_seconds
+                         )
+                         response = await post_task
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -215,6 +215,31 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         "exact_incremental_tokenizer": True,
+     }
+ 
++    await client.streaming_tool_call_request(
++        action="abort",
++        session_id="session",
++        context=context,
++        defer_abort=True,
++        http_session=http_session,
++    )
++    deferred_abort_request = _streaming_request_json(http_session.post.await_args)
++    assert deferred_abort_request == {
++        "session_id": "session",
++        "exact_incremental_tokenizer": True,
++        "defer": True,
++    }
++
++    with pytest.raises(ValueError, match="deferred cleanup requires"):
++        await client.streaming_tool_call_request(
++            action="tokenize",
++            session_id="session",
++            context=context,
++            sequence_no=0,
++            tool_output="output",
++            defer_abort=True,
++            http_session=http_session,
++        )
++
+ 
+ @pytest.mark.asyncio
+ async def test_compact_streaming_request_sends_context_once(monkeypatch):
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1434,7 +1434,7 @@ class TestLocalRuntime:
+ 
+         async def streaming_request(**kwargs):
+             if kwargs["action"] == "abort":
+-                return {"aborted": True}
++                return {"aborted": False, "scheduled": True}
+             request_started.set()
+             try:
+                 await asyncio.Event().wait()
+@@ -1499,6 +1499,7 @@ class TestLocalRuntime:
+             "tokenize",
+             "abort",
+         ]
++        assert requests[-1].kwargs["defer_abort"] is True
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_prefill_race_attempts"] == 1
+         assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 0
+@@ -1505,7 +1506,9 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_prefill_race_command_first"] == 1
+         assert metrics["streaming_tool_call_prefill_race_cancellations"] == 1
+         assert metrics["streaming_tool_call_prefill_race_abort_requests"] == 1
+-        assert metrics["streaming_tool_call_prefill_race_abort_existing_sessions"] == 1
++        assert metrics["streaming_tool_call_prefill_race_abort_existing_sessions"] == 0
++        assert metrics["streaming_tool_call_prefill_race_deferred_aborts"] == 1
++        assert metrics["streaming_tool_call_prefill_race_cancel_drain_seconds"] >= 0
+         assert metrics["streaming_tool_call_valid_prefill_actions"] == 0
+         assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 0
+         streaming_http_session.close.assert_awaited_once()
+@@ -1642,7 +1645,7 @@ class TestLocalRuntime:
+ 
+         async def streaming_request(**kwargs):
+             if kwargs["action"] == "abort":
+-                return {"aborted": False}
++                return {"aborted": False, "scheduled": True}
+             assert kwargs["action"] == "tokenize"
+             await asyncio.Event().wait()
+ 
+@@ -1697,6 +1700,12 @@ class TestLocalRuntime:
+             for request in streaming_client.streaming_tool_call_request.await_args_list
+         ]
+         assert actions[-1] == "abort"
++        assert (
++            streaming_client.streaming_tool_call_request.await_args_list[-1].kwargs[
++                "defer_abort"
++            ]
++            is True
++        )
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_prefill_race_attempts"] == 1
+         assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 0
+@@ -1710,6 +1720,8 @@ class TestLocalRuntime:
+             "streaming_tool_call_prefill_race_abort_existing_sessions"
+         ] == 0
+         assert metrics["streaming_tool_call_prefill_race_abort_failures"] == 0
++        assert metrics["streaming_tool_call_prefill_race_deferred_aborts"] == 1
++        assert metrics["streaming_tool_call_prefill_race_cancel_drain_seconds"] >= 0
+         assert metrics[
+             "streaming_tool_call_skipped_completed_before_admission"
+         ] == 1

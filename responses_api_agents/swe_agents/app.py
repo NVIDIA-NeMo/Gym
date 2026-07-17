@@ -287,8 +287,11 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_snapshot_revisions: Optional[int] = None
     streaming_tool_call_nonempty_snapshots: Optional[int] = None
     streaming_tool_call_snapshots_at_or_above_min_chunk_chars: Optional[int] = None
+    streaming_tool_call_snapshots_at_or_above_initial_chunk_chars: Optional[int] = None
+    streaming_tool_call_snapshot_wait_cancellations: Optional[int] = None
     streaming_tool_call_sessions_started: Optional[int] = None
     streaming_tool_call_prefill_requests: Optional[int] = None
+    streaming_tool_call_prefill_control_plane_requests: Optional[int] = None
     streaming_tool_call_prefill_tokens: Optional[int] = None
     streaming_tool_call_valid_prefill_actions: Optional[int] = None
     streaming_tool_call_tokenizer_only_actions: Optional[int] = None
@@ -300,9 +303,82 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prompt_reuse_token_equivalent_matches: Optional[int] = None
     streaming_tool_call_prompt_reuse_mismatches: Optional[int] = None
     streaming_tool_call_prompt_reuse_missing: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_count: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_seconds: Optional[float] = None
+    streaming_tool_call_prefill_reuse_model_call_prompt_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_completion_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_reused_prompt_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_cached_prompt_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_required_prefix_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_observed_prefill_cached_tokens: Optional[int] = None
+    streaming_tool_call_prefill_reuse_model_call_observed_prefill_actions: Optional[int] = None
+    streaming_tool_call_tokenizer_reuse_model_call_count: Optional[int] = None
+    streaming_tool_call_tokenizer_reuse_model_call_seconds: Optional[float] = None
+    streaming_tool_call_tokenizer_reuse_model_call_prompt_tokens: Optional[int] = None
+    streaming_tool_call_tokenizer_reuse_model_call_completion_tokens: Optional[int] = None
+    streaming_tool_call_tokenizer_reuse_model_call_cached_prompt_tokens: Optional[int] = None
+    streaming_tool_call_prompt_reuse_miss_model_call_count: Optional[int] = None
+    streaming_tool_call_prompt_reuse_miss_model_call_seconds: Optional[float] = None
+    streaming_tool_call_prompt_reuse_miss_model_call_prompt_tokens: Optional[int] = None
+    streaming_tool_call_prompt_reuse_miss_model_call_completion_tokens: Optional[int] = None
+    streaming_tool_call_prompt_reuse_miss_model_call_cached_prompt_tokens: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_requests: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_tokens: Optional[int] = None
     streaming_tool_call_exact_incremental_tokenizer_actions: Optional[int] = None
+    streaming_tool_call_final_only_incremental_tokenizer_actions: Optional[int] = None
+    streaming_tool_call_valid_final_only_incremental_tokenizer_actions: Optional[int] = None
+    streaming_tool_call_final_only_prefill_actions: Optional[int] = None
+    streaming_tool_call_valid_final_only_prefill_actions: Optional[int] = None
+    streaming_tool_call_final_only_prefill_failures: Optional[int] = None
+    streaming_tool_call_final_only_prefill_seconds: Optional[float] = None
+    streaming_tool_call_final_only_prefill_reused_tokens: Optional[int] = None
+    streaming_tool_call_prefill_after_admission_actions: Optional[int] = None
+    streaming_tool_call_valid_prefill_after_admission_actions: Optional[int] = None
+    streaming_tool_call_effective_prefill_after_admission_actions: Optional[int] = None
+    streaming_tool_call_prefill_after_admission_requests: Optional[int] = None
+    streaming_tool_call_prefill_after_admission_tokens: Optional[int] = None
+    streaming_tool_call_prefill_after_admission_request_seconds: Optional[float] = None
+    streaming_tool_call_prefill_committed_tokens: Optional[int] = None
+    streaming_tool_call_prefill_dynamic_tokens: Optional[int] = None
+    streaming_tool_call_prefill_effective_requests: Optional[int] = None
+    streaming_tool_call_prefill_background_scheduled_chunks: Optional[int] = None
+    streaming_tool_call_prefill_background_scheduled_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_completed_chunks: Optional[int] = None
+    streaming_tool_call_prefill_background_completed_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_completed_dummy_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_effective_chunks: Optional[int] = None
+    streaming_tool_call_prefill_background_dynamic_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_cancelled_chunks: Optional[int] = None
+    streaming_tool_call_prefill_background_cancelled_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_failed_chunks: Optional[int] = None
+    streaming_tool_call_prefill_background_failed_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_enqueue_seconds: Optional[float] = None
+    streaming_tool_call_prefill_background_completion_seconds: Optional[float] = None
+    streaming_tool_call_deferred_prefill_admissions: Optional[int] = None
+    streaming_tool_call_final_prefix_tokenizations: Optional[int] = None
+    streaming_tool_call_prefill_race_attempts: Optional[int] = None
+    streaming_tool_call_prefill_race_prefill_first: Optional[int] = None
+    streaming_tool_call_prefill_race_command_first: Optional[int] = None
+    streaming_tool_call_prefill_race_grace_admissions: Optional[int] = None
+    streaming_tool_call_prefill_race_cancellations: Optional[int] = None
+    streaming_tool_call_prefill_race_abort_requests: Optional[int] = None
+    streaming_tool_call_prefill_race_abort_existing_sessions: Optional[int] = None
+    streaming_tool_call_prefill_race_abort_failures: Optional[int] = None
+    streaming_tool_call_prefill_race_deferred_aborts: Optional[int] = None
+    streaming_tool_call_prefill_race_abort_seconds: Optional[float] = None
+    streaming_tool_call_prefill_race_cancelled_request_seconds: Optional[float] = None
+    streaming_tool_call_prefill_race_cancel_drain_seconds: Optional[float] = None
+    streaming_tool_call_prefix_seed_attempts: Optional[int] = None
+    streaming_tool_call_prefix_seed_successes: Optional[int] = None
+    streaming_tool_call_prefix_seed_fallbacks: Optional[int] = None
+    streaming_tool_call_prefix_seed_seconds: Optional[float] = None
+    streaming_tool_call_stable_first_snapshot_prefill_attempts: Optional[int] = None
+    streaming_tool_call_stable_first_snapshot_prefill_successes: Optional[int] = None
+    streaming_tool_call_stable_first_snapshot_prefill_fallbacks: Optional[int] = None
+    streaming_tool_call_stable_first_snapshot_prefill_seconds: Optional[float] = None
+    streaming_tool_call_stable_first_snapshot_prefill_stable_tokens: Optional[int] = None
+    streaming_tool_call_stable_first_snapshot_prefill_committable_tokens: Optional[int] = None
+    streaming_tool_call_stable_first_snapshot_prefill_dynamic_tokens: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_encoded_chars: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_encoded_tokens: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_reused_tokens: Optional[int] = None
@@ -311,6 +387,36 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_incremental_tokenizer_checkpoint_tokens: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_checkpoint_mismatches: Optional[int] = None
     streaming_tool_call_incremental_tokenizer_seconds: Optional[float] = None
+    streaming_tool_call_incremental_tokenizer_start_seconds: Optional[float] = None
+    streaming_tool_call_incremental_tokenizer_final_seconds: Optional[float] = None
+    streaming_tool_call_server_materialize_seconds: Optional[float] = None
+    streaming_tool_call_server_render_seconds: Optional[float] = None
+    streaming_tool_call_server_prefix_render_seconds: Optional[float] = None
+    streaming_tool_call_server_incremental_tokenizer_seconds: Optional[float] = None
+    streaming_tool_call_server_authoritative_tokenizer_seconds: Optional[float] = None
+    streaming_tool_call_server_request_handler_seconds: Optional[float] = None
+    streaming_tool_call_client_payload_build_seconds: Optional[float] = None
+    streaming_tool_call_client_payload_serialize_seconds: Optional[float] = None
+    streaming_tool_call_client_request_bytes: Optional[int] = None
+    streaming_tool_call_client_compact_context_requests: Optional[int] = None
+    streaming_tool_call_client_http_round_trip_seconds: Optional[float] = None
+    streaming_tool_call_client_response_json_seconds: Optional[float] = None
+    streaming_tool_call_gym_compact_context_registrations: Optional[int] = None
+    streaming_tool_call_gym_compact_context_hits: Optional[int] = None
+    streaming_tool_call_gym_compact_context_rebuild_seconds: Optional[float] = None
+    streaming_tool_call_gym_compact_context_registration_seconds: Optional[float] = None
+    streaming_tool_call_gym_preprocess_seconds: Optional[float] = None
+    streaming_tool_call_gym_vllm_request_seconds: Optional[float] = None
+    streaming_tool_call_gym_request_handler_seconds: Optional[float] = None
+    streaming_tool_call_server_compact_context_registrations: Optional[int] = None
+    streaming_tool_call_server_compact_context_hits: Optional[int] = None
+    streaming_tool_call_server_compact_context_rebuild_seconds: Optional[float] = None
+    streaming_tool_call_server_compact_context_registration_seconds: Optional[float] = None
+    streaming_tool_call_counterfactual_full_tokenizer_requests: Optional[int] = None
+    streaming_tool_call_counterfactual_full_tokenizer_seconds: Optional[float] = None
+    streaming_tool_call_counterfactual_full_tokenizer_tokens: Optional[int] = None
+    streaming_tool_call_counterfactual_full_tokenizer_mismatches: Optional[int] = None
+    streaming_tool_call_counterfactual_full_tokenizer_failures: Optional[int] = None
     streaming_tool_call_command_request_seconds: Optional[float] = None
     streaming_tool_call_post_command_tail_seconds: Optional[float] = None
     streaming_tool_call_snapshot_request_seconds: Optional[float] = None
@@ -318,6 +424,10 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_dummy_tokens: Optional[int] = None
     streaming_tool_call_prefix_matches: Optional[int] = None
     streaming_tool_call_fallbacks: Optional[int] = None
+    streaming_tool_call_fallback_snapshot_errors: Optional[int] = None
+    streaming_tool_call_fallback_request_errors: Optional[int] = None
+    streaming_tool_call_fallback_output_prefix_changes: Optional[int] = None
+    streaming_tool_call_fallback_other_errors: Optional[int] = None
     streaming_tool_call_overhead_seconds: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
@@ -1205,6 +1315,44 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             self.parent_dir / "patches" / "streaming_tool_call_exact_incremental_tokenizer.patch"
         )
         action_timeout_patch_path = self.parent_dir / "patches" / "streaming_tool_call_action_timeout.patch"
+        counterfactual_tokenizer_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_counterfactual_tokenizer_metrics.patch"
+        )
+        final_only_incremental_tokenizer_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_final_only_incremental_tokenizer.patch"
+        )
+        final_only_prefill_patch_path = self.parent_dir / "patches" / "streaming_tool_call_final_only_prefill.patch"
+        prefill_race_patch_path = self.parent_dir / "patches" / "streaming_tool_call_prefill_race.patch"
+        prefix_seed_metrics_patch_path = self.parent_dir / "patches" / "streaming_tool_call_prefix_seed_metrics.patch"
+        prefill_after_admission_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_prefill_after_admission.patch"
+        )
+        bucketed_long_poll_patch_path = self.parent_dir / "patches" / "streaming_tool_call_bucketed_long_poll.patch"
+        server_timing_patch_path = self.parent_dir / "patches" / "streaming_tool_call_server_timing.patch"
+        deferred_admission_patch_path = self.parent_dir / "patches" / "streaming_tool_call_deferred_admission.patch"
+        fallback_metrics_patch_path = self.parent_dir / "patches" / "streaming_tool_call_fallback_metrics.patch"
+        error_observation_patch_path = self.parent_dir / "patches" / "streaming_tool_call_error_observation.patch"
+        request_timing_patch_path = self.parent_dir / "patches" / "streaming_tool_call_request_timing.patch"
+        compact_request_context_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_compact_request_context.patch"
+        )
+        model_call_attribution_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_model_call_attribution.patch"
+        )
+        cancellable_long_poll_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_cancellable_long_poll.patch"
+        )
+        effective_prefill_patch_path = self.parent_dir / "patches" / "streaming_tool_call_effective_prefill.patch"
+        background_prefill_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_background_prefill_metrics.patch"
+        )
+        cached_token_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_cached_token_metrics.patch"
+        )
+        skip_unadmitted_finalization_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_skip_unadmitted_finalization.patch"
+        )
+        deferred_abort_patch_path = self.parent_dir / "patches" / "streaming_tool_call_deferred_abort.patch"
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1232,8 +1380,50 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
-        if is_applied(action_timeout_patch_path):
+        if is_applied(deferred_abort_patch_path):
             return
+        if is_applied(skip_unadmitted_finalization_patch_path):
+            apply_patch(deferred_abort_patch_path)
+            return
+        if is_applied(cached_token_metrics_patch_path):
+            apply_patch(skip_unadmitted_finalization_patch_path)
+            return
+        if is_applied(background_prefill_metrics_patch_path):
+            apply_patch(cached_token_metrics_patch_path)
+            return
+        if is_applied(effective_prefill_patch_path):
+            apply_patch(background_prefill_metrics_patch_path)
+            return
+        if is_applied(cancellable_long_poll_patch_path):
+            apply_patch(effective_prefill_patch_path)
+            return
+        if is_applied(model_call_attribution_patch_path):
+            apply_patch(cancellable_long_poll_patch_path)
+            return
+        if is_applied(compact_request_context_patch_path):
+            apply_patch(model_call_attribution_patch_path)
+            return
+        if is_applied(request_timing_patch_path):
+            apply_patch(compact_request_context_patch_path)
+            return
+        if is_applied(error_observation_patch_path):
+            apply_patch(request_timing_patch_path)
+            return
+        if is_applied(fallback_metrics_patch_path):
+            apply_patch(error_observation_patch_path)
+            return
+        if is_applied(deferred_admission_patch_path):
+            apply_patch(fallback_metrics_patch_path)
+            return
+        server_timing_applied = is_applied(server_timing_patch_path)
+        bucketed_long_poll_applied = is_applied(bucketed_long_poll_patch_path)
+        prefill_after_admission_applied = is_applied(prefill_after_admission_patch_path)
+        prefix_seed_metrics_applied = is_applied(prefix_seed_metrics_patch_path)
+        prefill_race_applied = is_applied(prefill_race_patch_path)
+        final_only_prefill_applied = is_applied(final_only_prefill_patch_path)
+        final_only_incremental_tokenizer_applied = is_applied(final_only_incremental_tokenizer_patch_path)
+        counterfactual_tokenizer_metrics_applied = is_applied(counterfactual_tokenizer_metrics_patch_path)
+        action_timeout_applied = is_applied(action_timeout_patch_path)
         exact_incremental_tokenizer_applied = is_applied(exact_incremental_tokenizer_patch_path)
         prompt_reuse_applied = is_applied(prompt_reuse_patch_path)
         runtime_breakdown_applied = is_applied(runtime_breakdown_patch_path)
@@ -1255,7 +1445,36 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             apply_patch(prompt_reuse_patch_path)
         if not exact_incremental_tokenizer_applied:
             apply_patch(exact_incremental_tokenizer_patch_path)
-        apply_patch(action_timeout_patch_path)
+        if not action_timeout_applied:
+            apply_patch(action_timeout_patch_path)
+        if not counterfactual_tokenizer_metrics_applied:
+            apply_patch(counterfactual_tokenizer_metrics_patch_path)
+        if not final_only_incremental_tokenizer_applied:
+            apply_patch(final_only_incremental_tokenizer_patch_path)
+        if not final_only_prefill_applied:
+            apply_patch(final_only_prefill_patch_path)
+        if not prefill_race_applied:
+            apply_patch(prefill_race_patch_path)
+        if not prefix_seed_metrics_applied:
+            apply_patch(prefix_seed_metrics_patch_path)
+        if not prefill_after_admission_applied:
+            apply_patch(prefill_after_admission_patch_path)
+        if not bucketed_long_poll_applied:
+            apply_patch(bucketed_long_poll_patch_path)
+        if not server_timing_applied:
+            apply_patch(server_timing_patch_path)
+        apply_patch(deferred_admission_patch_path)
+        apply_patch(fallback_metrics_patch_path)
+        apply_patch(error_observation_patch_path)
+        apply_patch(request_timing_patch_path)
+        apply_patch(compact_request_context_patch_path)
+        apply_patch(model_call_attribution_patch_path)
+        apply_patch(cancellable_long_poll_patch_path)
+        apply_patch(effective_prefill_patch_path)
+        apply_patch(background_prefill_metrics_patch_path)
+        apply_patch(cached_token_metrics_patch_path)
+        apply_patch(skip_unadmitted_finalization_patch_path)
+        apply_patch(deferred_abort_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -1481,14 +1700,26 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
-    with metrics_fpath.open() as f:
-        existing_dict = json.loads(f.read())
+    try:
+        with metrics_fpath.open() as f:
+            existing_dict = json.loads(f.read())
+    except json.JSONDecodeError:
+        # A timed-out OpenHands process can be terminated after truncating this
+        # shared file but before completing json.dump(). The final metrics model
+        # is authoritative, so recover the trajectory instead of failing the
+        # entire rollout batch.
+        existing_dict = {}
 
     existing_dict = {k: v for k, v in existing_dict.items() if v is not None}
     update_dict = {k: v for k, v in update_dict.items() if v is not None}
 
-    with metrics_fpath.open("w") as f:
-        json.dump(existing_dict | update_dict, f)
+    temporary_fpath = metrics_fpath.with_name(f".{metrics_fpath.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary_fpath.open("x") as f:
+            json.dump(existing_dict | update_dict, f)
+        os.replace(temporary_fpath, metrics_fpath)
+    finally:
+        temporary_fpath.unlink(missing_ok=True)
 
 
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
@@ -2293,8 +2524,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_snapshot_revisions": 0,
                     "streaming_tool_call_nonempty_snapshots": 0,
                     "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 0,
+                    "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars": 0,
+                    "streaming_tool_call_snapshot_wait_cancellations": 0,
                     "streaming_tool_call_sessions_started": 0,
                     "streaming_tool_call_prefill_requests": 0,
+                    "streaming_tool_call_prefill_control_plane_requests": 0,
                     "streaming_tool_call_prefill_tokens": 0,
                     "streaming_tool_call_valid_prefill_actions": 0,
                     "streaming_tool_call_tokenizer_only_actions": 0,
@@ -2306,9 +2540,82 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_prompt_reuse_token_equivalent_matches": 0,
                     "streaming_tool_call_prompt_reuse_mismatches": 0,
                     "streaming_tool_call_prompt_reuse_missing": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_count": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_seconds": 0.0,
+                    "streaming_tool_call_prefill_reuse_model_call_prompt_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_completion_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_reused_prompt_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_cached_prompt_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_required_prefix_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_observed_prefill_cached_tokens": 0,
+                    "streaming_tool_call_prefill_reuse_model_call_observed_prefill_actions": 0,
+                    "streaming_tool_call_tokenizer_reuse_model_call_count": 0,
+                    "streaming_tool_call_tokenizer_reuse_model_call_seconds": 0.0,
+                    "streaming_tool_call_tokenizer_reuse_model_call_prompt_tokens": 0,
+                    "streaming_tool_call_tokenizer_reuse_model_call_completion_tokens": 0,
+                    "streaming_tool_call_tokenizer_reuse_model_call_cached_prompt_tokens": 0,
+                    "streaming_tool_call_prompt_reuse_miss_model_call_count": 0,
+                    "streaming_tool_call_prompt_reuse_miss_model_call_seconds": 0.0,
+                    "streaming_tool_call_prompt_reuse_miss_model_call_prompt_tokens": 0,
+                    "streaming_tool_call_prompt_reuse_miss_model_call_completion_tokens": 0,
+                    "streaming_tool_call_prompt_reuse_miss_model_call_cached_prompt_tokens": 0,
                     "streaming_tool_call_incremental_tokenizer_requests": 0,
                     "streaming_tool_call_incremental_tokenizer_tokens": 0,
                     "streaming_tool_call_exact_incremental_tokenizer_actions": 0,
+                    "streaming_tool_call_final_only_incremental_tokenizer_actions": 0,
+                    "streaming_tool_call_valid_final_only_incremental_tokenizer_actions": 0,
+                    "streaming_tool_call_final_only_prefill_actions": 0,
+                    "streaming_tool_call_valid_final_only_prefill_actions": 0,
+                    "streaming_tool_call_final_only_prefill_failures": 0,
+                    "streaming_tool_call_final_only_prefill_seconds": 0.0,
+                    "streaming_tool_call_final_only_prefill_reused_tokens": 0,
+                    "streaming_tool_call_prefill_after_admission_actions": 0,
+                    "streaming_tool_call_valid_prefill_after_admission_actions": 0,
+                    "streaming_tool_call_effective_prefill_after_admission_actions": 0,
+                    "streaming_tool_call_prefill_after_admission_requests": 0,
+                    "streaming_tool_call_prefill_after_admission_tokens": 0,
+                    "streaming_tool_call_prefill_after_admission_request_seconds": 0.0,
+                    "streaming_tool_call_prefill_committed_tokens": 0,
+                    "streaming_tool_call_prefill_dynamic_tokens": 0,
+                    "streaming_tool_call_prefill_effective_requests": 0,
+                    "streaming_tool_call_prefill_background_scheduled_chunks": 0,
+                    "streaming_tool_call_prefill_background_scheduled_tokens": 0,
+                    "streaming_tool_call_prefill_background_completed_chunks": 0,
+                    "streaming_tool_call_prefill_background_completed_tokens": 0,
+                    "streaming_tool_call_prefill_background_completed_dummy_tokens": 0,
+                    "streaming_tool_call_prefill_background_effective_chunks": 0,
+                    "streaming_tool_call_prefill_background_dynamic_tokens": 0,
+                    "streaming_tool_call_prefill_background_cancelled_chunks": 0,
+                    "streaming_tool_call_prefill_background_cancelled_tokens": 0,
+                    "streaming_tool_call_prefill_background_failed_chunks": 0,
+                    "streaming_tool_call_prefill_background_failed_tokens": 0,
+                    "streaming_tool_call_prefill_background_enqueue_seconds": 0.0,
+                    "streaming_tool_call_prefill_background_completion_seconds": 0.0,
+                    "streaming_tool_call_deferred_prefill_admissions": 0,
+                    "streaming_tool_call_final_prefix_tokenizations": 0,
+                    "streaming_tool_call_prefill_race_attempts": 0,
+                    "streaming_tool_call_prefill_race_prefill_first": 0,
+                    "streaming_tool_call_prefill_race_command_first": 0,
+                    "streaming_tool_call_prefill_race_grace_admissions": 0,
+                    "streaming_tool_call_prefill_race_cancellations": 0,
+                    "streaming_tool_call_prefill_race_abort_requests": 0,
+                    "streaming_tool_call_prefill_race_abort_existing_sessions": 0,
+                    "streaming_tool_call_prefill_race_abort_failures": 0,
+                    "streaming_tool_call_prefill_race_deferred_aborts": 0,
+                    "streaming_tool_call_prefill_race_abort_seconds": 0.0,
+                    "streaming_tool_call_prefill_race_cancelled_request_seconds": 0.0,
+                    "streaming_tool_call_prefill_race_cancel_drain_seconds": 0.0,
+                    "streaming_tool_call_prefix_seed_attempts": 0,
+                    "streaming_tool_call_prefix_seed_successes": 0,
+                    "streaming_tool_call_prefix_seed_fallbacks": 0,
+                    "streaming_tool_call_prefix_seed_seconds": 0.0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_attempts": 0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_successes": 0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_fallbacks": 0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_seconds": 0.0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_stable_tokens": 0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_committable_tokens": 0,
+                    "streaming_tool_call_stable_first_snapshot_prefill_dynamic_tokens": 0,
                     "streaming_tool_call_incremental_tokenizer_encoded_chars": 0,
                     "streaming_tool_call_incremental_tokenizer_encoded_tokens": 0,
                     "streaming_tool_call_incremental_tokenizer_reused_tokens": 0,
@@ -2317,6 +2624,36 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_incremental_tokenizer_checkpoint_tokens": 0,
                     "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches": 0,
                     "streaming_tool_call_incremental_tokenizer_seconds": 0.0,
+                    "streaming_tool_call_incremental_tokenizer_start_seconds": 0.0,
+                    "streaming_tool_call_incremental_tokenizer_final_seconds": 0.0,
+                    "streaming_tool_call_server_materialize_seconds": 0.0,
+                    "streaming_tool_call_server_render_seconds": 0.0,
+                    "streaming_tool_call_server_prefix_render_seconds": 0.0,
+                    "streaming_tool_call_server_incremental_tokenizer_seconds": 0.0,
+                    "streaming_tool_call_server_authoritative_tokenizer_seconds": 0.0,
+                    "streaming_tool_call_server_request_handler_seconds": 0.0,
+                    "streaming_tool_call_client_payload_build_seconds": 0.0,
+                    "streaming_tool_call_client_payload_serialize_seconds": 0.0,
+                    "streaming_tool_call_client_request_bytes": 0,
+                    "streaming_tool_call_client_compact_context_requests": 0,
+                    "streaming_tool_call_client_http_round_trip_seconds": 0.0,
+                    "streaming_tool_call_client_response_json_seconds": 0.0,
+                    "streaming_tool_call_gym_compact_context_registrations": 0,
+                    "streaming_tool_call_gym_compact_context_hits": 0,
+                    "streaming_tool_call_gym_compact_context_rebuild_seconds": 0.0,
+                    "streaming_tool_call_gym_compact_context_registration_seconds": 0.0,
+                    "streaming_tool_call_gym_preprocess_seconds": 0.0,
+                    "streaming_tool_call_gym_vllm_request_seconds": 0.0,
+                    "streaming_tool_call_gym_request_handler_seconds": 0.0,
+                    "streaming_tool_call_server_compact_context_registrations": 0,
+                    "streaming_tool_call_server_compact_context_hits": 0,
+                    "streaming_tool_call_server_compact_context_rebuild_seconds": 0.0,
+                    "streaming_tool_call_server_compact_context_registration_seconds": 0.0,
+                    "streaming_tool_call_counterfactual_full_tokenizer_requests": 0,
+                    "streaming_tool_call_counterfactual_full_tokenizer_seconds": 0.0,
+                    "streaming_tool_call_counterfactual_full_tokenizer_tokens": 0,
+                    "streaming_tool_call_counterfactual_full_tokenizer_mismatches": 0,
+                    "streaming_tool_call_counterfactual_full_tokenizer_failures": 0,
                     "streaming_tool_call_command_request_seconds": 0.0,
                     "streaming_tool_call_post_command_tail_seconds": 0.0,
                     "streaming_tool_call_snapshot_request_seconds": 0.0,
@@ -2324,6 +2661,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_dummy_tokens": 0,
                     "streaming_tool_call_prefix_matches": 0,
                     "streaming_tool_call_fallbacks": 0,
+                    "streaming_tool_call_fallback_snapshot_errors": 0,
+                    "streaming_tool_call_fallback_request_errors": 0,
+                    "streaming_tool_call_fallback_output_prefix_changes": 0,
+                    "streaming_tool_call_fallback_other_errors": 0,
                     "streaming_tool_call_overhead_seconds": 0.0,
                 }
             )

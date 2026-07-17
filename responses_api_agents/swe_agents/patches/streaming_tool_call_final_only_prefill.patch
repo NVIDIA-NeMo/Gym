@@ -1,0 +1,306 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+index 1111c78..5ad51d1 100644
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -236,6 +236,7 @@ class NemoGymClient:
+         sequence_no: int | None = None,
+         tool_output: str | None = None,
+         final: bool = False,
++        prefill: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
+         payload: dict = {"session_id": session_id}
+@@ -269,6 +270,12 @@ class NemoGymClient:
+             payload["candidate_ttl_seconds"] = context.config[
+                 "session_ttl_seconds"
+             ]
++        if prefill:
++            if action != "tokenize" or sequence_no != 0 or final:
++                raise ValueError(
++                    "prefill requires a non-final sequence-zero tokenizer request"
++                )
++            payload["prefill"] = True
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 0870f02..7530a80 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -596,6 +596,9 @@ class LocalRuntime(ActionExecutionClient):
+             exact_incremental_tokenizer
+             and bool(context.config.get("final_only_incremental_tokenizer"))
+         )
++        final_only_prefill = final_only_incremental_tokenizer and bool(
++            context.config.get("final_only_prefill")
++        )
+         incremental_started = False
+         session_started = False
+         last_sent_content = ""
+@@ -605,7 +608,14 @@ class LocalRuntime(ActionExecutionClient):
+         incremental_tokenizer_start_seconds = 0.0
+         incremental_tokenizer_final_seconds = 0.0
+         prefill_requests = 0
++        prefill_control_plane_requests = 0
+         prefill_tokens = 0
++        prefill_completed_chunks = 0
++        prefill_dummy_tokens = 0
++        prefill_prefix_matched = False
++        final_only_prefill_failures = 0
++        final_only_prefill_seconds = 0.0
++        final_only_prefill_reused_tokens = 0
+         tokenizer_requests = 0
+         tokenizer_tokens = 0
+         incremental_encoded_chars = 0
+@@ -671,6 +681,16 @@ class LocalRuntime(ActionExecutionClient):
+             nonlocal incremental_valid
+             nonlocal incremental_tokenizer_final_seconds
+             nonlocal incremental_tokenizer_start_seconds
++            nonlocal final_only_prefill_failures
++            nonlocal final_only_prefill_reused_tokens
++            nonlocal final_only_prefill_seconds
++            nonlocal prefill_completed_chunks
++            nonlocal prefill_dummy_tokens
++            nonlocal prefill_prefix_matched
++            nonlocal prefill_control_plane_requests
++            nonlocal prefill_requests
++            nonlocal prefill_tokens
++            nonlocal session_started
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+             nonlocal tokenizer_tokens
+@@ -684,6 +704,9 @@ class LocalRuntime(ActionExecutionClient):
+                 sequence_no=sequence_no,
+                 tool_output=tool_output,
+                 final=final,
++                prefill=(
++                    final_only_prefill and sequence_no == 0 and not final
++                ),
+                 http_session=streaming_http_session,
+             )
+             request_seconds = time.monotonic() - request_start_time
+@@ -694,9 +717,37 @@ class LocalRuntime(ActionExecutionClient):
+                 incremental_tokenizer_start_seconds += request_seconds
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
++            session_started = session_started or bool(
++                tokenize_result.get("prefill_sessions_started", 0)
++            )
++            prefill_requests += tokenize_result.get("prefill_requests", 0)
++            prefill_control_plane_requests += tokenize_result.get(
++                "prefill_control_plane_requests", 0
++            )
++            prefill_tokens += tokenize_result.get("prefill_tokens", 0)
++            prefill_completed_chunks += tokenize_result.get(
++                "prefill_completed_chunks", 0
++            )
++            prefill_dummy_tokens += tokenize_result.get(
++                "prefill_dummy_tokens", 0
++            )
++            prefill_prefix_matched = prefill_prefix_matched or bool(
++                tokenize_result.get("prefill_prefix_matched", False)
++            )
++            final_only_prefill_failures += tokenize_result.get(
++                "prefill_failures", 0
++            )
++            final_only_prefill_seconds += tokenize_result.get(
++                "prefill_seconds", 0.0
++            )
+             incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
+             incremental_encoded_tokens += tokenize_result.get("encoded_tokens", 0)
+             incremental_reused_tokens += tokenize_result.get("reused_tokens", 0)
++            if final and final_only_prefill:
++                final_only_prefill_reused_tokens = min(
++                    prefill_tokens,
++                    tokenize_result.get("reused_tokens", 0),
++                )
+             incremental_rollback_tokens += tokenize_result.get("rollback_tokens", 0)
+             incremental_checkpoints += tokenize_result.get("checkpoint_count", 0)
+             incremental_checkpoint_tokens += tokenize_result.get(
+@@ -725,6 +776,25 @@ class LocalRuntime(ActionExecutionClient):
+                 "streaming_tool_call_final_only_incremental_tokenizer_actions": int(
+-                    final_only_incremental_tokenizer
++                    final_only_incremental_tokenizer and incremental_started
+                 ),
++                "streaming_tool_call_final_only_prefill_actions": int(
++                    final_only_prefill and incremental_started
++                ),
++                "streaming_tool_call_valid_final_only_prefill_actions": int(
++                    final_only_prefill
++                    and prefill_prefix_matched
++                    and prefill_completed_chunks > 0
++                    and final_only_prefill_reused_tokens > 0
++                    and final_only_prefill_failures == 0
++                ),
++                "streaming_tool_call_final_only_prefill_failures": (
++                    final_only_prefill_failures
++                ),
++                "streaming_tool_call_final_only_prefill_seconds": (
++                    final_only_prefill_seconds
++                ),
++                "streaming_tool_call_final_only_prefill_reused_tokens": (
++                    final_only_prefill_reused_tokens
++                ),
+                 "streaming_tool_call_incremental_tokenizer_requests": (
+                     tokenizer_requests
+                 ),
+@@ -862,6 +932,7 @@ class LocalRuntime(ActionExecutionClient):
+                             streaming_request_seconds += (
+                                 time.monotonic() - request_start_time
+                             )
++                            prefill_control_plane_requests += 1
+                             prefill_requests += 1
+                             prefill_tokens += prefill_result["chunk_tokens"]
+                             session_started = True
+@@ -886,6 +957,7 @@ class LocalRuntime(ActionExecutionClient):
+                         streaming_request_seconds += (
+                             time.monotonic() - request_start_time
+                         )
++                        prefill_control_plane_requests += 1
+                         prefill_requests += 1
+                         prefill_tokens += prefill_result["chunk_tokens"]
+                     sequence_no += 1
+@@ -931,9 +1003,28 @@ class LocalRuntime(ActionExecutionClient):
+                 metrics.update(streaming_timing_metrics())
+                 metrics.update(
+                     {
+-                        "streaming_tool_call_sessions_started": 0,
+-                        "streaming_tool_call_prefill_requests": 0,
+-                        "streaming_tool_call_prefill_tokens": 0,
++                        "streaming_tool_call_sessions_started": int(
++                            session_started
++                        ),
++                        "streaming_tool_call_prefill_requests": prefill_requests,
++                        "streaming_tool_call_prefill_control_plane_requests": (
++                            prefill_control_plane_requests
++                        ),
++                        "streaming_tool_call_prefill_tokens": prefill_tokens,
++                        "streaming_tool_call_completed_chunks": (
++                            prefill_completed_chunks
++                        ),
++                        "streaming_tool_call_dummy_tokens": prefill_dummy_tokens,
++                        "streaming_tool_call_prefix_matches": int(
++                            prefill_prefix_matched
++                        ),
++                        "streaming_tool_call_valid_prefill_actions": int(
++                            final_only_prefill
++                            and prefill_prefix_matched
++                            and prefill_completed_chunks > 0
++                            and final_only_prefill_reused_tokens > 0
++                            and final_only_prefill_failures == 0
++                        ),
+                         "streaming_tool_call_tokenizer_only_actions": 1,
+                         "streaming_tool_call_valid_tokenizer_actions": int(
+                             incremental_valid
+@@ -942,6 +1033,9 @@ class LocalRuntime(ActionExecutionClient):
+                             final_only_incremental_tokenizer and incremental_valid
+                         ),
+                         "streaming_tool_call_prompt_reuse_candidates": 1,
++                        "streaming_tool_call_fallbacks": int(
++                            final_only_prefill_failures > 0
++                        ),
+                         "streaming_tool_call_overhead_seconds": (
+                             streaming_request_seconds
+                         ),
+@@ -966,6 +1060,7 @@ class LocalRuntime(ActionExecutionClient):
+                 http_session=streaming_http_session,
+             )
+             streaming_request_seconds += time.monotonic() - request_start_time
++            prefill_control_plane_requests += 1
+             if not close_result["prefix_matched"]:
+                 logger.warning(
+                     "Streaming tool-call final token prefix did not match; "
+@@ -977,6 +1072,9 @@ class LocalRuntime(ActionExecutionClient):
+                 {
+                     "streaming_tool_call_sessions_started": 1,
+                     "streaming_tool_call_prefill_requests": prefill_requests,
++                    "streaming_tool_call_prefill_control_plane_requests": (
++                        prefill_control_plane_requests
++                    ),
+                     "streaming_tool_call_prefill_tokens": prefill_tokens,
+                     "streaming_tool_call_completed_chunks": close_result[
+                         "completed_chunks"
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+index 8d78a70..4380c1d 100644
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -138,6 +138,18 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     assert final_request["max_candidates"] == 256
+     assert final_request["candidate_ttl_seconds"] == 900
+ 
++    await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="session",
++        context=context,
++        sequence_no=0,
++        tool_output="",
++        prefill=True,
++        http_session=http_session,
++    )
++    prefill_request = http_session.post.await_args.kwargs["json"]
++    assert prefill_request["prefill"] is True
++
+     await client.streaming_tool_call_request(
+         action="abort",
+         session_id="session",
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index 92a8f2a..c88c683 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -701,6 +701,20 @@ class TestLocalRuntime:
+                 "checkpoint_mismatches": 0,
+                 "incremental_valid": True,
+             }
++            if kwargs["prefill"]:
++                result.update(
++                    {
++                        "prefill_sessions_started": 1,
++                        "prefill_requests": 1,
++                        "prefill_control_plane_requests": 0,
++                        "prefill_tokens": 13,
++                        "prefill_completed_chunks": 1,
++                        "prefill_dummy_tokens": 1,
++                        "prefill_prefix_matched": True,
++                        "prefill_failures": 0,
++                        "prefill_seconds": 0.25,
++                    }
++                )
+             if kwargs["final"]:
+                 result["reuse_id"] = "runtime-session:response:call"
+             return result
+@@ -719,6 +733,7 @@ class TestLocalRuntime:
+                 "tokenizer_only": True,
+                 "exact_incremental_tokenizer": True,
+                 "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
+                 "min_chunk_chars": 256,
+                 "snapshot_poll_interval_seconds": 0.05,
+                 "flush_interval_seconds": 0.25,
+@@ -762,6 +777,7 @@ class TestLocalRuntime:
+             final_observation.to_agent_observation(),
+         ]
+         assert [request.kwargs["final"] for request in requests] == [False, True]
++        assert [request.kwargs["prefill"] for request in requests] == [True, False]
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_snapshot_polls"] == 0
+         assert metrics["streaming_tool_call_tokenizer_only_actions"] == 1
+@@ -776,6 +792,19 @@ class TestLocalRuntime:
+         assert metrics[
+             "streaming_tool_call_valid_final_only_incremental_tokenizer_actions"
+         ] == 1
++        assert metrics["streaming_tool_call_final_only_prefill_actions"] == 1
++        assert metrics["streaming_tool_call_valid_final_only_prefill_actions"] == 1
++        assert metrics["streaming_tool_call_final_only_prefill_failures"] == 0
++        assert metrics["streaming_tool_call_final_only_prefill_seconds"] == 0.25
++        assert metrics["streaming_tool_call_final_only_prefill_reused_tokens"] == 13
++        assert metrics["streaming_tool_call_sessions_started"] == 1
++        assert metrics["streaming_tool_call_prefill_requests"] == 1
++        assert metrics["streaming_tool_call_prefill_control_plane_requests"] == 0
++        assert metrics["streaming_tool_call_prefill_tokens"] == 13
++        assert metrics["streaming_tool_call_completed_chunks"] == 1
++        assert metrics["streaming_tool_call_dummy_tokens"] == 1
++        assert metrics["streaming_tool_call_prefix_matches"] == 1
++        assert metrics["streaming_tool_call_valid_prefill_actions"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"
+         )

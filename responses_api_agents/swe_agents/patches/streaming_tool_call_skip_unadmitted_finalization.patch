@@ -1,0 +1,93 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -1694,10 +1694,6 @@ class LocalRuntime(ActionExecutionClient):
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+-            if not incremental_started and not (
+-                tokenizer_only
+-                and final_only_incremental_tokenizer
+-                and prefill_after_admission
+-            ):
++            if not incremental_started:
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
+                 metrics.update(prefill_race_metrics())
+@@ -1707,7 +1703,7 @@ class LocalRuntime(ActionExecutionClient):
+                     metrics["streaming_tool_call_skipped_no_output"] = 1
+                 elif nonempty_snapshots == 1:
+                     metrics["streaming_tool_call_skipped_single_snapshot"] = 1
+-                elif snapshots_at_or_above_min_chunk_chars == 0:
++                elif snapshots_at_or_above_initial_chunk_chars == 0:
+                     metrics["streaming_tool_call_skipped_below_min_chunk_chars"] = 1
+                 else:
+                     metrics[
+@@ -1719,7 +1715,6 @@ class LocalRuntime(ActionExecutionClient):
+             observation = observation_from_dict(response.json())
+             if tokenizer_only:
+                 assert streaming_http_session is not None
+-                finalized_without_prefill_admission = not incremental_started
+                 final_tool_output = _streaming_tool_call_observation_text(
+                     observation,
+                     context.client.llm.config.max_message_chars,
+@@ -1782,20 +1777,6 @@ class LocalRuntime(ActionExecutionClient):
+                     }
+                 )
+                 metrics.update(incremental_tokenizer_metrics())
+-                if finalized_without_prefill_admission:
+-                    metrics["streaming_tool_call_skipped_no_stable_output"] = 1
+-                    if nonempty_snapshots == 0:
+-                        metrics["streaming_tool_call_skipped_no_output"] = 1
+-                    elif nonempty_snapshots == 1:
+-                        metrics["streaming_tool_call_skipped_single_snapshot"] = 1
+-                    elif snapshots_at_or_above_initial_chunk_chars == 0:
+-                        metrics[
+-                            "streaming_tool_call_skipped_below_min_chunk_chars"
+-                        ] = 1
+-                    else:
+-                        metrics[
+-                            "streaming_tool_call_skipped_completed_before_admission"
+-                        ] = 1
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1511,7 +1511,7 @@ class TestLocalRuntime:
+         streaming_http_session.close.assert_awaited_once()
+ 
+     @pytest.mark.asyncio
+-    async def test_execute_action_finalizes_short_command_from_model_prefix(self):
++    async def test_execute_action_skips_unadmitted_short_command_finalization(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"
+         runtime.sid = "runtime-session"
+@@ -1610,23 +1610,11 @@ class TestLocalRuntime:
+             )
+ 
+         assert response is post_response
+-        request = streaming_client.streaming_tool_call_request.await_args
+-        assert request.kwargs["sequence_no"] == 0
+-        assert request.kwargs["final"] is True
+-        assert request.kwargs["prefill"] is False
+-        assert request.kwargs["prefill_from_required_prefix"] is False
+-        assert request.kwargs["finalize_from_required_prefix"] is True
++        streaming_client.streaming_tool_call_request.assert_not_awaited()
+         metrics = update_metrics.call_args_list[-1].args[0]
+-        assert metrics["streaming_tool_call_sessions_started"] == 0
+-        assert metrics["streaming_tool_call_valid_prefill_actions"] == 0
+-        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
+-        assert metrics["streaming_tool_call_deferred_prefill_admissions"] == 0
+-        assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
+-        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call",
+-            prefill_reused_tokens=0,
+-            prefill_attempted=False,
+-        )
++        assert metrics["streaming_tool_call_skipped_no_stable_output"] == 1
++        assert metrics["streaming_tool_call_skipped_no_output"] == 1
++        streaming_client.register_streaming_prompt_reuse.assert_not_called()
+ 
+     @pytest.mark.asyncio
+     async def test_execute_action_cancels_prefill_when_command_finishes_first(self):

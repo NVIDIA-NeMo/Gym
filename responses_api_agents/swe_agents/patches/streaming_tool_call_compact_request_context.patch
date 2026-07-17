@@ -1,0 +1,436 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -13,6 +13,7 @@ from copy import deepcopy
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING
+ 
++import orjson
+ from aiohttp import ClientSession
+ from openhands.core.logger import openhands_logger as logger
+ from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
+@@ -245,25 +246,41 @@ class NemoGymClient:
+         payload_build_started_at = time.perf_counter()
+         payload: dict = {"session_id": session_id}
+         if context is not None:
+-            payload["exact_incremental_tokenizer"] = bool(
++            exact_incremental_tokenizer = bool(
+                 context.config.get("exact_incremental_tokenizer")
+             )
++            payload["exact_incremental_tokenizer"] = exact_incremental_tokenizer
++            compact_context = bool(
++                exact_incremental_tokenizer
++                and context.config.get("compact_request_context")
++                and action == "tokenize"
++            )
++            if compact_context:
++                payload["compact_context"] = True
+             if tool_output is None:
+                 if action != "abort":
+                     raise ValueError(
+                         "tool_output is required when context is provided"
+                     )
++            elif compact_context and sequence_no is not None and sequence_no > 0:
++                payload["tool_output"] = tool_output
+             else:
+-                chat_completion = deepcopy(context.chat_completion)
+-                chat_completion["messages"].append(
++                chat_completion = dict(context.chat_completion)
++                chat_completion["messages"] = [
++                    *context.chat_completion["messages"],
+                     {
+                         "role": "tool",
+                         "content": tool_output,
+                         "tool_call_id": context.tool_call_id,
+                         "name": context.function_name,
+-                    }
+-                )
++                    },
++                ]
+                 payload["chat_completion"] = chat_completion
++                if compact_context and sequence_no == 0 and not final:
++                    payload["max_contexts"] = context.config["max_sessions"]
++                    payload["context_ttl_seconds"] = context.config[
++                        "session_ttl_seconds"
++                    ]
+         if sequence_no is not None:
+             payload["sequence_no"] = sequence_no
+         if final:
+@@ -301,6 +318,11 @@ class NemoGymClient:
+                 )
+             payload["finalize_from_required_prefix"] = True
+         payload_build_seconds = time.perf_counter() - payload_build_started_at
++        payload_serialize_started_at = time.perf_counter()
++        serialized_payload = orjson.dumps(payload)
++        payload_serialize_seconds = (
++            time.perf_counter() - payload_serialize_started_at
++        )
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
+@@ -309,7 +331,8 @@ class NemoGymClient:
+             response = await self.ng_server_client.post(
+                 server_name=server_name,
+                 url_path=url_path,
+-                json=payload,
++                data=serialized_payload,
++                headers={"Content-Type": "application/json"},
+                 cookies=self.model_server_cookies,
+             )
+         else:
+@@ -319,7 +342,8 @@ class NemoGymClient:
+             )
+             response = await http_session.post(
+                 f"http://{server_config.host}:{server_config.port}{url_path}",
+-                json=payload,
++                data=serialized_payload,
++                headers={"Content-Type": "application/json"},
+                 cookies=self.model_server_cookies,
+             )
+         await raise_for_status(response)
+@@ -328,6 +352,11 @@ class NemoGymClient:
+         result = await get_response_json(response)
+         response_json_seconds = time.perf_counter() - response_json_started_at
+         result["client_payload_build_seconds"] = payload_build_seconds
++        result["client_payload_serialize_seconds"] = payload_serialize_seconds
++        result["client_request_bytes"] = len(serialized_payload)
++        result["client_compact_context_requests"] = int(
++            payload.get("tool_output") is not None
++        )
+         result["client_http_round_trip_seconds"] = (
+             time.perf_counter() - http_round_trip_started_at
+         )
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -719,11 +719,22 @@ class LocalRuntime(ActionExecutionClient):
+         }
+         request_timing_metrics = {
+             "streaming_tool_call_client_payload_build_seconds": 0.0,
++            "streaming_tool_call_client_payload_serialize_seconds": 0.0,
++            "streaming_tool_call_client_request_bytes": 0,
++            "streaming_tool_call_client_compact_context_requests": 0,
+             "streaming_tool_call_client_http_round_trip_seconds": 0.0,
+             "streaming_tool_call_client_response_json_seconds": 0.0,
++            "streaming_tool_call_gym_compact_context_registrations": 0,
++            "streaming_tool_call_gym_compact_context_hits": 0,
++            "streaming_tool_call_gym_compact_context_rebuild_seconds": 0.0,
++            "streaming_tool_call_gym_compact_context_registration_seconds": 0.0,
+             "streaming_tool_call_gym_preprocess_seconds": 0.0,
+             "streaming_tool_call_gym_vllm_request_seconds": 0.0,
+             "streaming_tool_call_gym_request_handler_seconds": 0.0,
++            "streaming_tool_call_server_compact_context_registrations": 0,
++            "streaming_tool_call_server_compact_context_hits": 0,
++            "streaming_tool_call_server_compact_context_rebuild_seconds": 0.0,
++            "streaming_tool_call_server_compact_context_registration_seconds": 0.0,
+         }
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -1,5 +1,6 @@
+ from unittest.mock import AsyncMock, MagicMock
+ 
++import orjson
+ import pytest
+ from omegaconf import OmegaConf
+ 
+@@ -11,6 +12,10 @@ from openhands.agenthub.nemo_gym_client import (
+ )
+ 
+ 
++def _streaming_request_json(request_call):
++    return orjson.loads(request_call.kwargs["data"])
++
++
+ def test_streaming_context_matches_empty_assistant_content_serializer(monkeypatch):
+     client = NemoGymClient.__new__(NemoGymClient)
+     monkeypatch.setattr(
+@@ -110,25 +115,28 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+     assert result["sequence_no"] == 0
+     assert result["chunk_tokens"] == 0
+     assert result["client_payload_build_seconds"] >= 0
++    assert result["client_payload_serialize_seconds"] >= 0
++    assert result["client_request_bytes"] > 0
++    assert result["client_compact_context_requests"] == 0
+     assert result["client_http_round_trip_seconds"] >= 0
+     assert result["client_response_json_seconds"] >= 0
+     client.ng_server_client.post.assert_not_awaited()
+     request_call = http_session.post.await_args
+-    assert request_call.args == (
+-        "http://model-host:1234/v1/streaming_tool_call/start",
+-    )
++    assert request_call.args == ("http://model-host:1234/v1/streaming_tool_call/start",)
+     request = request_call.kwargs
+     assert request["cookies"] == {"session": "sticky"}
+-    assert request["json"]["chat_completion"]["messages"][-1] == {
++    assert request["headers"] == {"Content-Type": "application/json"}
++    request_json = _streaming_request_json(request_call)
++    assert request_json["chat_completion"]["messages"][-1] == {
+         "role": "tool",
+         "content": "partial output",
+         "tool_call_id": "call",
+         "name": "execute_bash",
+     }
+-    assert request["json"]["chat_completion"]["messages"][-2][
++    assert request_json["chat_completion"]["messages"][-2][
+         "generation_token_ids"
+     ] == [3]
+-    assert request["json"]["exact_incremental_tokenizer"] is True
++    assert request_json["exact_incremental_tokenizer"] is True
+ 
+     await client.streaming_tool_call_request(
+         action="tokenize",
+@@ -138,7 +146,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         final=True,
+         http_session=http_session,
+     )
+-    final_request = http_session.post.await_args.kwargs["json"]
++    final_request = _streaming_request_json(http_session.post.await_args)
+     assert final_request["max_candidates"] == 256
+     assert final_request["candidate_ttl_seconds"] == 900
+ 
+@@ -151,7 +159,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         prefill=True,
+         http_session=http_session,
+     )
+-    prefill_request = http_session.post.await_args.kwargs["json"]
++    prefill_request = _streaming_request_json(http_session.post.await_args)
+     assert prefill_request["prefill"] is True
+     assert prefill_request["prefill_continuation"] is False
+ 
+@@ -165,7 +173,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         prefill_continuation=True,
+         http_session=http_session,
+     )
+-    continuation_request = http_session.post.await_args.kwargs["json"]
++    continuation_request = _streaming_request_json(http_session.post.await_args)
+     assert continuation_request["prefill"] is True
+     assert continuation_request["prefill_continuation"] is True
+ 
+@@ -180,7 +188,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         prefill_from_required_prefix=True,
+         http_session=http_session,
+     )
+-    deferred_request = http_session.post.await_args.kwargs["json"]
++    deferred_request = _streaming_request_json(http_session.post.await_args)
+     assert deferred_request["prefill_from_required_prefix"] is True
+ 
+     await client.streaming_tool_call_request(
+@@ -193,7 +201,7 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         finalize_from_required_prefix=True,
+         http_session=http_session,
+     )
+-    short_final_request = http_session.post.await_args.kwargs["json"]
++    short_final_request = _streaming_request_json(http_session.post.await_args)
+     assert short_final_request["finalize_from_required_prefix"] is True
+ 
+     await client.streaming_tool_call_request(
+@@ -202,13 +210,112 @@ async def test_streaming_request_uses_loop_local_session(monkeypatch):
+         context=context,
+         http_session=http_session,
+     )
+-    abort_request = http_session.post.await_args.kwargs["json"]
++    abort_request = _streaming_request_json(http_session.post.await_args)
+     assert abort_request == {
+         "session_id": "session",
+         "exact_incremental_tokenizer": True,
+     }
+ 
+ 
++@pytest.mark.asyncio
++async def test_compact_streaming_request_sends_context_once(monkeypatch):
++    client = NemoGymClient.__new__(NemoGymClient)
++    client.ng_server_client = MagicMock()
++    client.ng_server_client.post = AsyncMock()
++    client.ng_server_client.global_config_dict = OmegaConf.create(
++        {
++            "policy_model": {
++                "responses_api_models": {
++                    "vllm_model": {"host": "model-host", "port": 1234}
++                }
++            }
++        }
++    )
++    client.model_server_cookies = {"session": "sticky"}
++    http_session = MagicMock()
++    response = MagicMock()
++    response.cookies = {"session": "sticky"}
++    http_session.post = AsyncMock(return_value=response)
++    monkeypatch.setattr(client_module, "raise_for_status", AsyncMock())
++    monkeypatch.setattr(
++        client_module,
++        "get_response_json",
++        AsyncMock(return_value={"sequence_no": 0}),
++    )
++    monkeypatch.setenv("NEMO_GYM_MODEL_SERVER_NAME", "policy_model")
++    context = StreamingToolCallContext(
++        client=client,
++        response_id="response",
++        tool_call_id="call",
++        function_name="execute_bash",
++        chat_completion={
++            "messages": [
++                {"role": "user", "content": "fix it"},
++                {
++                    "role": "assistant",
++                    "content": "",
++                    "tool_calls": [],
++                    "prompt_token_ids": [1, 2],
++                    "generation_token_ids": [3],
++                    "generation_log_probs": [-0.1],
++                },
++            ],
++            "tools": [],
++        },
++        config={
++            "enabled": True,
++            "exact_incremental_tokenizer": True,
++            "compact_request_context": True,
++            "max_sessions": 256,
++            "session_ttl_seconds": 900,
++        },
++    )
++
++    await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="session",
++        context=context,
++        sequence_no=0,
++        tool_output="first bucket",
++        prefill=True,
++        prefill_continuation=True,
++        http_session=http_session,
++    )
++    initial_call = http_session.post.await_args
++    initial_request = _streaming_request_json(initial_call)
++    initial_request_bytes = len(initial_call.kwargs["data"])
++    assert initial_request["compact_context"] is True
++    assert initial_request["max_contexts"] == 256
++    assert initial_request["context_ttl_seconds"] == 900
++    assert initial_request["chat_completion"]["messages"][-1]["content"] == (
++        "first bucket"
++    )
++
++    result = await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="session",
++        context=context,
++        sequence_no=1,
++        tool_output="first bucket plus more output",
++        prefill=True,
++        prefill_continuation=True,
++        http_session=http_session,
++    )
++    compact_call = http_session.post.await_args
++    compact_request = _streaming_request_json(compact_call)
++    assert compact_request == {
++        "session_id": "session",
++        "exact_incremental_tokenizer": True,
++        "compact_context": True,
++        "tool_output": "first bucket plus more output",
++        "sequence_no": 1,
++        "prefill": True,
++        "prefill_continuation": True,
++    }
++    assert len(compact_call.kwargs["data"]) < initial_request_bytes
++    assert result["client_compact_context_requests"] == 1
++
++
+ @pytest.mark.asyncio
+ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     client = NemoGymClient.__new__(NemoGymClient)
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -895,11 +895,22 @@ class TestLocalRuntime:
+                 "final_prefix_tokenizations": 1,
+                 "reuse_id": "runtime-session:response:call",
+                 "client_payload_build_seconds": 0.01,
++                "client_payload_serialize_seconds": 0.002,
++                "client_request_bytes": 1234,
++                "client_compact_context_requests": 1,
+                 "client_http_round_trip_seconds": 0.1,
+                 "client_response_json_seconds": 0.005,
++                "gym_compact_context_registrations": 1,
++                "gym_compact_context_hits": 1,
++                "gym_compact_context_rebuild_seconds": 0.003,
++                "gym_compact_context_registration_seconds": 0.004,
+                 "gym_preprocess_seconds": 0.02,
+                 "gym_vllm_request_seconds": 0.05,
+                 "gym_request_handler_seconds": 0.08,
++                "server_compact_context_registrations": 1,
++                "server_compact_context_hits": 1,
++                "server_compact_context_rebuild_seconds": 0.005,
++                "server_compact_context_registration_seconds": 0.006,
+             }
+         )
+         context = StreamingToolCallContext(
+@@ -970,11 +981,22 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_prompt_reuse_candidates"] == 1
+         assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
+         assert metrics["streaming_tool_call_client_payload_build_seconds"] == 0.01
++        assert metrics["streaming_tool_call_client_payload_serialize_seconds"] == 0.002
++        assert metrics["streaming_tool_call_client_request_bytes"] == 1234
++        assert metrics["streaming_tool_call_client_compact_context_requests"] == 1
+         assert metrics["streaming_tool_call_client_http_round_trip_seconds"] == 0.1
+         assert metrics["streaming_tool_call_client_response_json_seconds"] == 0.005
++        assert metrics["streaming_tool_call_gym_compact_context_registrations"] == 1
++        assert metrics["streaming_tool_call_gym_compact_context_hits"] == 1
++        assert metrics["streaming_tool_call_gym_compact_context_rebuild_seconds"] == 0.003
++        assert metrics["streaming_tool_call_gym_compact_context_registration_seconds"] == 0.004
+         assert metrics["streaming_tool_call_gym_preprocess_seconds"] == 0.02
+         assert metrics["streaming_tool_call_gym_vllm_request_seconds"] == 0.05
+         assert metrics["streaming_tool_call_gym_request_handler_seconds"] == 0.08
++        assert metrics["streaming_tool_call_server_compact_context_registrations"] == 1
++        assert metrics["streaming_tool_call_server_compact_context_hits"] == 1
++        assert metrics["streaming_tool_call_server_compact_context_rebuild_seconds"] == 0.005
++        assert metrics["streaming_tool_call_server_compact_context_registration_seconds"] == 0.006
+ 
+     @pytest.mark.asyncio
+     async def test_execute_action_prefills_bucket_after_admission(self):
+@@ -1506,9 +1528,21 @@ class TestLocalRuntime:
+                     "streaming_tool_call_snapshot_revisions": 1,
+                     "streaming_tool_call_nonempty_snapshots": 1,
+                     "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 0,
++                    "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars": 0,
++                    "streaming_tool_call_snapshot_wait_cancellations": 0,
+                     "streaming_tool_call_command_request_seconds": ANY,
+                     "streaming_tool_call_post_command_tail_seconds": ANY,
+                     "streaming_tool_call_snapshot_request_seconds": ANY,
++                    "streaming_tool_call_prefill_race_attempts": 0,
++                    "streaming_tool_call_prefill_race_prefill_first": 0,
++                    "streaming_tool_call_prefill_race_command_first": 0,
++                    "streaming_tool_call_prefill_race_grace_admissions": 0,
++                    "streaming_tool_call_prefill_race_cancellations": 0,
++                    "streaming_tool_call_prefill_race_abort_requests": 0,
++                    "streaming_tool_call_prefill_race_abort_existing_sessions": 0,
++                    "streaming_tool_call_prefill_race_abort_failures": 0,
++                    "streaming_tool_call_prefill_race_abort_seconds": 0.0,
++                    "streaming_tool_call_prefill_race_cancelled_request_seconds": 0.0,
+                     "streaming_tool_call_skipped_no_stable_output": 1,
+                     "streaming_tool_call_skipped_single_snapshot": 1,
+                 },
+@@ -1601,9 +1635,21 @@ class TestLocalRuntime:
+                     "streaming_tool_call_snapshot_revisions": 1,
+                     "streaming_tool_call_nonempty_snapshots": 1,
+                     "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": 1,
++                    "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars": 0,
++                    "streaming_tool_call_snapshot_wait_cancellations": 0,
+                     "streaming_tool_call_command_request_seconds": ANY,
+                     "streaming_tool_call_post_command_tail_seconds": ANY,
+                     "streaming_tool_call_snapshot_request_seconds": ANY,
++                    "streaming_tool_call_prefill_race_attempts": 0,
++                    "streaming_tool_call_prefill_race_prefill_first": 0,
++                    "streaming_tool_call_prefill_race_command_first": 0,
++                    "streaming_tool_call_prefill_race_grace_admissions": 0,
++                    "streaming_tool_call_prefill_race_cancellations": 0,
++                    "streaming_tool_call_prefill_race_abort_requests": 0,
++                    "streaming_tool_call_prefill_race_abort_existing_sessions": 0,
++                    "streaming_tool_call_prefill_race_abort_failures": 0,
++                    "streaming_tool_call_prefill_race_abort_seconds": 0.0,
++                    "streaming_tool_call_prefill_race_cancelled_request_seconds": 0.0,
+                     "streaming_tool_call_skipped_no_stable_output": 1,
+                     "streaming_tool_call_skipped_single_snapshot": 1,
+                 },

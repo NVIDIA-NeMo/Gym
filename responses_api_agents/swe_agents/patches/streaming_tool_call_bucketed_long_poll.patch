@@ -1,0 +1,446 @@
+diff --git a/openhands/runtime/action_execution_server.py b/openhands/runtime/action_execution_server.py
+index 28fa7c96a..5a6d9c812 100644
+--- a/openhands/runtime/action_execution_server.py
++++ b/openhands/runtime/action_execution_server.py
+@@ -2550,7 +2550,11 @@ if __name__ == '__main__':
+         return response
+ 
+     @app.get("/shell_stream_snapshot")
+-    async def get_shell_stream_snapshot():
++    async def get_shell_stream_snapshot(
++        stream_id: str | None = None,
++        min_content_chars: int = 0,
++        timeout_seconds: float = 0.0,
++    ):
+         assert client is not None
+         if client.bash_session is None or not isinstance(
+             client.bash_session, BashSession
+@@ -2559,7 +2563,24 @@ if __name__ == '__main__':
+                 status_code=409,
+                 detail="Shell output streaming is unavailable for this session",
+             )
+-        return client.bash_session.get_stream_snapshot()
++        if min_content_chars < 0:
++            raise HTTPException(
++                status_code=400,
++                detail="Minimum snapshot characters must be non-negative",
++            )
++        if not 0 <= timeout_seconds <= 5:
++            raise HTTPException(
++                status_code=400,
++                detail="Snapshot wait timeout must be between 0 and 5 seconds",
++            )
++        if stream_id is None:
++            return client.bash_session.get_stream_snapshot()
++        return await asyncio.to_thread(
++            client.bash_session.wait_for_stream_snapshot,
++            stream_id=stream_id,
++            min_content_chars=min_content_chars,
++            timeout_seconds=timeout_seconds,
++        )
+ 
+     @app.post("/execute_action")
+     async def execute_action(action_request: ActionRequest):
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 8499bbb11..1774e4e5e 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -670,13 +670,25 @@ class LocalRuntime(ActionExecutionClient):
+         }
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
++        initial_chunk_chars = context.config["initial_chunk_chars"]
+         snapshot_poll_interval = context.config["snapshot_poll_interval_seconds"]
++        snapshot_long_poll_timeout = context.config[
++            "snapshot_long_poll_timeout_seconds"
++        ]
+         flush_interval = context.config["flush_interval_seconds"]
++        if min_chunk_chars <= 0 or initial_chunk_chars <= 0:
++            raise ValueError("streaming character buckets must be positive")
++        if not 0 < snapshot_long_poll_timeout <= 5:
++            raise ValueError(
++                "snapshot long-poll timeout must be between 0 and 5 seconds"
++            )
+         snapshot_polls = 0
+         snapshot_revisions = 0
+         nonempty_snapshots = 0
+         snapshots_at_or_above_min_chunk_chars = 0
++        snapshots_at_or_above_initial_chunk_chars = 0
+         snapshot_request_seconds = 0.0
++        snapshot_wait_cancellations = 0
+         streaming_http_session: ClientSession | None = None
+ 
+         def snapshot_metrics() -> dict[str, int]:
+@@ -687,6 +699,12 @@ class LocalRuntime(ActionExecutionClient):
+                 "streaming_tool_call_snapshots_at_or_above_min_chunk_chars": (
+                     snapshots_at_or_above_min_chunk_chars
+                 ),
++                "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars": (
++                    snapshots_at_or_above_initial_chunk_chars
++                ),
++                "streaming_tool_call_snapshot_wait_cancellations": (
++                    snapshot_wait_cancellations
++                ),
+             }
+ 
+         def streaming_timing_metrics() -> dict[str, float]:
+@@ -703,6 +721,43 @@ class LocalRuntime(ActionExecutionClient):
+                 ),
+             }
+ 
++        async def wait_for_bucketed_snapshot(
++            min_content_chars: int,
++        ) -> dict | None:
++            nonlocal snapshot_polls
++            nonlocal snapshot_request_seconds
++            nonlocal snapshot_wait_cancellations
++
++            snapshot_polls += 1
++            request_started_at = time.monotonic()
++            snapshot_task = asyncio.create_task(
++                call_sync_from_async(
++                    lambda: self.session.get(
++                        f"{self.api_url}/shell_stream_snapshot",
++                        params={
++                            "stream_id": response_id,
++                            "min_content_chars": min_content_chars,
++                            "timeout_seconds": snapshot_long_poll_timeout,
++                        },
++                        timeout=snapshot_long_poll_timeout + 1,
++                    )
++                )
++            )
++            completed_tasks, _ = await asyncio.wait(
++                (post_task, snapshot_task),
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++            snapshot_request_seconds += time.monotonic() - request_started_at
++            if post_task in completed_tasks:
++                snapshot_wait_cancellations += 1
++                snapshot_task.cancel()
++                await asyncio.gather(snapshot_task, return_exceptions=True)
++                return None
++
++            snapshot_response = await snapshot_task
++            snapshot_response.raise_for_status()
++            return snapshot_response.json()
++
+         async def tokenize_snapshot(
+             tool_output: str, *, final: bool = False
+         ) -> dict:
+@@ -1116,21 +1171,16 @@ class LocalRuntime(ActionExecutionClient):
+                     and prefill_session_active
+                     and not post_task.done()
+                 ):
+-                    await asyncio.sleep(snapshot_poll_interval)
+-                    if post_task.done():
+-                        break
+-                    snapshot_polls += 1
+-                    snapshot_request_start = time.monotonic()
+-                    snapshot_response = await call_sync_from_async(
+-                        lambda: self.session.get(
+-                            f"{self.api_url}/shell_stream_snapshot"
+-                        )
++                    snapshot_target_chars = (
++                        initial_chunk_chars
++                        if not last_sent_content
++                        else len(last_sent_content) + min_chunk_chars
+                     )
+-                    snapshot_request_seconds += (
+-                        time.monotonic() - snapshot_request_start
++                    snapshot = await wait_for_bucketed_snapshot(
++                        snapshot_target_chars
+                     )
+-                    snapshot_response.raise_for_status()
+-                    snapshot = snapshot_response.json()
++                    if snapshot is None:
++                        break
+                     if snapshot["revision"] == last_revision:
+                         continue
+                     last_revision = snapshot["revision"]
+@@ -1141,6 +1191,8 @@ class LocalRuntime(ActionExecutionClient):
+                     nonempty_snapshots += 1
+                     if len(content) >= min_chunk_chars:
+                         snapshots_at_or_above_min_chunk_chars += 1
++                    if len(content) >= initial_chunk_chars:
++                        snapshots_at_or_above_initial_chunk_chars += 1
+                     if content == last_sent_content:
+                         continue
+                     if last_sent_content and not content.startswith(
+@@ -1150,7 +1202,12 @@ class LocalRuntime(ActionExecutionClient):
+                             "shell output changed a previously streamed prefix"
+                         )
+                     new_characters = len(content) - len(last_sent_content)
+-                    if new_characters < min_chunk_chars:
++                    required_characters = (
++                        initial_chunk_chars
++                        if not last_sent_content
++                        else min_chunk_chars
++                    )
++                    if new_characters < required_characters:
+                         continue
+                     if post_task.done():
+                         break
+diff --git a/openhands/runtime/utils/bash.py b/openhands/runtime/utils/bash.py
+index 7f7a6da33..4c04beabc 100644
+--- a/openhands/runtime/utils/bash.py
++++ b/openhands/runtime/utils/bash.py
+@@ -298,9 +298,10 @@ class BashSession:
+         self._initialized = False
+         self.max_memory_mb = max_memory_mb
+         self.memory_monitor = None
+-        self._stream_lock = threading.Lock()
++        self._stream_condition = threading.Condition()
+         self._stream_revision = 0
+         self._stream_content = ""
++        self._stream_id: str | None = None
+ 
+     def initialize(self) -> None:
+         self.server = libtmux.Server()
+@@ -385,18 +386,46 @@ class BashSession:
+         )
+         return content
+ 
+-    def get_stream_snapshot(self) -> dict[str, int | str]:
++    def get_stream_snapshot(self) -> dict[str, int | str | None]:
+         """Return the latest in-progress command output snapshot."""
+-        with self._stream_lock:
++        with self._stream_condition:
+             return {
+                 "revision": self._stream_revision,
+                 "content": self._stream_content,
++                "stream_id": self._stream_id,
+             }
+ 
+-    def _reset_stream_snapshot(self) -> None:
+-        with self._stream_lock:
++    def wait_for_stream_snapshot(
++        self,
++        *,
++        stream_id: str,
++        min_content_chars: int,
++        timeout_seconds: float,
++    ) -> dict[str, int | str | None]:
++        """Wait until one command's output reaches an absolute character target."""
++        if min_content_chars < 0:
++            raise ValueError("minimum snapshot characters must be non-negative")
++        if timeout_seconds < 0:
++            raise ValueError("snapshot wait timeout must be non-negative")
++
++        with self._stream_condition:
++            self._stream_condition.wait_for(
++                lambda: self._stream_id == stream_id
++                and len(self._stream_content) >= min_content_chars,
++                timeout=timeout_seconds,
++            )
++            return {
++                "revision": self._stream_revision,
++                "content": self._stream_content,
++                "stream_id": self._stream_id,
++            }
++
++    def _reset_stream_snapshot(self, stream_id: str | None) -> None:
++        with self._stream_condition:
+             self._stream_revision += 1
+             self._stream_content = ""
++            self._stream_id = stream_id
++            self._stream_condition.notify_all()
+ 
+     def _update_stream_snapshot(
+         self,
+@@ -410,11 +439,12 @@ class BashSession:
+         )
+         command_output = _remove_command_prefix(raw_command_output, command).rstrip()
+         command_output = CmdOutputObservation._maybe_truncate(command_output)
+-        with self._stream_lock:
++        with self._stream_condition:
+             if command_output == self._stream_content:
+                 return
+             self._stream_content = command_output
+             self._stream_revision += 1
++            self._stream_condition.notify_all()
+ 
+     def close(self) -> None:
+         """Clean up the session."""
+@@ -785,7 +815,13 @@ class BashSession:
+         )
+         initial_ps1_count = len(initial_ps1_matches)
+         logger.debug(f"Initial PS1 count: {initial_ps1_count}")
+-        self._reset_stream_snapshot()
++        tool_call_metadata = action.tool_call_metadata
++        model_response = (
++            tool_call_metadata.model_response
++            if tool_call_metadata is not None
++            else None
++        )
++        self._reset_stream_snapshot(getattr(model_response, "id", None))
+ 
+         start_time = time.time()
+         last_change_time = start_time
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index 9a826fe0b..4eef6ce6c 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -420,7 +420,9 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 10,
++                "initial_chunk_chars": 10,
+                 "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -577,7 +579,9 @@ class TestLocalRuntime:
+                 "tokenizer_only": True,
+                 "exact_incremental_tokenizer": True,
+                 "min_chunk_chars": 10,
++                "initial_chunk_chars": 10,
+                 "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -741,7 +745,9 @@ class TestLocalRuntime:
+                 "final_only_prefill": True,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
+                 "snapshot_poll_interval_seconds": 0.05,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.25,
+                 "request_timeout_seconds": 5,
+             },
+@@ -928,7 +934,9 @@ class TestLocalRuntime:
+                 "prefill_after_admission": True,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
+                 "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.25,
+                 "request_timeout_seconds": 5,
+             },
+@@ -959,6 +967,14 @@ class TestLocalRuntime:
+ 
+         assert response is post_response
+         assert session.get.call_count >= 2
++        assert [
++            request.kwargs["params"]["min_content_chars"]
++            for request in session.get.call_args_list[:2]
++        ] == [128, 556]
++        assert all(
++            request.kwargs["params"]["stream_id"] == "response"
++            for request in session.get.call_args_list[:2]
++        )
+         requests = streaming_client.streaming_tool_call_request.await_args_list
+         assert [request.kwargs["sequence_no"] for request in requests] == [
+             0,
+@@ -1002,6 +1018,13 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_completed_chunks"] == 2
+         assert metrics["streaming_tool_call_dummy_tokens"] == 2
+         assert metrics["streaming_tool_call_prefix_matches"] == 1
++        assert (
++            metrics[
++                "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars"
++            ]
++            == 2
++        )
++        assert metrics["streaming_tool_call_snapshot_wait_cancellations"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"
+         )
+@@ -1050,7 +1073,9 @@ class TestLocalRuntime:
+                 "final_only_prefill": True,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
+                 "snapshot_poll_interval_seconds": 0.05,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.25,
+                 "request_timeout_seconds": 5,
+             },
+@@ -1142,7 +1167,9 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
+                 "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+@@ -1235,7 +1262,9 @@ class TestLocalRuntime:
+             config={
+                 "enabled": True,
+                 "min_chunk_chars": 1,
++                "initial_chunk_chars": 1,
+                 "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
+                 "flush_interval_seconds": 0.001,
+                 "request_timeout_seconds": 5,
+             },
+diff --git a/tests/unit/runtime/utils/test_bash_session.py b/tests/unit/runtime/utils/test_bash_session.py
+index 9af6b9f77..d06ac4b9c 100644
+--- a/tests/unit/runtime/utils/test_bash_session.py
++++ b/tests/unit/runtime/utils/test_bash_session.py
+@@ -1,5 +1,6 @@
+ import os
+ import tempfile
++import threading
+ import time
+ 
+ from openhands.core.logger import openhands_logger as logger
+@@ -34,6 +35,52 @@ def test_session_initialization():
+     session.close()
+ 
+ 
++def test_wait_for_stream_snapshot_requires_matching_stream_and_target():
++    session = BashSession.__new__(BashSession)
++    session._stream_condition = threading.Condition()
++    session._stream_revision = 0
++    session._stream_content = ""
++    session._stream_id = None
++    result = {}
++    wait_started = threading.Event()
++
++    def wait_for_snapshot():
++        wait_started.set()
++        result.update(
++            session.wait_for_stream_snapshot(
++                stream_id="current-command",
++                min_content_chars=128,
++                timeout_seconds=1,
++            )
++        )
++
++    waiter = threading.Thread(target=wait_for_snapshot)
++    waiter.start()
++    assert wait_started.wait(timeout=1)
++
++    with session._stream_condition:
++        session._stream_id = "previous-command"
++        session._stream_content = "x" * 256
++        session._stream_revision += 1
++        session._stream_condition.notify_all()
++    time.sleep(0.01)
++    assert waiter.is_alive()
++
++    session._reset_stream_snapshot("current-command")
++    with session._stream_condition:
++        session._stream_content = "x" * 128
++        session._stream_revision += 1
++        session._stream_condition.notify_all()
++
++    waiter.join(timeout=1)
++    assert not waiter.is_alive()
++    assert result == {
++        "revision": 3,
++        "content": "x" * 128,
++        "stream_id": "current-command",
++    }
++
++
+ def test_cwd_property(tmp_path):
+     session = BashSession(work_dir=tmp_path)
+     session.initialize()

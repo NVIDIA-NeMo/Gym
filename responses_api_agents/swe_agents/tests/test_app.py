@@ -378,10 +378,18 @@ class TestSWEBenchMetrics:
             patch_exists=True,
             ray_queue_time=1.5,
             streaming_tool_call_snapshot_polls=2,
+            streaming_tool_call_fallback_request_errors=1,
+            streaming_tool_call_prefill_reuse_model_call_seconds=2.5,
+            streaming_tool_call_prefill_effective_requests=3,
+            streaming_tool_call_stable_first_snapshot_prefill_successes=2,
         )
         assert metrics.resolved is True
         assert metrics.ray_queue_time == 1.5
         assert metrics.streaming_tool_call_snapshot_polls == 2
+        assert metrics.streaming_tool_call_fallback_request_errors == 1
+        assert metrics.streaming_tool_call_prefill_reuse_model_call_seconds == 2.5
+        assert metrics.streaming_tool_call_prefill_effective_requests == 3
+        assert metrics.streaming_tool_call_stable_first_snapshot_prefill_successes == 2
 
     def test_finalize_failed_agent_command_metrics(self) -> None:
         metrics = SWEBenchMetrics(
@@ -472,6 +480,18 @@ class TestUpdateMetrics:
             assert result == {"a": 1, "d": 5}
             assert "b" not in result
             assert "c" not in result
+
+    @pytest.mark.parametrize("invalid_contents", ["", "{"])
+    def test_recovers_from_interrupted_writer(self, invalid_contents: str) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            fpath = directory / "metrics.json"
+            fpath.write_text(invalid_contents)
+
+            update_metrics(fpath, {"recovered": 1})
+
+            assert json.loads(fpath.read_text()) == {"recovered": 1}
+            assert list(directory.glob(".metrics.json.*.tmp")) == []
 
 
 ########################################
@@ -982,11 +1002,53 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
+    def test_cached_cancellable_patch_gets_effective_prefill_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            command_results = [
+                MagicMock(returncode=1),  # deferred-abort reverse check
+                MagicMock(returncode=1),  # skip-unadmitted-finalization reverse check
+                MagicMock(returncode=1),  # cached-token-metrics reverse check
+                MagicMock(returncode=1),  # background-prefill-metrics reverse check
+                MagicMock(returncode=1),  # effective-prefill reverse check
+                MagicMock(returncode=0),  # cancellable-long-poll reverse check
+                MagicMock(returncode=0),  # effective-prefill apply check
+                MagicMock(returncode=0),  # effective-prefill apply
+            ]
+
+            with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
+                processor._apply_streaming_tool_call_patch(Path(tmpdir))
+
+            commands = [call.args[0] for call in subprocess_run.call_args_list]
+            assert len(commands) == 8
+            assert commands[-1][2].endswith("streaming_tool_call_effective_prefill.patch")
+
     def test_cached_admission_patch_gets_remaining_upgrades(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
             command_results = [
+                MagicMock(returncode=1),  # deferred-abort reverse check
+                MagicMock(returncode=1),  # skip-unadmitted-finalization reverse check
+                MagicMock(returncode=1),  # cached-token-metrics reverse check
+                MagicMock(returncode=1),  # background-prefill-metrics reverse check
+                MagicMock(returncode=1),  # effective-prefill reverse check
+                MagicMock(returncode=1),  # cancellable-long-poll reverse check
+                MagicMock(returncode=1),  # model-call-attribution reverse check
+                MagicMock(returncode=1),  # compact-request-context reverse check
+                MagicMock(returncode=1),  # request-timing reverse check
+                MagicMock(returncode=1),  # error-observation reverse check
+                MagicMock(returncode=1),  # fallback-metrics reverse check
+                MagicMock(returncode=1),  # deferred-admission reverse check
+                MagicMock(returncode=1),  # server-timing reverse check
+                MagicMock(returncode=1),  # bucketed-long-poll reverse check
+                MagicMock(returncode=1),  # prefill-after-admission reverse check
+                MagicMock(returncode=1),  # prefix-seed-metrics reverse check
+                MagicMock(returncode=1),  # prefill-race reverse check
+                MagicMock(returncode=1),  # final-only prefill reverse check
+                MagicMock(returncode=1),  # final-only tokenizer reverse check
+                MagicMock(returncode=1),  # counterfactual-metrics reverse check
                 MagicMock(returncode=1),  # action-timeout reverse check
                 MagicMock(returncode=1),  # exact incremental tokenizer reverse check
                 MagicMock(returncode=1),  # prompt-reuse reverse check
@@ -1008,34 +1070,88 @@ class TestOpenHandsHarnessProcessor:
                 MagicMock(returncode=0),  # exact incremental tokenizer apply
                 MagicMock(returncode=0),  # action-timeout apply check
                 MagicMock(returncode=0),  # action-timeout apply
+                MagicMock(returncode=0),  # counterfactual-metrics apply check
+                MagicMock(returncode=0),  # counterfactual-metrics apply
+                MagicMock(returncode=0),  # final-only tokenizer apply check
+                MagicMock(returncode=0),  # final-only tokenizer apply
+                MagicMock(returncode=0),  # final-only prefill apply check
+                MagicMock(returncode=0),  # final-only prefill apply
+                MagicMock(returncode=0),  # prefill-race apply check
+                MagicMock(returncode=0),  # prefill-race apply
+                MagicMock(returncode=0),  # prefix-seed-metrics apply check
+                MagicMock(returncode=0),  # prefix-seed-metrics apply
+                MagicMock(returncode=0),  # prefill-after-admission apply check
+                MagicMock(returncode=0),  # prefill-after-admission apply
+                MagicMock(returncode=0),  # bucketed-long-poll apply check
+                MagicMock(returncode=0),  # bucketed-long-poll apply
+                MagicMock(returncode=0),  # server-timing apply check
+                MagicMock(returncode=0),  # server-timing apply
+                MagicMock(returncode=0),  # deferred-admission apply check
+                MagicMock(returncode=0),  # deferred-admission apply
+                MagicMock(returncode=0),  # fallback-metrics apply check
+                MagicMock(returncode=0),  # fallback-metrics apply
+                MagicMock(returncode=0),  # error-observation apply check
+                MagicMock(returncode=0),  # error-observation apply
+                MagicMock(returncode=0),  # request-timing apply check
+                MagicMock(returncode=0),  # request-timing apply
+                MagicMock(returncode=0),  # compact-request-context apply check
+                MagicMock(returncode=0),  # compact-request-context apply
+                MagicMock(returncode=0),  # model-call-attribution apply check
+                MagicMock(returncode=0),  # model-call-attribution apply
+                MagicMock(returncode=0),  # cancellable-long-poll apply check
+                MagicMock(returncode=0),  # cancellable-long-poll apply
+                MagicMock(returncode=0),  # effective-prefill apply check
+                MagicMock(returncode=0),  # effective-prefill apply
+                MagicMock(returncode=0),  # background-prefill-metrics apply check
+                MagicMock(returncode=0),  # background-prefill-metrics apply
+                MagicMock(returncode=0),  # cached-token-metrics apply check
+                MagicMock(returncode=0),  # cached-token-metrics apply
+                MagicMock(returncode=0),  # skip-unadmitted-finalization apply check
+                MagicMock(returncode=0),  # skip-unadmitted-finalization apply
+                MagicMock(returncode=0),  # deferred-abort apply check
+                MagicMock(returncode=0),  # deferred-abort apply
             ]
 
             with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
                 processor._apply_streaming_tool_call_patch(Path(tmpdir))
 
             commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 21
-            assert commands[0][2:4] == ["--reverse", "--check"]
-            assert commands[1][2:4] == ["--reverse", "--check"]
-            assert commands[2][2:4] == ["--reverse", "--check"]
-            assert commands[3][2:4] == ["--reverse", "--check"]
-            assert commands[4][2:4] == ["--reverse", "--check"]
-            assert commands[5][2:4] == ["--reverse", "--check"]
-            assert commands[6][2:4] == ["--reverse", "--check"]
-            assert commands[7][2:4] == ["--reverse", "--check"]
-            assert commands[8][2:4] == ["--reverse", "--check"]
-            assert commands[9][2] == "--check"
-            assert commands[10][2].endswith("streaming_tool_call_tokenizer_only.patch")
-            assert commands[11][2] == "--check"
-            assert commands[12][2].endswith("streaming_tool_call_valid_action_metrics.patch")
-            assert commands[13][2] == "--check"
-            assert commands[14][2].endswith("openhands_runtime_breakdown.patch")
-            assert commands[15][2] == "--check"
-            assert commands[16][2].endswith("streaming_tool_call_prompt_reuse.patch")
-            assert commands[17][2] == "--check"
-            assert commands[18][2].endswith("streaming_tool_call_exact_incremental_tokenizer.patch")
-            assert commands[19][2] == "--check"
-            assert commands[20][2].endswith("streaming_tool_call_action_timeout.patch")
+            assert len(commands) == 81
+            for command in commands[:29]:
+                assert command[2:4] == ["--reverse", "--check"]
+            expected_applied_patches = [
+                "streaming_tool_call_tokenizer_only.patch",
+                "streaming_tool_call_valid_action_metrics.patch",
+                "openhands_runtime_breakdown.patch",
+                "streaming_tool_call_prompt_reuse.patch",
+                "streaming_tool_call_exact_incremental_tokenizer.patch",
+                "streaming_tool_call_action_timeout.patch",
+                "streaming_tool_call_counterfactual_tokenizer_metrics.patch",
+                "streaming_tool_call_final_only_incremental_tokenizer.patch",
+                "streaming_tool_call_final_only_prefill.patch",
+                "streaming_tool_call_prefill_race.patch",
+                "streaming_tool_call_prefix_seed_metrics.patch",
+                "streaming_tool_call_prefill_after_admission.patch",
+                "streaming_tool_call_bucketed_long_poll.patch",
+                "streaming_tool_call_server_timing.patch",
+                "streaming_tool_call_deferred_admission.patch",
+                "streaming_tool_call_fallback_metrics.patch",
+                "streaming_tool_call_error_observation.patch",
+                "streaming_tool_call_request_timing.patch",
+                "streaming_tool_call_compact_request_context.patch",
+                "streaming_tool_call_model_call_attribution.patch",
+                "streaming_tool_call_cancellable_long_poll.patch",
+                "streaming_tool_call_effective_prefill.patch",
+                "streaming_tool_call_background_prefill_metrics.patch",
+                "streaming_tool_call_cached_token_metrics.patch",
+                "streaming_tool_call_skip_unadmitted_finalization.patch",
+                "streaming_tool_call_deferred_abort.patch",
+            ]
+            for patch_index, patch_name in enumerate(expected_applied_patches):
+                check_command_index = 29 + 2 * patch_index
+                assert commands[check_command_index][2] == "--check"
+                assert commands[check_command_index][3].endswith(patch_name)
+                assert commands[check_command_index + 1][2].endswith(patch_name)
 
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1922,6 +2038,9 @@ class TestSWEBenchWrapperSetupParams:
             assert params.eval_command is not None
             assert params.agent_command is not None
             assert params.metrics_fpath.exists()
+            initialized_metrics = json.loads(params.metrics_fpath.read_text())
+            assert initialized_metrics["streaming_tool_call_prefill_effective_requests"] == 0
+            assert initialized_metrics["streaming_tool_call_stable_first_snapshot_prefill_successes"] == 0
 
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

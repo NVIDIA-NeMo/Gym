@@ -1,0 +1,418 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -592,12 +592,18 @@
+         exact_incremental_tokenizer = tokenizer_only and bool(
+             context.config.get("exact_incremental_tokenizer")
+         )
++        final_only_incremental_tokenizer = (
++            exact_incremental_tokenizer
++            and bool(context.config.get("final_only_incremental_tokenizer"))
++        )
+         incremental_started = False
+         session_started = False
+         last_sent_content = ""
+         last_revision = -1
+         last_send_time = time.monotonic()
+         streaming_request_seconds = 0.0
++        incremental_tokenizer_start_seconds = 0.0
++        incremental_tokenizer_final_seconds = 0.0
+         prefill_requests = 0
+         prefill_tokens = 0
+         tokenizer_requests = 0
+@@ -663,6 +669,8 @@
+             nonlocal incremental_reused_tokens
+             nonlocal incremental_rollback_tokens
+             nonlocal incremental_valid
++            nonlocal incremental_tokenizer_final_seconds
++            nonlocal incremental_tokenizer_start_seconds
+             nonlocal streaming_request_seconds
+             nonlocal tokenizer_requests
+             nonlocal tokenizer_tokens
+@@ -678,7 +686,12 @@
+                 final=final,
+                 http_session=streaming_http_session,
+             )
+-            streaming_request_seconds += time.monotonic() - request_start_time
++            request_seconds = time.monotonic() - request_start_time
++            streaming_request_seconds += request_seconds
++            if final:
++                incremental_tokenizer_final_seconds += request_seconds
++            elif sequence_no == 0:
++                incremental_tokenizer_start_seconds += request_seconds
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
+             incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
+@@ -709,6 +722,9 @@
+                 "streaming_tool_call_exact_incremental_tokenizer_actions": int(
+                     exact_incremental_tokenizer and incremental_started
+                 ),
++                "streaming_tool_call_final_only_incremental_tokenizer_actions": int(
++                    final_only_incremental_tokenizer
++                ),
+                 "streaming_tool_call_incremental_tokenizer_requests": (
+                     tokenizer_requests
+                 ),
+@@ -739,84 +755,131 @@
+                 "streaming_tool_call_incremental_tokenizer_seconds": (
+                     streaming_request_seconds if tokenizer_only else 0.0
+                 ),
++                "streaming_tool_call_incremental_tokenizer_start_seconds": (
++                    incremental_tokenizer_start_seconds
++                ),
++                "streaming_tool_call_incremental_tokenizer_final_seconds": (
++                    incremental_tokenizer_final_seconds
++                ),
+                 **counterfactual_tokenizer_metrics,
+             }
+ 
+         try:
+-            while not post_task.done():
+-                await asyncio.sleep(snapshot_poll_interval)
+-                if post_task.done():
+-                    break
+-                snapshot_polls += 1
+-                snapshot_request_start = time.monotonic()
+-                snapshot_response = await call_sync_from_async(
+-                    lambda: self.session.get(f"{self.api_url}/shell_stream_snapshot")
++            if final_only_incremental_tokenizer:
++                streaming_http_session = ClientSession(
++                    cookie_jar=DummyCookieJar(),
++                    timeout=ClientTimeout(
++                        total=context.config["request_timeout_seconds"],
++                    ),
+                 )
+-                snapshot_request_seconds += (
+-                    time.monotonic() - snapshot_request_start
+-                )
+-                snapshot_response.raise_for_status()
+-                snapshot = snapshot_response.json()
+-                if snapshot["revision"] == last_revision:
+-                    continue
+-                last_revision = snapshot["revision"]
+-                snapshot_revisions += 1
+-                content = snapshot["content"]
+-                if not content:
+-                    continue
+-                nonempty_snapshots += 1
+-                if len(content) >= min_chunk_chars:
+-                    snapshots_at_or_above_min_chunk_chars += 1
+-                if content == last_sent_content:
+-                    continue
+-                expected_prefix = last_sent_content or pending_start_content
+-                if expected_prefix and not content.startswith(expected_prefix):
+-                    raise RuntimeError(
+-                        "shell output changed a previously streamed prefix"
++                # Seed the exact session with the prompt before command output is
++                # available. This request overlaps the running command and makes
++                # every eligible command independent of shell snapshot timing.
++                await tokenize_snapshot("")
++                incremental_started = True
++                sequence_no += 1
++                last_send_time = time.monotonic()
++            else:
++                while not post_task.done():
++                    await asyncio.sleep(snapshot_poll_interval)
++                    if post_task.done():
++                        break
++                    snapshot_polls += 1
++                    snapshot_request_start = time.monotonic()
++                    snapshot_response = await call_sync_from_async(
++                        lambda: self.session.get(
++                            f"{self.api_url}/shell_stream_snapshot"
++                        )
+                     )
+-
+-                if not incremental_started:
+-                    if pending_start_content is None:
+-                        # A single candidate cannot prove stable tokens. Keep it local
+-                        # until a later snapshot demonstrates that the command is still
+-                        # producing append-only output.
+-                        pending_start_content = content
++                    snapshot_request_seconds += (
++                        time.monotonic() - snapshot_request_start
++                    )
++                    snapshot_response.raise_for_status()
++                    snapshot = snapshot_response.json()
++                    if snapshot["revision"] == last_revision:
+                         continue
+-
+-                    if len(content) < min_chunk_chars:
++                    last_revision = snapshot["revision"]
++                    snapshot_revisions += 1
++                    content = snapshot["content"]
++                    if not content:
+                         continue
+-                else:
+-                    new_characters = len(content) - len(last_sent_content)
+-                    elapsed = time.monotonic() - last_send_time
+-                    if (
+-                        new_characters < min_chunk_chars
+-                        and elapsed < flush_interval
+-                    ):
++                    nonempty_snapshots += 1
++                    if len(content) >= min_chunk_chars:
++                        snapshots_at_or_above_min_chunk_chars += 1
++                    if content == last_sent_content:
+                         continue
++                    expected_prefix = last_sent_content or pending_start_content
++                    if expected_prefix and not content.startswith(expected_prefix):
++                        raise RuntimeError(
++                            "shell output changed a previously streamed prefix"
++                        )
+ 
+-                if post_task.done():
+-                    break
+-                if streaming_http_session is None:
+-                    streaming_http_session = ClientSession(
+-                        cookie_jar=DummyCookieJar(),
+-                        timeout=ClientTimeout(
+-                            total=context.config["request_timeout_seconds"],
+-                        ),
+-                    )
++                    if not incremental_started:
++                        if pending_start_content is None:
++                            # A single candidate cannot prove stable tokens. Keep it
++                            # local until a later snapshot demonstrates that the
++                            # command is still producing append-only output.
++                            pending_start_content = content
++                            continue
++
++                        if len(content) < min_chunk_chars:
++                            continue
++                    else:
++                        new_characters = len(content) - len(last_sent_content)
++                        elapsed = time.monotonic() - last_send_time
++                        if (
++                            new_characters < min_chunk_chars
++                            and elapsed < flush_interval
++                        ):
++                            continue
++
++                    if post_task.done():
++                        break
++                    if streaming_http_session is None:
++                        streaming_http_session = ClientSession(
++                            cookie_jar=DummyCookieJar(),
++                            timeout=ClientTimeout(
++                                total=context.config["request_timeout_seconds"],
++                            ),
++                        )
++
++                    if not incremental_started:
++                        assert pending_start_content is not None
++                        if tokenizer_only:
++                            await tokenize_snapshot(pending_start_content)
++                        else:
++                            request_start_time = time.monotonic()
++                            prefill_result = (
++                                await context.client.streaming_tool_call_request(
++                                    action="start",
++                                    session_id=session_id,
++                                    context=context,
++                                    sequence_no=sequence_no,
++                                    tool_output=pending_start_content,
++                                    http_session=streaming_http_session,
++                                )
++                            )
++                            streaming_request_seconds += (
++                                time.monotonic() - request_start_time
++                            )
++                            prefill_requests += 1
++                            prefill_tokens += prefill_result["chunk_tokens"]
++                            session_started = True
++                        incremental_started = True
++                        sequence_no += 1
++                        last_sent_content = pending_start_content
+ 
+-                if not incremental_started:
+-                    assert pending_start_content is not None
+                     if tokenizer_only:
+-                        await tokenize_snapshot(pending_start_content)
++                        await tokenize_snapshot(content)
+                     else:
+                         request_start_time = time.monotonic()
+                         prefill_result = (
+                             await context.client.streaming_tool_call_request(
+-                                action="start",
++                                action="append",
+                                 session_id=session_id,
+                                 context=context,
+                                 sequence_no=sequence_no,
+-                                tool_output=pending_start_content,
++                                tool_output=content,
+                                 http_session=streaming_http_session,
+                             )
+                         )
+@@ -825,29 +888,9 @@
+                         )
+                         prefill_requests += 1
+                         prefill_tokens += prefill_result["chunk_tokens"]
+-                        session_started = True
+-                    incremental_started = True
+                     sequence_no += 1
+-                    last_sent_content = pending_start_content
+-
+-                if tokenizer_only:
+-                    await tokenize_snapshot(content)
+-                else:
+-                    request_start_time = time.monotonic()
+-                    prefill_result = await context.client.streaming_tool_call_request(
+-                        action="append",
+-                        session_id=session_id,
+-                        context=context,
+-                        sequence_no=sequence_no,
+-                        tool_output=content,
+-                        http_session=streaming_http_session,
+-                    )
+-                    streaming_request_seconds += time.monotonic() - request_start_time
+-                    prefill_requests += 1
+-                    prefill_tokens += prefill_result["chunk_tokens"]
+-                sequence_no += 1
+-                last_sent_content = content
+-                last_send_time = time.monotonic()
++                    last_sent_content = content
++                    last_send_time = time.monotonic()
+ 
+             response = await post_task
+             if not incremental_started:
+@@ -895,6 +938,9 @@
+                         "streaming_tool_call_valid_tokenizer_actions": int(
+                             incremental_valid
+                         ),
++                        "streaming_tool_call_valid_final_only_incremental_tokenizer_actions": int(
++                            final_only_incremental_tokenizer and incremental_valid
++                        ),
+                         "streaming_tool_call_prompt_reuse_candidates": 1,
+                         "streaming_tool_call_overhead_seconds": (
+                             streaming_request_seconds
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -658,6 +658,128 @@
+             "runtime-session:response:call"
+         )
+ 
++    @pytest.mark.asyncio
++    async def test_execute_action_final_only_tokenizer_needs_no_snapshots(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="final command output",
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        session.post.side_effect = post
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++
++        async def tokenize_request(**kwargs):
++            assert kwargs["action"] == "tokenize"
++            if kwargs["sequence_no"] == 0:
++                release_post.set()
++            result = {
++                "sequence_no": kwargs["sequence_no"],
++                "token_count": 17,
++                "encoded_chars": 20 if kwargs["final"] else 0,
++                "encoded_tokens": 4 if kwargs["final"] else 0,
++                "reused_tokens": 13 if kwargs["final"] else 0,
++                "rollback_tokens": 2 if kwargs["final"] else 0,
++                "checkpoint_count": int(kwargs["sequence_no"] == 0),
++                "checkpoint_tokens": 13 if kwargs["sequence_no"] == 0 else 0,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
++            }
++            if kwargs["final"]:
++                result["reuse_id"] = "runtime-session:response:call"
++            return result
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=tokenize_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "min_chunk_chars": 256,
++                "snapshot_poll_interval_seconds": 0.05,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        session.get.assert_not_called()
++        requests = streaming_client.streaming_tool_call_request.await_args_list
++        assert [request.kwargs["action"] for request in requests] == [
++            "tokenize",
++            "tokenize",
++        ]
++        assert [request.kwargs["sequence_no"] for request in requests] == [0, 1]
++        assert [request.kwargs["tool_output"] for request in requests] == [
++            "",
++            final_observation.to_agent_observation(),
++        ]
++        assert [request.kwargs["final"] for request in requests] == [False, True]
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_snapshot_polls"] == 0
++        assert metrics["streaming_tool_call_tokenizer_only_actions"] == 1
++        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
++        assert (
++            metrics[
++                "streaming_tool_call_final_only_incremental_tokenizer_actions"
++            ]
++            == 1
++        )
++        assert metrics[
++            "streaming_tool_call_valid_final_only_incremental_tokenizer_actions"
++        ] == 1
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call"
++        )
++
+     def test_execute_action_skips_streaming_for_short_completed_output(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"

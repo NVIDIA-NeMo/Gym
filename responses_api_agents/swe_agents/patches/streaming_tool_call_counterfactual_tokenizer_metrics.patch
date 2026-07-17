@@ -1,0 +1,78 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -609,6 +609,13 @@ class LocalRuntime(ActionExecutionClient):
+         incremental_checkpoint_tokens = 0
+         incremental_checkpoint_mismatches = 0
+         incremental_valid = True
++        counterfactual_tokenizer_metrics = {
++            "streaming_tool_call_counterfactual_full_tokenizer_requests": 0,
++            "streaming_tool_call_counterfactual_full_tokenizer_seconds": 0.0,
++            "streaming_tool_call_counterfactual_full_tokenizer_tokens": 0,
++            "streaming_tool_call_counterfactual_full_tokenizer_mismatches": 0,
++            "streaming_tool_call_counterfactual_full_tokenizer_failures": 0,
++        }
+         pending_start_content: str | None = None
+         min_chunk_chars = context.config["min_chunk_chars"]
+         snapshot_poll_interval = context.config["snapshot_poll_interval_seconds"]
+@@ -685,9 +692,16 @@ class LocalRuntime(ActionExecutionClient):
+             incremental_checkpoint_mismatches += tokenize_result.get(
+                 "checkpoint_mismatches", 0
+             )
+             incremental_valid = incremental_valid and bool(
+                 tokenize_result.get("incremental_valid", True)
+             )
++            for metric_name in counterfactual_tokenizer_metrics:
++                response_key = metric_name.removeprefix(
++                    "streaming_tool_call_"
++                )
++                counterfactual_tokenizer_metrics[metric_name] += (
++                    tokenize_result.get(response_key, 0)
++                )
+             return tokenize_result
+ 
+         def incremental_tokenizer_metrics() -> dict[str, int | float]:
+@@ -719,10 +732,11 @@ class LocalRuntime(ActionExecutionClient):
+                 "streaming_tool_call_incremental_tokenizer_checkpoint_tokens": (
+                     incremental_checkpoint_tokens
+                 ),
+                 "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches": (
+                     incremental_checkpoint_mismatches
+                 ),
+                 "streaming_tool_call_incremental_tokenizer_seconds": (
+                     streaming_request_seconds if tokenizer_only else 0.0
+                 ),
++                **counterfactual_tokenizer_metrics,
+             }
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -550,5 +550,14 @@ class TestLocalRuntime:
+                 "incremental_valid": True,
+             }
+             if kwargs["final"]:
+                 result["reuse_id"] = "runtime-session:response:call"
++                result.update(
++                    {
++                        "counterfactual_full_tokenizer_requests": 1,
++                        "counterfactual_full_tokenizer_seconds": 0.25,
++                        "counterfactual_full_tokenizer_tokens": 17,
++                        "counterfactual_full_tokenizer_mismatches": 0,
++                        "counterfactual_full_tokenizer_failures": 0,
++                    }
++                )
+             return result
+@@ -624,5 +633,13 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_incremental_tokenizer_checkpoints"] == 1
+         assert metrics["streaming_tool_call_incremental_tokenizer_checkpoint_tokens"] == 17
++        counterfactual_prefix = (
++            "streaming_tool_call_counterfactual_full_tokenizer_"
++        )
++        assert metrics[f"{counterfactual_prefix}requests"] == 1
++        assert metrics[f"{counterfactual_prefix}seconds"] == 0.25
++        assert metrics[f"{counterfactual_prefix}tokens"] == 17
++        assert metrics[f"{counterfactual_prefix}mismatches"] == 0
++        assert metrics[f"{counterfactual_prefix}failures"] == 0
+         assert (
+             metrics[
+                 "streaming_tool_call_incremental_tokenizer_checkpoint_mismatches"

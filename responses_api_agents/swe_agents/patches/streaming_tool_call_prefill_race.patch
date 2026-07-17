@@ -1,0 +1,377 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -599,6 +599,19 @@
+         final_only_prefill = final_only_incremental_tokenizer and bool(
+             context.config.get("final_only_prefill")
+         )
++        final_only_prefill_completion_grace_seconds = (
++            float(
++                context.config[
++                    "final_only_prefill_completion_grace_seconds"
++                ]
++            )
++            if final_only_prefill
++            else 0.0
++        )
++        if final_only_prefill_completion_grace_seconds < 0:
++            raise ValueError(
++                "final-only prefill completion grace must be non-negative"
++            )
+         incremental_started = False
+         session_started = False
+         last_sent_content = ""
+@@ -616,6 +629,16 @@
+         final_only_prefill_failures = 0
+         final_only_prefill_seconds = 0.0
+         final_only_prefill_reused_tokens = 0
++        prefill_race_attempts = 0
++        prefill_race_prefill_first = 0
++        prefill_race_command_first = 0
++        prefill_race_grace_admissions = 0
++        prefill_race_cancellations = 0
++        prefill_race_abort_requests = 0
++        prefill_race_abort_existing_sessions = 0
++        prefill_race_abort_failures = 0
++        prefill_race_abort_seconds = 0.0
++        prefill_race_cancelled_request_seconds = 0.0
+         tokenizer_requests = 0
+         tokenizer_tokens = 0
+         incremental_encoded_chars = 0
+@@ -834,6 +857,40 @@
+                 **counterfactual_tokenizer_metrics,
+             }
+ 
++        def prefill_race_metrics() -> dict[str, int | float]:
++            return {
++                "streaming_tool_call_prefill_race_attempts": (
++                    prefill_race_attempts
++                ),
++                "streaming_tool_call_prefill_race_prefill_first": (
++                    prefill_race_prefill_first
++                ),
++                "streaming_tool_call_prefill_race_command_first": (
++                    prefill_race_command_first
++                ),
++                "streaming_tool_call_prefill_race_grace_admissions": (
++                    prefill_race_grace_admissions
++                ),
++                "streaming_tool_call_prefill_race_cancellations": (
++                    prefill_race_cancellations
++                ),
++                "streaming_tool_call_prefill_race_abort_requests": (
++                    prefill_race_abort_requests
++                ),
++                "streaming_tool_call_prefill_race_abort_existing_sessions": (
++                    prefill_race_abort_existing_sessions
++                ),
++                "streaming_tool_call_prefill_race_abort_failures": (
++                    prefill_race_abort_failures
++                ),
++                "streaming_tool_call_prefill_race_abort_seconds": (
++                    prefill_race_abort_seconds
++                ),
++                "streaming_tool_call_prefill_race_cancelled_request_seconds": (
++                    prefill_race_cancelled_request_seconds
++                ),
++            }
++
+         try:
+             if final_only_incremental_tokenizer:
+                 streaming_http_session = ClientSession(
+@@ -842,10 +899,121 @@
+                         total=context.config["request_timeout_seconds"],
+                     ),
+                 )
+-                # Seed the exact session with the prompt before command output is
+-                # available. This request overlaps the running command and makes
+-                # every eligible command independent of shell snapshot timing.
+-                await tokenize_snapshot("")
++                # Seed the exact session while the command runs. If the command
++                # finishes first, cancel the speculative request so it cannot
++                # become post-command latency.
++                if final_only_prefill:
++                    prefill_race_attempts = 1
++                    prime_started_at = time.monotonic()
++                    prime_task = asyncio.create_task(tokenize_snapshot(""))
++                    completed_tasks, _ = await asyncio.wait(
++                        (post_task, prime_task),
++                        return_when=asyncio.FIRST_COMPLETED,
++                    )
++                    prime_completed = prime_task in completed_tasks
++                    if prime_completed:
++                        prefill_race_prefill_first = 1
++                        await prime_task
++                    else:
++                        prefill_race_command_first = 1
++                        if final_only_prefill_completion_grace_seconds > 0:
++                            try:
++                                await asyncio.wait_for(
++                                    asyncio.shield(prime_task),
++                                    timeout=(
++                                        final_only_prefill_completion_grace_seconds
++                                    ),
++                                )
++                            except TimeoutError:
++                                pass
++                            else:
++                                prime_completed = True
++                                prefill_race_grace_admissions = 1
++
++                    if not prime_completed:
++                        prefill_race_cancellations = 1
++                        prefill_race_abort_requests = 1
++                        abort_started_at = time.monotonic()
++                        abort_task = asyncio.create_task(
++                            context.client.streaming_tool_call_request(
++                                action="abort",
++                                session_id=session_id,
++                                context=context,
++                                http_session=streaming_http_session,
++                            )
++                        )
++                        prime_task.cancel()
++                        await asyncio.gather(prime_task, return_exceptions=True)
++                        if prime_task.cancelled():
++                            prefill_race_cancelled_request_seconds = (
++                                time.monotonic() - prime_started_at
++                            )
++                        try:
++                            abort_result = await abort_task
++                        except Exception as abort_error:
++                            prefill_race_abort_failures = 1
++                            logger.debug(
++                                "Failed to abort command-lost prefill race: "
++                                f"{abort_error}"
++                            )
++                        else:
++                            prefill_race_abort_existing_sessions = int(
++                                bool(abort_result.get("aborted"))
++                            )
++                        prefill_race_abort_seconds = (
++                            time.monotonic() - abort_started_at
++                        )
++                        streaming_request_seconds += (
++                            prefill_race_cancelled_request_seconds
++                            + prefill_race_abort_seconds
++                        )
++                        response = await post_task
++                        metrics = snapshot_metrics()
++                        metrics.update(streaming_timing_metrics())
++                        metrics.update(prefill_race_metrics())
++                        metrics.update(
++                            {
++                                "streaming_tool_call_sessions_started": int(
++                                    session_started
++                                ),
++                                "streaming_tool_call_prefill_requests": (
++                                    prefill_requests
++                                ),
++                                "streaming_tool_call_prefill_control_plane_requests": (
++                                    prefill_control_plane_requests
++                                ),
++                                "streaming_tool_call_prefill_tokens": prefill_tokens,
++                                "streaming_tool_call_completed_chunks": (
++                                    prefill_completed_chunks
++                                ),
++                                "streaming_tool_call_dummy_tokens": (
++                                    prefill_dummy_tokens
++                                ),
++                                "streaming_tool_call_prefix_matches": int(
++                                    prefill_prefix_matched
++                                ),
++                                "streaming_tool_call_valid_prefill_actions": 0,
++                                "streaming_tool_call_tokenizer_only_actions": 0,
++                                "streaming_tool_call_valid_tokenizer_actions": 0,
++                            }
++                        )
++                        metrics.update(incremental_tokenizer_metrics())
++                        metrics[
++                            "streaming_tool_call_skipped_no_stable_output"
++                        ] = 1
++                        metrics[
++                            "streaming_tool_call_skipped_completed_before_admission"
++                        ] = 1
++                        metrics["streaming_tool_call_fallbacks"] = int(
++                            prefill_race_abort_failures > 0
++                        )
++                        metrics["streaming_tool_call_overhead_seconds"] = (
++                            streaming_request_seconds
++                        )
++                        _update_streaming_tool_call_metrics(metrics)
++                        return response
++                else:
++                    await tokenize_snapshot("")
+                 incremental_started = True
+                 sequence_no += 1
+                 last_send_time = time.monotonic()
+@@ -968,6 +1136,7 @@
+             if not incremental_started:
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
++                metrics.update(prefill_race_metrics())
+                 metrics["streaming_tool_call_skipped_no_stable_output"] = 1
+                 if nonempty_snapshots == 0:
+                     metrics["streaming_tool_call_skipped_no_output"] = 1
+@@ -1001,6 +1170,7 @@
+                 )
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
++                metrics.update(prefill_race_metrics())
+                 metrics.update(
+                     {
+                         "streaming_tool_call_sessions_started": int(
+@@ -1068,6 +1238,7 @@
+                 )
+             metrics = snapshot_metrics()
+             metrics.update(streaming_timing_metrics())
++            metrics.update(prefill_race_metrics())
+             metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": 1,
+@@ -1098,7 +1269,8 @@
+         except Exception as error:
+             logger.warning(f"Streaming tool call disabled for this action: {error}")
+             if session_started or (
+-                exact_incremental_tokenizer and incremental_started
++                exact_incremental_tokenizer
++                and (incremental_started or prefill_race_attempts > 0)
+             ):
+                 assert streaming_http_session is not None
+                 try:
+@@ -1115,6 +1287,7 @@
+             response = await post_task
+             metrics = snapshot_metrics()
+             metrics.update(streaming_timing_metrics())
++            metrics.update(prefill_race_metrics())
+             metrics.update(
+                 {
+                     "streaming_tool_call_sessions_started": int(session_started),
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1,5 +1,6 @@
+ """Unit tests for LocalRuntime's URL-related methods."""
+ 
++import asyncio
+ import json
+ import os
+ import threading
+@@ -734,6 +734,7 @@
+                 "exact_incremental_tokenizer": True,
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "snapshot_poll_interval_seconds": 0.05,
+                 "flush_interval_seconds": 0.25,
+@@ -805,10 +806,109 @@
+         assert metrics["streaming_tool_call_dummy_tokens"] == 1
+         assert metrics["streaming_tool_call_prefix_matches"] == 1
+         assert metrics["streaming_tool_call_valid_prefill_actions"] == 1
++        assert metrics["streaming_tool_call_prefill_race_attempts"] == 1
++        assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 1
++        assert metrics["streaming_tool_call_prefill_race_command_first"] == 0
++        assert metrics["streaming_tool_call_prefill_race_cancellations"] == 0
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"
+         )
+ 
++    @pytest.mark.asyncio
++    async def test_execute_action_cancels_prefill_when_command_finishes_first(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="fast command",
++            command="true",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++        session.post.return_value = post_response
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++
++        async def streaming_request(**kwargs):
++            if kwargs["action"] == "abort":
++                return {"aborted": False}
++            assert kwargs["action"] == "tokenize"
++            await asyncio.Event().wait()
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=streaming_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "snapshot_poll_interval_seconds": 0.05,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="true")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        actions = [
++            request.kwargs["action"]
++            for request in streaming_client.streaming_tool_call_request.await_args_list
++        ]
++        assert actions[-1] == "abort"
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_prefill_race_attempts"] == 1
++        assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 0
++        assert metrics["streaming_tool_call_prefill_race_command_first"] == 1
++        assert metrics["streaming_tool_call_prefill_race_grace_admissions"] == 0
++        assert metrics["streaming_tool_call_prefill_race_cancellations"] == 1
++        assert metrics["streaming_tool_call_prefill_race_abort_requests"] == 1
++        assert metrics[
++            "streaming_tool_call_prefill_race_abort_existing_sessions"
++        ] == 0
++        assert metrics["streaming_tool_call_prefill_race_abort_failures"] == 0
++        assert metrics[
++            "streaming_tool_call_skipped_completed_before_admission"
++        ] == 1
++        streaming_client.register_streaming_prompt_reuse.assert_not_called()
++
+     def test_execute_action_skips_streaming_for_short_completed_output(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"

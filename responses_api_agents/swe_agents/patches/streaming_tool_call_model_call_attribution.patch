@@ -1,0 +1,299 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+index 82967fef1..1222e8072 100644
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -67,6 +67,7 @@ class NemoGymClient:
+         self.model_server_cookies = None
+         self.llm = llm
+         self._pending_streaming_prompt_reuse_id: str | None = None
++        self._pending_streaming_prompt_reuse_prefill_tokens = 0
+ 
+     async def model_call(
+         self,
+@@ -108,7 +109,11 @@ class NemoGymClient:
+             params["tools"] = tools
+ 
+         streaming_prompt_reuse_id = self._pending_streaming_prompt_reuse_id
++        streaming_prompt_reuse_prefill_tokens = (
++            self._pending_streaming_prompt_reuse_prefill_tokens
++        )
+         self._pending_streaming_prompt_reuse_id = None
++        self._pending_streaming_prompt_reuse_prefill_tokens = 0
+         if streaming_prompt_reuse_id is not None:
+             params["streaming_prompt_reuse_id"] = streaming_prompt_reuse_id
+ 
+@@ -152,9 +157,16 @@ class NemoGymClient:
+         self.model_server_cookies = model_response.cookies
+ 
+         if streaming_prompt_reuse_id is not None:
++            usage = model_response_json.get("usage") or {}
+             self._update_streaming_prompt_reuse_metrics(
+                 streaming_prompt_reuse_status,
+                 streaming_prompt_reuse_match_kind,
++                latency=latency,
++                prefill_reused_tokens=(
++                    streaming_prompt_reuse_prefill_tokens
++                ),
++                prompt_tokens=int(usage.get("prompt_tokens") or 0),
++                completion_tokens=int(usage.get("completion_tokens") or 0),
+             )
+ 
+         response: ModelResponse = ModelResponse.model_validate(model_response_json)
+@@ -180,9 +192,19 @@ class NemoGymClient:
+ 
+         return response
+ 
+-    def register_streaming_prompt_reuse(self, reuse_id: str) -> None:
++    def register_streaming_prompt_reuse(
++        self,
++        reuse_id: str,
++        *,
++        prefill_reused_tokens: int = 0,
++    ) -> None:
+         """Attach an exact, one-shot tokenized prompt to the next model call."""
++        if prefill_reused_tokens < 0:
++            raise ValueError("prefill reused tokens must be non-negative")
+         self._pending_streaming_prompt_reuse_id = reuse_id
++        self._pending_streaming_prompt_reuse_prefill_tokens = (
++            prefill_reused_tokens
++        )
+ 
+     def _register_streaming_tool_call_context(
+         self,
+@@ -410,6 +432,11 @@ class NemoGymClient:
+     def _update_streaming_prompt_reuse_metrics(
+         status: str | None,
+         match_kind: str | None,
++        *,
++        latency: float,
++        prefill_reused_tokens: int,
++        prompt_tokens: int,
++        completion_tokens: int,
+     ) -> None:
+         metrics_fpath = os.environ["NEMO_GYM_METRICS_FPATH"]
+         with open(metrics_fpath) as f:
+@@ -435,5 +462,26 @@ class NemoGymClient:
+                 existing_dict.get(match_kind_metric_name, 0) + 1
+             )
+ 
++        if status != "matched":
++            model_call_kind = "prompt_reuse_miss"
++        elif prefill_reused_tokens > 0:
++            model_call_kind = "prefill_reuse"
++        else:
++            model_call_kind = "tokenizer_reuse"
++        metric_prefix = f"streaming_tool_call_{model_call_kind}_model_call_"
++        for suffix, value in (
++            ("count", 1),
++            ("seconds", latency),
++            ("prompt_tokens", prompt_tokens),
++            ("completion_tokens", completion_tokens),
++        ):
++            metric_name = f"{metric_prefix}{suffix}"
++            existing_dict[metric_name] = existing_dict.get(metric_name, 0) + value
++        if model_call_kind == "prefill_reuse":
++            metric_name = f"{metric_prefix}reused_prompt_tokens"
++            existing_dict[metric_name] = (
++                existing_dict.get(metric_name, 0) + prefill_reused_tokens
++            )
++
+         with open(metrics_fpath, "w") as f:
+             json.dump(existing_dict, f)
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+index 01b8b88a5..5f11abe59 100644
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -1024,6 +1024,15 @@ class LocalRuntime(ActionExecutionClient):
+             fallback_stage = "other"
+             return tokenize_result
+ 
++        def has_valid_final_only_prefill() -> bool:
++            return bool(
++                final_only_prefill
++                and prefill_prefix_matched
++                and prefill_completed_chunks > 0
++                and final_only_prefill_reused_tokens > 0
++                and final_only_prefill_failures == 0
++            )
++
+         def incremental_tokenizer_metrics() -> dict[str, int | float]:
+             return {
+                 "streaming_tool_call_exact_incremental_tokenizer_actions": int(
+@@ -1036,11 +1045,7 @@ class LocalRuntime(ActionExecutionClient):
+                     final_only_prefill and incremental_started
+                 ),
+                 "streaming_tool_call_valid_final_only_prefill_actions": int(
+-                    final_only_prefill
+-                    and prefill_prefix_matched
+-                    and prefill_completed_chunks > 0
+-                    and final_only_prefill_reused_tokens > 0
+-                    and final_only_prefill_failures == 0
++                    has_valid_final_only_prefill()
+                 ),
+                 "streaming_tool_call_final_only_prefill_failures": (
+                     final_only_prefill_failures
+@@ -1504,7 +1509,12 @@ class LocalRuntime(ActionExecutionClient):
+                 )
+                 incremental_started = True
+                 context.client.register_streaming_prompt_reuse(
+-                    final_tokenize_result["reuse_id"]
++                    final_tokenize_result["reuse_id"],
++                    prefill_reused_tokens=(
++                        final_only_prefill_reused_tokens
++                        if has_valid_final_only_prefill()
++                        else 0
++                    ),
+                 )
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
+@@ -1527,11 +1537,7 @@ class LocalRuntime(ActionExecutionClient):
+                             prefill_prefix_matched
+                         ),
+                         "streaming_tool_call_valid_prefill_actions": int(
+-                            final_only_prefill
+-                            and prefill_prefix_matched
+-                            and prefill_completed_chunks > 0
+-                            and final_only_prefill_reused_tokens > 0
+-                            and final_only_prefill_failures == 0
++                            has_valid_final_only_prefill()
+                         ),
+                         "streaming_tool_call_tokenizer_only_actions": 1,
+                         "streaming_tool_call_valid_tokenizer_actions": int(
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+index 3a98bc06e..5a7805c3a 100644
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -1,4 +1,4 @@
+-from unittest.mock import AsyncMock, MagicMock
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import orjson
+ import pytest
+@@ -325,6 +325,7 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     client.ng_server_client.post = AsyncMock(return_value=response)
+     client.model_server_cookies = None
+     client._pending_streaming_prompt_reuse_id = None
++    client._pending_streaming_prompt_reuse_prefill_tokens = 0
+     client.llm = MagicMock()
+     client.llm._nemo_gym_llm_kwargs = {}
+     client._log_completion = MagicMock()
+@@ -348,6 +349,7 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+                 ],
+                 "streaming_prompt_reuse_status": "matched",
+                 "streaming_prompt_reuse_match_kind": "token_equivalent",
++                "usage": {"prompt_tokens": 100, "completion_tokens": 5},
+             }
+         ),
+     )
+@@ -356,12 +358,59 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     message = MagicMock()
+     message.model_dump.return_value = {"role": "user", "content": "hello"}
+ 
+-    client.register_streaming_prompt_reuse("reuse")
+-    await client._post_completion([message])
++    client.register_streaming_prompt_reuse(
++        "reuse", prefill_reused_tokens=64
++    )
++    with patch.object(client_module.time, "perf_counter", side_effect=(10.0, 12.0)):
++        await client._post_completion([message])
+ 
+     request = client.ng_server_client.post.await_args.kwargs
+     assert request["json"]["streaming_prompt_reuse_id"] == "reuse"
+     assert client._pending_streaming_prompt_reuse_id is None
++    assert client._pending_streaming_prompt_reuse_prefill_tokens == 0
+     client._update_streaming_prompt_reuse_metrics.assert_called_once_with(
+-        "matched", "token_equivalent"
++        "matched",
++        "token_equivalent",
++        latency=2.0,
++        prefill_reused_tokens=64,
++        prompt_tokens=100,
++        completion_tokens=5,
+     )
++
++
++@pytest.mark.parametrize(
++    ("status", "prefill_reused_tokens", "model_call_kind"),
++    (
++        ("matched", 64, "prefill_reuse"),
++        ("matched", 0, "tokenizer_reuse"),
++        ("missing", 64, "prompt_reuse_miss"),
++    ),
++)
++def test_streaming_prompt_reuse_model_call_attribution(
++    monkeypatch,
++    tmp_path,
++    status,
++    prefill_reused_tokens,
++    model_call_kind,
++):
++    metrics_path = tmp_path / "metrics.json"
++    metrics_path.write_text("{}")
++    monkeypatch.setenv("NEMO_GYM_METRICS_FPATH", str(metrics_path))
++
++    NemoGymClient._update_streaming_prompt_reuse_metrics(
++        status,
++        "exact" if status == "matched" else None,
++        latency=2.5,
++        prefill_reused_tokens=prefill_reused_tokens,
++        prompt_tokens=100,
++        completion_tokens=5,
++    )
++
++    metrics = orjson.loads(metrics_path.read_bytes())
++    metric_prefix = f"streaming_tool_call_{model_call_kind}_model_call_"
++    assert metrics[f"{metric_prefix}count"] == 1
++    assert metrics[f"{metric_prefix}seconds"] == 2.5
++    assert metrics[f"{metric_prefix}prompt_tokens"] == 100
++    assert metrics[f"{metric_prefix}completion_tokens"] == 5
++    if model_call_kind == "prefill_reuse":
++        assert metrics[f"{metric_prefix}reused_prompt_tokens"] == 64
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+index 8d81c843b..3e5ebe49a 100644
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -692,7 +692,7 @@ class TestLocalRuntime:
+             streaming_client.llm.config.max_message_chars,
+         )
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call"
++            "runtime-session:response:call", prefill_reused_tokens=0
+         )
+ 
+     @pytest.mark.asyncio
+@@ -858,7 +858,7 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_prefix_seed_fallbacks"] == 0
+         assert metrics["streaming_tool_call_prefix_seed_seconds"] == 0.01
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call"
++            "runtime-session:response:call", prefill_reused_tokens=13
+         )
+ 
+     @pytest.mark.asyncio
+@@ -973,7 +973,7 @@ class TestLocalRuntime:
+             "\n[Error occurred in processing last action]"
+         )
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call"
++            "runtime-session:response:call", prefill_reused_tokens=0
+         )
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_fallbacks"] == 0
+@@ -1227,7 +1227,7 @@ class TestLocalRuntime:
+             "streaming_tool_call_server_request_handler_seconds"
+         ] == pytest.approx(0.06)
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call"
++            "runtime-session:response:call", prefill_reused_tokens=33
+         )
+ 
+     @pytest.mark.asyncio
+@@ -1343,7 +1343,7 @@ class TestLocalRuntime:
+         assert metrics["streaming_tool_call_deferred_prefill_admissions"] == 0
+         assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+-            "runtime-session:response:call"
++            "runtime-session:response:call", prefill_reused_tokens=0
+         )
+ 
+     @pytest.mark.asyncio

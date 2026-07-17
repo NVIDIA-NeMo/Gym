@@ -1,0 +1,523 @@
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -238,6 +238,8 @@
+         final: bool = False,
+         prefill: bool = False,
+         prefill_continuation: bool = False,
++        prefill_from_required_prefix: bool = False,
++        finalize_from_required_prefix: bool = False,
+         http_session: ClientSession | None = None,
+     ) -> dict:
+         payload: dict = {"session_id": session_id}
+@@ -284,6 +286,19 @@
+             payload["prefill_continuation"] = prefill_continuation
+         elif prefill_continuation:
+             raise ValueError("prefill continuation requires prefill")
++        if prefill_from_required_prefix:
++            if not prefill_continuation:
++                raise ValueError(
++                    "prefill from required prefix requires prefill continuation"
++                )
++            payload["prefill_from_required_prefix"] = True
++        if finalize_from_required_prefix:
++            if not final or prefill or sequence_no != 0:
++                raise ValueError(
++                    "finalization from required prefix requires a final "
++                    "sequence-zero request without prefill"
++                )
++            payload["finalize_from_required_prefix"] = True
+ 
+         server_name = os.environ["NEMO_GYM_MODEL_SERVER_NAME"]
+         url_path = f"/v1/streaming_tool_call/{action}"
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -616,6 +616,7 @@
+                 "final-only prefill completion grace must be non-negative"
+             )
+         incremental_started = False
++        incremental_request_attempted = False
+         session_started = False
+         prefill_session_active = False
+         prefill_after_admission_used = False
+@@ -637,6 +638,8 @@
+         prefill_after_admission_requests = 0
+         prefill_after_admission_tokens = 0
+         prefill_after_admission_request_seconds = 0.0
++        deferred_prefill_admissions = 0
++        final_prefix_tokenizations = 0
+         prefill_race_attempts = 0
+         prefill_race_prefill_first = 0
+         prefill_race_command_first = 0
+@@ -776,12 +779,15 @@
+             nonlocal incremental_encoded_tokens
+             nonlocal incremental_reused_tokens
+             nonlocal incremental_rollback_tokens
++            nonlocal incremental_request_attempted
+             nonlocal incremental_valid
+             nonlocal incremental_tokenizer_final_seconds
+             nonlocal incremental_tokenizer_start_seconds
+             nonlocal final_only_prefill_failures
+             nonlocal final_only_prefill_reused_tokens
+             nonlocal final_only_prefill_seconds
++            nonlocal deferred_prefill_admissions
++            nonlocal final_prefix_tokenizations
+             nonlocal prefill_after_admission_used
+             nonlocal prefill_after_admission_request_seconds
+             nonlocal prefill_after_admission_requests
+@@ -807,7 +813,17 @@
+                 (sequence_no == 0 and not final)
+                 or (prefill_after_admission and prefill_session_active)
+             )
++            prefill_from_required_prefix = bool(
++                prefill_after_admission
++                and request_prefill
++                and sequence_no == 0
++                and tool_output
++            )
++            finalize_from_required_prefix = bool(
++                prefill_after_admission and final and sequence_no == 0
++            )
+             request_start_time = time.monotonic()
++            incremental_request_attempted = True
+             tokenize_result = await context.client.streaming_tool_call_request(
+                 action="tokenize",
+                 session_id=session_id,
+@@ -819,6 +835,8 @@
+                 prefill_continuation=(
+                     prefill_after_admission and request_prefill
+                 ),
++                prefill_from_required_prefix=prefill_from_required_prefix,
++                finalize_from_required_prefix=finalize_from_required_prefix,
+                 http_session=streaming_http_session,
+             )
+             request_seconds = time.monotonic() - request_start_time
+@@ -829,6 +847,12 @@
+                 incremental_tokenizer_start_seconds += request_seconds
+             tokenizer_requests += 1
+             tokenizer_tokens += tokenize_result["token_count"]
++            deferred_prefill_admissions += tokenize_result.get(
++                "deferred_prefill_admissions", 0
++            )
++            final_prefix_tokenizations += tokenize_result.get(
++                "final_prefix_tokenizations", 0
++            )
+             request_sessions_started = bool(
+                 tokenize_result.get("prefill_sessions_started", 0)
+             )
+@@ -872,6 +896,15 @@
+                     and request_sessions_started
+                     and request_prefill_failures == 0
+                 )
++                if prefill_from_required_prefix:
++                    prefill_after_admission_used = True
++                    prefill_after_admission_requests += tokenize_result.get(
++                        "prefill_requests", 0
++                    )
++                    prefill_after_admission_tokens += tokenize_result.get(
++                        "prefill_tokens", 0
++                    )
++                    prefill_after_admission_request_seconds += request_seconds
+             elif request_prefill and not final:
+                 prefill_after_admission_used = True
+                 prefill_after_admission_requests += tokenize_result.get(
+@@ -963,6 +996,12 @@
+                 "streaming_tool_call_prefill_after_admission_request_seconds": (
+                     prefill_after_admission_request_seconds
+                 ),
++                "streaming_tool_call_deferred_prefill_admissions": (
++                    deferred_prefill_admissions
++                ),
++                "streaming_tool_call_final_prefix_tokenizations": (
++                    final_prefix_tokenizations
++                ),
+                 "streaming_tool_call_prefix_seed_attempts": (
+                     prefix_seed_attempts
+                 ),
+@@ -1057,10 +1096,10 @@
+                         total=context.config["request_timeout_seconds"],
+                     ),
+                 )
+-                # Seed the exact session while the command runs. If the command
+-                # finishes first, cancel the speculative request so it cannot
+-                # become post-command latency.
+-                if final_only_prefill:
++                # One-shot prefill retains its speculative prime. Continuation
++                # mode defers both tokenizer and prefill state until the command
++                # reaches its initial output bucket.
++                if final_only_prefill and not prefill_after_admission:
+                     prefill_race_attempts = 1
+                     prime_started_at = time.monotonic()
+                     prime_task = asyncio.create_task(tokenize_snapshot(""))
+@@ -1170,21 +1209,19 @@
+                         )
+                         _update_streaming_tool_call_metrics(metrics)
+                         return response
+-                else:
++                elif not final_only_prefill:
+                     await tokenize_snapshot("")
+-                incremental_started = True
+-                sequence_no += 1
+-                last_send_time = time.monotonic()
++                if not prefill_after_admission:
++                    incremental_started = True
++                    sequence_no += 1
++                    last_send_time = time.monotonic()
+ 
+-                # Admission is decided by the cheap empty-output prime above.
+-                # Only an admitted session polls command output, and it sends a
+-                # continuation after a full character bucket has accumulated.
+-                # The final unsent tail is intentionally left for the normal
+-                # generation request because it can no longer overlap command
+-                # execution.
++                # The first full character bucket jointly starts exact
++                # tokenization and admits prefill from the authoritative model
++                # prefix. Later buckets extend only the proven stable suffix.
+                 while (
+                     prefill_after_admission
+-                    and prefill_session_active
++                    and (not incremental_started or prefill_session_active)
+                     and not post_task.done()
+                 ):
+                     snapshot_target_chars = (
+@@ -1228,6 +1265,7 @@
+                     if post_task.done():
+                         break
+                     await tokenize_snapshot(content)
++                    incremental_started = True
+                     sequence_no += 1
+                     last_sent_content = content
+                     last_send_time = time.monotonic()
+@@ -1347,7 +1385,11 @@
+                     last_send_time = time.monotonic()
+ 
+             response = await post_task
+-            if not incremental_started:
++            if not incremental_started and not (
++                tokenizer_only
++                and final_only_incremental_tokenizer
++                and prefill_after_admission
++            ):
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
+                 metrics.update(prefill_race_metrics())
+@@ -1369,6 +1411,7 @@
+             raw_final_tool_output = observation.to_agent_observation()
+             if tokenizer_only:
+                 assert streaming_http_session is not None
++                finalized_without_prefill_admission = not incremental_started
+                 # ConversationMemory applies this same truncation before the
+                 # observation becomes the next tool message. Tokenize that
+                 # authoritative prompt, not the longer runtime observation.
+@@ -1379,6 +1422,7 @@
+                 final_tokenize_result = await tokenize_snapshot(
+                     final_tool_output, final=True
+                 )
++                incremental_started = True
+                 context.client.register_streaming_prompt_reuse(
+                     final_tokenize_result["reuse_id"]
+                 )
+@@ -1426,6 +1470,20 @@
+                     }
+                 )
+                 metrics.update(incremental_tokenizer_metrics())
++                if finalized_without_prefill_admission:
++                    metrics["streaming_tool_call_skipped_no_stable_output"] = 1
++                    if nonempty_snapshots == 0:
++                        metrics["streaming_tool_call_skipped_no_output"] = 1
++                    elif nonempty_snapshots == 1:
++                        metrics["streaming_tool_call_skipped_single_snapshot"] = 1
++                    elif snapshots_at_or_above_initial_chunk_chars == 0:
++                        metrics[
++                            "streaming_tool_call_skipped_below_min_chunk_chars"
++                        ] = 1
++                    else:
++                        metrics[
++                            "streaming_tool_call_skipped_completed_before_admission"
++                        ] = 1
+                 _update_streaming_tool_call_metrics(metrics)
+                 return response
+ 
+@@ -1484,7 +1542,7 @@
+             logger.warning(f"Streaming tool call disabled for this action: {error}")
+             if session_started or (
+                 exact_incremental_tokenizer
+-                and (incremental_started or prefill_race_attempts > 0)
++                and (incremental_request_attempted or prefill_race_attempts > 0)
+             ):
+                 assert streaming_http_session is not None
+                 try:
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -879,17 +879,17 @@
+ 
+         async def tokenize_request(**kwargs):
+             sequence_no = kwargs["sequence_no"]
+-            if sequence_no == 1:
++            if sequence_no == 0:
+                 request_tokens = 13
+-            elif sequence_no == 2:
++            elif sequence_no == 1:
+                 request_tokens = 20
+             else:
+                 request_tokens = 0
+             result = {
+                 "sequence_no": sequence_no,
+                 "token_count": 40,
+-                "encoded_chars": 300 if sequence_no > 0 else 0,
+-                "encoded_tokens": 20 if sequence_no > 0 else 0,
++                "encoded_chars": 300,
++                "encoded_tokens": 20,
+                 "reused_tokens": 33 if kwargs["final"] else 0,
+                 "rollback_tokens": 0,
+                 "checkpoint_count": 0,
+@@ -897,11 +897,11 @@
+                 "checkpoint_mismatches": 0,
+                 "incremental_valid": True,
+                 "prefill_sessions_started": int(sequence_no == 0),
+-                "prefill_requests": int(sequence_no in (1, 2)),
++                "prefill_requests": int(sequence_no in (0, 1)),
+                 "prefill_control_plane_requests": 0,
+                 "prefill_tokens": request_tokens,
+-                "prefill_completed_chunks": int(sequence_no in (1, 2)),
+-                "prefill_dummy_tokens": int(sequence_no in (1, 2)),
++                "prefill_completed_chunks": int(sequence_no in (0, 1)),
++                "prefill_dummy_tokens": int(sequence_no in (0, 1)),
+                 "prefill_prefix_matched": kwargs["final"],
+                 "prefill_failures": 0,
+                 "prefill_seconds": 0.01,
+@@ -915,8 +915,10 @@
+                 "server_incremental_tokenizer_seconds": 0.004,
+                 "server_authoritative_tokenizer_seconds": 0.0,
+                 "server_request_handler_seconds": 0.02,
++                "deferred_prefill_admissions": int(sequence_no == 0),
++                "final_prefix_tokenizations": 0,
+             }
+-            if sequence_no == 2:
++            if sequence_no == 1:
+                 release_post.set()
+             if kwargs["final"]:
+                 result["reuse_id"] = "runtime-session:response:call"
+@@ -986,23 +988,28 @@
+             0,
+             1,
+             2,
+-            3,
+         ]
+-        assert [request.kwargs["tool_output"] for request in requests[:3]] == [
+-            "",
++        assert [request.kwargs["tool_output"] for request in requests[:2]] == [
+             first_streamed_content,
+             second_streamed_content,
+         ]
+         assert [request.kwargs["final"] for request in requests] == [
+             False,
+             False,
+-            False,
+             True,
+         ]
+         assert all(request.kwargs["prefill"] for request in requests)
+         assert all(
+             request.kwargs["prefill_continuation"] for request in requests
+         )
++        assert [
++            request.kwargs["prefill_from_required_prefix"]
++            for request in requests
++        ] == [True, False, False]
++        assert not any(
++            request.kwargs["finalize_from_required_prefix"]
++            for request in requests
++        )
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_prefill_after_admission_actions"] == 1
+         assert (
+@@ -1024,6 +1031,8 @@
+         assert metrics["streaming_tool_call_completed_chunks"] == 2
+         assert metrics["streaming_tool_call_dummy_tokens"] == 2
+         assert metrics["streaming_tool_call_prefix_matches"] == 1
++        assert metrics["streaming_tool_call_deferred_prefill_admissions"] == 1
++        assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 0
+         assert (
+             metrics[
+                 "streaming_tool_call_snapshots_at_or_above_initial_chunk_chars"
+@@ -1031,24 +1040,139 @@
+             == 2
+         )
+         assert metrics["streaming_tool_call_server_materialize_seconds"] == (
+-            pytest.approx(0.004)
++            pytest.approx(0.003)
+         )
+         assert metrics["streaming_tool_call_server_render_seconds"] == (
+-            pytest.approx(0.008)
++            pytest.approx(0.006)
+         )
+         assert metrics["streaming_tool_call_server_prefix_render_seconds"] == (
+-            pytest.approx(0.012)
++            pytest.approx(0.009)
+         )
+         assert metrics[
+             "streaming_tool_call_server_incremental_tokenizer_seconds"
+-        ] == pytest.approx(0.016)
++        ] == pytest.approx(0.012)
+         assert metrics[
+             "streaming_tool_call_server_authoritative_tokenizer_seconds"
+         ] == 0.0
+         assert metrics[
+             "streaming_tool_call_server_request_handler_seconds"
+-        ] == pytest.approx(0.08)
+-        assert metrics["streaming_tool_call_snapshot_wait_cancellations"] == 1
++        ] == pytest.approx(0.06)
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call"
++        )
++
++    @pytest.mark.asyncio
++    async def test_execute_action_finalizes_short_command_from_model_prefix(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        session = MagicMock()
++        runtime.session = session
++        final_observation = CmdOutputObservation(
++            content="short output",
++            command="echo output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++        session.post.return_value = post_response
++        snapshot_response = MagicMock()
++        snapshot_response.json.return_value = {"revision": 0, "content": ""}
++        session.get.return_value = snapshot_response
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            return_value={
++                "sequence_no": 0,
++                "token_count": 40,
++                "encoded_chars": 12,
++                "encoded_tokens": 6,
++                "reused_tokens": 30,
++                "rollback_tokens": 0,
++                "checkpoint_count": 0,
++                "checkpoint_tokens": 0,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
++                "prefill_sessions_started": 0,
++                "prefill_requests": 0,
++                "prefill_control_plane_requests": 0,
++                "prefill_tokens": 0,
++                "prefill_completed_chunks": 0,
++                "prefill_dummy_tokens": 0,
++                "prefill_prefix_matched": False,
++                "prefill_failures": 0,
++                "prefill_seconds": 0.0,
++                "prefix_seed_attempts": 1,
++                "prefix_seed_successes": 1,
++                "prefix_seed_fallbacks": 0,
++                "prefix_seed_seconds": 0.01,
++                "deferred_prefill_admissions": 0,
++                "final_prefix_tokenizations": 1,
++                "reuse_id": "runtime-session:response:call",
++            }
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "prefill_after_admission": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
++                "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="echo output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        request = streaming_client.streaming_tool_call_request.await_args
++        assert request.kwargs["sequence_no"] == 0
++        assert request.kwargs["final"] is True
++        assert request.kwargs["prefill"] is False
++        assert request.kwargs["prefill_from_required_prefix"] is False
++        assert request.kwargs["finalize_from_required_prefix"] is True
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_sessions_started"] == 0
++        assert metrics["streaming_tool_call_valid_prefill_actions"] == 0
++        assert metrics["streaming_tool_call_valid_tokenizer_actions"] == 1
++        assert metrics["streaming_tool_call_deferred_prefill_admissions"] == 0
++        assert metrics["streaming_tool_call_final_prefix_tokenizations"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call"
+         )
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -166,6 +166,33 @@
+     assert continuation_request["prefill_continuation"] is True
+ 
+     await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="deferred-session",
++        context=context,
++        sequence_no=0,
++        tool_output="first admitted bucket",
++        prefill=True,
++        prefill_continuation=True,
++        prefill_from_required_prefix=True,
++        http_session=http_session,
++    )
++    deferred_request = http_session.post.await_args.kwargs["json"]
++    assert deferred_request["prefill_from_required_prefix"] is True
++
++    await client.streaming_tool_call_request(
++        action="tokenize",
++        session_id="short-session",
++        context=context,
++        sequence_no=0,
++        tool_output="short final output",
++        final=True,
++        finalize_from_required_prefix=True,
++        http_session=http_session,
++    )
++    short_final_request = http_session.post.await_args.kwargs["json"]
++    assert short_final_request["finalize_from_required_prefix"] is True
++
++    await client.streaming_tool_call_request(
+         action="abort",
+         session_id="session",
+         context=context,
