@@ -343,3 +343,20 @@ def test_classify_task_failure_mapping():
     assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
     assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
     assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
+
+
+def test_tavily_single_key_unchanged():
+    agent = make_agent(tavily_api_key="tvly-only")  # pragma: allowlist secret
+    assert [agent._task_env("t")["TAVILY_API_KEY"] for _ in range(3)] == ["tvly-only"] * 3
+
+
+def test_tavily_comma_keys_rotate():
+    agent = make_agent(tavily_api_key="tvly-a, tvly-b,tvly-c")  # pragma: allowlist secret
+    got = [agent._task_env("t")["TAVILY_API_KEY"] for _ in range(6)]
+    assert got == ["tvly-a", "tvly-b", "tvly-c"] * 2
+
+
+def test_tavily_list_keys_rotate():
+    agent = make_agent(tavily_api_key=["tvly-x", "tvly-y"])  # pragma: allowlist secret
+    got = [agent._task_env("t")["TAVILY_API_KEY"] for _ in range(4)]
+    assert got == ["tvly-x", "tvly-y", "tvly-x", "tvly-y"]

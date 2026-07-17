@@ -37,13 +37,14 @@ See README.md for design + findings (skill patch, gateway, parity).
 
 import asyncio
 import glob
+import itertools
 import json
 import shutil
 import tarfile
 import textwrap
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
 from fastapi import Request, Response
 from pydantic import ConfigDict
@@ -106,7 +107,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
 
     web_search_provider: str = "brave"
     brave_api_key: Optional[str] = None
-    tavily_api_key: Optional[str] = None
+    # Single key, comma-separated keys, or a list; multiple keys rotate across task
+    # sandboxes to spread provider rate limits.
+    tavily_api_key: Optional[Union[str, List[str]]] = None
 
     timeout_multiplier: float = 3.0
     max_concurrent: int = 4
@@ -157,7 +160,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context):
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
+        self._tavily_rr = itertools.count()
         return super().model_post_init(context)
+
+    def _next_tavily_key(self) -> str:
+        raw = self.config.tavily_api_key
+        keys = raw if isinstance(raw, list) else [k.strip() for k in raw.split(",")]
+        keys = [k for k in keys if k]
+        return keys[next(self._tavily_rr) % len(keys)]
 
     async def responses(
         self,
@@ -191,7 +201,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
-            env["TAVILY_API_KEY"] = self.config.tavily_api_key
+            env["TAVILY_API_KEY"] = self._next_tavily_key()
         return env
 
     # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
