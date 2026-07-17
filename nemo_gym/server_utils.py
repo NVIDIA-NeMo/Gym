@@ -72,6 +72,7 @@ from nemo_gym.profiling import Profiler
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_LOOP: Union[None, asyncio.AbstractEventLoop] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
@@ -119,6 +120,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     global _GLOBAL_AIOHTTP_CLIENT
     _GLOBAL_AIOHTTP_CLIENT = client_session
 
+    global _GLOBAL_AIOHTTP_CLIENT_LOOP
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
+
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
 
@@ -137,10 +141,33 @@ def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
+    client = _GLOBAL_AIOHTTP_CLIENT
+    loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
+    try:
+        if client.closed:
+            return
+        if loop is None or loop.is_closed():
+            # At interpreter shutdown there is no safe loop left on which to
+            # await the connector's loop-bound close futures. Detaching marks
+            # the session closed; the process will reclaim the connector.
+            client.detach()
+            return
 
-    _GLOBAL_AIOHTTP_CLIENT = None
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            loop.create_task(client.close())
+        elif loop.is_running():
+            asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=5)
+        else:
+            loop.run_until_complete(client.close())
+    finally:
+        _GLOBAL_AIOHTTP_CLIENT = None
+        _GLOBAL_AIOHTTP_CLIENT_LOOP = None
 
 
 atexit.register(global_aiohttp_client_exit)

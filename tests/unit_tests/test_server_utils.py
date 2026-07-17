@@ -34,6 +34,55 @@ from nemo_gym.server_utils import (
 
 
 class TestServerUtils:
+    def test_global_aiohttp_client_exit_uses_creation_loop(self, monkeypatch: MonkeyPatch) -> None:
+        creation_loop = nemo_gym.server_utils.asyncio.new_event_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert nemo_gym.server_utils.asyncio.get_running_loop() is creation_loop
+                self.closed = True
+
+            def detach(self) -> None:
+                raise AssertionError("open creation loop must close the client")
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", creation_loop)
+
+        nemo_gym.server_utils.global_aiohttp_client_exit()
+
+        assert client.closed
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        creation_loop.close()
+
+    def test_global_aiohttp_client_exit_detaches_after_loop_closed(self, monkeypatch: MonkeyPatch) -> None:
+        creation_loop = nemo_gym.server_utils.asyncio.new_event_loop()
+        creation_loop.close()
+
+        class LoopBoundClient:
+            closed = False
+            detached = False
+
+            async def close(self) -> None:
+                raise AssertionError("closed creation loop cannot run client close")
+
+            def detach(self) -> None:
+                self.closed = True
+                self.detached = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", creation_loop)
+
+        nemo_gym.server_utils.global_aiohttp_client_exit()
+
+        assert client.detached
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
