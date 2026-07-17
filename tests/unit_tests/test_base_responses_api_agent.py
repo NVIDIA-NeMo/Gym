@@ -142,7 +142,7 @@ class TestSharedRun:
             parallel_tool_calls=True,
             usage=NeMoGymResponseUsage(
                 input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
                 output_tokens=0,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=0,
@@ -218,7 +218,7 @@ class TestSharedRun:
             parallel_tool_calls=True,
             usage=NeMoGymResponseUsage(
                 input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
                 output_tokens=0,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=0,

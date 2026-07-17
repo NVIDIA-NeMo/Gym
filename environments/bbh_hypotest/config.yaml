@@ -1,0 +1,143 @@
+bbh_sandbox_opencode:
+  responses_api_agents:
+    sandbox_agent:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: OpenCode analyzing Hypotest BBH capsules inside OpenSandbox.
+      value: Scientific data-analysis and hypothesis-testing capability.
+      resources_server:
+        type: resources_servers
+        name: bbh_hypotest
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: ${oc.env:BBH_AGENT_CONCURRENCY,8}
+      mode: agent_only_runner
+      agent_module: responses_api_agents.opencode_agent.app
+      agent_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_config:
+        resources_server:
+          type: resources_servers
+          name: bbh_hypotest
+        concurrency: 1
+        command: /gym_mount/responses_api_agents/opencode_agent/.opencode_node/bin/opencode
+        model: nvinf/policy_model
+        workspace_root: /tmp/opencode
+        repo_dir: /data_workspace
+        thinking: true
+        timeout: 1200
+        setup_timeout: 900
+        extra_args:
+          - --auto
+          - --title
+          - bbh-hypotest
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        opencode_version: 1.17.13
+        system_prompt: >-
+          Complete the scientific analysis in /data_workspace. Do not finish until a
+          reproducible analysis.py or analysis.ipynb exists, has been executed
+          successfully, and prints the evidence required by the task rubric.
+          Base the final conclusion on the computed results, never on filenames
+          or the wording of the hypothesis. Inspect binary workbooks with
+          pandas or openpyxl through the bash tool.
+        opencode_config:
+          agent:
+            build:
+              steps: 128
+              prompt: >-
+                Create /data_workspace/analysis.py immediately, before exploratory
+                analysis. Keep the complete reproducible analysis in that file,
+                update it as you inspect the data, and execute it successfully
+                before giving a final conclusion. Do not rely only on one-off
+                shell commands or finish with no analysis artifact.
+          compaction:
+            auto: false
+            prune: true
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+          provider:
+            nvinf:
+              npm: "@ai-sdk/openai-compatible"
+              options:
+                baseURL: __SANDBOX_MODEL_URL__/v1
+                apiKey: gym  # pragma: allowlist secret
+              models:
+                policy_model:
+                  name: policy_model
+                  interleaved:
+                    field: reasoning
+                  limit:
+                    # OpenCode's inclusive boundary can otherwise submit
+                    # context + output == max_model_len + 1 to vLLM.
+                    context: ${oc.env:BBH_OPENCODE_CONTEXT,79999}
+                    output: 8192
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            protocol: http
+            request_timeout_s: 300
+            use_server_proxy: true
+          create:
+            request_timeout_s: 1200
+            timeout_s: 1200
+            skip_health_check: true
+            retries: 10
+            retry_delay_s: 5.0
+            retry_max_delay_s: 90.0
+          probe:
+            command: null
+          operations:
+            retries: 5
+            retry_delay_s: 1.0
+            retry_max_delay_s: 45.0
+            command_retries: 0
+            close_timeout_s: 30
+      sandbox_image: ${oc.env:BBH_OPENSANDBOX_IMAGE}
+      model_transport: endpoint_bridge
+      model_bridge_port: 18080
+      sandbox_spec:
+        ttl_s: 3600
+        ready_timeout_s: 1200
+        workdir: /data_workspace
+        resources:
+          cpu: 2
+          memory_mib: 32768
+          disk_gib: 50
+        provider_options:
+          platform:
+            os: linux
+            arch: amd64
+        metadata:
+          benchmark: bbh-hypotest
+          harness: opencode
+      gym_source: ${oc.env:BBH_SANDBOX_GYM_SOURCE,auto}
+      setup_commands:
+        - >-
+          python3 -m pip install --quiet --no-cache-dir
+          aiohttp fastapi gprof2dot hydra-core itsdangerous openai==2.7.2 omegaconf
+          orjson pandas psutil pydantic pydot ray requests rich uvicorn wandb yappi
+          scikit-learn scipy statsmodels openpyxl
+        - >-
+          PYTHONPATH=/gym_mount python3 -c "from responses_api_agents.opencode_agent.setup_opencode import
+          ensure_opencode; ensure_opencode('1.17.13')"
+        - |
+          cat > /data_workspace/AGENTS.md <<'EOF'
+          # BBH Hypothesis Analysis
+
+          Analyze the actual files in this workspace and follow every task protocol and rubric step.
+          Create analysis.py immediately, keep the complete reproducible analysis in it, and
+          successfully run it before giving the final scientific conclusion.
+          Print every retained row count, transformation, fitted result, and numerical comparison
+          needed by the rubric. Never infer the answer from filenames or hypothesis wording.
+          EOF
+      sandbox_python: python3
+      eval_timeout: 1800
+      rollout_timeout: 1500
+      empty_trajectory_retries: 2

@@ -189,11 +189,11 @@ class TestRepoDir:
         assert agent._repo_dir(tmp_path / "fallback") == repo_dir
         assert repo_dir.is_dir()
 
-    async def test_preserves_configured_repo_and_cleans_workspace(self, tmp_path: Path) -> None:
+    async def test_preserves_repo_and_logs_empty_session_output(self, tmp_path: Path, caplog) -> None:
         workspace = tmp_path / "workspace"
         repo_dir = tmp_path / "repo"
         process = MagicMock(returncode=0)
-        process.communicate = AsyncMock(return_value=(b"", b""))
+        process.communicate = AsyncMock(return_value=(b"session output", b"provider failed"))
         agent = _make_agent(repo_dir=str(repo_dir))
 
         with (
@@ -202,11 +202,44 @@ class TestRepoDir:
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
                 AsyncMock(return_value=process),
             ),
+            caplog.at_level("WARNING"),
         ):
             await agent._run_opencode("fix the issue", None)
 
         assert repo_dir.is_dir()
         assert not workspace.exists()
+        assert "opencode produced no parsed output (exit 0)" in caplog.text
+        assert "session output" in caplog.text
+        assert "provider failed" in caplog.text
+
+    async def test_timeout_preserves_partial_session(self, tmp_path: Path, caplog) -> None:
+        workspace = tmp_path / "workspace"
+        data_dir = workspace / ".opencode-data" / "opencode"
+        data_dir.mkdir(parents=True)
+        _session_db(data_dir, [("assistant", [{"type": "text", "text": "partial result"}])])
+        process = MagicMock(returncode=None)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        agent = _make_agent(repo_dir=str(tmp_path / "repo"), timeout=1200)
+
+        async def force_timeout(awaitable, *, timeout):
+            assert timeout == 1200
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=workspace),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch("responses_api_agents.opencode_agent.app.asyncio.wait_for", side_effect=force_timeout),
+            caplog.at_level("WARNING"),
+        ):
+            output_items, _, _ = await agent._run_opencode("finish the analysis", None)
+
+        process.kill.assert_called_once()
+        assert output_items[0].content[0].text == "partial result"
+        assert "opencode timed out after 1200s" in caplog.text
 
 
 class TestConfigYaml:

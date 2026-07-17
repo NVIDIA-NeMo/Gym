@@ -88,6 +88,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    forward_prefix_token_ids: bool = False
 
 
     # pin sampling for run-scoped requests so nemo-rl's on-policy assert passes
@@ -343,7 +344,8 @@ class VLLMModel(TokenIDBufferingMixin, SimpleResponsesAPIModel):
             body_dict["temperature"] = self.config.on_policy_temperature
             body_dict["top_p"] = self.config.on_policy_top_p
 
-        self.attach_tokens_and_logprobs(request, body_dict.get("messages") or [])
+        if self.config.forward_prefix_token_ids:
+            self.attach_tokens_and_logprobs(request, body_dict.get("messages") or [])
 
         client = self._resolve_client(request)
 

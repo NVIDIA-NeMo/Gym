@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import tempfile
 from unittest.mock import MagicMock
 
@@ -44,6 +45,11 @@ class _BufferingHost(TokenIDBufferingMixin):
     def __init__(self) -> None:
         d = tempfile.mkdtemp()
         self._trajectory = RunTrajectory(d)
+
+
+class _BufferPathHost(TokenIDBufferingMixin):
+    def __init__(self, global_config=None) -> None:
+        self.server_client = MagicMock(global_config_dict=global_config or {})
 
 
 class TestInjectPrefixTokenIds:
@@ -107,6 +113,26 @@ class TestRunTokenMiddleware:
 
 
 class TestRunTrajectory:
+    def test_fallback_buffer_dir_is_shared_across_model_instances(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("NEMO_GYM_TOKEN_ID_BUFFER_DIR", raising=False)
+        monkeypatch.setenv("SLURM_JOB_ID", "job/123")
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+        first = _BufferPathHost().token_id_buffer_dir()
+        second = _BufferPathHost().token_id_buffer_dir()
+
+        assert first == second == str(tmp_path / f"nemo_gym_token_id_buffer_{os.getuid()}_job_123")
+        first_trajectory = RunTrajectory(first)
+        second_trajectory = RunTrajectory(second)
+        first_trajectory.append("tok", [NeMoGymResponseOutputMessage(id="m", content=[], role="assistant")])
+        assert len(second_trajectory.read("tok")) == 1
+
+    def test_explicit_buffer_dir_overrides_global_log_dir(self, monkeypatch, tmp_path) -> None:
+        configured = tmp_path / "configured"
+        monkeypatch.setenv("NEMO_GYM_TOKEN_ID_BUFFER_DIR", str(configured))
+        host = _BufferPathHost({"nemo_gym_log_dir": str(tmp_path / "logs")})
+        assert host.token_id_buffer_dir() == str(configured)
+
     def test_append_read_pop_roundtrips_and_clears(self) -> None:
         t = RunTrajectory(tempfile.mkdtemp())
         assert t.read("tok") == []  # missing file -> empty

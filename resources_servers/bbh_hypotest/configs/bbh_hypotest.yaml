@@ -1,0 +1,35 @@
+bbh_hypotest:
+  resources_servers:
+    bbh_hypotest:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Hypotest BBH tasks graded from reproducible artifacts produced in a sandbox.
+      value: Scientific data-analysis and hypothesis-testing capability.
+      seed_concurrency: ${oc.env:BBH_HYPOTEST_SEED_CONCURRENCY,8}
+      sandbox_workdir: /data_workspace
+      artifact_paths:
+        - analysis.py
+        - analysis.ipynb
+        - notebook.ipynb
+      dataset:
+        problem_jsonl: ${oc.env:BBH_PROBLEM_JSONL}
+        capsule_dir: ${oc.env:BBH_CAPSULE_DIR}
+        work_dir: ${oc.env:BBH_HYPOTEST_WORK_DIR,/tmp/bbh-hypotest}
+        force_python: true
+        rubric_model: ${oc.env:BBH_RUBRIC_MODEL,openai/openai/openai/gpt-5.2}
+        rubric_model_config:
+          model_list:
+            - model_name: ${oc.env:BBH_RUBRIC_MODEL,openai/openai/openai/gpt-5.2}
+              litellm_params:
+                model: ${oc.env:BBH_RUBRIC_MODEL,openai/openai/openai/gpt-5.2}
+                api_key: ${oc.env:OPENAI_API_KEY}
+                base_url: ${oc.env:BBH_RUBRIC_BASE_URL,https://inference-api.nvidia.com/v1}
+        use_ray: false
+        use_docker: false
+        use_enroot: false
+        execution_config:
+          cell_execution_timeout: 600
+          job_timeout: 1800
+          warn_submit_threshold: 600
+          force_submit_threshold: 300

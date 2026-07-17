@@ -45,6 +45,7 @@ from nemo_gym.server_utils import (
 
 
 LOG = logging.getLogger(__name__)
+RUN_TOKEN_HEADER = "x-nemo-gym-run-token"
 
 
 class AgentRunRequest(BaseRunRequest):
@@ -95,7 +96,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             cookies = seed_resp.cookies
 
             run_token = uuid4().hex if getattr(self.config, "model_server", None) else None
-            run_header = {"headers": {"x-nemo-gym-run-token": run_token}} if run_token else {}
+            run_header = {"headers": {RUN_TOKEN_HEADER: run_token}} if run_token else {}
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
@@ -145,7 +146,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     @staticmethod
     def run_token_from_request(request: Request) -> Optional[str]:
-        return request.headers.get("x-nemo-gym-run-token")
+        return request.headers.get(RUN_TOKEN_HEADER)
 
     def model_server_base_url(self) -> Optional[str]:
         ref = getattr(self.config, "model_server", None)

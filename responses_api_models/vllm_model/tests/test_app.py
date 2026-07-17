@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import tomllib
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -75,6 +76,13 @@ COMMON_RESPONSE_PARAMS = dict(
     parallel_tool_calls=True,
     tool_choice="auto",
 )
+
+
+def test_component_declares_nemo_gym_runtime_dependency():
+    with (PARENT_DIR / "responses_api_models/vllm_model/pyproject.toml").open("rb") as config_file:
+        dependencies = tomllib.load(config_file)["project"]["dependencies"]
+
+    assert "nemo-gym" in dependencies
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----

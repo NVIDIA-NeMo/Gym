@@ -133,8 +133,15 @@ def _main_chain(items: List[NeMoGymResponseOutputItem]) -> List[NeMoGymResponseO
 
 class TokenIDBufferingMixin:
     def token_id_buffer_dir(self) -> str:
-        log_dir = (self.server_client.global_config_dict or {}).get(NEMO_GYM_LOG_DIR_KEY_NAME)
-        return str(log_dir) if log_dir else tempfile.mkdtemp(prefix="nemo_gym_token_id_buffer_")
+        configured_dir = os.getenv("NEMO_GYM_TOKEN_ID_BUFFER_DIR")
+        if configured_dir:
+            return configured_dir
+        global_config = getattr(self.server_client, "global_config_dict", None) or {}
+        log_dir = global_config.get(NEMO_GYM_LOG_DIR_KEY_NAME)
+        if log_dir:
+            return str(log_dir)
+        scope = re.sub(r"[^A-Za-z0-9_.-]", "_", os.getenv("SLURM_JOB_ID", "local"))
+        return os.path.join(tempfile.gettempdir(), f"nemo_gym_token_id_buffer_{os.getuid()}_{scope}")
 
     def setup_token_id_buffering(self, app: FastAPI) -> None:
         @app.middleware("http")
@@ -263,6 +270,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     async def messages(self, request: Request, body: dict = Body()):
         from nemo_gym.anthropic_converter import AnthropicConverter  # lazy: anthropic pkg optional
+
         _ANTHROPIC_CONVERTER = AnthropicConverter()
         """default anthropic messages handler: converts to responses api, delegates to responses(), converts back.
         re-emits as SSE when stream=true (claude code cli always sends this). servers may override."""

@@ -274,18 +274,26 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            timed_out = False
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
             except asyncio.TimeoutError:
+                timed_out = True
                 proc.kill()
-                await proc.communicate()
+                stdout, stderr = await proc.communicate()
                 LOG.warning("opencode timed out after %ds", self.config.timeout)
-                return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
 
-            if proc.returncode not in (0, None):
+            if not timed_out and proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             output_items, usage = parse_opencode_session(data_home / "opencode" / "opencode.db")
+            if not output_items:
+                LOG.warning(
+                    "opencode produced no parsed output (exit %s): stdout_tail=%r stderr_tail=%r",
+                    proc.returncode,
+                    stdout.decode(errors="replace")[-2000:],
+                    stderr.decode(errors="replace")[-2000:],
+                )
             return output_items, usage, self.config.model
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
