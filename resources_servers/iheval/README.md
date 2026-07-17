@@ -123,6 +123,45 @@ Also reported: `aligned_score`, `reference_score`, the per-task
 `compute_metrics` also reports `mean_reward` plus per-`task`, per-`domain`, and
 per-`setting` breakdowns for inspection.
 
+## Example rollouts and metrics
+
+`data/example_rollouts.jsonl` and `data/example_metrics.json` are committed
+and can be regenerated at any time without any live servers:
+
+```bash
+# Score synthetic responses against example.jsonl → example_rollouts.jsonl
+python resources_servers/iheval/generate_example_rollouts.py
+
+# Aggregate rollouts → per-task / per-domain / per-setting summary
+python resources_servers/iheval/generate_example_metrics.py
+
+# Inspect
+tail -n 1 resources_servers/iheval/data/example_rollouts.jsonl | jq .reward
+cat resources_servers/iheval/data/example_metrics.json | jq .
+```
+
+Note: `example.jsonl` contains only aligned-setting rows, so the headline
+`result_score` (conflict score) is not present in `example_metrics.json`. Run
+against `data/test.jsonl` with a full model eval for the complete IHEval metric.
+
+## Run
+
+```bash
+# Full eval (resources server + model)
+gym env start --resources-server iheval --model-type vllm_model
+
+# Serve-only (no model needed — all scorers are rule-based)
+gym env start --resources-server iheval/iheval_serve
+```
+
+Set `OPEN_ROUTER_KEY` if using an OpenRouter-backed model server.
+
+## Test
+
+```bash
+gym env test --resources-server iheval
+```
+
 ## Scoring source
 
 The IFEval rule-following checkers under `ifeval/` are vendored from upstream
