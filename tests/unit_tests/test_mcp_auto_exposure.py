@@ -566,6 +566,63 @@ def test_refuses_unknown_toolless_catchall_declaration():
         install_auto_exposure(server, server.setup_webserver())
 
 
+class Excluding(SimpleResourcesServer):
+    expose_tools_over_mcp: ClassVar[bool] = True
+    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
+
+    async def verify(self, body):
+        pass
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+
+        @app.post("/append")
+        async def append(body: EchoBody):
+            return {"value": body.value}
+
+        @app.post("/end_session")
+        async def end_session(body: EchoBody):
+            return {"ended": body.value}
+
+        return app
+
+
+def test_excluded_route_is_not_a_tool_but_plain_http_still_works():
+    with _mcp(Excluding, "excl") as (client, token):
+        assert {t["name"] for t in _list(client, token)} == {"append"}
+        r = _call(client, "end_session", {"value": "x"}, token=token)
+        assert r["isError"] is True and "Unknown tool" in r["content"][0]["text"]
+        resp = client.post("/end_session", json={"value": "x"})
+        assert resp.status_code == 200 and resp.json() == {"ended": "x"}
+
+
+def test_refuses_unknown_excluded_path_declaration():
+    class TypoExcluded(Store):
+        mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/nope"})
+
+    server = _server(TypoExcluded)
+    with pytest.raises(ValueError, match=r"mcp_excluded_paths.*'/nope'"):
+        install_auto_exposure(server, server.setup_webserver())
+
+
+def test_excluded_route_with_depends_param_does_not_refuse():
+    class ExcludedDepends(Excluding):
+        mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session", "/gated"})
+
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            @app.post("/gated")
+            async def gated(ok: bool = Depends(lambda: True)):
+                return {"ok": ok}
+
+            return app
+
+    server = _server(ExcludedDepends, "excl")
+    tools = install_auto_exposure(server, server.setup_webserver())
+    assert set(tools) == {"append"}
+
+
 def test_refuses_inventory_without_a_catchall_route():
     class InventoryNoCatchall(SimpleResourcesServer):
         expose_tools_over_mcp: ClassVar[bool] = True
@@ -761,6 +818,7 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
 
     server = _server(Recorder, name="store")  # Store has expose_tools_over_mcp = True
     app = server.setup_webserver()
+    maybe_auto_expose(server, app)
     with TestClient(app) as client:
         emitted = ["mcp__store__append", "raw_step", "mcp__other__tool"]
         resp = client.post("/verify", json=_verify_body(emitted))
@@ -769,6 +827,49 @@ def test_verify_normalizes_mcp_namespaced_tool_names():
     # verify SAW: this server's prefix stripped, bare names untouched, other servers' prefixes left alone
     assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
     assert echoed == emitted
+
+
+def test_litmus_pattern_reregistered_verify_is_still_normalized():
+    """Servers that strip and re-register /verify (litmus_agent pattern) get the install-time wrap
+    on their own handler: it sees bare names, and the response restores the emitted ones."""
+    seen: dict[str, list] = {}
+
+    class LitmusStore(Store):
+        def mcp_tool_inventory(self) -> Optional[list[dict]]:
+            return None
+
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            async def verify_and_cleanup(body: BaseVerifyRequest) -> BaseVerifyResponse:
+                seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+                return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+            # The catch-all is dropped too: it would shadow the re-appended /verify (litmus has none).
+            app.router.routes[:] = [
+                r for r in app.router.routes if getattr(r, "path", None) not in ("/verify", "/{tool_name}")
+            ]
+            app.post("/verify")(verify_and_cleanup)
+            return app
+
+    server = _server(LitmusStore, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        emitted = ["mcp__store__append", "raw_step", "mcp__other__tool"]
+        resp = client.post("/verify", json=_verify_body(emitted))
+        assert resp.status_code == 200, resp.text
+        echoed = [o["name"] for o in resp.json()["response"]["output"] if o["type"] == "function_call"]
+    assert seen["names"] == ["append", "raw_step", "mcp__other__tool"]
+    assert echoed == emitted
+
+
+def test_flag_on_server_without_verify_route_refuses_at_install():
+    server = _server()
+    app = server.setup_webserver()
+    app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
+    with pytest.raises(ValueError, match="/verify route"):
+        install_auto_exposure(server, app)
 
 
 def test_verify_does_not_normalize_when_mcp_exposure_off():

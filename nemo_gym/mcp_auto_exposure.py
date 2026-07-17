@@ -21,7 +21,9 @@ reads exactly as written; this module never touches them.
 
 ``run_webserver`` calls :func:`maybe_auto_expose` after building the app, so exposure is automatic
 for any server that sets the flag. Dispatcher servers (one catch-all route backing many tools, whose
-per-tool schemas live in data) additionally override one method, ``mcp_tool_inventory()``.
+per-tool schemas live in data) additionally override one method, ``mcp_tool_inventory()``. Routes
+named in ``mcp_excluded_paths`` are not tools at all: never advertised, never callable over MCP,
+never shape-checked — the plain HTTP route is untouched.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -36,6 +38,7 @@ MCP-side engine: the official SDK's public low-level ``mcp.server.lowlevel.Serve
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import logging
@@ -438,12 +441,22 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             "dispatch would silently skip. Remove the middleware, or do not set expose_tools_over_mcp."
         )
 
+    # A typo'd exclusion would silently expose the route it meant to hide.
+    excluded = frozenset(server.mcp_excluded_paths)
+    post_paths = {r.path for r in app.routes if isinstance(r, APIRoute) and "POST" in (r.methods or set())}
+    unknown_excluded = excluded - post_paths
+    if unknown_excluded:
+        raise ValueError(
+            f"mcp_excluded_paths on {type(server).__name__} names route(s) {sorted(unknown_excluded)} "
+            f"but the app's POST routes are {sorted(post_paths)}. Fix the declaration."
+        )
+
     typed_routes: dict[str, APIRoute] = {}
     catchall_routes: list[APIRoute] = []
     for route in app.routes:
         if not isinstance(route, APIRoute) or "POST" not in (route.methods or set()):
             continue
-        if route.path in BASIC_PATHS:
+        if route.path in BASIC_PATHS or route.path in excluded:
             continue
         if "{" in route.path:
             catchall_routes.append(route)
@@ -548,7 +561,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
 
 
 # ==================================================================================================
-# /seed_session augmentation: wrap (never edit) the endpoint so its response gains the signed token
+# /seed_session + /verify augmentation: wrap (never edit) the endpoints the app currently holds
 # ==================================================================================================
 
 
@@ -610,6 +623,70 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request], dict]) -
     app.router.routes[idx] = new_route  # in-place swap keeps ordering vs catch-all routes
 
 
+def _wrap_verify(app: FastAPI, server: Any) -> None:
+    """Wrap the app's current /verify endpoint so MCP-namespaced tool-call names are normalized for
+    scoring only. Verification runs against a deep copy with bare names; the reward response's
+    echoed names are restored to what the model emitted (matched by call_id), so persisted rollout
+    artifacts keep transport provenance. Wrapping whatever handler the route holds at install time
+    covers servers that strip and re-register /verify with their own handler.
+    """
+    found = next(
+        ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == "/verify"),
+        None,
+    )
+    if found is None:
+        raise ValueError(
+            "expose_tools_over_mcp requires a /verify route (its tool-call names are normalized for "
+            "scoring), but the app has none."
+        )
+    idx, route = found
+    endpoint = route.endpoint
+
+    def _function_calls(container: Any) -> list:
+        return [
+            item
+            for item in (getattr(getattr(container, "response", None), "output", None) or [])
+            if getattr(item, "type", None) == "function_call"
+        ]
+
+    @functools.wraps(endpoint)
+    async def verify_normalized(*args: Any, **kwargs: Any) -> Any:
+        args = list(args)
+        # Verify signatures vary ((body), (request, body), ...), so find the trajectory-carrying
+        # argument by content.
+        target_key: Any = next((k for k, v in enumerate(args) if _function_calls(v)), None)
+        if target_key is None:
+            target_key = next((k for k, v in kwargs.items() if _function_calls(v)), None)
+            container = kwargs.get(target_key)
+        else:
+            container = args[target_key]
+        if target_key is None:
+            result = endpoint(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+
+        emitted = {item.call_id: item.name for item in _function_calls(container)}
+        normalized = container.model_copy(deep=True)
+        for item in _function_calls(normalized):
+            item.name = server.normalize_tool_name(item.name)
+        if isinstance(target_key, int):
+            args[target_key] = normalized
+        else:
+            kwargs[target_key] = normalized
+
+        result = endpoint(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+
+        for item in _function_calls(result):
+            if item.call_id in emitted:
+                item.name = emitted[item.call_id]
+        return result
+
+    app.post("/verify")(verify_normalized)
+    new_route = app.router.routes.pop()  # the route just appended by app.post
+    app.router.routes[idx] = new_route  # in-place swap keeps ordering vs catch-all routes
+
+
 # ==================================================================================================
 # The installer + the flag-gated automatic entry point
 # ==================================================================================================
@@ -666,6 +743,7 @@ def install_auto_exposure(server: Any, app: FastAPI, allowed_tools: Optional[lis
         ).model_dump()
 
     _wrap_seed_session(app, mint_metadata)
+    _wrap_verify(app, server)
 
     mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
 

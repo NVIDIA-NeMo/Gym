@@ -159,18 +159,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # override for that route.
     mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset()
 
+    # Routes as registered (e.g. "/end_session") that must not be advertised or callable over MCP.
+    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset()
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
 
         app.post("/seed_session")(self.seed_session)
-        # Wrap verify only for MCP-exposed servers, so HTTP-only servers keep verify
-        # byte-for-byte and their baselines stay valid.
-        verify_handler = self._verify_with_normalized_tool_names() if self.expose_tools_over_mcp else self.verify
-        # A flag-on subclass that strips and re-registers /verify must re-apply this wrapper (normalize
-        # function_call names via self.normalize_tool_name), or MCP-namespaced trajectories score wrong.
-        app.post("/verify")(verify_handler)
+        app.post("/verify")(self.verify)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
@@ -189,53 +187,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         server has no such tools.
         """
         return None
-
-    def _verify_with_normalized_tool_names(self):
-        """Wrap verify so tool names are normalized for scoring only, without changing the recorded
-        trajectory. The comparison runs against a normalized copy; the reward response's echoed tool
-        names are then restored to what the model emitted (matched by call_id), so persisted rollout
-        artifacts keep the real names and transport provenance.
-        """
-        verify = self.verify
-
-        def _function_calls(container):
-            return [
-                item
-                for item in (getattr(getattr(container, "response", None), "output", None) or [])
-                if getattr(item, "type", None) == "function_call"
-            ]
-
-        @functools.wraps(verify)
-        async def verify_normalized(*args, **kwargs):
-            args = list(args)
-            # Verify signatures vary ((body), (request, body), ...), so find the
-            # trajectory-carrying argument by content.
-            target_key = next((k for k, v in enumerate(args) if _function_calls(v)), None)
-            if target_key is None:
-                target_key = next((k for k, v in kwargs.items() if _function_calls(v)), None)
-                container = kwargs.get(target_key)
-            else:
-                container = args[target_key]
-            if target_key is None:
-                return await verify(*args, **kwargs)
-
-            emitted = {item.call_id: item.name for item in _function_calls(container)}
-            normalized = container.model_copy(deep=True)
-            for item in _function_calls(normalized):
-                item.name = self.normalize_tool_name(item.name)
-            if isinstance(target_key, int):
-                args[target_key] = normalized
-            else:
-                kwargs[target_key] = normalized
-
-            result = await verify(*args, **kwargs)
-
-            for item in _function_calls(result):
-                if item.call_id in emitted:
-                    item.name = emitted[item.call_id]
-            return result
-
-        return verify_normalized
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()

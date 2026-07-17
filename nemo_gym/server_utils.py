@@ -533,6 +533,10 @@ class SimpleServer(BaseServer):
         return f"{self.__class__.__name__}___{self.config.name}"
 
     def setup_session_middleware(self, app: FastAPI) -> None:
+        if getattr(app.state, "nemo_gym_session_middleware_installed", False):
+            return
+        app.state.nemo_gym_session_middleware_installed = True
+
         # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
         # Says that if you register middlewares A and then B,
         # - at request time: They execute B first then A
