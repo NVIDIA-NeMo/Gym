@@ -21,9 +21,10 @@ swe_agents_train:
       dataset_path: ???
       # --- refine (multi-turn) knobs ---
       max_refine_rounds: 2
-      refine_strategy: baseline
-      carry_over_token_budget: 40000
-      refine_verify_feedback_chars: 8000
+      refine_strategy: compact_raw
+      carry_over_token_budget: 30000
+      refine_verify_feedback_chars: 6000
+      refine_failure_snippet_chars: 3000
       skip_reset_after_initial_round: false  # true → persistent refine (needs OpenHands SKIP_INITIAL_RESET)
       agent_prompt_overrides:
       # CodeAct agent
@@ -63,9 +64,10 @@ swe_agents_val:
       command_exec_timeout: 300
       dataset_path: ???
       max_refine_rounds: 2
-      refine_strategy: baseline
-      carry_over_token_budget: 40000
-      refine_verify_feedback_chars: 8000
+      refine_strategy: compact_raw
+      carry_over_token_budget: 30000
+      refine_verify_feedback_chars: 6000
+      refine_failure_snippet_chars: 3000
       skip_reset_after_initial_round: false
       agent_prompt_overrides:
       - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2

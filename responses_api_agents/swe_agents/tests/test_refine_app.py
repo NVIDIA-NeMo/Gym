@@ -10,6 +10,9 @@ from responses_api_agents.swe_agents.refine_app import (
     _append_seed_to_problem_metadata,
     _build_chain_metrics,
     _build_refine_v1_seed,
+    _build_refine_v3_seed,
+    _extract_failure_snippet,
+    _split_key_and_raw_verify_context,
     _truncate_middle,
 )
 
@@ -29,6 +32,8 @@ def _refine_config(**overrides) -> SWEBenchRefineConfig:
 def test_refine_round_config_accepts_canonical_and_legacy_names() -> None:
     assert _refine_config(max_refine_rounds=3).max_refine_rounds == 3
     assert _refine_config(max_attempts=4).max_refine_rounds == 4
+    assert _refine_config(refine_strategy="compact_raw").refine_strategy == "compact_raw"
+    assert _refine_config().refine_failure_snippet_chars == 3000
     assert (
         _refine_config(skip_reset_after_first=True).skip_reset_after_initial_round
         is True
@@ -58,10 +63,57 @@ def test_build_refine_v1_seed_matches_eval_handoff() -> None:
         max_patch_tokens=40000,
     )
 
-    assert "previous automated attempt did NOT resolve" in seed
+    assert "previous automated refinement round did NOT resolve" in seed
     assert "```diff\ndiff --git a/a.py b/a.py\n+fix\n```" in seed
     assert "FAILED tests/test_a.py::test_bug" in seed
     assert "produce a correct, complete patch" in seed
+
+
+def test_extract_failure_snippet_prefers_latest_traceback() -> None:
+    feedback = (
+        "Traceback (most recent call last):\nold failure\n"
+        "noise\n"
+        "Traceback (most recent call last):\nnew failure\nAssertionError: expected 2"
+    )
+
+    snippet = _extract_failure_snippet(feedback, max_chars=3000)
+
+    assert "old failure" not in snippet
+    assert snippet.startswith("Traceback (most recent call last):\nnew failure")
+    assert "AssertionError: expected 2" in snippet
+
+
+def test_split_key_and_raw_verify_context_removes_overlap() -> None:
+    key = "FAILED tests/test_a.py::test_bug\nAssertionError: expected 2"
+    raw = f"setup output\n{key}\nshort test summary"
+
+    extracted_key, additional = _split_key_and_raw_verify_context(key, raw)
+
+    assert extracted_key == key
+    assert key not in additional
+    assert "key verifier output shown above" in additional
+    assert "short test summary" in additional
+
+
+def test_build_refine_v3_seed_frontloads_compact_raw_evidence() -> None:
+    failure = (
+        "Traceback (most recent call last):\n"
+        '  File "tests/test_a.py", line 10, in test_bug\n'
+        "AssertionError: expected 2"
+    )
+    seed = _build_refine_v3_seed(
+        patch="diff --git a/a.py b/a.py\n+fix",
+        verify_feedback=f"setup output\n{failure}",
+        max_patch_tokens=30000,
+        max_failure_snippet_chars=3000,
+    )
+
+    assert "previous automated refine round did NOT resolve" in seed
+    assert seed.index("Key verifier output:") < seed.index("Previous patch:")
+    assert seed.count("AssertionError: expected 2") == 1
+    assert "Additional verifier context:" in seed
+    assert "You may keep, revise, or discard it" in seed
+    assert "complete minimal patch from the clean repository" in seed
 
 
 def test_append_seed_updates_openhands_instance_problem() -> None:
@@ -89,10 +141,14 @@ def test_build_chain_metrics_reports_refine_rescue() -> None:
         {"metrics": SWEBenchMetrics(resolved=True)},
     ]
 
-    metrics = _build_chain_metrics(refine_rounds, max_refine_rounds=2)
+    metrics = _build_chain_metrics(
+        refine_rounds,
+        max_refine_rounds=2,
+        refine_strategy="compact_raw",
+    )
 
     assert metrics == {
-        "refine_strategy": "baseline",
+        "refine_strategy": "compact_raw",
         "num_refine_rounds": 2,
         "max_refine_rounds": 2,
         "chain_resolved": True,

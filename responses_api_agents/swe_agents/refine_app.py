@@ -68,9 +68,20 @@ class SWEBenchRefineConfig(SWEBenchWrapperConfig):
         ge=0,
         description="Target upper bound (tokens) for context carried into the next round.",
     )
-    refine_strategy: Literal["baseline"] = Field(
+    refine_strategy: Literal["baseline", "compact_raw"] = Field(
         default="baseline",
-        description="Refine seed strategy. 'baseline' is eval-compatible refine v1.",
+        description=(
+            "Refine seed strategy. 'baseline' is eval-compatible refine v1; "
+            "'compact_raw' is refine v3 with front-loaded, deduplicated failure evidence."
+        ),
+    )
+    refine_failure_snippet_chars: int = Field(
+        default=3000,
+        ge=0,
+        description=(
+            "Maximum characters of high-signal traceback/assertion evidence placed "
+            "first in a compact_raw refine seed."
+        ),
     )
     skip_reset_after_initial_round: bool = Field(
         default=False,
@@ -132,7 +143,7 @@ def _build_refine_v1_seed(patch: str, verify_feedback: str, max_patch_tokens: in
 
     parts = [
         "\n\n---\n"
-        "Your previous automated attempt did NOT resolve the issue.",
+        "Your previous automated refinement round did NOT resolve the issue.",
         "Here is the diff you produced so far:",
         f"```diff\n{patch}\n```",
     ]
@@ -145,6 +156,121 @@ def _build_refine_v1_seed(patch: str, verify_feedback: str, max_patch_tokens: in
     parts.append(
         "Continue refining the patch so the failing tests pass. "
         "Review the diff, fix what is wrong, and produce a correct, complete patch."
+    )
+    return "\n\n".join(parts) + "\n"
+
+
+def _extract_failure_snippet(verify_feedback: str, max_chars: int) -> str:
+    """Extract the highest-signal traceback/assertion context from verifier output."""
+    verify_feedback = (verify_feedback or "").strip()
+    if not verify_feedback or max_chars <= 0:
+        return ""
+
+    lower_feedback = verify_feedback.lower()
+    traceback_idx = lower_feedback.rfind("traceback (most recent call last)")
+    if traceback_idx >= 0:
+        return verify_feedback[traceback_idx:][-max_chars:]
+
+    lines = verify_feedback.splitlines()
+    interesting = []
+    needles = (
+        "assertionerror",
+        "assert ",
+        "failed ",
+        "error ",
+        "syntaxerror",
+        "importerror",
+        "modulenotfounderror",
+        "timeout",
+        "timed out",
+        " e   ",
+    )
+    for idx, line in enumerate(lines):
+        if any(needle in line.lower() for needle in needles):
+            start = max(0, idx - 3)
+            end = min(len(lines), idx + 8)
+            interesting.extend(lines[start:end])
+            interesting.append("...")
+
+    snippet = "\n".join(interesting).strip() or verify_feedback
+    return snippet[-max_chars:]
+
+
+def _split_key_and_raw_verify_context(
+    key_failure_snippet: str, raw_verify_tail: str
+) -> tuple[str, str]:
+    """Return key and additional verifier context without duplicate evidence."""
+    key_failure_snippet = (key_failure_snippet or "").strip()
+    raw_verify_tail = (raw_verify_tail or "").strip()
+    additional_verify_context = raw_verify_tail
+
+    if key_failure_snippet and raw_verify_tail:
+        if raw_verify_tail == key_failure_snippet or raw_verify_tail in key_failure_snippet:
+            additional_verify_context = ""
+        elif key_failure_snippet in raw_verify_tail:
+            additional_verify_context = raw_verify_tail.replace(
+                key_failure_snippet, "\n...[key verifier output shown above]...\n", 1
+            ).strip()
+        else:
+            key_tail = key_failure_snippet[-1000:]
+            if key_tail and key_tail in raw_verify_tail:
+                additional_verify_context = raw_verify_tail.replace(
+                    key_tail,
+                    "\n...[overlapping key verifier output shown above]...\n",
+                    1,
+                ).strip()
+
+    return key_failure_snippet, additional_verify_context
+
+
+def _build_refine_v3_seed(
+    patch: str,
+    verify_feedback: str,
+    max_patch_tokens: int,
+    max_failure_snippet_chars: int,
+) -> str:
+    """Build refine v3 compact-raw seed with high-signal verifier evidence first."""
+    patch = _truncate_middle((patch or "").strip(), max_patch_tokens)
+    raw_verify_tail = (verify_feedback or "").strip()
+    key_failure_snippet = _extract_failure_snippet(
+        raw_verify_tail, max_failure_snippet_chars
+    )
+    key_failure_snippet, additional_verify_context = (
+        _split_key_and_raw_verify_context(key_failure_snippet, raw_verify_tail)
+    )
+
+    parts = [
+        "\n\n---\n"
+        "Your previous automated refine round did NOT resolve the issue.",
+        "You are starting again from a clean repository. "
+        "Use the previous round only as debugging evidence.",
+    ]
+    if key_failure_snippet:
+        parts.extend(
+            [
+                "Key verifier output:",
+                f"```text\n{key_failure_snippet}\n```",
+            ]
+        )
+    if additional_verify_context:
+        context_label = (
+            "Additional verifier context:"
+            if key_failure_snippet
+            else "Verifier output tail:"
+        )
+        parts.extend(
+            [
+                context_label,
+                f"```text\n{additional_verify_context}\n```",
+            ]
+        )
+    parts.extend(
+        [
+            "Previous patch:",
+            f"```diff\n{patch}\n```",
+            "Use the previous patch only as evidence. You may keep, revise, or discard it. "
+            "Produce a complete minimal patch from the clean repository.",
+        ]
     )
     return "\n\n".join(parts) + "\n"
 
@@ -174,7 +300,9 @@ def _append_seed_to_problem_metadata(metadata: dict[str, Any], seed: str) -> dic
 
 
 def _build_chain_metrics(
-    refine_rounds: list[dict], max_refine_rounds: int
+    refine_rounds: list[dict],
+    max_refine_rounds: int,
+    refine_strategy: str = "baseline",
 ) -> dict[str, Any]:
     """Return core metrics for one refinement chain."""
     resolved_at_refine_round = next(
@@ -189,7 +317,7 @@ def _build_chain_metrics(
     chain_resolved = resolved_at_refine_round is not None
     refine_continued = len(refine_rounds) > 1
     return {
-        "refine_strategy": "baseline",
+        "refine_strategy": refine_strategy,
         "num_refine_rounds": len(refine_rounds),
         "max_refine_rounds": max_refine_rounds,
         "chain_resolved": chain_resolved,
@@ -249,7 +377,9 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             # Chain-level reward = resolved by the (cumulative) final state; broadcast
             # to every round's sample. With fixed-length padding this keeps each
             # rollout's per-group count constant, so the GRPO baseline stays unbiased.
-            chain_metrics = _build_chain_metrics(refine_rounds, max_refine_rounds)
+            chain_metrics = _build_chain_metrics(
+                refine_rounds, max_refine_rounds, self.config.refine_strategy
+            )
             reward = 1.0 if chain_metrics["chain_resolved"] else 0.0
 
             results: list[SWEBenchRefineVerifyResponse] = []
@@ -319,6 +449,13 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
         """
         last = refine_rounds[-1]
         metrics = last["metrics"]
+        if self.config.refine_strategy == "compact_raw":
+            return _build_refine_v3_seed(
+                patch=metrics.model_patch or "",
+                verify_feedback=last.get("verify_feedback") or "",
+                max_patch_tokens=self.config.carry_over_token_budget,
+                max_failure_snippet_chars=self.config.refine_failure_snippet_chars,
+            )
         return _build_refine_v1_seed(
             patch=metrics.model_patch or "",
             verify_feedback=last.get("verify_feedback") or "",
