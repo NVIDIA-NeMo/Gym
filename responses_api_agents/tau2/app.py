@@ -27,7 +27,7 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -62,6 +62,8 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
 
 
 class Tau2RunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
     config: TextRunConfig
     task: Task
     seed: int
@@ -113,8 +115,6 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
-        for _ng in ("ng_task_index", "ng_rollout_index", "ng_attempt_index"):
-            body_dict.pop(_ng, None)
 
         config: TextRunConfig = body_dict["config"]
 

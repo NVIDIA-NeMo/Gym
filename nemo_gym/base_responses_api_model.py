@@ -232,18 +232,17 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     key for backward compatibility.
     """
     if isinstance(body, BaseModel):
-        task = getattr(body, TASK_INDEX_KEY_NAME[1:], None)
-        rollout = getattr(body, ROLLOUT_INDEX_KEY_NAME[1:], None)
-        attempt = getattr(body, ATTEMPT_INDEX_KEY_NAME[1:], None)
+        data = body.model_dump()
     elif isinstance(body, Mapping):
-        task = body.get(TASK_INDEX_KEY_NAME)
-        rollout = body.get(ROLLOUT_INDEX_KEY_NAME)
-        attempt = body.get(ATTEMPT_INDEX_KEY_NAME)
+        data = body
     else:
         return None
+    task = data.get(TASK_INDEX_KEY_NAME)
+    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
     if task is None or rollout is None:
         return None
     rollout_id = f"{task}-{rollout}"
+    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None:
         attempt_index = int(attempt)
         if attempt_index > 0:
