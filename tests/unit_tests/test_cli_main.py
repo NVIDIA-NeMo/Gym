@@ -1139,8 +1139,8 @@ class TestListEnvironmentsRouting:
         assert seen["env"] == os.pathsep.join(["/a", "/b"])  # set while the command runs
         assert NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME not in os.environ  # restored (unset) after main()
 
-    def test_search_dir_restores_pre_existing_extra_roots_env(self, monkeypatch: MonkeyPatch) -> None:
-        # A pre-existing NEMO_GYM_EXTRA_ROOTS is fully replaced by --search-dir for the command, then restored.
+    def test_search_dir_prepends_to_pre_existing_extra_roots_env(self, monkeypatch: MonkeyPatch) -> None:
+        # --search-dir roots take priority over a pre-existing NEMO_GYM_EXTRA_ROOTS (both searched), then restore.
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "/pre")
         seen = {}
 
@@ -1148,8 +1148,9 @@ class TestListEnvironmentsRouting:
             seen["env"] = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
 
         monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
-        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a"])
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
         main()
 
-        assert seen["env"] == "/a"  # flag fully replaces the existing value for the command
+        # --search-dir roots come first, existing extra roots after, so both stay searchable
+        assert seen["env"] == os.pathsep.join(["/a", "/b", "/pre"])
         assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "/pre"  # original restored after main()

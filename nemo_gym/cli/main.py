@@ -617,7 +617,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
 
 @contextmanager
 def _extra_roots_from_search_dir(search_dirs: list[str] | None):
-    """Set ``NEMO_GYM_EXTRA_ROOTS`` to ``--search-dir`` for the duration of the command, then restore.
+    """Prepend ``--search-dir`` roots to ``NEMO_GYM_EXTRA_ROOTS`` for the duration of the command, then restore.
 
     Setting the env var lets the roots reach every resolver (discovery, the --<component> selectors,
     deep config/prompt/rollout resolution) and inherit into spawned server subprocesses.
@@ -628,7 +628,7 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
         yield
         return
     original = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
-    value = os.pathsep.join(search_dirs)
+    value = os.pathsep.join([*search_dirs, *([original] if original else [])])
     os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = value
     _augment_sys_path()  # re-read env so --search-dir roots are importable (e.g. a benchmark prepare.py)
     logger.debug(f"Set {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={value} from --search-dir")
