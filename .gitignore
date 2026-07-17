@@ -240,3 +240,4 @@ env.yaml
 
 # Backup files
 *.backup
+e2e_mcp/
