@@ -1,0 +1,150 @@
+diff --git a/openhands/runtime/utils/bash.py b/openhands/runtime/utils/bash.py
+--- a/openhands/runtime/utils/bash.py
++++ b/openhands/runtime/utils/bash.py
+@@ -302,6 +302,11 @@ class BashSession:
+         self._stream_revision = 0
+         self._stream_content = ""
+         self._stream_id: str | None = None
++        self._stream_async_waiters: dict[
++            int,
++            tuple[asyncio.AbstractEventLoop, asyncio.Event, str, int],
++        ] = {}
++        self._stream_next_waiter_id = 0
+ 
+     def initialize(self) -> None:
+         self.server = libtmux.Server()
+@@ -438,29 +443,80 @@ class BashSession:
+         if poll_interval_seconds <= 0:
+             raise ValueError("snapshot poll interval must be positive")
+ 
++        loop = asyncio.get_running_loop()
++        wake_event = asyncio.Event()
++        with self._stream_condition:
++            if not hasattr(self, "_stream_async_waiters"):
++                self._stream_async_waiters = {}
++                self._stream_next_waiter_id = 0
++            waiter_id = self._stream_next_waiter_id
++            self._stream_next_waiter_id += 1
++            self._stream_async_waiters[waiter_id] = (
++                loop,
++                wake_event,
++                stream_id,
++                min_content_chars,
++            )
++
+         deadline = time.monotonic() + timeout_seconds
+-        while True:
+-            snapshot = self.get_stream_snapshot()
+-            content = snapshot["content"]
+-            if (
+-                snapshot["stream_id"] == stream_id
+-                and isinstance(content, str)
+-                and len(content) >= min_content_chars
+-            ):
+-                return snapshot
+-            if await is_disconnected():
+-                raise asyncio.CancelledError
+-            remaining_seconds = deadline - time.monotonic()
+-            if remaining_seconds <= 0:
+-                return snapshot
+-            await asyncio.sleep(min(poll_interval_seconds, remaining_seconds))
+-
+-    def _reset_stream_snapshot(self, stream_id: str | None) -> None:
++        try:
++            while True:
++                # Clear before reading under the same lock used by producers.
++                # An update after this snapshot will set the event again.
++                wake_event.clear()
++                snapshot = self.get_stream_snapshot()
++                content = snapshot["content"]
++                if (
++                    snapshot["stream_id"] == stream_id
++                    and isinstance(content, str)
++                    and len(content) >= min_content_chars
++                ):
++                    return snapshot
++                if await is_disconnected():
++                    raise asyncio.CancelledError
++                remaining_seconds = deadline - time.monotonic()
++                if remaining_seconds <= 0:
++                    return snapshot
++                try:
++                    await asyncio.wait_for(
++                        wake_event.wait(),
++                        timeout=min(poll_interval_seconds, remaining_seconds),
++                    )
++                except TimeoutError:
++                    pass
++        finally:
++            with self._stream_condition:
++                self._stream_async_waiters.pop(waiter_id, None)
++
++    def _wake_stream_async_waiters_locked(self) -> None:
++        """Wake async snapshot requests whose character target is ready."""
++        stale_waiters = []
++        for waiter_id, (
++            loop,
++            wake_event,
++            stream_id,
++            min_content_chars,
++        ) in self._stream_async_waiters.items():
++            if (
++                self._stream_id != stream_id
++                or len(self._stream_content) < min_content_chars
++            ):
++                continue
++            try:
++                loop.call_soon_threadsafe(wake_event.set)
++            except RuntimeError:
++                stale_waiters.append(waiter_id)
++        for waiter_id in stale_waiters:
++            self._stream_async_waiters.pop(waiter_id, None)
++
++    def _reset_stream_snapshot(self, stream_id: str | None = None) -> None:
+         with self._stream_condition:
+             self._stream_revision += 1
+             self._stream_content = ""
+             self._stream_id = stream_id
+             self._stream_condition.notify_all()
++            if hasattr(self, "_stream_async_waiters"):
++                self._wake_stream_async_waiters_locked()
+ 
+     def _update_stream_snapshot(
+         self,
+@@ -480,6 +536,8 @@ class BashSession:
+             self._stream_content = command_output
+             self._stream_revision += 1
+             self._stream_condition.notify_all()
++            if hasattr(self, "_stream_async_waiters"):
++                self._wake_stream_async_waiters_locked()
+ 
+     def close(self) -> None:
+         """Clean up the session."""
+diff --git a/tests/unit/runtime/utils/test_bash_session.py b/tests/unit/runtime/utils/test_bash_session.py
+--- a/tests/unit/runtime/utils/test_bash_session.py
++++ b/tests/unit/runtime/utils/test_bash_session.py
+@@ -101,7 +101,7 @@ async def test_async_stream_snapshot_wait_releases_on_target():
+             min_content_chars=128,
+             timeout_seconds=1,
+             is_disconnected=is_disconnected,
+-            poll_interval_seconds=0.001,
++            poll_interval_seconds=1,
+         )
+     )
+     await asyncio.sleep(0)
+@@ -110,12 +110,14 @@ async def test_async_stream_snapshot_wait_releases_on_target():
+         session._stream_content = "x" * 128
+         session._stream_revision += 1
+         session._stream_condition.notify_all()
++        session._wake_stream_async_waiters_locked()
+ 
+-    assert await waiter == {
++    assert await asyncio.wait_for(waiter, timeout=0.2) == {
+         "revision": 2,
+         "content": "x" * 128,
+         "stream_id": "current-command",
+     }
++    assert session._stream_async_waiters == {}
+ 
+ 
+ @pytest.mark.asyncio
