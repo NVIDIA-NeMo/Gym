@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -70,6 +72,46 @@ def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None,
     if usage:
         response["usage"] = usage
     return response
+
+
+def _provider_error(status: int, message: str, response_body: str | None = None) -> ClientResponseError:
+    error = ClientResponseError(MagicMock(), (), status=status, message="provider request failed", headers=None)
+    error.message = message
+    payload = response_body if response_body is not None else message
+    error.response_content = payload.encode("utf-8")
+    return error
+
+
+class _FakeResponseContent:
+    def __init__(self, response_body: str) -> None:
+        self._response_body = response_body.encode("utf-8")
+        self._consumed = False
+
+    async def read(self) -> bytes:
+        if self._consumed:
+            return b""
+        self._consumed = True
+        return self._response_body
+
+
+class _FakeRetryResponse:
+    def __init__(self, status: int, response_body: str) -> None:
+        self.status = status
+        self.ok = status < 400
+        self.content = _FakeResponseContent(response_body)
+        self.request_info = MagicMock()
+        self.request_info.real_url = "https://api.example.com/v1/chat/completions"
+
+    def raise_for_status(self) -> None:
+        if self.ok:
+            return
+        raise ClientResponseError(
+            self.request_info,
+            (),
+            status=self.status,
+            message="provider request failed",
+            headers=None,
+        )
 
 
 class TestSanity:
@@ -255,6 +297,252 @@ class TestInferenceProvider:
         content = data["choices"][0]["message"]["content"]
         assert content == "<think>Let me think about this...</think>The answer is 42."
         assert "reasoning_content" not in data["choices"][0]["message"]
+
+
+class TestProviderErrors:
+    async def test_chat_completion_provider_auth_error_is_structured(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        auth_error_content = json.dumps({"error": {"message": "Invalid API key", "type": "authentication_error"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(401, "Authentication failed", auth_error_content)
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "whoami"}]},
+        )
+        assert response.status_code == 401
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 401
+        assert detail["category"] == "authentication"
+        assert detail["retryable"] is False
+        assert detail["provider_context"]["base_url"] == "https://api.example.com/v1"
+        assert detail["model"] == "test-model"
+        assert detail["message"] == "Invalid API key"
+
+    async def test_chat_completion_provider_request_error_is_structured(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        request_error_content = json.dumps({"error": {"message": "Missing required field: messages"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(400, "Bad request", request_error_content)
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "bad payload"}]},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 400
+        assert detail["category"] == "request_error"
+        assert detail["retryable"] is False
+        assert detail["message"] == "Missing required field: messages"
+
+    async def test_chat_completion_provider_status_zero_falls_back_to_500(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(0, "Connection closed by upstream", "Connection closed by upstream")
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 500
+        assert detail["category"] == "transient_upstream_failure"
+        assert detail["retryable"] is True
+        assert detail["message"] == "Connection closed by upstream"
+
+    async def test_chat_completion_provider_retry_exhausted_500_uses_default_message(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        response_body = json.dumps({"error": {"message": "Upstream provider unavailable"}})
+        retry_responses = [_FakeRetryResponse(500, response_body) for _ in range(3)]
+
+        async def mock_request(**kwargs):
+            return retry_responses.pop(0)
+
+        async def mock_sleep(seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", mock_request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", mock_sleep)
+        server._client = NeMoGymAsyncOpenAI(base_url=server.config.base_url, api_key=server.config.api_key)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 500
+        assert detail["category"] == "transient_upstream_failure"
+        assert detail["retryable"] is True
+        assert detail["message"] == "Provider request failed"
+
+    async def test_chat_completion_provider_error_message_is_truncated_and_compacted(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        long_message = "  ".join(["very-long-provider-error-message"] * 20)
+        error_content = json.dumps({"error": {"message": long_message}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(418, "Provider said no", error_content)
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert response.status_code == 418
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 418
+        assert detail["category"] == "provider_error"
+        assert detail["retryable"] is False
+        assert len(detail["message"]) == 200
+        assert detail["message"].endswith("...")
+
+    async def test_responses_provider_error_uses_same_structured_contract(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        model_error_content = json.dumps({"error": {"message": "Model test-model does not exist"}})
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            side_effect=_provider_error(404, "Model not found", model_error_content)
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json={"input": "whoami"},
+        )
+        assert response.status_code == 404
+        detail = response.json()["detail"]
+        assert detail["provider_status"] == 404
+        assert detail["category"] == "model_not_found"
+        assert detail["retryable"] is False
+        assert detail["provider_context"]["base_url"] == "https://api.example.com/v1"
+        assert detail["message"] == "Model test-model does not exist"
+
+
+class TestProviderErrorHelpers:
+    def test_build_provider_error_payload_marks_rate_limit_as_retryable(self) -> None:
+        server = _make_server()
+        error = _provider_error(429, "Rate limit exceeded", json.dumps({"error": {"message": "Rate limit exceeded"}}))
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 429
+        assert payload["category"] == "rate_limit"
+        assert payload["retryable"] is True
+        assert payload["message"] == "Rate limit exceeded"
+
+    def test_build_provider_error_payload_marks_transient_upstream_failures_as_retryable(self) -> None:
+        server = _make_server()
+        error = _provider_error(
+            503,
+            "Service unavailable",
+            json.dumps({"error": {"message": "Upstream provider unavailable"}}),
+        )
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 503
+        assert payload["category"] == "transient_upstream_failure"
+        assert payload["retryable"] is True
+        assert payload["message"] == "Upstream provider unavailable"
+
+    def test_build_provider_error_payload_preserves_plain_text_provider_bodies(self) -> None:
+        server = _make_server()
+        plain_text_error = "gateway timeout while reading upstream response"
+        error = _provider_error(502, "Bad gateway", plain_text_error)
+
+        payload = server._build_provider_error_payload(error)
+
+        assert payload["provider_status"] == 502
+        assert payload["category"] == "transient_upstream_failure"
+        assert payload["retryable"] is True
+        assert payload["message"] == plain_text_error
+
+    def test_extract_provider_error_message_reads_top_level_message(self) -> None:
+        server = _make_server()
+        error = _provider_error(400, "Bad request", json.dumps({"message": "Top-level message"}))
+
+        assert server._extract_provider_error_message(error) == "Top-level message"
+
+    def test_extract_provider_error_message_reads_top_level_detail(self) -> None:
+        server = _make_server()
+        error = _provider_error(400, "Bad request", json.dumps({"detail": "Top-level detail"}))
+
+        assert server._extract_provider_error_message(error) == "Top-level detail"
+
+    def test_extract_provider_error_message_keeps_raw_json_when_shape_is_unknown(self) -> None:
+        server = _make_server()
+        response_body = json.dumps({"unexpected": "payload"})
+        error = _provider_error(500, "Server error", response_body)
+
+        assert server._extract_provider_error_message(error) == response_body
+
+    def test_extract_provider_error_message_uses_string_response_content_when_non_bytes(self) -> None:
+        server = _make_server()
+        error = ClientResponseError(MagicMock(), (), status=502, message="provider request failed", headers=None)
+        error.response_content = "string-based provider body"
+
+        assert server._extract_provider_error_message(error) == "string-based provider body"
+
+    def test_extract_provider_error_message_falls_back_when_response_content_is_none(self) -> None:
+        server = _make_server()
+        request_info = MagicMock()
+        request_info.real_url = "https://api.example.com/v1/chat/completions"
+        error = ClientResponseError(
+            request_info,
+            (),
+            status=500,
+            message="provider request failed",
+            headers=None,
+        )
+        error.response_content = None
+
+        assert server._extract_provider_error_message(error) == str(error).strip()
+
+    def test_classify_provider_error_uses_message_for_authentication(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "api key invalid") == "authentication"
+        assert server._classify_provider_error(418, "auth token expired") == "authentication"
+
+    def test_classify_provider_error_uses_message_for_model_not_found(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "requested model was not found") == "model_not_found"
+
+    def test_classify_provider_error_uses_message_for_rate_limit(self) -> None:
+        server = _make_server()
+
+        assert server._classify_provider_error(418, "rate limit exceeded upstream") == "rate_limit"
 
 
 class TestResponses:
