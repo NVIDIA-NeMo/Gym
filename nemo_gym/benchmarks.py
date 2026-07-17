@@ -39,7 +39,7 @@ BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
 
 
 class BenchmarkConfig(BaseModel):
-    name: str
+    name: str  # this is a dataset name, not the config name (they are usually the same)
     path: Path
     agent_name: str
     num_repeats: int
@@ -101,29 +101,16 @@ class BenchmarkConfig(BaseModel):
         )
 
 
-def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, BenchmarkConfig]:
-    benchmarks_dict = dict()
-    for config_path in config_paths:
-        config_path = Path(config_path)
+def _benchmark_config_name(rel_config_path: Path) -> str:
+    """The name of the benchmark config, given its path relative to ``benchmarks/``, sans ``.yaml``.
 
-        try:
-            # Listing has no runtime context, so tolerate unset runtime-only values.
-            maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
-        except Exception as e:
-            # Still unresolvable (e.g. a multi-benchmark suite) — skip with a warning rather than fail the
-            # whole listing, so it isn't silently invisible.
-            print(
-                f"Warning: skipping benchmark config '{config_path}': could not resolve it "
-                f"({type(e).__name__}: {str(e).splitlines()[0]}).",
-                file=sys.stderr,
-            )
-            continue
-        if not maybe_bc:
-            continue
-
-        benchmarks_dict[maybe_bc.name] = maybe_bc
-
-    return benchmarks_dict
+    This is the identity we key benchmarks by, so a listed benchmark is always a valid ``--benchmark`` argument.
+    """
+    rel = rel_config_path.with_suffix("")
+    parts = rel.parts
+    if len(parts) == 2 and parts[1] == "config":
+        return parts[0]
+    return rel.as_posix()
 
 
 def _is_benchmark_config(config_path: Path) -> bool:
@@ -161,7 +148,26 @@ def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
 
 def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
-    return _load_benchmarks_from_config_paths(_benchmark_config_paths(benchmarks_dir))
+    benchmarks_dict = dict()
+    for config_path in _benchmark_config_paths(benchmarks_dir):
+        try:
+            # Listing has no runtime context, so tolerate unset runtime-only values.
+            maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
+        except Exception as e:
+            # Still unresolvable (e.g. a multi-benchmark suite) — skip with a warning rather than fail the
+            # whole listing, so it isn't silently invisible.
+            print(
+                f"Warning: skipping benchmark config '{config_path}': could not resolve it "
+                f"({type(e).__name__}: {str(e).splitlines()[0]}).",
+                file=sys.stderr,
+            )
+            continue
+        if not maybe_bc:
+            continue
+
+        benchmarks_dict[_benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
+
+    return benchmarks_dict
 
 
 def discover_benchmarks() -> Dict[str, BenchmarkConfig]:

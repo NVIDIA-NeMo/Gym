@@ -76,11 +76,13 @@ def list_benchmarks() -> None:
     metadata = {name: read_config_metadata(bench.path) for name, bench in benchmarks.items()}
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
-    # across the benchmark name and domain.
+    # across the benchmark cofnig name, its dataset name, and domain.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
         benchmarks = {
-            name: bench for name, bench in benchmarks.items() if fuzzy_matches(query, name, metadata[name][0] or "")
+            name: bench
+            for name, bench in benchmarks.items()
+            if fuzzy_matches(query, name, bench.name, metadata[name][0] or "")
         }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
