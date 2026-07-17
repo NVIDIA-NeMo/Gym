@@ -143,6 +143,15 @@ RESOURCES_SERVER = Flag(
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
 
+# `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
+# component (surfaced as the reserved `component_name` config key) instead of listing all.
+NAME = Flag(
+    register=lambda p: p.add_argument(
+        "name", nargs="?", metavar="NAME", help="Inspect a single component by name instead of listing all."
+    ),
+    translate_to_hydra=lambda args: [f"+component_name={args.name}"] if getattr(args, "name", None) else [],
+)
+
 # `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
 # chosen listing command as the reserved `query` config key; the type only picks which command to run
 # (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
@@ -353,28 +362,28 @@ GROUPS = {
 COMMANDS = {
     "list benchmarks": Command(
         target="nemo_gym.cli.eval:list_benchmarks",
-        summary="List available benchmarks.",
-        flags=(JSON, SEARCH_DIR),
+        summary="List or inspect available benchmarks.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list environments": Command(
         target="nemo_gym.cli.env:list_environments",
-        summary="List available environments by name.",
-        flags=(JSON, SEARCH_DIR),
+        summary="List or inspect available environments.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
-        summary="List agent harnesses and how each composes (Pattern A vs self-contained B).",
-        flags=(JSON, SEARCH_DIR),
+        summary="List or inspect available agent harnesses.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list models": Command(
         target="nemo_gym.cli.models:list_models",
-        summary="List model servers by the value to pass to --model-type.",
-        flags=(JSON, SEARCH_DIR),
+        summary="List or inspect available model servers.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list resources-servers": Command(
         target="nemo_gym.cli.resources_servers:list_resources_servers",
-        summary="List resources servers (selectable with --resources-server) by name.",
-        flags=(JSON, SEARCH_DIR),
+        summary="List or inspect available resources servers.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "search": Command(
         target=_search,

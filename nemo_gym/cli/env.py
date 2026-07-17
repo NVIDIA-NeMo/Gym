@@ -38,9 +38,17 @@ from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.setup_command import run_command, setup_env_command
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, fuzzy_matches, print_no_matches, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_cleanly_on_config_error,
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -51,7 +59,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.registry import discover_environments
+from nemo_gym.registry import discover_environments, read_environment_details
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -919,14 +927,47 @@ def validate():
     rich.print("[green]✓[/green] Config is valid.")
 
 
+def _inspect_environment(name: str, environments: dict, global_config_dict) -> None:
+    """Render the ``gym list environments <name>`` inspect view for one environment."""
+    entry = environments.get(name)
+    if entry is None:
+        exit_unknown_component(name, environments, "environment")
+        return
+
+    parsed = read_environment_details(entry.config_path)
+    details = {"config": str(entry.config_path.resolve())}
+    if parsed["resources_servers"]:
+        details["resources servers"] = ", ".join(parsed["resources_servers"])
+    if parsed["agent"]:
+        details["agent"] = parsed["agent"]
+    if parsed["datasets"]:
+        details["datasets"] = ", ".join(parsed["datasets"])
+
+    description = parsed["description"]
+    if parsed["value"]:  # surface `value` as a trailing line of the description
+        description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
+
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="environment",
+        domain=parsed["domain"],
+        description=description,
+        details=details,
+        usage=f"gym env start --environment {name} --model-type vllm_model",
+    )
+
+
 def list_environments() -> None:
-    """List the environments available under environments/, optionally filtered by a `query` (the
-    `gym search environments` entry point). ``--search-dir`` adds extra roots on top of the cwd and built-ins.
+    """List the environments under environments/, or inspect one by name (``gym list environments <name>``).
+    Optionally filtered by a `query` (the `gym search environments` entry point). ``--search-dir`` adds extra
+    roots on top of the cwd and built-ins.
 
     Examples:
 
     ```bash
     gym list environments
+    gym list environments calendar
     gym list environments --json
     gym list environments --search-dir /path/to/project
     ```
@@ -939,6 +980,11 @@ def list_environments() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     environments = discover_environments()
+
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_environment(name, environments, global_config_dict)
+        return
 
     # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on
     # name + domain + description.

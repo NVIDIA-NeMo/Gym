@@ -100,14 +100,15 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
             working = OmegaConf.merge(DictConfig({key: _UNSET_VALUE_PLACEHOLDER}), working)
 
 
-def _scan_servers_for_metadata(container) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort ``(domain, description)`` from a config mapping: the first of each found across all
-    server groups. Defensive against malformed shapes, so it never raises.
+def iter_server_configs(container):
+    """Yield ``(group_key, server_name, server_config)`` for every server across all instances in a config.
+
+    Walks a loaded config mapping (each top-level instance -> its ``resources_servers``/
+    ``responses_api_agents``/``responses_api_models`` group -> each server). Defensive against malformed
+    shapes, so it never raises. The shared primitive behind metadata reads and the inspect deep-parse.
     """
-    domain: Optional[str] = None
-    description: Optional[str] = None
     if not isinstance(container, (dict, DictConfig)):
-        return None, None
+        return
     for instance in container.values():
         if not isinstance(instance, (dict, DictConfig)):
             continue
@@ -115,13 +116,22 @@ def _scan_servers_for_metadata(container) -> Tuple[Optional[str], Optional[str]]
             servers = instance.get(group_key)
             if not isinstance(servers, (dict, DictConfig)):
                 continue
-            for server_config in servers.values():
-                if not isinstance(server_config, (dict, DictConfig)):
-                    continue
-                if domain is None and server_config.get("domain"):
-                    domain = str(server_config["domain"])
-                if description is None and server_config.get("description"):
-                    description = str(server_config["description"])
+            for server_name, server_config in servers.items():
+                if isinstance(server_config, (dict, DictConfig)):
+                    yield group_key, server_name, server_config
+
+
+def _scan_servers_for_metadata(container) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort ``(domain, description)`` from a config mapping: the first of each found across all
+    server groups. Never raises.
+    """
+    domain: Optional[str] = None
+    description: Optional[str] = None
+    for _group_key, _server_name, server_config in iter_server_configs(container):
+        if domain is None and server_config.get("domain"):
+            domain = str(server_config["domain"])
+        if description is None and server_config.get("description"):
+            description = str(server_config["description"])
     return domain, description
 
 

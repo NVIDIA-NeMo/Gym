@@ -132,3 +132,32 @@ class TestDiscoverEnvironmentsAcrossRoots:
         monkeypatch.chdir(tmp_path)
 
         assert "cwd_env" in discover_environments()
+
+
+class TestReadEnvironmentDetails:
+    def test_extracts_resources_servers_agent_datasets_and_value(self, tmp_path: Path) -> None:
+        from nemo_gym.registry import read_environment_details
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "env:\n"
+            "  resources_servers:\n"
+            "    my_rs:\n"
+            "      domain: agent\n"
+            "      description: Desc\n"
+            "      value: The value\n"
+            "env_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets:\n"
+            "      - {name: train, type: train}\n"
+            "      - {name: example, type: example}\n"
+        )
+
+        details = read_environment_details(cfg)
+
+        assert details["domain"] == "agent" and details["description"] == "Desc"
+        assert details["value"] == "The value"
+        assert details["resources_servers"] == ["my_rs"]
+        assert details["agent"] == "simple_agent"
+        assert details["datasets"] == ["train", "example"]

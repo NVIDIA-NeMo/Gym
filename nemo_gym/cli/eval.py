@@ -31,10 +31,18 @@ from nemo_gym.benchmarks import (
     discover_benchmarks,
 )
 from nemo_gym.cli.env import RunHelper
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, fuzzy_matches, print_no_matches, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_cleanly_on_config_error,
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.discovery import read_config_metadata
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -50,8 +58,35 @@ from nemo_gym.global_config import (
 # commands in this module must not pay for on every invocation.
 
 
+def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
+    """Render the ``gym list benchmarks <name>`` inspect view for one benchmark."""
+    bench = benchmarks.get(name)
+    if bench is None:
+        exit_unknown_component(name, benchmarks, "benchmark")
+        return
+
+    domain, description = read_config_metadata(bench.path)
+    details = {
+        "config": str(bench.path.resolve()),
+        "agent": bench.agent_name,
+        "num repeats": str(bench.num_repeats),
+        "dataset": str(bench.dataset.jsonl_fpath),
+        "prepare script": str(bench.dataset.prepare_script),
+    }
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="benchmark",
+        domain=domain,
+        description=description,
+        details=details,
+        usage=f"gym eval prepare --benchmark {name}\ngym eval run --benchmark {name} --model-type vllm_model",
+    )
+
+
 def list_benchmarks() -> None:
-    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point).
+    """List available benchmarks, or inspect one by name (``gym list benchmarks <name>``). Optionally filtered
+    by a `query` (the `gym search` entry point).
 
     A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
     domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
@@ -65,6 +100,11 @@ def list_benchmarks() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     benchmarks = discover_benchmarks()
+
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_benchmark(name, benchmarks, global_config_dict)
+        return
 
     # Resolve domain + description once per benchmark, via the shared component-metadata reader —
     # the same one `gym list environments` uses — for the columns and `gym search`.
