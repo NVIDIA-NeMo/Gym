@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from itsdangerous import BadSignature, URLSafeSerializer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.routing import Route
@@ -81,10 +81,6 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
-    ng_task_index: Optional[int] = Field(default=None, validation_alias="_ng_task_index", exclude=True, repr=False)
-    ng_rollout_index: Optional[int] = Field(default=None, validation_alias="_ng_rollout_index", exclude=True, repr=False)
-    ng_attempt_index: Optional[int] = Field(default=None, validation_alias="_ng_attempt_index", exclude=True, repr=False)
-
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
 

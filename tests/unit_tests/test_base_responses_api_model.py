@@ -405,7 +405,7 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
 
 def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, ConfigDict
 
     from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
     from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -416,11 +416,9 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     assert maybe_rollout_id_from_run_body({}) is None
     assert maybe_rollout_id_from_run_body(None) is None
 
-    # The shape agents actually receive: a run-request model that declares the correlation indices
-    # as aliased, excluded fields (as BaseRunRequest does).
+    # The shape agents actually receive: a run-request model with extra="allow".
     class _Body(BaseModel):
-        ng_task_index: int | None = Field(default=None, validation_alias=TASK_INDEX_KEY_NAME, exclude=True)
-        ng_rollout_index: int | None = Field(default=None, validation_alias=ROLLOUT_INDEX_KEY_NAME, exclude=True)
+        model_config = ConfigDict(extra="allow")
 
     body = _Body.model_validate({TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 2})
     assert maybe_rollout_id_from_run_body(body) == "5-2"
