@@ -219,25 +219,47 @@ def _asset_config_path(flag: str, value: str) -> str:
     if matches:
         return str(matches[0])
 
-    # No match: suggest the closest real name across all roots (a config flavor when the server exists, else a
-    # server name) and report the full paths that were searched.
-    available = ", ".join(set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir()))
-    typo = config_flavor
-    candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
+    # No match: build a "did you mean?" hint and the roots searched
+    if flag == "benchmark":
+        # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
+        # the generic one-level flavor/sibling search below can't see them.
+        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
+        from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
-    if len(candidates) == 0:
-        available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
-        typo = server_name
-        candidates = [
-            child.name
+        config_names = {
+            _benchmark_config_name(p.relative_to(root / parent))
             for root in roots
-            if (root / parent).is_dir()
-            for child in (root / parent).iterdir()
-            if child.is_dir()
-        ]
+            for p in _benchmark_config_paths(root / parent)
+        }
+        # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
+        # at the config names under it; otherwise fall back to a fuzzy match across every token.
+        under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
+        hint = f" Did you mean `{min(under_dir, key=len)}`?" if under_dir else did_you_mean(value, config_names)
+        available = ", ".join(sorted(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+    else:
+        # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
+        # name, reporting the full paths that were searched in each case.
+        available = ", ".join(
+            set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir())
+        )
+        typo = config_flavor
+        candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
+
+        if len(candidates) == 0:
+            available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+            typo = server_name
+            candidates = [
+                child.name
+                for root in roots
+                if (root / parent).is_dir()
+                for child in (root / parent).iterdir()
+                if child.is_dir()
+            ]
+
+        hint = did_you_mean(typo, candidates)
 
     raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{did_you_mean(typo, candidates)} "
+        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{hint} "
         f"See available {flag} configs in {available}."
     )
 

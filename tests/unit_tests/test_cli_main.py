@@ -1009,6 +1009,19 @@ class TestDidYouMean:
         )
         assert "Did you mean `dapo17k`?" in err
 
+    def test_benchmark_group_dir_suggests_a_nested_token(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `livecodebench` is a directory that only groups benchmarks (its configs are nested), so it is not
+        # itself a valid `--benchmark` value. The hint must point at a real nested token, not circle back to
+        # the bare directory name.
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "run", "--benchmark", "livecodebench"])
+        assert "Did you mean `livecodebench/" in err
+        assert "Did you mean `livecodebench`?" not in err
+
+    def test_benchmark_group_dir_with_flavor_configs_subdir(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # tau2 keeps its benchmarks under `configs/`; the hint should surface one of those tokens.
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "prepare", "--benchmark", "tau2"])
+        assert "Did you mean `tau2/configs/" in err
+
 
 class TestSearchDir:
     """--search-dir registers extra roots that the name->config selectors also search (REQ 5)."""
@@ -1016,7 +1029,9 @@ class TestSearchDir:
     def _make_user_benchmark(self, tmp_path, name: str = "mybench") -> None:
         bench_dir = tmp_path / "benchmarks" / name
         bench_dir.mkdir(parents=True)
-        (bench_dir / "config.yaml").write_text("{}\n")
+        # A `type: benchmark` dataset so the config is discoverable as a real benchmark (the "did you mean"
+        # suggestions enumerate real benchmark tokens); resolution itself only needs the file to exist.
+        (bench_dir / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
 
     def test_resolves_component_from_user_dir(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         self._make_user_benchmark(tmp_path)
