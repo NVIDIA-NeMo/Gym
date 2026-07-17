@@ -239,11 +239,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            k: v
-            for k, v in agent_metrics.items()
-            if k.startswith("mean/") or k.startswith("subtask_accuracy")
-        }
+        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/") or k.startswith("subtask_accuracy")}
 
 
 if __name__ == "__main__":
