@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, mock_open
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli.dataset
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
 from nemo_gym import _resolve_under_cwd_or_install
@@ -440,6 +441,54 @@ class TestLoadDatasets:
 
 
 class TestValidateSamplesAndAggregateMetrics:
+    def test_prepare_data_no_model_config_seeds_non_policy_model_refs(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv(nemo_gym.global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.return_value = 12345
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig(
+                {
+                    "example_agent": {
+                        "responses_api_agents": {
+                            "simple_agent": {
+                                "entrypoint": "app.py",
+                                "model_server": {
+                                    "type": "responses_api_models",
+                                    "name": "user_model",
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        captured_configs = []
+
+        def run_mock(_processor, global_config_dict):
+            captured_configs.append(global_config_dict)
+
+        monkeypatch.setattr(nemo_gym.cli.dataset.TrainDataProcessor, "run", run_mock)
+
+        nemo_gym.cli.dataset.prepare_data()
+
+        assert len(captured_configs) == 1
+        global_config_dict = captured_configs[0]
+        assert global_config_dict["user_model"]["responses_api_models"]["dummy_model"]["entrypoint"] == "app.py"
+
     def test_validate_samples_and_aggregate_metrics_sanity(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
         write_filenames = []

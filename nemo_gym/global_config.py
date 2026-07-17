@@ -302,6 +302,52 @@ Duplicate config paths:
 
         return server_instance_configs
 
+    def _is_no_model_initial_config(self, initial_global_config_dict: DictConfig) -> bool:
+        policy_model_config = initial_global_config_dict.get(POLICY_MODEL_KEY_NAME)
+        if not isinstance(policy_model_config, (DictConfig, dict)):
+            return False
+
+        responses_api_models = policy_model_config.get("responses_api_models")
+        if not isinstance(responses_api_models, (DictConfig, dict)):
+            return False
+
+        dummy_model_config = responses_api_models.get("dummy_model")
+        return (
+            isinstance(dummy_model_config, (DictConfig, dict))
+            and dummy_model_config.get(ENTRYPOINT_KEY_NAME) == "app.py"
+        )
+
+    def _seed_no_model_response_model_refs(self, global_config_dict: DictConfig) -> None:
+        server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
+        existing_response_model_names = {
+            server_config.name
+            for server_config in server_instance_configs
+            if server_config.get_server_ref().type == "responses_api_models"
+        }
+        refs_to_seed = []
+
+        for server_instance_config in server_instance_configs:
+            run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
+            for maybe_ref_config in run_server_config_dict.values():
+                maybe_server_ref = is_server_ref(maybe_ref_config)
+                if (
+                    maybe_server_ref
+                    and maybe_server_ref.type == "responses_api_models"
+                    and maybe_server_ref.name not in existing_response_model_names
+                ):
+                    refs_to_seed.append(maybe_server_ref.name)
+                    existing_response_model_names.add(maybe_server_ref.name)
+
+        dummy_model_config = GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT[POLICY_MODEL_KEY_NAME][
+            "responses_api_models"
+        ]["dummy_model"]
+
+        with open_dict(global_config_dict):
+            for ref_name in refs_to_seed:
+                global_config_dict[ref_name] = {
+                    "responses_api_models": {"dummy_model": OmegaConf.create(deepcopy(dummy_model_config))}
+                }
+
     def raise_on_no_server_instances(self, global_config_dict: DictConfig) -> None:
         """Fail fast if a run has no server instances to start.
 
@@ -605,6 +651,9 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+
+        if self._is_no_model_initial_config(initial_global_config_dict):
+            self._seed_no_model_response_model_refs(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
