@@ -28,7 +28,6 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 """
 
 import logging
-import math
 import statistics
 from typing import Any, Dict, List
 
@@ -129,7 +128,6 @@ def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
             continue
         std_dev = 0.0 if all(v == runs[0] for v in runs) else statistics.stdev(runs)
         metrics[f"{key}/std_dev_across_runs"] = std_dev
-        metrics[f"{key}/std_err_across_runs"] = std_dev / math.sqrt(len(runs))
     return metrics
 
 

@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 import statistics
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -297,13 +296,8 @@ class TestAcrossRunStats:
         problem_runs = [1 / 2, 1 / 2, 0.0]  # run means of problem_accuracy
         subtask_runs = [5 / 6, 5 / 6, 3 / 6]  # per-run pooled sub-step fractions
         assert m["mean/problem_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(problem_runs))
-        assert m["mean/problem_accuracy/std_err_across_runs"] == pytest.approx(
-            statistics.stdev(problem_runs) / math.sqrt(3)
-        )
         assert m["subtask_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(subtask_runs))
-        assert m["subtask_accuracy/std_err_across_runs"] == pytest.approx(
-            statistics.stdev(subtask_runs) / math.sqrt(3)
-        )
+        assert not any(k.endswith("std_err_across_runs") for k in m)
 
     def test_single_repeat_emits_only_pooled_metric(self):
         tasks = [[_repeat(0, 1, 2)], [_repeat(0, 3, 4)]]
