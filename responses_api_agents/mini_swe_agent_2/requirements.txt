@@ -1,3 +1,4 @@
 -e nemo-gym[dev,sandbox] @ ../../
 mini-swe-agent==2.1.0
 swebench==4.1.0
+nemo-lens[sdk]

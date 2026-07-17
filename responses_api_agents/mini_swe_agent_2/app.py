@@ -584,7 +584,18 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
-    return _run_mini_swe_v2(**params)
+    result = _run_mini_swe_v2(**params)
+    # Finalize the sandbox observability recorder so artifacts are flushed before
+    # the Ray worker is recycled (atexit runs too late in pooled workers).
+    try:
+        from nemo_gym.sandbox.api import _get_sandbox_recorder
+
+        rec = _get_sandbox_recorder()
+        if rec is not None:
+            rec.finalize()
+    except Exception:
+        pass
+    return result
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
