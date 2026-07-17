@@ -26,6 +26,13 @@ sandbox:
       protocol: http
       request_timeout_s: 300
       use_server_proxy: true
+      # Fresh connection per request. The server proxy is reached over a
+      # cross-cluster istio east-west gateway fronted by an AWS NLB that
+      # silently reaps idle pooled connections; reusing a reaped connection
+      # hangs exec (observed as dozens of CLOSE_WAIT sockets wedging tasks,
+      # while a fresh-connection exec returns in ~1s). Disabling keepalive
+      # forces a fresh connection so no reaped socket is ever reused.
+      disable_connection_pooling: true
     create:
       request_timeout_s: 1200
       timeout_s: 1200
@@ -40,7 +47,22 @@ sandbox:
       stable_delay_s: 1.0
     operations:
       retries: 5
-      retry_delay_s: 1.0
-      retry_max_delay_s: 45.0
-      command_retries: 0
+      retry_delay_s: 0.5
+      # Fast retries: the transient errors on a cross-cluster/LB path (stale
+      # half-closed connection reuse -> RemoteProtocolError, proxy 500) clear on
+      # an immediate retry, so a long backoff just wastes wall-clock.
+      retry_max_delay_s: 8.0
+      command_retries: 3
       close_timeout_s: 30
+      # Foreground (streaming SSE) exec is the default and matches the baseline
+      # reproduction. `background_exec` runs the command in the background and
+      # polls status/logs instead of holding one SSE stream open; it was added
+      # for load balancers that cap long-lived streams, but it multiplies short
+      # cross-cluster requests and (without `disable_connection_pooling`) churns
+      # pooled connections. With fresh connections + short TB commands (<=180s,
+      # well under any LB idle cap), foreground SSE is simpler and reliable.
+      background_exec: false
+      # Poll cadence when background_exec is enabled: fast at first (short tmux
+      # commands finish in <1s) then back off.
+      background_poll_initial_s: 0.25
+      background_poll_interval_s: 2.0

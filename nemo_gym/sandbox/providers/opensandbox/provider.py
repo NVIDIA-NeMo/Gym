@@ -341,6 +341,14 @@ class OpenSandboxConnectionConfig:
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    # When true, give the SDK an httpx transport with connection keepalive
+    # disabled (max_keepalive_connections=0), so every request opens a fresh
+    # connection. Set this for cross-cluster/load-balanced paths (e.g. an istio
+    # east-west gateway fronted by an AWS NLB) where the LB silently reaps idle
+    # pooled connections: the SDK would otherwise reuse a reaped "zombie"
+    # connection and hang. Fresh connections cost a handshake per request but
+    # never reuse a dead socket. Harmless (slightly slower) on a direct path.
+    disable_connection_pooling: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,6 +413,19 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
+    # When True, run exec via a background command plus short status/log polls
+    # instead of one long-lived SSE stream. The streaming path holds a single
+    # connection open for the whole command; if that connection traverses a
+    # load balancer with a max idle/stream duration (e.g. an AWS NLB on an
+    # istio east-west gateway), a command that runs a while can have its stream
+    # silently dropped, hanging the client. Background+poll issues only short
+    # requests, so no single connection must survive longer than the LB allows.
+    background_exec: bool = False
+    # Poll interval starts at background_poll_initial_s and backs off toward
+    # background_poll_interval_s, so short commands are detected quickly while
+    # long ones do not spam requests.
+    background_poll_initial_s: float = 0.25
+    background_poll_interval_s: float = 2.0
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -417,6 +438,10 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
+        if self.background_poll_interval_s <= 0:
+            raise ValueError("operations.background_poll_interval_s must be > 0")
+        if self.background_poll_initial_s <= 0:
+            raise ValueError("operations.background_poll_initial_s must be > 0")
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -535,6 +560,14 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+        if self._connection.disable_connection_pooling:
+            import httpx
+
+            # Fresh connection per request: never reuse a connection an
+            # intermediary load balancer may have silently reaped.
+            kwargs["transport"] = httpx.AsyncHTTPTransport(
+                limits=httpx.Limits(max_keepalive_connections=0, max_connections=200)
+            )
         return ConnectionConfig(**kwargs)
 
     async def aclose(self) -> None:
@@ -871,22 +904,138 @@ class OpenSandboxProvider:
             )
         )
         effective_retries = self._command_retry_count() if retries is None else retries
+
+        async def _dispatch() -> SandboxExecResult:
+            if self._operations.background_exec:
+                return await self._exec_background(
+                    handle,
+                    effective_command,
+                    opts_kwargs,
+                    sdk_timeout_s=sdk_timeout_s,
+                    total_timeout_s=timeout_s,
+                    retries=effective_retries,
+                )
+
+            execution = await self._await_sdk_operation(
+                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                operation="command run",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=sdk_timeout_s,
+                retries=effective_retries,
+            )
+            stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
+            stderr_parts = [msg.text for msg in execution.logs.stderr]
+            if execution.error is not None:
+                stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+            stderr = "\n".join(stderr_parts) or None
+            error_type = None
+            if execution.exit_code is not None:
+                return_code = execution.exit_code
+            elif execution.error is not None:
+                return_code = 125
+                error_type = "sandbox"
+            else:
+                return_code = 0
+
+            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+
+        # Hard wall-clock backstop for the whole exec (submit + background poll +
+        # any retries). The inner poll-loop deadline / per-call timeouts bound the
+        # common cases and fire first with cleaner errors; this only catches
+        # pathological wedges (e.g. a request silently black-holed on a
+        # cross-cluster load balancer, or a status that never flips) so a single
+        # exec can never hang the task past ~2x its intended per-command budget.
+        # Raising TimeoutError lets Terminus-2 record a command timeout and move on.
+        hard_cap_s = None if sdk_timeout_s is None else (2.0 * float(sdk_timeout_s) + 30.0)
+        if hard_cap_s is None:
+            return await _dispatch()
+        try:
+            return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                f"(sandbox_id={handle.sandbox_id!r})"
+            ) from e
+
+    async def _exec_background(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        opts_kwargs: dict[str, Any],
+        *,
+        sdk_timeout_s: float | None,
+        total_timeout_s: int | float | None,
+        retries: int,
+    ) -> SandboxExecResult:
+        """Run a command as a background execution polled via short requests.
+
+        Avoids holding one long-lived SSE stream open for the whole command,
+        which a load balancer between the client and the OpenSandbox server can
+        silently drop. Submit (short) -> poll status (short) -> read logs (short).
+        """
+        _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
+        background_opts = dict(opts_kwargs)
+        background_opts["background"] = True
+
         execution = await self._await_sdk_operation(
-            lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
-            operation="command run",
+            lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
+            operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,
             timeout_s=sdk_timeout_s,
-            retries=effective_retries,
+            retries=retries,
         )
-        stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
-        stderr_parts = [msg.text for msg in execution.logs.stderr]
-        if execution.error is not None:
-            stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        stderr = "\n".join(stderr_parts) or None
+        execution_id = getattr(execution, "id", None)
+        if not execution_id:
+            raise RuntimeError("OpenSandbox background command did not return an execution id")
+
+        loop = asyncio.get_running_loop()
+        # execd enforces the command timeout server-side; give the poll loop a
+        # little headroom before giving up client-side.
+        deadline = loop.time() + float(total_timeout_s) + 60.0 if total_timeout_s is not None else None
+        poll_timeout_s = (
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
+        )
+
+        # Adaptive poll interval: poll fast at first so quick commands (the many
+        # short tmux keystrokes/pane-captures an agent issues) are detected almost
+        # immediately, then back off toward the configured max so a genuinely long
+        # command does not spam requests. Frequent early polls also keep the
+        # connection warm, reducing stale-connection reuse errors.
+        poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
+        status = None
+        while True:
+            status = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_command_status(execution_id),
+                operation="command status",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+            )
+            if not getattr(status, "running", False):
+                break
+            if deadline is not None and loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
+                    f"execution_id={execution_id!r}"
+                )
+            await asyncio.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
+
+        logs = await self._await_sdk_operation(
+            lambda: handle.raw.commands.get_background_command_logs(execution_id),
+            operation="command logs",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=poll_timeout_s,
+            retries=self._operations.retries,
+        )
+        stdout = getattr(logs, "content", None) or None
         error_type = None
-        if execution.exit_code is not None:
-            return_code = execution.exit_code
-        elif execution.error is not None:
+        exit_code = getattr(status, "exit_code", None)
+        status_error = getattr(status, "error", None)
+        stderr = status_error or None
+        if exit_code is not None:
+            return_code = exit_code
+        elif status_error is not None:
             return_code = 125
             error_type = "sandbox"
         else:

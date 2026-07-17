@@ -303,6 +303,21 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert no_policy_provider._resolve_extensions({"imagePullPolicy": "Never"}) == {"imagePullPolicy": "Never"}
 
 
+def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox_sdk: None) -> None:
+    import httpx
+
+    # Default: no transport override (SDK uses its pooled default).
+    pooled = opensandbox_provider.OpenSandboxProvider(connection={"domain": "sandbox.example"})
+    assert "transport" not in pooled._connection_config().kwargs
+
+    # disable_connection_pooling -> a fresh-connection (no-keepalive) transport.
+    fresh = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "disable_connection_pooling": True}
+    )
+    transport = fresh._connection_config().kwargs.get("transport")
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+
+
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -395,6 +410,158 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(handle) == SandboxStatus.RUNNING
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """background_exec submits, polls status until finished, then reads logs."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls: list[tuple[str, FakeRunCommandOpts]] = []
+            self.status_calls: list[str] = []
+            self.log_calls: list[str] = []
+            self._status_sequence = [
+                SimpleNamespace(running=True, exit_code=None, error=None),
+                SimpleNamespace(running=False, exit_code=7, error=None),
+            ]
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.run_calls.append((command, opts))
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            return self._status_sequence[min(len(self.status_calls) - 1, len(self._status_sequence) - 1)]
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls.append(execution_id)
+            return SimpleNamespace(content="combined output", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-bg", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "make build", cwd="/repo", timeout_s=30)
+
+    assert result == opensandbox_provider.SandboxExecResult(
+        stdout="combined output", stderr=None, return_code=7, error_type=None
+    )
+    # Submitted once with background=True; polled twice (running -> finished); read logs once.
+    assert len(raw.commands.run_calls) == 1
+    assert raw.commands.run_calls[0][1].kwargs["background"] is True
+    assert raw.commands.status_calls == ["exec-42", "exec-42"]
+    assert raw.commands.log_calls == ["exec-42"]
+
+
+async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged exec (hard wall-clock cap tripping) surfaces as TimeoutError."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:  # pragma: no cover
+            return SimpleNamespace(id="exec-wedged")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+
+    # Simulate the outer hard-cap wait_for timing out before _dispatch completes.
+    async def fake_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-wedge", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(TimeoutError, match="hard cap"):
+        await provider.exec(handle, "sleep 999", timeout_s=30)
+
+
+async def test_exec_background_without_timeout_skips_hard_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no per-command timeout and no connection request timeout, exec runs uncapped."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls: list[str] = []
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-uncapped")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            running = len(self.status_calls) < 2
+            return SimpleNamespace(running=running, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="ok", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": None},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-uncapped", provider_name="opensandbox", raw=FakeRaw())
+
+    result = await provider.exec(handle, "echo hi")
+
+    assert result == opensandbox_provider.SandboxExecResult(
+        stdout="ok", stderr=None, return_code=0, error_type=None
+    )
 
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:

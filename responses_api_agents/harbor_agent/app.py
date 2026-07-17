@@ -56,6 +56,13 @@ class HarborDatasetSourceConfig(BaseModel):
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int
 
+    # CPUs Ray reserves per Harbor-job task. Each job is I/O-bound (the work runs
+    # in a remote sandbox and on the model server, not on the driver), so a
+    # fractional value lets many more jobs run concurrently than the driver's
+    # physical CPU count. None keeps Ray's default of 1 CPU/task, which caps
+    # concurrency at (driver CPUs). Set e.g. 0.25 to run ~4x the CPU count.
+    harbor_ray_task_num_cpus: Optional[float] = None
+
     # --- Harbor agent settings ---
     # Name of a built-in Harbor agent (e.g. "terminus-2", "claude-code", "aider").
     harbor_agent_name: Optional[str] = "terminus-2"
@@ -266,8 +273,16 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 params = dict(
                     job_config_dict=job_config_dict,
                 )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                runner = runner_ray_remote
+                if self.config.harbor_ray_task_num_cpus is not None:
+                    runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
+                future = runner.remote(_run_harbor_job_sync, params)
+                # Await the ObjectRef directly (Ray futures are awaitable). Using
+                # asyncio.to_thread(ray.get, ...) here caps result consumption at
+                # the default executor's ~(cpus+4) threads: with more concurrent
+                # jobs than threads, finished results queue behind long-blocking
+                # ray.get calls and responses flush in delayed waves.
+                trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 
                 # Read the trial result (summary: reward, agent_result, verifier_result)

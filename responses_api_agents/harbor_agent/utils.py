@@ -184,7 +184,9 @@ class HarborAgentUtils:
 
         return {
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            # cache_write_tokens is required by openai>=2.40 InputTokensDetails;
+            # vLLM backends do not report cache writes.
+            "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
             "output_tokens": output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": input_tokens + output_tokens,

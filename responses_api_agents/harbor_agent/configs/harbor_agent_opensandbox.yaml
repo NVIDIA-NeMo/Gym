@@ -1,0 +1,113 @@
+# Harbor agent wired to the NeMo Gym sandbox API (OpenSandbox provider).
+#
+# Runs Terminal-Bench 2.1 tasks with the stock Terminus-2 harness while task
+# containers execute remotely on an OpenSandbox cluster via
+# `custom_envs/nemo_gym_sandbox/environment.py:NemoGymSandboxEnvironment`.
+#
+# Provider-neutral, mini_swe_agent_2 style: the sandbox provider is referenced
+# by name (`sandbox_provider: ${sandbox}`) and its definition lives in a
+# separate provider config, so swapping providers is swapping that `--config`
+# path (no edits here):
+#
+#   AGENT=responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox.yaml
+#   PROVIDER=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   gym eval run \
+#       --config $AGENT --config $PROVIDER --config $MODEL \
+#       --agent harbor_agent --split benchmark \
+#       --input <one-row-per-task>.jsonl --output rollouts.jsonl
+#
+# Required environment variables (consumed by the $PROVIDER config):
+#   OPENSANDBOX_DOMAIN   e.g. opensandbox-server.opensandbox-system.svc.cluster.local
+#   OPENSANDBOX_API_KEY  any placeholder when the server runs in insecure mode
+# Plus, for the local Terminal-Bench 2.1 dataset:
+#   TERMINAL_BENCH_2_1_TASKS_DIR  checkout of harbor-framework/terminal-bench-2-1 (the tasks/ dir)
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses and environments.
+      value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
+      # Full-benchmark concurrency: run all 89 TB 2.1 tasks at once (bounded by
+      # the gym eval --concurrency flag, the sandbox cluster, and vLLM batching).
+      concurrency: 89
+      # Each Harbor job is dispatched as a Ray task; the default 1 CPU/task caps
+      # in-flight jobs at (driver CPUs). Jobs are I/O-bound (remote sandbox +
+      # model server), so reserve a fraction of a CPU to actually reach the
+      # concurrency above on a modest driver. 0.25 -> ~4x driver CPU count.
+      harbor_ray_task_num_cpus: 0.25
+
+      harbor_datasets:
+        terminal_bench:
+          local_dataset_path: ${oc.env:TERMINAL_BENCH_2_1_TASKS_DIR}
+
+      # One row per task; consumed by `gym eval run --split benchmark`.
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: responses_api_agents/harbor_agent/example/terminal_bench_2_1_input.jsonl
+          prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
+          prompt_config: null
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_kwargs:
+        collect_rollout_details: false
+        # Thinking-mode episodes can generate for tens of minutes under load;
+        # the 120s default times out and re-sends, piling zombie requests onto
+        # the model server. But don't set this to multi-hour either: the serving
+        # stack can silently drop an in-flight request (observed: engine shows 0
+        # running while clients hold open sockets), and the client then blocks
+        # for this full duration. 2400s clears any legitimate thinking turn
+        # while letting a dropped request self-heal within 40 minutes.
+        nemo_model_server_timeout_sec: 2400
+        model_info:
+          max_input_tokens: 262144
+          max_output_tokens: 81920
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: null
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
+      harbor_environment_kwargs:
+        # Reference the `sandbox` block from the included provider config
+        # (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
+        sandbox_provider: ${sandbox}
+        sandbox_metadata:
+          harbor-benchmark: terminal-bench-2-1
+        # Server-side safety net; trials are bounded by the agent/verifier
+        # timeouts below.
+        sandbox_ttl_s: 21600
+        sandbox_ready_timeout_s: 900
+        # Per-command exec bound (NOT a trial bound). Terminus-2 omits
+        # ``timeout_sec`` only for its short tmux plumbing (send-keys/capture are
+        # sub-second; blocked waits self-bound at ``timeout <=180s tmux wait
+        # done``), so 300s is ample headroom while still bounding a wedged exec
+        # on the cross-cluster path. A trial-length value here (e.g. hours) lets
+        # a single stuck exec hang the whole task until the trial deadline.
+        default_exec_timeout_s: 600
+        # Uniform per-sandbox resources for all tasks. disk_gib is derived from
+        # override_storage_mb; 30 GiB avoids kubelet ephemeral-storage evictions
+        # on disk-heavy tasks (image builds, dataset downloads) that overrun the
+        # 10 GiB task.toml default. Remove these to use each task.toml's values.
+        # 8C/16G: exec-path 500s ("Failed to run command", no server error) were
+        # traced to sandbox containers dying under load — consistent with
+        # OOM/oversubscription kills; roomier limits keep execd alive on
+        # memory-hungry tasks.
+        override_cpus: 8
+        override_memory_mb: 16384
+        override_storage_mb: 30720
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Match the Qwen3.6 model-card harness setup: 3h agent timeout.
+      harbor_agent_override_timeout: 10800
+      harbor_agent_max_timeout: null
+      harbor_verifier_override_timeout: null
+      harbor_verifier_max_timeout: null
+      harbor_timeout_multiplier: null
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"
