@@ -39,22 +39,24 @@ class TestDiscoverResourcesServers:
             flavors={"my_server": ("knowledge", "The default"), "some_other_flavor": ("other", "A flavor")},
         )
 
-        entry = _discover_resources_servers_in_dir(tmp_path)["my_server"]
+        servers = _discover_resources_servers_in_dir(tmp_path)
 
+        assert set(servers) == {"my_server", "my_server/some_other_flavor"}  # one token per flavor
+        entry = servers["my_server"]
         assert entry.domain == "knowledge"
         assert entry.description == "The default"
         assert entry.config_path.name == "my_server.yaml"
 
-    def test_reads_first_flavor_when_no_default(self, tmp_path: Path) -> None:
-        # No `<name>.yaml`, so metadata is read from the first config alphabetically.
+    def test_flavor_tokens_when_no_default(self, tmp_path: Path) -> None:
+        # No `<name>.yaml`, so each flavor is its own `<name>/<flavor>` token (no collapsing to one entry).
         _make_resources_server(
             tmp_path, "my_server", flavors={"beta": ("science", "Beta"), "alpha": ("math", "Alpha")}
         )
 
-        entry = _discover_resources_servers_in_dir(tmp_path)["my_server"]
+        servers = _discover_resources_servers_in_dir(tmp_path)
 
-        assert entry.config_path.name == "alpha.yaml"
-        assert entry.domain == "math"
+        assert set(servers) == {"my_server/alpha", "my_server/beta"}
+        assert servers["my_server/alpha"].domain == "math"
 
     def test_dirs_without_a_config_are_skipped(self, tmp_path: Path) -> None:
         # A dir with no config (e.g. a stray .egg-info) is not a resources server.
@@ -62,6 +64,15 @@ class TestDiscoverResourcesServers:
         _make_resources_server(tmp_path, "real_server", flavors={"real_server": ("other", "Real")})
 
         assert set(_discover_resources_servers_in_dir(tmp_path)) == {"real_server"}
+
+    def test_helper_configs_are_skipped(self, tmp_path: Path) -> None:
+        # A config with no `resources_servers` block (e.g. a judge model helper) is not a flavor.
+        _make_resources_server(tmp_path, "my_server", flavors={"my_server": ("knowledge", "Default")})
+        (tmp_path / "my_server" / "configs" / "judge_model.yaml").write_text(
+            "judge_model:\n  responses_api_models:\n    m:\n      x: 1\n"
+        )
+
+        assert set(_discover_resources_servers_in_dir(tmp_path)) == {"my_server"}
 
     def test_missing_directory_yields_no_servers(self, tmp_path: Path) -> None:
         assert _discover_resources_servers_in_dir(tmp_path / "nope") == {}
