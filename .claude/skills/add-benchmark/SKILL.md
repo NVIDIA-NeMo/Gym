@@ -72,7 +72,7 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 
 **Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
 
-**`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
+**`example.jsonl`**: Generate 5 entries for smoke testing, committed directly to git in `data/example.jsonl`. Each row must be in materialized Responses format (contain `responses_create_params`) — example datasets are not templated via `prompt_config`, so raw rows won't validate.
 
 **`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
 
