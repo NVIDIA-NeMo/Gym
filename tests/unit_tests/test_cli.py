@@ -423,3 +423,26 @@ class TestListEnvironments:
         assert json.loads(capsys.readouterr().out) == [
             {"name": "alpha", "domain": "agent", "description": "Alpha env"}
         ]
+
+    def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `gym search environments <query>` reuses this command via the `query` config key (matches name + domain).
+        beta = EnvironmentEntry(
+            name="beta",
+            config_path=Path("environments/beta/config.yaml"),
+            path=Path("environments/beta"),
+            description="Beta env",
+            domain="math",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "alpha"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "beta": beta}
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "Environments matching 'alpha'" in out
+        assert "agent" in out  # alpha's domain -> its row was rendered
+        assert "beta" not in out and "math" not in out  # beta and its domain filtered out

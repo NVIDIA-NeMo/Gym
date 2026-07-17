@@ -14,14 +14,14 @@
 # limitations under the License.
 import json
 
-import rich
 from rich.table import Table
 
 from nemo_gym.agent_registry import discover_agents
-from nemo_gym.cli.utils import print_rich_table
+from nemo_gym.cli.utils import fuzzy_matches, print_no_matches, print_rich_table
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     JSON_OUTPUT_KEY_NAME,
+    QUERY_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
@@ -29,8 +29,9 @@ from nemo_gym.global_config import (
 
 def list_agents() -> None:
     """List discovered agent harnesses and how each composes: freely wireable into a separate environment
-    (Pattern A) vs. self-contained harnesses that run with their own config (Pattern B). ``--search-dir``
-    adds extra roots to scan on top of the cwd and built-ins.
+    (Pattern A) vs. self-contained harnesses that run with their own config (Pattern B). Optionally filtered
+    by a `query` (the `gym search agents` entry point). ``--search-dir`` adds extra roots on top of the cwd
+    and built-ins.
     """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
@@ -40,6 +41,11 @@ def list_agents() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     agents = discover_agents()
+
+    # `gym search agents <query>` reuses this command, narrowing to fuzzy matches on name + variant names.
+    query = global_config_dict.get(QUERY_KEY_NAME)
+    if query:
+        agents = {name: entry for name, entry in agents.items() if fuzzy_matches(query, name, *entry.variants)}
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
@@ -56,10 +62,10 @@ def list_agents() -> None:
         return
 
     if not agents:
-        rich.print("No agents found.")
+        print_no_matches("agents", query)
         return
 
-    table = Table(title="NeMo Gym agents")
+    table = Table(title=f"Agents matching '{query}'" if query else "NeMo Gym agents")
     table.add_column("agent", style="bold")
     table.add_column("composition")
     table.add_column("variants")
