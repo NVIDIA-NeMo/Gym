@@ -678,7 +678,8 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
-        # After the app is fully built so subclass routes are present; lazy import keeps the MCP SDK out of agents/models.
+        # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
+        # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 

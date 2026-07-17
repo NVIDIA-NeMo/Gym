@@ -3,9 +3,6 @@
 *.pkl
 #*.ipynb
 output
-
-# Local-only demo/verification harness (not shipped)
-prototypes/
 output_2048
 result
 *.pt
@@ -240,4 +237,3 @@ env.yaml
 
 # Backup files
 *.backup
-e2e_mcp/

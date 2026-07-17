@@ -77,9 +77,11 @@ class GymnasiumServer(SimpleResourcesServer):
     session_state: Dict[str, Any] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
+        app = FastAPI()
+        self.setup_session_middleware(app)
         app.post("/reset")(self._reset_endpoint)
         app.post("/step")(self._step_endpoint)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def _reset_endpoint(self, body: EnvResetRequest, request: Request) -> EnvResetResponse:

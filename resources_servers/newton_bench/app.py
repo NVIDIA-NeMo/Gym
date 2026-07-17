@@ -21,7 +21,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, PrivateAttr
@@ -142,8 +142,6 @@ class NewtonBenchEndSessionResponse(BaseModel):
 
 
 class NewtonBenchResourcesServer(SimpleResourcesServer):
-    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
-
     config: NewtonBenchResourcesServerConfig
     session_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     _sessions: Dict[str, SessionHandle] = PrivateAttr(default_factory=dict)

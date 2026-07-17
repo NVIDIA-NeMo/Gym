@@ -129,7 +129,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     config: NSToolsConfig
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
-    _mcp_tool_specs: List[Dict[str, Any]] = []  # name/input_schema/description retained for mcp_tool_inventory
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
@@ -292,23 +291,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             tools = await self.tool_manager.list_all_tools()
             for tool in tools:
                 self._tool_name_map[tool["name"]] = tool["name"]
-                self._mcp_tool_specs.append(
-                    {
-                        "name": tool["name"],
-                        "input_schema": tool.get("input_schema"),
-                        "description": tool.get("description"),
-                    }
-                )
             logger.info(f"Loaded {len(tools)} nemo_skills tools: {list(self._tool_name_map.keys())}")
 
         asyncio.get_event_loop().run_until_complete(_load_tools())
         logger.info("NeMo Skills ToolManager initialized successfully")
-
-    def mcp_tool_inventory(self) -> Optional[List[Dict[str, Any]]]:
-        # No configured tools means no catch-all route was registered, so there is nothing to expose.
-        if self.tool_manager is None:
-            return None
-        return list(self._mcp_tool_specs)
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """

@@ -29,15 +29,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 
-TOOLKITS = [
-    "email",
-    "calendar",
-    "analytics",
-    "project_management",
-    "customer_relationship_manager",
-]
-
-
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
@@ -65,12 +56,6 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 
-    def mcp_tool_inventory(self) -> list[dict]:
-        return [
-            {"name": s["name"], "input_schema": s["parameters"], "description": s.get("description")}
-            for s in get_tools(TOOLKITS)["schemas"]
-        ]
-
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/{path}")(self.route_to_python_function)
@@ -79,7 +64,14 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
-        self.session_id_to_tool_env[session_id] = get_tools(TOOLKITS)
+        toolkits = [
+            "email",
+            "calendar",
+            "analytics",
+            "project_management",
+            "customer_relationship_manager",
+        ]
+        self.session_id_to_tool_env[session_id] = get_tools(toolkits)
         return BaseSeedSessionResponse()
 
     async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:

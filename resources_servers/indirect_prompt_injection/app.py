@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-import inspect
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -116,29 +115,6 @@ class IPIResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.post("/{tool_name}")(self.route_tool_call)
         return app
-
-    def mcp_tool_inventory(self) -> List[Dict[str, Any]]:
-        # Handlers carry no parameter schemas (per-task schemas live in the dataset rows), so
-        # advertise a permissive object schema; route_tool_call accepts arbitrary kwargs anyway.
-        return [
-            {
-                "name": name,
-                "input_schema": {"type": "object", "additionalProperties": True},
-                "description": inspect.getdoc(handler),
-            }
-            for name, handler in TOOL_HANDLERS.items()
-        ]
-
-    def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[List[str]]:
-        params = seed_body.get("responses_create_params")
-        if not isinstance(params, dict):
-            return None
-        names = [
-            tool["name"]
-            for tool in params.get("tools") or []
-            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
-        ]
-        return names or None
 
     async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]

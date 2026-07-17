@@ -19,7 +19,7 @@ import multiprocessing
 import signal
 import time
 from contextlib import redirect_stderr, redirect_stdout
-from typing import ClassVar, Dict, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -163,8 +163,6 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 
 class PythonExecutorResourcesServer(SimpleResourcesServer):
     # new: create the pool once
-
-    mcp_excluded_paths: ClassVar[frozenset[str]] = frozenset({"/end_session"})
 
     config: PythonExecutorResourcesServerConfig
 

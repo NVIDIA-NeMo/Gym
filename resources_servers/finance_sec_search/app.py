@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 import yaml
@@ -342,9 +342,6 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     - /web_search: Tavily web search
     - /submit_final_result: Submit the final answer
     """
-
-    # The catch-all only returns unknown-tool errors; the five typed routes are the tools.
-    mcp_toolless_catchall_paths: ClassVar[frozenset[str]] = frozenset({"/{tool_name}"})
 
     config: FinanceAgentResourcesServerConfig
 

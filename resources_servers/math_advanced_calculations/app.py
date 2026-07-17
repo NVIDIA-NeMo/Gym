@@ -90,18 +90,6 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
 
         return app
 
-    def mcp_tool_inventory(self) -> list[dict]:
-        # Per-tool parameter schemas live only in dataset rows; advertise a permissive schema and
-        # let route_to_python_function's body model validate as it does over plain HTTP.
-        return [
-            {
-                "name": name,
-                "input_schema": {"type": "object", "additionalProperties": True},
-                "description": (func.__doc__ or "").strip().splitlines()[0] if func.__doc__ else None,
-            }
-            for name, func in self._function_map.items()
-        ]
-
     async def route_to_python_function(self, path: str, body: MultiVerseMathHardRequest) -> MultiVerseMathHardResponse:
         func = self._function_map.get(path)
 
