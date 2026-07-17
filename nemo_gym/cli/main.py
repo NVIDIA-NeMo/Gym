@@ -297,7 +297,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
 
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
-    "list": "List available components (benchmarks, agents, environments).",
+    "list": "List available components (benchmarks, environments, agents, models).",
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
@@ -320,6 +320,11 @@ COMMANDS = {
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
         summary="List agent harnesses and how each composes (Pattern A vs self-contained B).",
+        flags=(JSON, SEARCH_DIR),
+    ),
+    "list models": Command(
+        target="nemo_gym.cli.models:list_models",
+        summary="List model servers by the value to pass to --model-type.",
         flags=(JSON, SEARCH_DIR),
     ),
     "search": Command(
