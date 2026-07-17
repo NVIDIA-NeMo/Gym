@@ -100,14 +100,16 @@ def _resolve_under_cwd_or_install(
 def _augment_sys_path() -> None:
     """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
 
+    Extra roots go to the front and ``PARENT_DIR`` (the built-ins) to the end, so import precedence matches
+    file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
     Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
-    roots into the env (see nemo_gym.cli.main). With no extra roots this is just ``append(PARENT_DIR)``, as
-    before.
+    roots into the env (see nemo_gym.cli.main).
     """
-    for root in [*_extra_roots(), PARENT_DIR]:
-        entry = str(root)
-        if entry not in sys.path:
-            sys.path.append(entry)
+    extra = [str(root) for root in _extra_roots()]
+    parent = str(PARENT_DIR)
+    managed = {*extra, parent}
+    # Extra roots first, the rest of sys.path (order preserved) in the middle, PARENT_DIR last.
+    sys.path[:] = [*extra, *(entry for entry in sys.path if entry not in managed), parent]
 
 
 _augment_sys_path()

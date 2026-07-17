@@ -13,11 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, component_search_roots
+from nemo_gym import (
+    NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
+    PARENT_DIR,
+    _augment_sys_path,
+    component_search_roots,
+)
 from nemo_gym.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
     _parse_no_environment_tolerating_unset_values,
@@ -58,6 +64,32 @@ class TestComponentSearchRoots:
     def test_empty_or_unset_env_var_adds_nothing(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "")
         assert component_search_roots()[0].resolve() == Path.cwd().resolve()
+
+
+class TestAugmentSysPath:
+    def test_extra_roots_shadow_builtins_on_import(self, tmp_path: Path, monkeypatch) -> None:
+        # Import precedence must match component_search_roots file precedence: extra roots at the front,
+        # PARENT_DIR (the built-ins) at the end, so a plugin module wins over a same-named Gym module.
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, os.pathsep.join([str(a), str(b)]))
+        # Start with PARENT_DIR ahead of where the extra roots would land, to prove it gets moved to the end.
+        monkeypatch.setattr(sys, "path", [str(PARENT_DIR), "/some/site-packages"])
+
+        _augment_sys_path()
+
+        assert sys.path[0] == str(a) and sys.path[1] == str(b)  # extra roots first, in listed order
+        assert sys.path[-1] == str(PARENT_DIR)  # built-ins last, even though they started first
+        assert sys.path.count(str(PARENT_DIR)) == 1  # not duplicated
+
+    def test_idempotent_and_no_extra_roots_appends_parent_dir(self, monkeypatch) -> None:
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(sys, "path", ["/some/site-packages"])
+
+        _augment_sys_path()
+        _augment_sys_path()  # re-run (e.g. after --search-dir) must not pile up duplicates
+
+        assert sys.path == ["/some/site-packages", str(PARENT_DIR)]
 
 
 class TestMergeByName:
