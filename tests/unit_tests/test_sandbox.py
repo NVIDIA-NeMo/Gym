@@ -358,6 +358,12 @@ def test_rewrite_image_validation() -> None:
 def test_sandbox_resources_validation() -> None:
     spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"})
     assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
+    split_spec = SandboxSpec(
+        resource_requests={"cpu": "0.5", "memory_mib": "1024"},
+        resource_limits={"cpu": "2", "memory_mib": "4096"},
+    )
+    assert split_spec.resource_requests == SandboxResources(cpu=0.5, memory_mib=1024)
+    assert split_spec.resource_limits == SandboxResources(cpu=2.0, memory_mib=4096)
 
     with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
         SandboxSpec(resources={"memory": "4Gi"})

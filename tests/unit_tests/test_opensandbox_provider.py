@@ -195,6 +195,15 @@ def test_provider_validation_and_retry_helpers() -> None:
         opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"skip_health_check": "true"})
 
     assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
+    split_spec = SandboxSpec(
+        image="image:tag",
+        resources=SandboxResources(cpu=1, memory_mib=2048),
+        resource_requests=SandboxResources(cpu=0.5, memory_mib=1024),
+        resource_limits=SandboxResources(cpu=2, memory_mib=4096),
+    )
+    resource_requests, resource_limits = opensandbox_provider._split_resource_maps(split_spec)
+    assert resource_requests == {"cpu": "0.5", "memory": "1024Mi"}
+    assert resource_limits == {"cpu": "2", "memory": "4096Mi"}
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
     assert opensandbox_provider._to_sandbox_status("terminated") == SandboxStatus.STOPPED
     assert opensandbox_provider._to_sandbox_status("failed") == SandboxStatus.ERROR
@@ -239,6 +248,28 @@ def test_provider_validation_and_retry_helpers() -> None:
     assert attrs["status_code"] == 502
     assert attrs["attempt_number"] == 2
     assert attrs["next_sleep_s"] == 0.5
+
+
+def test_build_split_create_request_injects_requests_and_limits() -> None:
+    pytest.importorskip("opensandbox.adapters.converter.sandbox_model_converter")
+    spec = SandboxSpec(
+        image="registry.example/repo:tag",
+        entrypoint=["/bin/sh"],
+        env={"A": "1"},
+        metadata={"suite": "unit"},
+        ttl_s=60,
+        resources=SandboxResources(cpu=1, memory_mib=2048),
+        resource_requests=SandboxResources(cpu=0.5, memory_mib=1024),
+        resource_limits=SandboxResources(cpu=2, memory_mib=4096),
+    )
+    request = opensandbox_provider._build_split_create_request(
+        spec,
+        resource_requests={"cpu": "0.5", "memory": "1024Mi"},
+        resource_limits={"cpu": "2", "memory": "4096Mi"},
+    )
+    body = request.to_dict()
+    assert body["resourceLimits"] == {"cpu": "2", "memory": "4096Mi"}
+    assert body["resourceRequests"] == {"cpu": "0.5", "memory": "1024Mi"}
 
 
 def test_provider_options_from_mapping() -> None:
