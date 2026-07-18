@@ -414,7 +414,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
-        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         if failures_fpath.exists():
@@ -492,7 +492,7 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)

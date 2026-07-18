@@ -231,15 +231,15 @@ def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
             )
 
 
-def _build_verify_payload(input_row: Dict, rollout_row: Dict) -> Dict:
-    return input_row | {"response": rollout_row["response"]}
+def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+    return pair.input | {"response": pair.rollout["response"]}
 
 def _prepare_payloads_from_config(config: RolloutReverificationConfig) -> List[Dict]:
     materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
     rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
     payloads = [
-        _build_verify_payload(pair.input, pair.rollout)
-        for pair in _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath)
+        _build_verify_payload(pair)
+        for pair in _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=config.limit)
     ]
     return payloads
 
@@ -368,7 +368,7 @@ class RolloutReverificationHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append(serialized)
+            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume

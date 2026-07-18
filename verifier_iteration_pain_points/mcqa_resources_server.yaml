@@ -1,3 +1,5 @@
+skip_venv_if_present: true
+
 mcqa_resources_server:
   resources_servers:
     mcqa:

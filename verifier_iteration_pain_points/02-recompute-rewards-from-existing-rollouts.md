@@ -65,14 +65,14 @@ uv run gym eval run --no-serve \
   --num-repeats 2 \
   --temperature 1.0 --top-p 0.95
 ```
-
+# Working reverify
 ```
 uv run gym eval reverify \
   --config verifier_iteration_pain_points/mcqa_resources_server.yaml \
   "++mcqa_resources_server.resources_servers.mcqa.grading_mode=lenient_boxed" \
   --inputs outputs/reverify_test/rollouts_materialized_inputs.jsonl \
   --rollouts outputs/reverify_test/rollouts.jsonl \
-  --output outputs/reverify_test/rollouts_lenient.jsonl 
+  --output outputs/reverify_test/rollouts_lenient2.jsonl 
 
 ```
 
