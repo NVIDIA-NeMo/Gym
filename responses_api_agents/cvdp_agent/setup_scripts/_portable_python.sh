@@ -22,7 +22,6 @@ install_portable_python() {
 }
 
 install_nemo_gym_deps() {
-    # Install NeMo-Gym runtime deps; live source is mounted separately.
     echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
     "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_ROOT"
 }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install hermes_agent deps into $DEPS_DIR (mounted read-only at /agent_deps_mount).
+# Install hermes_agent deps into a portable $DEPS_DIR prefix.
 set -euo pipefail
 set -x
 

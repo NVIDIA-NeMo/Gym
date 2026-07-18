@@ -15,9 +15,11 @@
 
 import json
 import shutil
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
@@ -28,13 +30,19 @@ from resources_servers.cvdp.app import (
 )
 from resources_servers.cvdp.cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
 from resources_servers.cvdp.testbench_runner import (
+    TestbenchRunner as CVDPTestbenchRunner,
+)
+from resources_servers.cvdp.testbench_runner import (
     _apply_substitutions,
-    _build_binds,
     _build_command,
     _build_env,
     _build_runtime_tmp_env,
+    _compose_workspace_links,
     _load_dot_env,
+    _pack_workspace,
     _parse_compose_service,
+    _resolve_service_image,
+    _service_build_key,
 )
 
 
@@ -606,24 +614,23 @@ class TestVerifyConsumesRtlFiles:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: provider-facing bind/env helpers
+# Unit tests: provider-neutral Compose/env helpers
 # ---------------------------------------------------------------------------
 
 
-class TestBuildBinds:
-    def test_includes_code_mounts(self):
-        binds = _build_binds("/tmp/work", [])
-        assert "/tmp/work/rtl:/code/rtl" in binds
-        assert "/tmp/work/rundir:/code/rundir" in binds
-        assert "/tmp/work/src:/code/src" in binds
+class TestComposeWorkspaceLinks:
+    def test_translates_relative_sources(self):
+        assert _compose_workspace_links(["./src:/src:ro", "./extra:/data"]) == [
+            ("/code/src", "/src"),
+            ("/code/extra", "/data"),
+        ]
 
-    def test_includes_compose_volumes_resolved(self):
-        binds = _build_binds("/tmp/work", ["./extra:/data:ro"])
-        assert "/tmp/work/extra:/data:ro" in binds
+    def test_skips_already_materialized_code_path(self):
+        assert _compose_workspace_links(["./rtl:/code/rtl:ro"]) == []
 
-    def test_skips_code_volumes_from_compose(self):
-        binds = _build_binds("/tmp/work", ["./rtl:/code/rtl:ro"])
-        assert all("/code/rtl:ro" not in b or b == "/tmp/work/rtl:/code/rtl" for b in binds)
+    def test_rejects_host_absolute_source(self):
+        with pytest.raises(ValueError, match="host-absolute"):
+            _compose_workspace_links(["/tmp/src:/src"])
 
 
 class TestBuildEnv:
@@ -649,8 +656,47 @@ class TestBuildRuntimeTmpEnv:
         assert env["JAVA_TOOL_OPTIONS"] == "-Djava.io.tmpdir=/scratch/tmp"
 
 
+class TestPreparedImages:
+    def test_direct_image_needs_no_manifest(self):
+        server = _make_server()
+        compose = yaml.safe_load(_COMPOSE_WITH_CMD)
+        image, key = _resolve_service_image(compose, "direct", {}, server.config, {})
+        assert image == "ghcr.io/hdl/sim/osvb"
+        assert key is None
+
+    def test_build_service_resolves_by_recipe_key(self):
+        server = _make_server()
+        compose = {"services": {"synth": {"build": {"dockerfile": "src/Dockerfile.synth"}}}}
+        harness = {"src/Dockerfile.synth": "FROM __OSS_PNR_IMAGE__\nRUN true\n"}
+        key = _service_build_key(compose, "synth", harness, server.config)
+        image, resolved_key = _resolve_service_image(
+            compose,
+            "synth",
+            harness,
+            server.config,
+            {key: "registry.example/cvdp:synth"},
+        )
+        assert image == "registry.example/cvdp:synth"
+        assert resolved_key == key
+
+    def test_named_provider_config_and_metadata_are_resolved(self):
+        server = _make_server()
+        server.config.sandbox_provider = "sandbox"
+        runner = CVDPTestbenchRunner(
+            server.config,
+            {
+                "sandbox": {
+                    "opensandbox": {"connection": {"domain": "sandbox.example"}},
+                    "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+                }
+            },
+        )
+        assert "opensandbox" in runner._sandbox_provider
+        assert runner._sandbox_metadata == {"sandbox-api": "opensandbox-sdk"}
+
+
 # ---------------------------------------------------------------------------
-# Unit tests: _run_service runs through the Apptainer provider
+# Unit tests: _run_service runs through AsyncSandbox
 # ---------------------------------------------------------------------------
 
 
@@ -659,12 +705,17 @@ class _FakeHandle:
 
 
 class _FakeProvider:
-    def __init__(self, exec_result, create_error=None):
+    def __init__(self, exec_result, create_error=None, name="fake", snapshot_result=None):
+        self.name = name
         self._exec_result = exec_result
         self._create_error = create_error
+        self._snapshot_result = snapshot_result
         self.created = []
         self.execs = []
         self.closed = []
+        self.uploads = []
+        self.downloads = []
+        self._uploaded_archive = None
 
     async def create(self, spec):
         if self._create_error is not None:
@@ -672,12 +723,27 @@ class _FakeProvider:
         self.created.append(spec)
         return _FakeHandle()
 
-    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None):
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s})
+        if "cvdp-workspace.tar.gz" in command and "tar -xzf" in command:
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        if "cvdp-workspace-out.tar.gz" in command and "tar -czf" in command:
+            return self._snapshot_result or SandboxExecResult(stdout="", stderr="", return_code=0)
         return self._exec_result
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads.append((Path(source_path), target_path))
+        self._uploaded_archive = Path(source_path)
+
+    async def download_file(self, handle, source_path, target_path):
+        self.downloads.append((source_path, Path(target_path)))
+        shutil.copyfile(self._uploaded_archive, target_path)
 
     async def close(self, handle):
         self.closed.append(handle)
+
+    async def aclose(self):
+        pass
 
 
 _COMPOSE_WITH_CMD = """
@@ -703,11 +769,21 @@ class TestRunServiceProvider:
         self.server = _make_server()
 
     async def _run(self, tmp_path, fake, compose):
-        with (
-            patch.object(self.server._harness, "_ensure_sif", new_callable=AsyncMock, return_value="/cache/img.sif"),
-            patch.object(self.server._harness, "_get_provider", new_callable=AsyncMock, return_value=fake),
-        ):
-            return await self.server._harness._run_service(str(tmp_path), "direct", compose)
+        (tmp_path / "rtl").mkdir(exist_ok=True)
+        (tmp_path / "src").mkdir(exist_ok=True)
+        archive = tmp_path.parent / f"{tmp_path.name}.tar.gz"
+        _pack_workspace(tmp_path, archive)
+        try:
+            self.server._harness._sandbox_provider = fake
+            return await self.server._harness._run_service(
+                archive,
+                "direct",
+                compose,
+                {"src/.env": "SIM=icarus\n"},
+            )
+        finally:
+            archive.unlink(missing_ok=True)
+            archive.with_name(f"{archive.name}.next").unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_create_exec_close_and_payload(self, tmp_path):
@@ -716,26 +792,30 @@ class TestRunServiceProvider:
 
         assert exit_code == 0
         assert output == "hi\n"
-        # create got the cached SIF and the workspace + compose binds.
         spec = fake.created[0]
-        assert spec.image == "/cache/img.sif"
-        binds = spec.provider_options["binds"]
-        assert any(b.endswith(":/code/rtl") for b in binds)
-        assert any(b.endswith(":/data:ro") for b in binds)
-        # exec wraps the command with HOME export, sets cwd + timeout.
-        call = fake.execs[0]
-        assert "export HOME=/code/rundir" in call["command"]
+        assert spec.image == "ghcr.io/hdl/sim/osvb"
+        assert spec.provider_options == {}
+        assert fake.uploads[0][1] == "/sandbox/cvdp-workspace.tar.gz"
+        setup = fake.execs[0]
+        assert "ln -s /code/extra /data" in setup["command"]
+        assert setup["cwd"] == "/"
+        call = next(item for item in fake.execs if "echo hi" in item["command"])
         assert "echo hi" in call["command"]
+        assert call["command"].startswith("env HOME=/code/rundir PYTHONNOUSERSITE=1 ")
         assert call["cwd"] == "/code/rundir"
+        assert call["env"]["SIM"] == "icarus"
+        assert "HOME" not in call["env"]
         assert call["timeout_s"] == 30
-        # instance is always torn down.
+        assert fake.downloads[0][0] == "/sandbox/cvdp-workspace-out.tar.gz"
         assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
-    async def test_no_command_uses_runscript(self, tmp_path):
+    async def test_no_command_returns_portability_error(self, tmp_path):
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
-        await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
-        assert "/.singularity.d/runscript" in fake.execs[0]["command"]
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
+        assert exit_code == 1
+        assert "no explicit command" in output
+        assert fake.created == []
 
     @pytest.mark.asyncio
     async def test_timeout_maps_to_negative_one(self, tmp_path):
@@ -753,15 +833,34 @@ class TestRunServiceProvider:
         )
         exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
         assert exit_code == 1
-        assert "instance start failed" in output
+        assert "sandbox create failed" in output
         assert fake.execs == []
         assert fake.closed == []
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_is_not_silently_ignored(self, tmp_path):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout="", stderr="disk full", return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 1
+        assert "workspace snapshot failed" in output
+        assert "disk full" in output
 
     @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):
         self.server.config.container_tmp_bind_path = "/container/tmp"
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
         await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
-        spec = fake.created[0]
-        assert any(b.endswith(":/container/tmp") for b in spec.provider_options["binds"])
-        assert fake.execs[0]["env"]["TMPDIR"] == "/container/tmp"
+        assert "ln -s /code/rundir/tmp /container/tmp" in fake.execs[0]["command"]
+        command = next(item for item in fake.execs if "echo hi" in item["command"])
+        assert command["env"]["TMPDIR"] == "/container/tmp"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_name", ["apptainer", "opensandbox"])
+    async def test_provider_identity_does_not_change_spec(self, tmp_path, provider_name):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0), name=provider_name)
+        exit_code, _ = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 0
+        assert fake.created[0].provider_options == {}

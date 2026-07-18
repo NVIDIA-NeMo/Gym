@@ -1,0 +1,49 @@
+cvdp_agent_generic_opencode:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: app.py
+      simple_agent: false
+      resources_server: {type: resources_servers, name: cvdp}
+      model_server: null
+      concurrency: 4
+      timeout: 900
+
+      datasets:
+      - name: example_agentic
+        type: example
+        jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
+
+      agent_server_module: responses_api_agents.opencode_agent.app
+      agent_server_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_kwargs:
+        model: nvinf/${policy_model_name}
+        openai_api_key: ${policy_api_key}
+        openai_base_url: ${policy_base_url}
+        repo_dir: /code
+        thinking: false
+        timeout: 900
+        opencode_version: 1.17.11
+        opencode_config:
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+          provider:
+            nvinf:
+              npm: "@ai-sdk/openai-compatible"
+              options:
+                baseURL: ${policy_base_url}
+                apiKey: ${policy_api_key}
+              models:
+                nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
+
+      # Apptainer default. Override sandbox_provider for another backend.
+      image: ${cvdp_sim_image}
+      sandbox_provider:
+        apptainer:
+          create:
+            mount_point: /code
+            extra_start_args: [--writable-tmpfs]
+      container_workdir: /code
+      deps_provision: archive

@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 pyyaml==6.0.2
 requests==2.32.3
 pydantic==2.13.4

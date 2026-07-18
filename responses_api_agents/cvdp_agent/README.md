@@ -13,7 +13,7 @@ with the task*; both read the same task format and grade through the same `/veri
 | Config flag          | Flavor                   | When to use                                                                                                                                  |
 | -------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `simple_agent: true`  | Non-agentic, no sandbox  | Model emits the RTL directly (optionally with resources-server tool calls). Fast.                                                            |
-| `simple_agent: false` | Agentic, **any harness** | Runs a coding harness (Claude, Hermes, ...) inside an Apptainer sandbox so it can edit files and self-test; the harness is chosen by config. |
+| `simple_agent: false` | Agentic, **any harness** | Runs a config-selected coding harness inside a Gym sandbox to edit files and self-test. |
 
 
 > `CVDPAgent.run()` dispatches on `config.simple_agent`: `_run_simple()` for the non-agentic
@@ -68,7 +68,8 @@ CVDPAgent._run_agentic()
   reads verifier_metadata        ← context_files / target_files / harness_files
   _provision_deps()              → install that harness's software into a deps prefix (once, cached)
   _seed_files()                  → copy safe context files into the workspace (never the hidden harness)
-  _build_spec()                  → generate the in-sandbox runner script + mount nemo_gym + deps
+  _build_spec()                  → generate the in-sandbox runner script + workspace files
+  upload runtime archive        → provider-neutral harness dependencies
   AsyncSandbox(...).exec(runner) → the runner imports the harness and calls responses()
                                      the harness edits rtl/*.sv with its own tools
   _remote_harvest()              → pull back the produced HDL files
@@ -85,7 +86,7 @@ be a real field on `<agent_config_class>`. (e.g. for `ClaudeCodeAgentConfig`: `m
 - **A deps script must exist** for the harness: `setup_scripts/<key>_deps.sh`, where `<key>`
 is derived from the module (`responses_api_agents.hermes_agent.app` → `hermes_agent`). It
 builds a self-contained prefix (portable Python + nemo_gym + the harness CLI) that is
-bind-mounted into the sandbox.
+packaged once and uploaded into each sandbox.
 - The data format **never changes** when you swap harnesses, and grading always goes through
 the same CVDP `/verify`.
 
@@ -98,42 +99,15 @@ the same CVDP `/verify`.
 
 No Python changes — `app.py` and `sandbox_entrypoint.py` stay untouched.
 
-### Sandbox / apptainer notes (read this before running)
+### Sandbox configuration
 
-The generic agent talks to the **provider-neutral sandbox API**, so a couple of apptainer
-specifics that the old Claude-only agent hardcoded are now **explicit in the config**:
-
-- `**image` accepts a bare docker ref, a `.sif` path, or a pullable uri.** A *bare* ref like
-`nvidia/cvdp-sim:v1.0.0` is resolved to a cached `.sif` under `~/.cache/nemo-gym/sif/` using the
-same naming convention the CVDP verifier uses — so the agent and verifier share **one** image
-value and hit the **same** cached `.sif`. A registry pull only happens if that `.sif` isn't
-already cached. For an image that only exists locally (built with Docker), prebuild the `.sif`
-into the cache once so neither side ever tries docker.io:
-  ```bash
-  apptainer build ~/.cache/nemo-gym/sif/nvidia_cvdp-sim_v1.0.0.sif docker-daemon://nvidia/cvdp-sim:v1.0.0
-  ```
-- `**sandbox_provider.apptainer.create.mount_point` must match `container_workdir`** — the
-apptainer provider bind-mounts a *writable* host dir at `mount_point`; everything the agent
-writes lives under `container_workdir`. If they differ, the workspace is read-only and
-uploads fail with `Read-only file system`. `--writable-tmpfs` makes the rest of the
-container (e.g. the harness's `$HOME`/config) writable. Both configs ship with:
-  ```yaml
-  sandbox_provider:
-    apptainer:
-      create:
-        mount_point: /code            # == container_workdir
-        extra_start_args: [--writable-tmpfs]
-  container_workdir: /code
-  ```
-
-(These were previously hardcoded in Python; here they're config so any harness/backend can
-override them.)
+The agent uses the common sandbox API. `sandbox_provider` accepts an inline config or a
+named top-level config. `archive` uploads the runtime without provider-specific mounts.
+Use a registry OCI image for Apptainer and OpenSandbox. Local `.sif` images require Apptainer.
 
 ### Running
 
-Add the harness settings to your repo-root `env.yaml` (Claude example). `cvdp_sim_image` is a
-**docker ref** — the agent and verifier both resolve it to the cached `.sif` (see sandbox notes
-above; prebuild that `.sif` once if the image only exists locally):
+Add the harness settings to your repo-root `env.yaml`:
 
 ```yaml
 anthropic_model_name: <claude-model>
@@ -142,7 +116,7 @@ anthropic_base_url: https://api.anthropic.com
 cvdp_sim_image: nvidia/cvdp-sim:v1.0.0
 ```
 
-**Step 1 — Start servers** (loads the agentic agent config; `apptainer` must be installed):
+**Step 1: Start servers**
 
 ```bash
 gym env start \
@@ -198,15 +172,16 @@ Kept as a plain, lintable module rather than a string template.
   - `claude_code_agent_deps.sh` — adds portable Node + the `@anthropic-ai/claude-code` CLI.
   - `hermes_agent_deps.sh` — adds the `hermes-agent` Python package (version pinned from
   `responses_api_agents/hermes_agent/requirements.txt`).
-- `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`
+  - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
+- `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
+`**configs/cvdp_agent_generic_opencode.yaml**`
 — example wirings; identical except the `agent_server_*` block, `agent_kwargs`, and deps
 script. They show the harness swap is config-only.
 
 ### Runtime requirements
 
-- `apptainer` available on the host (the sandbox backend, selected via `sandbox_provider`).
-- A sandbox image apptainer can use — a local `.sif` or a pullable registry ref (see the
-sandbox notes above).
+- A configured Gym sandbox provider. Apptainer is required only when selected.
+- An image visible to that provider. Local `.sif` images are Apptainer-only.
 - Network access on the **first** run for the chosen harness (to download portable
 Python/Node and the harness CLI). The result is cached via a `.installed` sentinel, so
 later runs are offline-fast.
@@ -222,4 +197,3 @@ Data: N/A
 Dependencies
 
 - nemo_gym: Apache 2.0
-

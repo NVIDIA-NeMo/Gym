@@ -29,9 +29,15 @@ import sys
 from pathlib import Path
 
 
-# the mounts only exist inside the sandbox; do this before importing nemo_gym / the agent
 sys.path.insert(0, "/nemo_gym_mount")
-os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
+agent_deps_dir = os.environ.get("NV_AGENT_DEPS_DIR", "/agent_deps_mount")
+os.environ["PATH"] = f"{agent_deps_dir}/bin:" + os.environ.get("PATH", "")
+agent_home = Path(os.environ.get("NV_AGENT_HOME", "/code/.home"))
+os.environ["HOME"] = str(agent_home)
+os.environ["XDG_CACHE_HOME"] = str(agent_home / ".cache")
+os.environ["XDG_CONFIG_HOME"] = str(agent_home / ".config")
+os.environ["XDG_DATA_HOME"] = str(agent_home / ".local" / "share")
+agent_home.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
