@@ -94,12 +94,30 @@ def _make_provider(
 # Pure helpers
 # --------------------------------------------------------------------------- #
 def test_require_apptainer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APPTAINER_BINPATH", raising=False)
     monkeypatch.setattr(apptainer_provider.shutil, "which", lambda _name: "/opt/apptainer")
     assert apptainer_provider._require_apptainer() == "/opt/apptainer"
 
     monkeypatch.setattr(apptainer_provider.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="apptainer"):
         apptainer_provider._require_apptainer()
+
+
+def test_require_apptainer_uses_configured_binpath(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    binary = tmp_path / "apptainer"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("APPTAINER_BINPATH", str(tmp_path))
+    monkeypatch.setattr(apptainer_provider.shutil, "which", lambda _name: None)
+
+    assert apptainer_provider._require_apptainer() == str(binary)
+
+
+def test_apptainer_subprocess_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APPTAINER_BINPATH", "/workspace/apptainer/bin")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    assert apptainer_provider._apptainer_subprocess_env()["PATH"] == "/workspace/apptainer/bin:/usr/bin"
 
 
 def test_coerce_config() -> None:
