@@ -799,10 +799,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             if requires_proxy and not enable_proxy:
                 return _empty_response(
                     body,
-                    error=(
-                        "ProxyRequiredButDisabled: task requires a proxy, but "
-                        "OSWORLD_ENABLE_PROXY is disabled"
-                    ),
+                    error=("ProxyRequiredButDisabled: task requires a proxy, but OSWORLD_ENABLE_PROXY is disabled"),
                     termination_reason="proxy_required_but_disabled",
                     proxy_required=True,
                     proxy_enabled=False,

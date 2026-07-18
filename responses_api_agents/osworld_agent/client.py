@@ -788,7 +788,9 @@ def _redact_pointer_io_secrets(value: Any) -> Any:
         redacted: Dict[str, Any] = {}
         for key, item in value.items():
             normalized_key = str(key).lower().replace("-", "_")
-            redacted[str(key)] = "<redacted>" if normalized_key in _POINTER_SECRET_KEYS else _redact_pointer_io_secrets(item)
+            redacted[str(key)] = (
+                "<redacted>" if normalized_key in _POINTER_SECRET_KEYS else _redact_pointer_io_secrets(item)
+            )
         return redacted
     if isinstance(value, list):
         return [_redact_pointer_io_secrets(item) for item in value]

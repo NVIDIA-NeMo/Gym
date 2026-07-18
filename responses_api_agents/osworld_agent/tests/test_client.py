@@ -1442,8 +1442,7 @@ def test_pointer_anthropic_patch_wraps_clients_only_in_logging_context(monkeypat
     assert isinstance(logged, osworld_client._PointerAnthropicClientProxy)
     assert logged.messages.create(model="model", messages=[]) == "response"
     records = [
-        json.loads(line)
-        for line in (tmp_path / "model-io-agent.jsonl").read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in (tmp_path / "model-io-agent.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [record["event"] for record in records] == ["model_request", "model_response"]
 
