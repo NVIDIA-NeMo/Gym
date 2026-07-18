@@ -36,7 +36,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -161,6 +162,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
+    model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
     command: str = "opencode"
     model: str = "openai/gpt-4o-mini"
@@ -176,6 +178,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
+    context_window: int = 262144
+    max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
 
     @property
@@ -233,18 +237,53 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _write_opencode_config(self, work_dir: Path) -> None:
-        if not self.config.opencode_config:
-            return
+    def _resolve_model_base_url(self) -> str:
+        if self.config.model_server is None:
+            return ""
+        config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        base_url = self.server_client._build_server_base_url(config).rstrip("/")
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+    def _effective_model(self) -> str:
+        return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
+
+    def _build_opencode_config(self) -> dict[str, Any]:
         config = self._deep_merge({}, copy.deepcopy(self.config.opencode_config))
+        if self.config.model_server:
+            providers = config.setdefault("provider", {})
+            nemo = providers.setdefault("nemo", {"npm": "@ai-sdk/openai-compatible"})
+            nemo.setdefault("options", {}).update(
+                {"baseURL": self._resolve_model_base_url(), "apiKey": "EMPTY"}  # pragma: allowlist secret
+            )
+            model = nemo.setdefault("models", {}).get(self.config.model, {})
+            self._deep_merge(
+                model,
+                {
+                    "name": self.config.model,
+                    "interleaved": {"field": "reasoning"},
+                    "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
+                },
+            )
+            nemo["models"] = {self.config.model: model}
+        return config
+
+    def _write_opencode_config(self, work_dir: Path) -> None:
+        config = self._build_opencode_config()
+        if not config:
+            return
         (work_dir / "opencode.json").write_text(json.dumps(config, indent=2))
 
     def _env(self, data_home: str) -> dict[str, str]:
         env = {**os.environ, "XDG_DATA_HOME": data_home}
-        if self.config.openai_base_url:
-            env["OPENAI_BASE_URL"] = self.config.openai_base_url
-        if self.config.openai_api_key:
-            env["OPENAI_API_KEY"] = self.config.openai_api_key
+        base_url = self._resolve_model_base_url() if self.config.model_server else self.config.openai_base_url
+        api_key = "EMPTY" if self.config.model_server else self.config.openai_api_key
+        if base_url:
+            env["OPENAI_BASE_URL"] = base_url
+        if api_key:
+            env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
         return env
 
@@ -260,7 +299,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self._write_opencode_config(project_dir)
         env = self._env(str(data_home))
 
-        cmd = [*self.config.command_parts, "run", "-m", self.config.model, "--dir", str(project_dir)]
+        cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
         if self.config.thinking:
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)

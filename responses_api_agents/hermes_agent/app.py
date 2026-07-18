@@ -153,6 +153,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
     enabled_toolsets: Optional[list[str]] = None
@@ -211,7 +212,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         import yaml
 
         config: dict[str, Any] = {
-            "model": str(self.config.model_server.name),
+            "model": self._model_name(),
             "provider": "auto",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
@@ -251,6 +252,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
+    def _model_name(self) -> str:
+        return self.config.model or str(self.config.model_server.name)
+
     async def responses(
         self,
         request: Request,
@@ -268,7 +272,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # A prefixed self-call carries the rollout id into the model-server base URL.
         rollout_id = request.path_params.get("rollout_id") if request is not None else None
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-        model_name = str(self.config.model_server.name)
+        model_name = self._model_name()
 
         agent = AIAgent(
             base_url=base_url,
