@@ -486,7 +486,7 @@ class TestApp:
         class_path = _validate_runner_runtime(make_config(runner_name="pointer_agent"))
 
         assert class_path == "mm_agents.pointer.PointerAgent"
-        assert os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"
+        assert os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"  # pragma: allowlist secret
         mock_load_attr.assert_called_once_with(class_path)
 
     def test_metrics_report_binary_and_raw_osworld_scores(self) -> None:

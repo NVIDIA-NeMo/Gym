@@ -47,7 +47,7 @@ def test_proxy_config_inspection_returns_only_non_secret_provenance(tmp_path) ->
             "port": 8080,
             "protocol": "http",
             "username": "proxy-user",
-            "password": "proxy-password",
+            "password": "proxy-password",  # pragma: allowlist secret
         },
     ]
     raw = (json.dumps(payload) + "\n").encode()
