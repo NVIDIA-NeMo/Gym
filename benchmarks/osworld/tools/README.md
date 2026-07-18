@@ -1,9 +1,10 @@
 # OSWorld advanced tools
 
 The public setup path is `python3 benchmarks/osworld/prepare.py`, followed by
-`ng_run` and `ng_collect_rollouts`. The scripts here are retained for advanced
-host setup, dataset conversion, smoke tests, concurrent rollouts, diagnostics,
-and Nemotron 3 Nano Omni serving.
+`gym env start` and `gym eval run --no-serve`. The deprecated `ng_run` and
+`ng_collect_rollouts` aliases remain compatible. The scripts here are retained
+for advanced host setup, dataset conversion, smoke tests, concurrent rollouts,
+diagnostics, and Nemotron 3 Nano Omni serving.
 
 | Script | Purpose |
 | --- | --- |

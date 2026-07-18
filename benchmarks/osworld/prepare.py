@@ -7,8 +7,8 @@ The committed five-task JSONL is immediately runnable. This entrypoint checks
 that data and creates a benchmark-local ``env.yaml`` so the next two commands
 can be invoked without Hydra arguments::
 
-    ng_run
-    ng_collect_rollouts
+    gym env start
+    gym eval run --no-serve
 
 Referenced task inputs and evaluator files are prefetched through the official
 Hugging Face cache, then materialized in OSWorld's per-task cache layout. Full
@@ -190,8 +190,8 @@ def main() -> None:
 
     print("\nNext steps:")
     print(f"  cd {BENCHMARK_DIR}")
-    print("  ng_run")
-    print("  ng_collect_rollouts")
+    print("  gym env start")
+    print("  gym eval run --no-serve")
 
 
 if __name__ == "__main__":

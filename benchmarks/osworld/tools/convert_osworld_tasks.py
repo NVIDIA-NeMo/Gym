@@ -9,7 +9,7 @@ OSWorld benchmark (NeurIPS 2024, xlang-ai/OSWorld) ships 369 tasks under
 `test_nogdrive.json` mapping each subset to a `{domain: [task_id, ...]}`
 dict.
 
-NeMo-Gym's `ng_collect_rollouts` consumes a JSONL where each row matches the
+NeMo Gym's `gym eval run` consumes a JSONL where each row matches the
 osworld_agent client's expected schema:
 
     {

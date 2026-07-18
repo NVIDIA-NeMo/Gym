@@ -1,6 +1,6 @@
 # External vLLM transport for Nemotron 3 Nano Omni ("Omni Mini").
 #
-# vLLM is intentionally managed outside ng_run so the model process can
+# vLLM is intentionally managed outside `gym env start` so the model process can
 # survive Gym/Ray/OSWorld restarts. Override the three values with
 # environment variables; no env.yaml rewrite is needed.
 policy_model:

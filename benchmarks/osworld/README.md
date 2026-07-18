@@ -57,13 +57,13 @@ export POLICY_API_KEY="your-key"  # pragma: allowlist secret
 export POLICY_MODEL_NAME="your-vlm-model"
 python3 prepare.py
 
-ng_run
+gym env start
 ```
 
-With `ng_run` still active, use a second terminal in the same directory:
+With `gym env start` still active, use a second terminal in the same directory:
 
 ```bash
-ng_collect_rollouts
+gym eval run --no-serve
 ```
 
 `prepare.py` validates the committed input, prefetches its setup and evaluator
@@ -71,15 +71,20 @@ files, and writes a private, gitignored `env.yaml` containing the default
 config, agent, input, output, cache, and rollout settings. Hugging Face assets
 use the official client cache and `HF_TOKEN` when configured. It keeps an
 existing env file unless `--force-env` is supplied. Python component
-dependencies are installed by `ng_run` from the agent and model server project
+dependencies are installed by `gym env start` from the agent and model server project
 files.
 
-Asset preparation is idempotent: `ng_run` checks the same selected JSONL and
+Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
 shared cache at server startup, then each rollout links only its task's
 read-only files into the OSWorld cache. Use `--skip-assets` only to retain
 OSWorld's upstream runtime-download behavior. A normal run connects directly;
 `OSWORLD_ASSET_PROXY_URL` is an optional fallback used only after an official
 Hugging Face download fails.
+
+The former `ng_run` and `ng_collect_rollouts` names remain compatibility
+aliases, but Gym marks them deprecated. Their current equivalents are
+`gym env start` and `gym eval run --no-serve`. To start servers, collect, and
+stop them in one command, use `gym eval run`.
 
 The first run downloads the OSWorld container and VM image. When running more
 than one environment concurrently, pre-stage and verify the VM image to avoid
@@ -95,7 +100,7 @@ size and SHA-256. Override `VM_DIR`, `VM_URL`, `VM_SHA256`, or
 
 ## Runners
 
-Set `runner_name` in the agent config or pass an override to `ng_run`.
+Set `runner_name` in the agent config or pass an override to `gym env start`.
 
 | Runner | Prompt and action contract |
 | --- | --- |
@@ -198,7 +203,7 @@ own `benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml` overlay.
 ## Multi-environment runs
 
 `run_multienv_osworld_agent.sh` starts the configured services, waits for
-readiness, and invokes `ng_collect_rollouts`. `NUM_ENVS` controls parallel
+readiness, and invokes the rollout collector. `NUM_ENVS` controls parallel
 `DesktopEnv` instances; `LIMIT` controls total input rows.
 
 ```bash
@@ -395,7 +400,7 @@ Every rollout receives a collision-safe `${domain}/${task_id}` directory with:
 
 The directory is returned as `verifier_metadata.osworld_artifact_dir`. Set
 `TASK_ARTIFACTS=0` to disable it, or set `OSWORLD_TASK_ARTIFACT_ROOT` when
-starting `ng_run` directly.
+starting `gym env start` directly.
 
 ### Full model I/O
 
@@ -420,7 +425,7 @@ still accepts `OSWORLD_TRANSPORT_IO_LOG` as a compatibility alias.
 
 ## Video recording
 
-Set `OSWORLD_RECORD_VIDEO_DIR` before `ng_run`, or use `RECORD_VIDEO=all` or
+Set `OSWORLD_RECORD_VIDEO_DIR` before `gym env start`, or use `RECORD_VIDEO=all` or
 `RECORD_VIDEO=sample` with the multi-environment runner. Recording is
 best-effort and does not fail the rollout if the VM cannot produce an mp4.
 
@@ -457,9 +462,9 @@ The converter supports `test_all`, `test_small`, `test_infeasible`, and
 
 ## Troubleshooting
 
-### `uv` is missing inside `ng_run`
+### `uv` is missing inside `gym env start`
 
-`ng_run` starts component servers in non-interactive shells. If `uv` is only
+`gym env start` starts component servers in non-interactive shells. If `uv` is only
 on an interactive-shell path, expose it on the system path:
 
 ```bash
