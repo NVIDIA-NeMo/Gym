@@ -31,7 +31,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
-from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
@@ -42,8 +41,8 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.path_utils import failures_path_for, resolve_input_path
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -106,8 +105,6 @@ def _get_max_rollout_attempts() -> int:
             flush=True,
         )
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
-
-
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -300,7 +297,10 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        _input_path = resolve_input_path(config.input_jsonl_fpath, f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly.")
+        _input_path = resolve_input_path(
+            config.input_jsonl_fpath,
+            f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly.",
+        )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)

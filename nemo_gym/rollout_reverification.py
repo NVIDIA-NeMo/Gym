@@ -15,25 +15,28 @@
 import asyncio
 import json
 from asyncio import Future, Semaphore
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, defaultdict
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import orjson
+from omegaconf import DictConfig
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
+from wandb import Table
 
-from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    get_wandb_run,
 )
+from nemo_gym.path_utils import failures_path_for, resolve_input_path
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -44,16 +47,11 @@ from nemo_gym.server_utils import (
     set_global_aiohttp_client,
 )
 
-from collections import defaultdict
 
-from omegaconf import DictConfig
-from nemo_gym.global_config import get_wandb_run
-from wandb import Table
-from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.path_utils import failures_path_for, resolve_input_path
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+
 
 @dataclass
 class InputRolloutPair:
@@ -68,7 +66,9 @@ class InputRolloutPair:
 # ---------------------------------------------------------------------------
 
 
-def _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+def _agent_to_rs_mapping_from_agent_blocks(
+    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+) -> Dict[str, str]:
     mapping = {}
     for name in global_conflict_dict:
         block = global_conflict_dict[name]
@@ -80,12 +80,16 @@ def _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict: Union[Dict[str,
     return mapping
 
 
-def _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+def _agent_to_rs_mapping_from_resources_only_config(
+    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+) -> Dict[str, str]:
     # The rollout rows still carry agent names that were never started, so fall back to the
     # single resources server for EVERY requested key.
     resources_server_names = [
-        name for name in global_conflict_dict
-        if isinstance(global_conflict_dict[name], (dict, DictConfig)) and "resources_servers" in global_conflict_dict[name]
+        name
+        for name in global_conflict_dict
+        if isinstance(global_conflict_dict[name], (dict, DictConfig))
+        and "resources_servers" in global_conflict_dict[name]
     ]
     if len(resources_server_names) == 1:
         only = resources_server_names[0]
@@ -97,12 +101,16 @@ def _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict: Union[
         "route by. Use a config with agent blocks."
     )
 
-def _build_agent_to_resources_server_mapping(global_conflict_dict: Union[Dict[str, Any], "DictConfig"]) -> Dict[str, str]:
+
+def _build_agent_to_resources_server_mapping(
+    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+) -> Dict[str, str]:
     mapping = _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict)
     if mapping:
         return mapping
     return _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict)
-    
+
+
 class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     # to do - we provide description 2 times here - once in the config main.py and once in the field
     # to do can we use Path already here?
@@ -150,6 +158,7 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         ),
     )
 
+
 def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
@@ -160,16 +169,16 @@ def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: st
     }
     return {k: v for k, v in summary.items() if v is not None}
 
+
 def _setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":  # pragma: no cover
     server_client = ServerClient.load_from_global_config(head_server_config)
     if not is_global_aiohttp_client_setup():
-        set_global_aiohttp_client(
-            cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-        )
+        set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
     return server_client
-        
 
-def _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
+
+def _yield_inputs_and_rollouts_paired(
+    materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -186,39 +195,40 @@ def _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath: Path, rol
                 raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
             yield InputRolloutPair(input=input_row, rollout=rollout_row)
 
+
 def _run_verification_payloads(
-        payloads: List[Dict],
-        semaphore: Semaphore | nullcontext[None] | None = None,
-    ) -> Iterator[Future]:  # pragma: no cover
-       
-        semaphore = semaphore or nullcontext[None]()
-        server_client = _setup_server_client()
-        agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    payloads: List[Dict],
+    semaphore: Semaphore | nullcontext[None] | None = None,
+) -> Iterator[Future]:  # pragma: no cover
+    semaphore = semaphore or nullcontext[None]()
+    server_client = _setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
 
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            async with semaphore:
-                rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
-                res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_reverification] /verify failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
-                            flush=True,
-                        )
-                    raise
-                return row, await get_response_json(res)
+    async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+        async with semaphore:
+            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+            res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
+            try:
+                await raise_for_status(res)
+            except Exception:
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print(
+                        "[rollout_reverification] /verify failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
+                        flush=True,
+                    )
+                raise
+            return row, await get_response_json(res)
 
-        return tqdm.as_completed(
-            map(_post_subroutine, payloads),
-            desc="Collecting reverification results",
-            miniters=10,
-            total=len(payloads),
-            maxinterval=60,
-        )
+    return tqdm.as_completed(
+        map(_post_subroutine, payloads),
+        desc="Collecting reverification results",
+        miniters=10,
+        total=len(payloads),
+        maxinterval=60,
+    )
+
 
 def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
     if output_fpath.exists():
@@ -226,22 +236,68 @@ def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
             output_fpath.unlink()
         else:
             raise ConfigError(
-                f"Output file already exists: '{output_fpath}'. "
-                "Pass ++overwrite=true to delete it and start fresh."
+                f"Output file already exists: '{output_fpath}'. Pass ++overwrite=true to delete it and start fresh."
             )
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     return pair.input | {"response": pair.rollout["response"]}
 
+
 def _prepare_payloads_from_config(config: RolloutReverificationConfig) -> List[Dict]:
     materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
     rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
     payloads = [
         _build_verify_payload(pair)
-        for pair in _yield_inputs_and_rollouts_paired(materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=config.limit)
+        for pair in _yield_inputs_and_rollouts_paired(
+            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=config.limit
+        )
     ]
     return payloads
+
+
+async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[str, str]) -> List[str]:
+    """Query GET /reverify_mode on each unique resource server referenced by agent_to_rs.
+
+    Returns a sorted list of RS names that reported ReverifyMode.UNSUPPORTED.
+    """
+    unsupported: List[str] = []
+    for rs_name in set(agent_to_rs.values()):
+        res = await server_client.get(server_name=rs_name, url_path="/reverify_mode")
+        await raise_for_status(res)
+        mode = ReverifyMode(await get_response_json(res))
+        if mode == ReverifyMode.UNSUPPORTED:
+            unsupported.append(rs_name)
+    return sorted(unsupported)
+
+
+async def _guard_reverify_mode(payloads: List[Dict], force: bool) -> Optional[str]:
+    """Check reverify_mode for every RS referenced by payloads before reverification starts.
+
+    Returns a warning string when force=True and at least one RS is UNSUPPORTED (caller must
+    print it and apply the unsafe_ output prefix).
+    Raises ConfigError when force=False and at least one RS is UNSUPPORTED.
+    Returns None when all RS are STATELESS.
+    """
+    server_client = _setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    agent_names = {p[AGENT_REF_KEY_NAME]["name"] for p in payloads}
+    rs_subset = {name: agent_to_rs[name] for name in agent_names if name in agent_to_rs}
+    unsupported_rs = await _check_reverify_mode(server_client, rs_subset)
+    if not unsupported_rs:
+        return None
+    if not force:
+        raise ConfigError(
+            f"Resource server(s) {unsupported_rs} have reverify_mode=UNSUPPORTED. "
+            "Rewards computed by reverification may be incorrect. "
+            "Pass ++force=true to override (output will be prefixed with 'unsafe_')."
+        )
+    return (
+        f"WARNING: resource server(s) {unsupported_rs} have reverify_mode=UNSUPPORTED. "
+        "Rewards computed by reverification may be incorrect. "
+        "Output is prefixed with 'unsafe_'."
+    )
+
 
 async def _call_aggregate_metrics(
     results: List[Dict],
@@ -309,11 +365,7 @@ async def _call_aggregate_metrics(
     for agent_entry in all_agent_metrics:
         agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
         metrics_to_log.update(
-            {
-                f"{agent_name}/{k}": v
-                for k, v in agent_entry["agent_metrics"].items()
-                if isinstance(v, primitive_types)
-            }
+            {f"{agent_name}/{k}": v for k, v in agent_entry["agent_metrics"].items() if isinstance(v, primitive_types)}
         )
         metrics_to_log.update(
             {
@@ -331,16 +383,24 @@ async def _call_aggregate_metrics(
     metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
+
+
 class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
+
+        payloads_to_reverify = _prepare_payloads_from_config(config)
+
+        force_warning = await _guard_reverify_mode(payloads_to_reverify, config.force)
+        if force_warning:
+            output_fpath = output_fpath.with_name("unsafe_" + output_fpath.name)
+            print(force_warning)
+
         failures_fpath = failures_path_for(output_fpath)
 
         for fpath in (output_fpath, failures_fpath):
             _guard_output_file(fpath, config.overwrite)
-
-        payloads_to_reverify = _prepare_payloads_from_config(config)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
@@ -353,7 +413,7 @@ class RolloutReverificationHelper(BaseModel):
         rows: List[Dict] = []
         results: List[Dict] = []
         result_strs: List[List[str]] = []
-        for future in _run_verification_payloads(payloads_to_reverify,semaphore=semaphore):
+        for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -425,9 +485,7 @@ class RolloutReverificationHelper(BaseModel):
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpath}
         Aggregate metrics: {aggregate_metrics_fpath}""")
+        if force_warning:
+            print(force_warning)
 
         return results
-
-
-
-

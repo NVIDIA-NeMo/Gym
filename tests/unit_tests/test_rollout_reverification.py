@@ -13,27 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import json
-from asyncio import Future, Semaphore
-from collections import Counter
-from contextlib import nullcontext
+from asyncio import Semaphore
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
-import yaml
 
-import nemo_gym.rollout_collection
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_reverification import (
-    InputRolloutPair,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    InputRolloutPair,
     RolloutReverificationConfig,
     RolloutReverificationHelper,
     _agent_to_rs_mapping_from_agent_blocks,
@@ -41,13 +34,17 @@ from nemo_gym.rollout_reverification import (
     _build_agent_to_resources_server_mapping,
     _build_verify_payload,
     _call_aggregate_metrics,
+    _check_reverify_mode,
     _guard_output_file,
+    _guard_reverify_mode,
     _prepare_payloads_from_config,
     _rollout_verify_debug_summary,
     _run_verification_payloads,
     _setup_server_client,
     _yield_inputs_and_rollouts_paired,
 )
+
+
 #  (
 #     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
 #     RolloutAggregationConfig,
@@ -59,6 +56,7 @@ from nemo_gym.rollout_reverification import (
 #     _rollout_request_debug_summary,
 #     loads_jsonl_line,
 # )
+
 
 class TestAgentToRsMappingFromAgentBlocks:
     """Tests for RolloutReverificationHelper._agent_to_rs_mapping_from_agent_blocks.
@@ -74,9 +72,7 @@ class TestAgentToRsMappingFromAgentBlocks:
                 }
             }
         }
-        assert _agent_to_rs_mapping_from_agent_blocks(config) == {
-            "text_to_sql_agent": "text_to_sql_resources_server"
-        }
+        assert _agent_to_rs_mapping_from_agent_blocks(config) == {"text_to_sql_agent": "text_to_sql_resources_server"}
 
     def test_multiple_agents_each_map_to_own_resources_server(self) -> None:
         config = {
@@ -110,9 +106,7 @@ class TestAgentToRsMappingFromResourcesOnlyConfig:
     """
 
     def test_single_resources_server_maps_any_key_to_it(self) -> None:
-        config = {
-            "mcqa_resources_server": {"resources_servers": {"mcqa": {"grading_mode": None}}}
-        }
+        config = {"mcqa_resources_server": {"resources_servers": {"mcqa": {"grading_mode": None}}}}
         result = _agent_to_rs_mapping_from_resources_only_config(config)
         assert result["whatever_agent_ran_the_rollout"] == "mcqa_resources_server"
         assert result["another_agent"] == "mcqa_resources_server"
@@ -148,9 +142,7 @@ class TestBuildAgentToResourcesServerMapping:
         }
 
     def test_resources_only_config_routes_via_resources_server_blocks(self) -> None:
-        config = {
-            "mcqa_resources_server": {"resources_servers": {"mcqa": {}}}
-        }
+        config = {"mcqa_resources_server": {"resources_servers": {"mcqa": {}}}}
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent"] == "mcqa_resources_server"
 
@@ -162,6 +154,7 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
 
 class TestRolloutVerifyDebugSummary:
     def test_rollout_verify_debug_summary_compact(self) -> None:
@@ -180,6 +173,7 @@ class TestRolloutVerifyDebugSummary:
             ROLLOUT_INDEX_KEY_NAME: 3,
             "resources_server_name": "my_rs",
         }
+
 
 class TestSetupServerClient:
     def test_returns_server_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,7 +409,9 @@ class TestRunVerificationPayloads:
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=MagicMock())
-        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500"))
+        self._patch(
+            monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500")
+        )
 
         with pytest.raises(RuntimeError, match="HTTP 500"):
             await self._collect(_run_verification_payloads([row]))
@@ -427,7 +423,9 @@ class TestRunVerificationPayloads:
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=MagicMock())
-        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500"))
+        self._patch(
+            monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500")
+        )
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification.is_global_aiohttp_client_request_debug_enabled", lambda: False
         )
@@ -446,7 +444,9 @@ class TestRunVerificationPayloads:
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=mock_response)
-        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500"))
+        self._patch(
+            monkeypatch, mock_client, {"agent_a": "rs_a"}, raise_for_status_side_effect=RuntimeError("HTTP 500")
+        )
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification.is_global_aiohttp_client_request_debug_enabled", lambda: True
         )
@@ -764,7 +764,10 @@ class TestCallAggregateMetrics:
                 "reward": 0.8,
                 TASK_INDEX_KEY_NAME: 0,
                 # no AGENT_REF_KEY_NAME — agent routing must come from rows, not results
-                "response": {"output": "a very long model response", "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+                "response": {
+                    "output": "a very long model response",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
                 "responses_create_params": {"input": "large prompt content", "model": "llm"},
             }
         ]
@@ -842,9 +845,7 @@ class TestRolloutReverificationRunFromConfig:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, pairs: list[tuple[dict, dict]]) -> None:
         """Patch the five delegates that run_from_config calls."""
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads
-        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads)
 
         async def fake_future(row: dict, result: dict) -> tuple[dict, dict]:
             return row, result
@@ -853,9 +854,8 @@ class TestRolloutReverificationRunFromConfig:
             "nemo_gym.rollout_reverification._run_verification_payloads",
             lambda *_args, **_kwargs: [fake_future(row, result) for row, result in pairs],
         )
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
-        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
 
@@ -908,14 +908,26 @@ class TestRolloutReverificationRunFromConfig:
         assert stamped[AGENT_REF_KEY_NAME] == {"name": "agent_a"}
         assert stamped[SKILLS_REF_KEY_NAME] == ["skill_a"]
         assert stamped["reward"] == 1.0
-        assert set(stamped.keys()) == {"reward", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME, SKILLS_REF_KEY_NAME}
+        assert set(stamped.keys()) == {
+            "reward",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+            SKILLS_REF_KEY_NAME,
+        }
 
         # failure row: exact field set = verify response fields + 3 stamped metadata fields (no SKILLS_REF)
         failed = failure_rows[0]
         assert failed[TASK_INDEX_KEY_NAME] == 1
         assert failed[NG_FAILURE_CLASS_KEY] == "timeout"
         assert SKILLS_REF_KEY_NAME not in failed
-        assert set(failed.keys()) == {"reward", NG_FAILURE_CLASS_KEY, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME}
+        assert set(failed.keys()) == {
+            "reward",
+            NG_FAILURE_CLASS_KEY,
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+        }
 
         # run_from_config accumulates all 3 results regardless of routing
         assert len(returned) == 3
@@ -983,9 +995,7 @@ class TestRolloutReverificationRunFromConfig:
             (self._make_row("agent_b", task=3), {"reward": 0.3}),
         ]
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads
-        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads)
 
         # Wire _run_verification_payloads through its real impl so routing is exercised.
         # Patch the three hooks it relies on instead.
@@ -1011,6 +1021,7 @@ class TestRolloutReverificationRunFromConfig:
 
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
         config = self._make_config(tmp_path)
@@ -1042,3 +1053,191 @@ class TestRolloutReverificationRunFromConfig:
         agent_names_in_agg = {r[AGENT_REF_KEY_NAME]["name"] for r in agg_results}
         assert agent_names_in_agg == {"agent_a", "agent_b"}
         assert len(returned) == 4
+
+
+class TestCheckReverifyMode:
+    """Tests for _check_reverify_mode — queries GET /reverify_mode per unique RS."""
+
+    def _mock_client(self, monkeypatch: pytest.MonkeyPatch, responses: list[ReverifyMode]) -> MagicMock:
+        """Return a mock client whose .get is async and patch raise_for_status + get_response_json."""
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(side_effect=responses),
+        )
+        return mock_client
+
+    async def test_returns_empty_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # _check_reverify_mode iterates sorted(set(rs_names)), so order is rs_a then rs_b
+        mock_client = self._mock_client(monkeypatch, [ReverifyMode.STATELESS, ReverifyMode.STATELESS])
+
+        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b"})
+
+        assert result == []
+
+    async def test_returns_unsupported_rs_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # sorted RS names: rs_a, rs_b, rs_c — responses match that order
+        mock_client = self._mock_client(
+            monkeypatch,
+            [ReverifyMode.STATELESS, ReverifyMode.UNSUPPORTED, ReverifyMode.UNSUPPORTED],
+        )
+
+        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b", "agent_c": "rs_c"})
+
+        assert result == ["rs_b", "rs_c"]
+
+    async def test_queries_each_unique_rs_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two agents sharing the same RS must result in only one GET /reverify_mode call."""
+        queried: list[str] = []
+
+        async def capturing_get(**kwargs: object) -> MagicMock:
+            queried.append(kwargs["server_name"])
+            return MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.get = capturing_get
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(return_value=ReverifyMode.STATELESS),
+        )
+
+        await _check_reverify_mode(mock_client, {"agent_a": "rs_shared", "agent_b": "rs_shared"})
+
+        assert queried == ["rs_shared"]
+
+
+class TestGuardReverifyMode:
+    """Tests for _guard_reverify_mode — raises or returns warning based on force flag."""
+
+    def _make_payload(self, agent: str) -> dict:
+        return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        unsupported_rs: list[str],
+        agent_to_rs: dict[str, str] | None = None,
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: agent_to_rs or {"agent_a": "rs_a"},
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._check_reverify_mode",
+            AsyncMock(return_value=unsupported_rs),
+        )
+
+    async def test_returns_none_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, unsupported_rs=[])
+        result = await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
+        assert result is None
+
+    async def test_raises_config_error_when_unsupported_and_not_force(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, unsupported_rs=["rs_a"])
+        with pytest.raises(ConfigError, match="rs_a"):
+            await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
+
+    async def test_returns_warning_string_when_unsupported_and_force(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, unsupported_rs=["rs_a"])
+        result = await _guard_reverify_mode([self._make_payload("agent_a")], force=True)
+        assert result is not None
+        assert "WARNING" in result
+        assert "rs_a" in result
+        assert "unsafe_" in result
+
+    async def test_only_rs_referenced_by_payloads_are_checked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Payloads only reference agent_a; rs_b (from agent_b) must not be queried."""
+        captured: list[dict] = []
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: {"agent_a": "rs_a", "agent_b": "rs_b"},
+        )
+
+        async def capture_check(_client: object, agent_to_rs: dict) -> list:
+            captured.append(dict(agent_to_rs))
+            return []
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._check_reverify_mode", capture_check)
+
+        await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
+
+        assert captured == [{"agent_a": "rs_a"}]
+
+
+class TestRunFromConfigForceFlag:
+    """Tests for the --force / unsafe_ prefix integration inside run_from_config."""
+
+    def _make_config(self, tmp_path: Path, *, force: bool = False) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+            force=force,
+        )
+
+    def _patch_common(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        force_warning: str | None,
+    ) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {"reward": 1.0}
+
+        async def fake_future() -> tuple[dict, dict]:
+            return row, result
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: [row])
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._guard_reverify_mode",
+            AsyncMock(return_value=force_warning),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._run_verification_payloads",
+            lambda *_a, **_kw: [fake_future()],
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
+
+    async def test_no_unsafe_prefix_when_all_rs_stateless(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch_common(monkeypatch, force_warning=None)
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+        assert (tmp_path / "output.jsonl").exists()
+        assert not (tmp_path / "unsafe_output.jsonl").exists()
+
+    async def test_unsafe_prefix_applied_to_output_when_force_warning(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        warning = (
+            "WARNING: resource server(s) ['rs_a'] have reverify_mode=UNSUPPORTED. Output is prefixed with 'unsafe_'."
+        )
+        self._patch_common(monkeypatch, force_warning=warning)
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, force=True))
+
+        assert (tmp_path / "unsafe_output.jsonl").exists()
+        assert not (tmp_path / "output.jsonl").exists()
+
+    async def test_warning_printed_before_and_after_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        warning = (
+            "WARNING: resource server(s) ['rs_a'] have reverify_mode=UNSUPPORTED. Output is prefixed with 'unsafe_'."
+        )
+        self._patch_common(monkeypatch, force_warning=warning)
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, force=True))
+
+        out = capsys.readouterr().out
+        assert out.count(warning) == 2
