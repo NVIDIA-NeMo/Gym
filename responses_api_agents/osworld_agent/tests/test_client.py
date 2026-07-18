@@ -870,6 +870,42 @@ def test_stage_setup_cache_does_not_link_evaluator_outputs(monkeypatch, tmp_path
     assert not (task_cache / "result_gold").exists()
 
 
+def test_stage_setup_cache_links_evaluator_inputs_from_explicit_cache(tmp_path: Path) -> None:
+    task_id = "task-with-evaluator-inputs"
+    setup_url = "https://example.test/postconfig.bin"
+    setup_name = f"{osworld_client.uuid.uuid5(osworld_client.uuid.NAMESPACE_URL, setup_url)}_postconfig.bin"
+    source_dir = tmp_path / "prestage" / task_id
+    source_dir.mkdir(parents=True)
+    (source_dir / setup_name).write_bytes(b"postconfig")
+    (source_dir / "gold.bin").write_bytes(b"gold")
+
+    linked = osworld_client._stage_setup_cache(
+        {
+            "id": task_id,
+            "evaluator": {
+                "postconfig": [
+                    {
+                        "type": "download",
+                        "parameters": {"files": [{"url": setup_url, "path": "/tmp/postconfig.bin"}]},
+                    }
+                ],
+                "expected": {
+                    "type": "cloud_file",
+                    "path": "https://example.test/gold.bin",
+                    "dest": "gold.bin",
+                },
+            },
+        },
+        str(tmp_path / "cache"),
+        str(tmp_path / "prestage"),
+    )
+
+    task_cache = tmp_path / "cache" / task_id
+    assert linked == 2
+    assert (task_cache / setup_name).read_bytes() == b"postconfig"
+    assert (task_cache / "gold.bin").read_bytes() == b"gold"
+
+
 def test_stage_setup_cache_supports_flat_spreadsheet_download_cache(monkeypatch, tmp_path: Path) -> None:
     task_id = "spreadsheetbench-task"
     url = "https://example.test/input.xlsx"

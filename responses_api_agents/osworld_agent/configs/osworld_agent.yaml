@@ -8,30 +8,6 @@ osworld_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: responses_api_agents/osworld_agent/data/train.jsonl
-        gitlab_identifier:
-          dataset_name: osworld
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        huggingface_identifier:
-          repo_id: xlangai/osworld
-        license: Apache 2.0
-      - name: validation
-        type: validation
-        jsonl_fpath: responses_api_agents/osworld_agent/data/validation.jsonl
-        gitlab_identifier:
-          dataset_name: osworld
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
-        huggingface_identifier:
-          repo_id: xlangai/osworld
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: responses_api_agents/osworld_agent/data/example.jsonl
       concurrency: 4
       provider_name: docker
       container_image: docker://happysixd/osworld-docker:latest
@@ -46,6 +22,8 @@ osworld_simple_agent:
       max_trajectory_length: 3
       sleep_after_execution: 10.0   # Generous post-action wait. pyautogui clicks actuate immediately but page nav/render can take 5-8s under software emulation (TCG) — 1.5s catches mid-render screenshots that look "unchanged" and trigger broken-record re-clicks. Under KVM (hardware-accelerated qemu) 0.5-1.5s usually suffices.
       cache_dir: cache
+      setup_cache_dir: null       # prepare.py writes an absolute shared asset cache path into env.yaml
+      asset_input_jsonl: null     # prepare.py sets this so ng_run can idempotently fill missing assets
       max_tokens: 1500
       temperature: 1.0
       top_p: null  # null = skip the top_p kwarg entirely (some reasoning models reject it with HTTP 400). Set to e.g. 0.9 for permissive models that accept it.

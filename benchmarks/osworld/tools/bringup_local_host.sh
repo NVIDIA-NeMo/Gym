@@ -141,7 +141,7 @@ fi
 
 cat <<EOF
 
-✓ Host is ready for OSWorld. Three things remain before \`ng_run\`:
+✓ Host is ready for OSWorld. Two things remain before \`ng_run\`:
 
   [1] Get the agent code
   -----------------------------------------------------------------------------
@@ -149,37 +149,32 @@ cat <<EOF
       cd <Gym-checkout>
       uv venv && uv sync --extra dev
 
-  [2] Write env.yaml (REQUIRED — ng_run resolves OmegaConf refs from this)
+  [2] Prepare the benchmark configuration
   -----------------------------------------------------------------------------
       The policy MUST be a VLM (vision-language model). Text-only models
-      score 0 on every OSWorld task. Fill in your VLM endpoint:
+      score 0 on every OSWorld task. Prepare a private benchmark-local
+      env.yaml from your VLM endpoint:
 
-      cat > env.yaml <<YAML
-      policy_base_url: https://your-vlm-endpoint/v1
-      policy_api_key: <your-key>
-      policy_model_name: <your-vlm-model>     # must be VLM
-      YAML
-      chmod 600 env.yaml                       # contains a key
+      cd benchmarks/osworld
+      export POLICY_BASE_URL="https://your-vlm-endpoint/v1"
+      export POLICY_API_KEY="your-key"  # pragma: allowlist secret
+      export POLICY_MODEL_NAME="your-vlm-model"
+      python3 prepare.py
 
-  [3] Prestage Ubuntu.qcow2 (REQUIRED when concurrency > 1)
+  Optional: prestage Ubuntu.qcow2 before concurrency > 1
   -----------------------------------------------------------------------------
       Concurrent first-run downloads race to write the same docker_vm_data/
       Ubuntu.qcow2.zip — torn file. Recipe (12 GB compressed, ~5 min on a
       fast link):
 
-      bash responses_api_agents/osworld_agent/scripts/prepare_osworld_vm.sh
+      bash tools/prepare_osworld_vm.sh
 
   Then run servers + rollouts:
   -----------------------------------------------------------------------------
-      ng_run "+config_paths=[\\
-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,\\
-responses_api_models/openai_model/configs/openai_model.yaml]" &
+      ng_run
 
-      ng_collect_rollouts \\
-        +agent_name=osworld_simple_agent \\
-        +input_jsonl_fpath=responses_api_agents/osworld_agent/data/example.jsonl \\
-        +output_jsonl_fpath=results/osworld_example.jsonl \\
-        +num_repeats=1
+      # In another terminal, also from benchmarks/osworld:
+      ng_collect_rollouts
 
   Optional: set OSWORLD_RECORD_VIDEO_DIR before ng_run to capture per-task
   mp4. See README's "Recording rollout videos" section.

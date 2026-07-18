@@ -8,10 +8,10 @@
 #   - ng_status is used to wait for server readiness before collecting.
 #
 # Examples:
-#   bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
-#   RUNNER_NAME=prompt_agent_computer_13 LIMIT=null bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
-#   START_NG_RUN=0 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
-#   DRY_RUN=1 bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+#   bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
+#   RUNNER_NAME=prompt_agent_computer_13 LIMIT=null bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
+#   START_NG_RUN=0 bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
+#   DRY_RUN=1 bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ cd "${GYM_ROOT}"
 
 AGENT_NAME="${AGENT_NAME:-osworld_simple_agent}"
 RUNNER_NAME="${RUNNER_NAME:-prompt_agent}"
-INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
+INPUT_JSONL="${INPUT_JSONL:-benchmarks/osworld/data/example.jsonl}"
 OUTPUT_JSONL="${OUTPUT_JSONL:-results/osworld_native_prompt_agent_smoke.jsonl}"
 NUM_REPEATS="${NUM_REPEATS:-1}"
 LIMIT="${LIMIT:-1}"
@@ -38,7 +38,7 @@ NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
 EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
-CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
+CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 
 mkdir -p "$(dirname "${OUTPUT_JSONL}")"

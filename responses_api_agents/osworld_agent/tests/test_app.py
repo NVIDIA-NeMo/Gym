@@ -122,13 +122,13 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     }
 
     assert _log_context_headers(context) == {
-        "x-osworld-run-id": "run-001",
-        "x-osworld-adapter": "gym",
-        "x-osworld-task-id": "task-001",
-        "x-osworld-domain": "chrome",
-        "x-osworld-task-attempt": "2",
-        "x-osworld-step": "3",
-        "x-osworld-parse-attempt": "1",
+        "x-nemo-gym-log-run-id": "run-001",
+        "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-task-id": "task-001",
+        "x-nemo-gym-log-domain": "chrome",
+        "x-nemo-gym-log-task-attempt": "2",
+        "x-nemo-gym-log-step": "3",
+        "x-nemo-gym-log-parse-attempt": "1",
     }
 
 
@@ -161,8 +161,8 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
     sent = client.chat.completions.create.call_args.kwargs
     assert sent["messages"] == messages
     assert "_osworld_log_context" not in sent
-    assert sent["extra_headers"]["x-osworld-task-id"] == "task-001"
-    assert sent["extra_headers"]["x-osworld-step"] == "4"
+    assert sent["extra_headers"]["x-nemo-gym-log-task-id"] == "task-001"
+    assert sent["extra_headers"]["x-nemo-gym-log-step"] == "4"
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert [row["event"] for row in rows] == ["model_request", "model_response"]
     assert all(row["task_id"] == "task-001" for row in rows)
@@ -538,6 +538,28 @@ class TestApp:
         # /run is registered (anything other than 404 satisfies registration).
         run_resp = client.post("/run", json={})
         assert run_resp.status_code != 404
+
+    @patch("benchmarks.osworld.assets.ensure_osworld_assets")
+    def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:
+        mock_ensure.return_value = SimpleNamespace(
+            task_count=5,
+            asset_count=7,
+            materialized_count=0,
+            cache_dir="/cache",
+        )
+        agent = OSWorldAgent(
+            config=make_config(asset_input_jsonl="/data/tasks.jsonl", setup_cache_dir="/cache"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        agent.setup_webserver()
+
+        mock_ensure.assert_called_once_with(
+            "/data/tasks.jsonl",
+            "/cache",
+            token=os.environ.get("HF_TOKEN"),
+            proxy_url=os.environ.get("OSWORLD_ASSET_PROXY_URL"),
+        )
 
     async def test_run_missing_task_returns_empty_response(self) -> None:
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))

@@ -1,12 +1,14 @@
-# OSWorld helper scripts
+# OSWorld advanced tools
 
-These scripts cover host setup, dataset conversion, smoke tests, concurrent
-rollouts, and Nemotron 3 Nano Omni serving.
+The public setup path is `python3 benchmarks/osworld/prepare.py`, followed by
+`ng_run` and `ng_collect_rollouts`. The scripts here are retained for advanced
+host setup, dataset conversion, smoke tests, concurrent rollouts, diagnostics,
+and Nemotron 3 Nano Omni serving.
 
 | Script | Purpose |
 | --- | --- |
 | [`bringup_local_host.sh`](bringup_local_host.sh) | Install Docker, `uv`, and optional video tools on an x86_64 rollout host |
-| [`paper_to_gym_jsonl.py`](paper_to_gym_jsonl.py) | Convert upstream OSWorld manifests to Gym JSONL |
+| [`convert_osworld_tasks.py`](convert_osworld_tasks.py) | Convert upstream OSWorld manifests and task JSON to Gym JSONL |
 | [`run_native_prompt_agent_smoke.sh`](run_native_prompt_agent_smoke.sh) | Run a small OSWorld `PromptAgent` smoke test |
 | [`run_multienv_osworld_agent.sh`](run_multienv_osworld_agent.sh) | Run multiple OSWorld environments through Gym |
 | [`run_m3_multienv.sh`](run_m3_multienv.sh) | Select the MiniMax M3 runner and delegate to the multi-environment script |
@@ -20,7 +22,7 @@ Run the setup helper on the Linux x86_64 host that will run Gym and the
 OSWorld Docker VMs:
 
 ```bash
-bash responses_api_agents/osworld_agent/scripts/bringup_local_host.sh
+bash benchmarks/osworld/tools/bringup_local_host.sh
 ```
 
 The script does not clone Gym, create `env.yaml`, or download the VM image.
@@ -29,20 +31,20 @@ Follow the main [OSWorld agent README](../README.md) for those steps.
 ## Native PromptAgent smoke
 
 ```bash
-bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 ```
 
 Common overrides:
 
 ```bash
 RUNNER_NAME=prompt_agent_computer_13 LIMIT=1 \
-  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+  bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 
 START_NG_RUN=0 \
-  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+  bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 
 DRY_RUN=1 \
-  bash responses_api_agents/osworld_agent/scripts/run_native_prompt_agent_smoke.sh
+  bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 ```
 
 ## Multi-environment rollouts
@@ -55,16 +57,16 @@ RUNNER_NAME=prompt_agent \
 POLICY_MODEL_NAME=<your-model> \
 NUM_ENVS=4 \
 LIMIT=8 \
-bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
 ```
 
 For resumable runs:
 
 ```bash
-INPUT_JSONL=responses_api_agents/osworld_agent/data/test_all.jsonl \
+INPUT_JSONL=benchmarks/osworld/data/test_all.jsonl \
 RUN_DIR=results/<failed-run> \
 LIMIT=null NUM_ENVS=4 RESUME_FROM_CACHE=1 \
-bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
 ```
 
 Keep the input order, output path, repeat count, and video-sampling seed stable
@@ -82,7 +84,7 @@ the normal command unchanged. For proxy-required tasks:
 OSWORLD_ENABLE_PROXY=1 \
 PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json \
 RUNNER_NAME=prompt_agent LIMIT=8 NUM_ENVS=4 \
-bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
 ```
 
 The launcher validates the file before server startup and writes only its
@@ -120,7 +122,7 @@ vLLM payloads, including embedded screenshots, in the current attempt directory.
 
 ```bash
 LIMIT=4 NUM_ENVS=1 \
-  bash responses_api_agents/osworld_agent/scripts/run_m3_multienv.sh
+  bash benchmarks/osworld/tools/run_m3_multienv.sh
 ```
 
 The wrapper selects the M3 runner and its model overlay, then invokes the
@@ -131,21 +133,21 @@ multi-environment script.
 On the model host:
 
 ```bash
-bash responses_api_agents/osworld_agent/scripts/launch_omni_mini_vllm.sh
+bash benchmarks/osworld/tools/launch_omni_mini_vllm.sh
 ```
 
 The launcher defaults to tensor parallel size 1. For a multi-GPU host:
 
 ```bash
 TENSOR_PARALLEL_SIZE=8 \
-  bash responses_api_agents/osworld_agent/scripts/launch_omni_mini_vllm.sh
+  bash benchmarks/osworld/tools/launch_omni_mini_vllm.sh
 ```
 
 On the rollout host, pass an endpoint reachable from the OSWorld worker:
 
 ```bash
 OMNI_MINI_VLLM_BASE_URL=http://model-host:8000/v1 \
-  bash responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh
+  bash benchmarks/osworld/tools/run_omni_mini_vllm.sh
 ```
 
 The rollout wrapper probes the endpoint first and defaults to the committed

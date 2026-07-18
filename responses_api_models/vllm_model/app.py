@@ -49,22 +49,22 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 
-_OSWORLD_LOG_CONTEXT_HEADERS = {
-    "run_id": "x-osworld-run-id",
-    "adapter": "x-osworld-adapter",
-    "task_id": "x-osworld-task-id",
-    "domain": "x-osworld-domain",
-    "task_attempt": "x-osworld-task-attempt",
-    "step": "x-osworld-step",
-    "parse_attempt": "x-osworld-parse-attempt",
+_TRANSPORT_LOG_CONTEXT_HEADERS = {
+    "run_id": "x-nemo-gym-log-run-id",
+    "adapter": "x-nemo-gym-log-adapter",
+    "task_id": "x-nemo-gym-log-task-id",
+    "domain": "x-nemo-gym-log-domain",
+    "task_attempt": "x-nemo-gym-log-task-attempt",
+    "step": "x-nemo-gym-log-step",
+    "parse_attempt": "x-nemo-gym-log-parse-attempt",
 }
 
 
 def _transport_log_context(request: Request) -> Dict[str, Any]:
-    """Read opt-in OSWorld identity headers without changing the model body."""
+    """Read opt-in Gym trace headers without changing the model body."""
 
     context: Dict[str, Any] = {}
-    for field, header in _OSWORLD_LOG_CONTEXT_HEADERS.items():
+    for field, header in _TRANSPORT_LOG_CONTEXT_HEADERS.items():
         value = request.headers.get(header)
         if not value:
             continue
@@ -128,7 +128,7 @@ def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _append_transport_io(event: Dict[str, Any]) -> None:
     """Append exact vLLM request/response data when explicitly enabled."""
 
-    path = os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip()
+    path = os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip()
     if not path:
         return
     try:
@@ -499,7 +499,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "content_filter"
                 return res
 
-        transport_io_enabled = bool(os.environ.get("OSWORLD_TRANSPORT_IO_LOG", "").strip())
+        transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
         log_context = _transport_log_context(request)
         call_index = 0
         started_ns = 0

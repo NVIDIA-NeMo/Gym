@@ -11,11 +11,11 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh"
-OMNI_RUN_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/run_omni_mini_vllm.sh"
-PREFLIGHT_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/preflight_osworld_run.py"
-HOST_CHECK_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/check_host_prerequisites.sh"
-VM_PREPARE_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/scripts/prepare_osworld_vm.sh"
+RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_multienv_osworld_agent.sh"
+OMNI_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_omni_mini_vllm.sh"
+PREFLIGHT_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/preflight_osworld_run.py"
+HOST_CHECK_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/check_host_prerequisites.sh"
+VM_PREPARE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/prepare_osworld_vm.sh"
 
 
 def _read_run_env(path: Path) -> dict[str, str]:
@@ -274,8 +274,7 @@ def test_multienv_resume_uses_a_new_attempt_directory_and_requires_prior_failure
     (run_dir / "finished_at.txt").write_text("2026-07-13T01:00:00Z\n", encoding="utf-8")
     (run_dir / "exit_code.txt").write_text("1\n", encoding="utf-8")
     original_terminal_files = {
-        name: (run_dir / name).read_bytes()
-        for name in ("started_at.txt", "finished_at.txt", "exit_code.txt")
+        name: (run_dir / name).read_bytes() for name in ("started_at.txt", "finished_at.txt", "exit_code.txt")
     }
     env = os.environ.copy()
     env.update(
@@ -304,10 +303,7 @@ def test_multienv_resume_uses_a_new_attempt_directory_and_requires_prior_failure
     assert (attempt_dir / "exit_code.txt").read_text() == "0\n"
     assert _read_run_env(attempt_dir / "run.env")["RUN_LIFECYCLE_DIR"] == str(attempt_dir)
     assert "+resume_from_cache=true" in (attempt_dir / "resolved-command.log").read_text()
-    assert {
-        name: (run_dir / name).read_bytes()
-        for name in original_terminal_files
-    } == original_terminal_files
+    assert {name: (run_dir / name).read_bytes() for name in original_terminal_files} == original_terminal_files
 
     env["RUN_ATTEMPT_ID"] = "resume-2"
     completed = subprocess.run(
@@ -329,7 +325,7 @@ def test_omni_configs_declare_adapter_agent_class(tmp_path: Path) -> None:
     configs = ",".join(
         [
             "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
-            "responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml",
+            "benchmarks/osworld/configs/osworld_agent_omni_mini.yaml",
         ]
     )
 
@@ -364,7 +360,7 @@ def test_multienv_preflight_does_not_require_prebuilt_agent_runtime(tmp_path: Pa
     configs = ",".join(
         [
             "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
-            "responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml",
+            "benchmarks/osworld/configs/osworld_agent_omni_mini.yaml",
         ]
     )
     env = os.environ.copy()
@@ -416,7 +412,7 @@ def test_pointer_launcher_preflight_does_not_import_runtime_package(tmp_path: Pa
     configs = ",".join(
         [
             "responses_api_agents/osworld_agent/configs/osworld_agent.yaml",
-            "responses_api_agents/osworld_agent/configs/osworld_agent_pointer.yaml",
+            "benchmarks/osworld/configs/osworld_agent_pointer.yaml",
         ]
     )
 

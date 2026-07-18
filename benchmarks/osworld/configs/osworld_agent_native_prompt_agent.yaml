@@ -4,7 +4,7 @@ osworld_simple_agent:
       # Overlay for upstream OSWorld's native mm_agents.agent.PromptAgent.
       #
       # Include this file after osworld_agent.yaml in ng_run config_paths:
-      #   "+config_paths=[responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+      #   "+config_paths=[responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
       #
       # The unqualified prompt_agent runner mirrors OSWorld PromptAgent's
       # defaults: screenshot_a11y_tree observations with computer_13 actions.

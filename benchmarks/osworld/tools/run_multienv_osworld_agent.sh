@@ -9,7 +9,7 @@
 #   RUNNER_NAME=prompt_agent \
 #   POLICY_MODEL_NAME=nvidia/minimaxai/minimax-m3 \
 #   NUM_ENVS=4 LIMIT=4 \
-#   bash responses_api_agents/osworld_agent/scripts/run_multienv_osworld_agent.sh
+#   bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
 
 set -euo pipefail
 
@@ -57,7 +57,7 @@ gym_absolute_path() {
 
 AGENT_NAME="${AGENT_NAME:-osworld_simple_agent}"
 RUNNER_NAME="${RUNNER_NAME:-prompt_agent}"
-INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
+INPUT_JSONL="${INPUT_JSONL:-benchmarks/osworld/data/example.jsonl}"
 RUN_TAG="${RUN_TAG:-osworld-multienv-${RUNNER_NAME}-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${RUN_DIR:-results/${RUN_TAG}}"
 RUN_DIR="$(gym_absolute_path "${RUN_DIR}")"
@@ -92,7 +92,7 @@ NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
 EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
-CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
+CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 MAX_STEPS="${MAX_STEPS:-}"
 TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
@@ -222,7 +222,7 @@ if [[ "${OSWORLD_ENABLE_PROXY}" == "1" ]]; then
         echo "PROXY_CONFIG_FILE is required when OSWORLD_ENABLE_PROXY=1" >&2
         exit 2
     fi
-    proxy_inspection="$("${PYTHON_BIN}" "${SCRIPT_DIR}/../proxy.py" "${PROXY_CONFIG_FILE}")" || exit $?
+    proxy_inspection="$("${PYTHON_BIN}" "${GYM_ROOT}/responses_api_agents/osworld_agent/proxy.py" "${PROXY_CONFIG_FILE}")" || exit $?
     IFS=$'\t' read -r PROXY_CONFIG_SHA256 PROXY_CONFIG_ENTRY_COUNT PROXY_CONFIG_FILE <<< "${proxy_inspection}"
 fi
 export OSWORLD_ENABLE_PROXY PROXY_CONFIG_FILE
@@ -274,12 +274,15 @@ fi
 
 if [[ "${FULL_MODEL_IO}" == "1" ]]; then
     OSWORLD_MODEL_IO_LOG="$(gym_absolute_path "${OSWORLD_MODEL_IO_LOG:-${RUN_LIFECYCLE_DIR}/model-io-agent.jsonl}")"
-    OSWORLD_TRANSPORT_IO_LOG="$(gym_absolute_path "${OSWORLD_TRANSPORT_IO_LOG:-${RUN_LIFECYCLE_DIR}/model-io-transport.jsonl}")"
+    NEMO_GYM_VLLM_TRANSPORT_LOG="$(gym_absolute_path "${NEMO_GYM_VLLM_TRANSPORT_LOG:-${OSWORLD_TRANSPORT_IO_LOG:-${RUN_LIFECYCLE_DIR}/model-io-transport.jsonl}}")"
+    # Backward-compatible launcher variable; vllm_model consumes only the
+    # provider-neutral NEMO_GYM_VLLM_TRANSPORT_LOG name.
+    OSWORLD_TRANSPORT_IO_LOG="${NEMO_GYM_VLLM_TRANSPORT_LOG}"
     OSWORLD_VM_EXEC_LOG="$(gym_absolute_path "${OSWORLD_VM_EXEC_LOG:-${RUN_LIFECYCLE_DIR}/vm-exec.jsonl}")"
-    export OSWORLD_MODEL_IO_LOG OSWORLD_TRANSPORT_IO_LOG OSWORLD_VM_EXEC_LOG
+    export OSWORLD_MODEL_IO_LOG OSWORLD_TRANSPORT_IO_LOG NEMO_GYM_VLLM_TRANSPORT_LOG OSWORLD_VM_EXEC_LOG
     mkdir -p \
         "$(dirname "${OSWORLD_MODEL_IO_LOG}")" \
-        "$(dirname "${OSWORLD_TRANSPORT_IO_LOG}")" \
+        "$(dirname "${NEMO_GYM_VLLM_TRANSPORT_LOG}")" \
         "$(dirname "${OSWORLD_VM_EXEC_LOG}")"
 fi
 
@@ -402,6 +405,7 @@ OSWORLD_TASK_ARTIFACT_ROOT=${OSWORLD_TASK_ARTIFACT_ROOT:-}
 OSWORLD_RECORD_VIDEO_DIR=${OSWORLD_RECORD_VIDEO_DIR:-}
 OSWORLD_MODEL_IO_LOG=${OSWORLD_MODEL_IO_LOG:-}
 OSWORLD_TRANSPORT_IO_LOG=${OSWORLD_TRANSPORT_IO_LOG:-}
+NEMO_GYM_VLLM_TRANSPORT_LOG=${NEMO_GYM_VLLM_TRANSPORT_LOG:-}
 OSWORLD_VM_EXEC_LOG=${OSWORLD_VM_EXEC_LOG:-}
 TASK_PARITY_REFERENCE_INPUT=${TASK_PARITY_REFERENCE_INPUT}
 TASK_PARITY_IDS_FILE=${TASK_PARITY_IDS_FILE}
@@ -449,7 +453,7 @@ if [[ "${TASK_ARTIFACTS}" == "1" ]]; then
 fi
 if [[ "${FULL_MODEL_IO}" == "1" ]]; then
     echo "agent I/O:   ${OSWORLD_MODEL_IO_LOG}"
-    echo "transport:   ${OSWORLD_TRANSPORT_IO_LOG}"
+    echo "transport:   ${NEMO_GYM_VLLM_TRANSPORT_LOG}"
     echo "VM exec:     ${OSWORLD_VM_EXEC_LOG}"
 fi
 if [[ -n "${TASK_PARITY_REFERENCE_INPUT}" ]]; then

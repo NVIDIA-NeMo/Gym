@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""paper_to_gym_jsonl.py — convert OSWorld upstream task JSON to gym JSONL
+"""convert_osworld_tasks.py — convert OSWorld upstream task JSON to Gym JSONL
 
 OSWorld benchmark (NeurIPS 2024, xlang-ai/OSWorld) ships 369 tasks under
 `evaluation_examples/examples/<domain>/<task_id>.json`, with manifests
@@ -27,13 +27,13 @@ osworld_agent client's expected schema:
 This script converts an OSWorld manifest into that JSONL shape.
 
 Usage:
-    paper_to_gym_jsonl.py \\
+    convert_osworld_tasks.py \\
         --osworld-root /path/to/forked-osworld \\
         --manifest test_all.json \\
         --output test_all.jsonl
 
 Or generate ALL four standard manifests at once:
-    paper_to_gym_jsonl.py --osworld-root /path/to/forked-osworld --all
+    convert_osworld_tasks.py --osworld-root /path/to/forked-osworld --all
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def main():
         help="Convert all four standard manifests "
         "(test_all / test_small / test_infeasible / test_nogdrive) "
         "into the data/ dir alongside this script "
-        "(i.e. responses_api_agents/osworld_agent/data/).",
+        "(i.e. benchmarks/osworld/data/).",
     )
     args = ap.parse_args()
 

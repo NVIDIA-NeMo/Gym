@@ -31,7 +31,7 @@ fi
 
 export GYM_ROOT
 export RUNNER_NAME="${RUNNER_NAME:-nemotron_v3_nano_omni_agent}"
-export INPUT_JSONL="${INPUT_JSONL:-responses_api_agents/osworld_agent/data/example.jsonl}"
+export INPUT_JSONL="${INPUT_JSONL:-benchmarks/osworld/data/example.jsonl}"
 export LIMIT="${LIMIT:-5}"
 export NUM_ENVS="${NUM_ENVS:-1}"
 export NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-${NUM_ENVS}}"
@@ -39,6 +39,6 @@ export RESUME_FROM_CACHE="${RESUME_FROM_CACHE:-0}"
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-4096}"
 export TEMPERATURE="${TEMPERATURE:-0.6}"
 export RECORD_VIDEO="${RECORD_VIDEO:-0}"
-export CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,responses_api_agents/osworld_agent/configs/osworld_agent_omni_mini.yaml,responses_api_models/vllm_model/configs/vllm_model_omni_mini.yaml}"
+export CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_omni_mini.yaml,benchmarks/osworld/configs/vllm_model_omni_mini.yaml}"
 
 exec bash "${SCRIPT_DIR}/run_multienv_osworld_agent.sh"

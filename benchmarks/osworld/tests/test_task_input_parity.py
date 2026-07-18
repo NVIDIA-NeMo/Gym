@@ -10,7 +10,7 @@ from pathlib import Path
 from types import ModuleType
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "check_task_input_parity.py"
+SCRIPT = Path(__file__).parents[1] / "tools" / "check_task_input_parity.py"
 
 
 def _module() -> ModuleType:

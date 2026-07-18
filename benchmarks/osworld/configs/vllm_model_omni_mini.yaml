@@ -8,7 +8,7 @@ policy_model:
     vllm_model:
       entrypoint: app.py
       base_url: ${oc.env:OMNI_MINI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
-      api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}
+      api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
       model: ${oc.env:OMNI_MINI_VLLM_MODEL,nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}
       return_token_id_information: false
       # The vLLM server must be started with --reasoning-parser nemotron_v3.

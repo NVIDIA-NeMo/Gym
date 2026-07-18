@@ -15,6 +15,10 @@ from responses_api_agents.osworld_agent.runner_registry import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+BENCHMARK_CONFIG_DIR = REPO_ROOT / "benchmarks" / "osworld" / "configs"
+
+
 def test_default_runner_preserves_existing_pyautogui_path() -> None:
     spec = resolve_runner_spec(DEFAULT_RUNNER_NAME)
 
@@ -85,7 +89,7 @@ def test_qwen3_omni_runner_reuses_upstream_scaffold_with_gym_transport() -> None
 
 
 def test_m3_config_overrides_the_osworld_server_config() -> None:
-    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_m3.yaml"
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_m3.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
@@ -115,7 +119,7 @@ def test_model_runner_overlays(
     max_tokens: int,
     task_timeout: int,
 ) -> None:
-    config_path = Path(__file__).parents[1] / "configs" / config_name
+    config_path = BENCHMARK_CONFIG_DIR / config_name
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
@@ -126,7 +130,7 @@ def test_model_runner_overlays(
 
 
 def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
-    config_path = Path(__file__).parents[1] / "configs" / "osworld_agent_omni_mini.yaml"
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_omni_mini.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     assert "policy_model" not in config
@@ -135,6 +139,18 @@ def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
     assert server_config["agent_kwargs"]["thinking"] is True
     assert server_config["agent_kwargs"]["max_image_history_length"] == 3
     assert server_config["agent_kwargs"]["parse_retries"] == 5
+
+
+def test_pointer_overlay_targets_the_osworld_server() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_pointer.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    assert server_config == {
+        "runner_name": "pointer_agent",
+        "max_steps": 100,
+        "sleep_after_execution": 0.0,
+    }
 
 
 @pytest.mark.parametrize(

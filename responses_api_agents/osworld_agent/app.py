@@ -71,7 +71,9 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
     "step",
     "parse_attempt",
 )
-_OSWORLD_LOG_CONTEXT_HEADERS = {field: f"x-osworld-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS}
+_MODEL_LOG_CONTEXT_HEADERS = {
+    field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
+}
 
 
 def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -100,7 +102,7 @@ def _log_context_headers(context: Mapping[str, Any] | None) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     for field, value in _normalize_log_context(context).items():
         header_value = str(value).replace("\r", "").replace("\n", "")
-        headers[_OSWORLD_LOG_CONTEXT_HEADERS[field]] = header_value[:1024]
+        headers[_MODEL_LOG_CONTEXT_HEADERS[field]] = header_value[:1024]
     return headers
 
 
@@ -238,6 +240,8 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     max_trajectory_length: int = 3
     sleep_after_execution: float = 0.5
     cache_dir: str = "cache"
+    setup_cache_dir: Optional[str] = None
+    asset_input_jsonl: Optional[str] = None
     max_tokens: int = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
@@ -709,6 +713,27 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
 
+    def setup_webserver(self):
+        """Idempotently fill a configured asset cache before accepting work."""
+
+        if self.config.asset_input_jsonl and self.config.setup_cache_dir:
+            from benchmarks.osworld.assets import ensure_osworld_assets
+
+            summary = ensure_osworld_assets(
+                self.config.asset_input_jsonl,
+                self.config.setup_cache_dir,
+                token=os.environ.get("HF_TOKEN"),
+                proxy_url=os.environ.get("OSWORLD_ASSET_PROXY_URL"),
+            )
+            LOG.info(
+                "OSWorld assets ready: tasks=%d assets=%d new_entries=%d cache=%s",
+                summary.task_count,
+                summary.asset_count,
+                summary.materialized_count,
+                summary.cache_dir,
+            )
+        return super().setup_webserver()
+
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Report binary completion and raw OSWorld evaluator reward together."""
 
@@ -834,6 +859,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "max_trajectory_length": self.config.max_trajectory_length,
                 "sleep_after_execution": self.config.sleep_after_execution,
                 "cache_dir": self.config.cache_dir,
+                "setup_cache_dir": self.config.setup_cache_dir,
                 "mem_limit_mb": self.config.mem_limit_mb,
                 "step_timeout": self.config.step_timeout,
                 "task_timeout": self.config.task_timeout,

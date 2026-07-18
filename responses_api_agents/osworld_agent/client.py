@@ -183,8 +183,53 @@ def _link_if_present(source: str, destination: str) -> bool:
         return False
 
 
-def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
-    """Expose pre-staged setup artifacts through OSWorld's per-task cache.
+def _walk_cloud_file_configs(value: Any):
+    if isinstance(value, Mapping):
+        if value.get("type") == "cloud_file":
+            yield value
+        for child in value.values():
+            yield from _walk_cloud_file_configs(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_cloud_file_configs(child)
+
+
+def _readonly_task_cache_names(task_config: Mapping[str, Any]) -> List[str]:
+    names: List[str] = []
+    action_groups = [task_config.get("config", [])]
+    evaluator = task_config.get("evaluator")
+    if isinstance(evaluator, Mapping):
+        action_groups.append(evaluator.get("postconfig", []))
+    for actions in action_groups:
+        if not isinstance(actions, list):
+            continue
+        for setup_item in actions:
+            if not isinstance(setup_item, Mapping) or setup_item.get("type") != "download":
+                continue
+            parameters = setup_item.get("parameters", {})
+            files = parameters.get("files", []) if isinstance(parameters, Mapping) else []
+            for file_config in files if isinstance(files, list) else []:
+                if not isinstance(file_config, Mapping):
+                    continue
+                url = file_config.get("url")
+                destination_path = file_config.get("path")
+                if url and destination_path:
+                    names.append(f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}_{os.path.basename(destination_path)}")
+
+    if isinstance(evaluator, Mapping):
+        for cloud_file in _walk_cloud_file_configs(evaluator):
+            destinations = cloud_file.get("dest")
+            if not cloud_file.get("multi", False):
+                destinations = [destinations]
+            if isinstance(destinations, list):
+                names.extend(
+                    destination for destination in destinations if isinstance(destination, str) and destination
+                )
+    return list(dict.fromkeys(names))
+
+
+def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_dir: Optional[str] = None) -> int:
+    """Expose pre-staged read-only artifacts through OSWorld's task cache.
 
     Staging before ``env.reset`` preserves OSWorld's existing
     ``SetupController`` flow without modifying the OSWorld checkout.  Only
@@ -206,24 +251,24 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str) -> int:
     elif "pptc" in task_id:
         flat_cache_env = "PPTC_SETUP_CACHE_DIR"
 
-    setup_cache_names: List[str] = []
-    for setup_item in task_config.get("config", []):
-        if setup_item.get("type") != "download":
-            continue
-        for file_config in setup_item.get("parameters", {}).get("files", []):
-            url = file_config.get("url")
-            destination_path = file_config.get("path")
-            if not url or not destination_path:
-                continue
-            setup_cache_names.append(
-                f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}_{os.path.basename(destination_path)}"
-            )
+    setup_cache_names = _readonly_task_cache_names(task_config)
 
-    if flat_cache_env:
+    if setup_cache_dir:
+        source_dir = os.path.join(os.path.expanduser(setup_cache_dir), task_id)
+    elif flat_cache_env:
         source_dir = os.environ.get(flat_cache_env, "")
     else:
         cache_env = "OW_SETUP_CACHE_DIR" if task_id.startswith("ow-") else "OSWORLD_SETUP_CACHE_DIR"
         source_root = os.environ.get(cache_env, "")
+        if not source_root and cache_env == "OSWORLD_SETUP_CACHE_DIR":
+            # Also consume prepare.py's standard cache when an older, preserved
+            # env.yaml predates the explicit setup_cache_dir config field.
+            try:
+                from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE
+
+                source_root = str(DEFAULT_SETUP_CACHE)
+            except ImportError:
+                pass
         source_dir = os.path.join(source_root, task_id) if source_root else ""
 
     if not os.path.isdir(source_dir):
@@ -1465,6 +1510,7 @@ def run_osworld_task(
     sleep_after_execution: float = 0.5,
     system_prompt: Optional[str] = None,
     cache_dir: str = "cache",
+    setup_cache_dir: Optional[str] = None,
     mem_limit_mb: int = 0,
     step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
     task_timeout: int = 1800,  # wall-clock cap on the whole rollout
@@ -1642,7 +1688,7 @@ def run_osworld_task(
             cache_dir=cache_dir,
             enable_proxy=enable_proxy,
         )
-        linked_cache_files = _stage_setup_cache(task_config, cache_dir)
+        linked_cache_files = _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)

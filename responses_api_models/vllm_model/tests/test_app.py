@@ -70,7 +70,7 @@ FIXED_UUID = "123"
 
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
-    monkeypatch.setenv("OSWORLD_TRANSPORT_IO_LOG", str(log_path))
+    monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
     messages = [
         {
             "role": "user",
@@ -95,16 +95,16 @@ def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_pa
     assert row["embedded_images"][0]["decoded_bytes"] == 3
 
 
-def test_transport_log_context_reads_osworld_headers_without_body_fields() -> None:
+def test_transport_log_context_reads_generic_headers_without_body_fields() -> None:
     request = MagicMock()
     request.headers = {
-        "x-osworld-run-id": "run-001",
-        "x-osworld-adapter": "gym",
-        "x-osworld-task-id": "task-001",
-        "x-osworld-domain": "chrome",
-        "x-osworld-task-attempt": "2",
-        "x-osworld-step": "3",
-        "x-osworld-parse-attempt": "1",
+        "x-nemo-gym-log-run-id": "run-001",
+        "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-task-id": "task-001",
+        "x-nemo-gym-log-domain": "chrome",
+        "x-nemo-gym-log-task-attempt": "2",
+        "x-nemo-gym-log-step": "3",
+        "x-nemo-gym-log-parse-attempt": "1",
     }
 
     assert _transport_log_context(request) == {
