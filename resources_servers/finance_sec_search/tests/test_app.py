@@ -89,6 +89,10 @@ def server_config(temp_cache_dir):
         entrypoint="",
         name="finance_sec_search_test",
         cache_dir=temp_cache_dir,
+        # The default is use_cache=False (eval). The bulk of these tests exercise
+        # the on-disk cache, so the shared fixture pins it True; the use_cache=False
+        # bypass path is covered explicitly in TestUseCacheFlag.
+        use_cache=True,
         judge_prompt_template_fpath=str(_prompt_dir / "finance_sec_search_judge.yaml"),
         retrieval_system_prompt_fpath=str(_prompt_dir / "finance_sec_search_retrieval.yaml"),
     )
@@ -116,6 +120,96 @@ class TestServerInitialization:
         assert Path(temp_cache_dir).exists()
         assert (Path(temp_cache_dir) / "filings_metadata").exists()
         assert (Path(temp_cache_dir) / "filings").exists()
+
+
+# ============================================================================
+# Test: use_cache flag (on-disk cache enable/disable)
+# ============================================================================
+
+
+class TestUseCacheFlag:
+    """Tests that the use_cache flag fully gates the on-disk SEC cache."""
+
+    _SEC_URL = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/aapl-20241228.htm"
+
+    @staticmethod
+    def _make_server(cache_dir: Path, use_cache: bool) -> FinanceAgentResourcesServer:
+        _pd = Path(__file__).resolve().parents[1] / "prompt_templates"
+        config = FinanceAgentResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="finance_sec_search_test",
+            cache_dir=str(cache_dir),
+            use_cache=use_cache,
+            judge_prompt_template_fpath=str(_pd / "finance_sec_search_judge.yaml"),
+            retrieval_system_prompt_fpath=str(_pd / "finance_sec_search_retrieval.yaml"),
+        )
+        return FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_directories_created_when_enabled(self, tmp_path) -> None:
+        """use_cache=True creates the cache directories."""
+        cache_dir = tmp_path / "cache"
+        self._make_server(cache_dir, use_cache=True)
+        assert (cache_dir / "filings").exists()
+        assert (cache_dir / "filings_metadata").exists()
+
+    def test_directories_not_created_when_disabled(self, tmp_path) -> None:
+        """use_cache=False does not create any cache directories."""
+        cache_dir = tmp_path / "cache"
+        server = self._make_server(cache_dir, use_cache=False)
+        assert not (cache_dir / "filings").exists()
+        assert not (cache_dir / "filings_metadata").exists()
+        # The path is still derived so URL→path conversion keeps working.
+        assert server._url_to_filing_path(self._SEC_URL) is not None
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_served_when_enabled(self, tmp_path) -> None:
+        """use_cache=True serves a pre-populated filing from disk without fetching."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CACHED CONTENT", encoding="utf-8")
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>LIVE CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert text == "CACHED CONTENT"
+        fetch_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_bypassed_when_disabled(self, tmp_path) -> None:
+        """use_cache=False ignores an existing cache file, fetches live, and never writes back."""
+        server = self._make_server(tmp_path / "cache", use_cache=False)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CACHED CONTENT", encoding="utf-8")
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>LIVE CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert "LIVE CONTENT" in text
+        assert "CACHED CONTENT" not in text
+        fetch_mock.assert_called_once()
+        # The live result must NOT overwrite the cache file when caching is disabled.
+        assert path.read_text(encoding="utf-8") == "CACHED CONTENT"
+
+    @pytest.mark.asyncio
+    async def test_cache_written_when_enabled(self, tmp_path) -> None:
+        """use_cache=True writes a freshly fetched filing to the cache file."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        assert not path.exists()
+
+        fetch_mock = AsyncMock(return_value="<html><body><p>FRESH CONTENT</p></body></html>")
+        with patch.object(server, "_fetch_with_retry", fetch_mock):
+            text = await server._fetch_sec_filing_text(self._SEC_URL)
+
+        assert "FRESH CONTENT" in text
+        assert path.exists()
+        assert "FRESH CONTENT" in path.read_text(encoding="utf-8")
 
 
 # ============================================================================
@@ -768,6 +862,93 @@ class TestRetrieveInformation:
         body = RetrieveInformationRequest(prompt="Summarize {{huge}}")
         response = await server.retrieve_information(_mock_request(), body)
         assert "Summary of huge doc" in response.results
+
+    # ------------------------------------------------------------------
+    # F2: HTTP status check + richer empty-output diagnostic
+    # ------------------------------------------------------------------
+    # Background: the pre-F2 branch surfaced 4xx/5xx from vLLM as a bare
+    # "Retrieval LLM returned no output" message because the JSON parser
+    # swallowed the error body.  Operators were left guessing whether
+    # the retrieval model was misconfigured, oversubscribed, or just
+    # quietly silent.  These tests pin the diagnostic contract.
+
+    @pytest.mark.asyncio
+    async def test_http_error_surfaces_status_and_body(self, server) -> None:
+        """4xx/5xx from the retrieval model server must surface the status
+        code + body excerpt (not be silently converted to 'no output').
+        """
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status = 500
+        mock_response.text = AsyncMock(return_value="Internal Server Error: model is overloaded")
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "ERROR" in response.results
+        assert "HTTP 500" in response.results
+        assert "Internal Server Error" in response.results
+        assert "model is overloaded" in response.results
+
+    @pytest.mark.asyncio
+    async def test_http_error_body_is_capped_at_500_chars(self, server) -> None:
+        """Error bodies are truncated to avoid polluting agent context with
+        multi-KB vLLM HTML error pages.
+        """
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        huge_body = "X" * 5000
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status = 503
+        mock_response.text = AsyncMock(return_value=huge_body)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "HTTP 503" in response.results
+        # Body excerpt must be capped to ≤500 chars; full 5000-char body
+        # would have ballooned the agent's next prompt by ~5KB.
+        assert response.results.count("X") <= 500
+
+    @pytest.mark.asyncio
+    async def test_empty_output_includes_incomplete_details(self, server) -> None:
+        """When the LLM returns 200 OK but no output text, the empty-output
+        branch must surface ``incomplete_details.reason`` so the operator
+        can distinguish max-output-token truncation from a model bug.
+        """
+        import orjson
+
+        server._data_storage[_TEST_SESSION_ID] = {"doc": "Annual Report 2023"}
+        payload = orjson.dumps(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.read = AsyncMock(return_value=payload)
+        server.server_client = MagicMock()
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        body = RetrieveInformationRequest(prompt="Summarize {{doc}}")
+        response = await server.retrieve_information(_mock_request(), body)
+
+        assert "ERROR" in response.results
+        assert "no output" in response.results
+        assert "max_output_tokens" in response.results
 
 
 # ============================================================================

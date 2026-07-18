@@ -1,31 +1,50 @@
 {
-  "n": 3,
-  "mean_reward": 1.0,
-  "parse_fail_rate": 0.0,
-  "precision": 1.0,
-  "recall": 1.0,
-  "f1": 1.0,
-  "by_task_type": {
-    "Data2txt": {
-      "precision": 1.0,
-      "recall": 1.0,
-      "f1": 1.0,
-      "accuracy": 1.0,
-      "count": 1
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/ragtruth/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "MIT",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
     },
-    "QA": {
-      "precision": 1.0,
-      "recall": 1.0,
-      "f1": 1.0,
-      "accuracy": 1.0,
-      "count": 1
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 156.8,
+        "Min": 150.0,
+        "Max": 162.0,
+        "Standard deviation": 5.07
     },
-    "Summary": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "accuracy": 1.0,
-      "count": 1
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "task_type": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "is_halu": {
+        "Total # non-null values": 5,
+        "Average": 0.6,
+        "Min": 0.0,
+        "Max": 1.0,
+        "Standard deviation": 0.548
     }
-  }
 }
