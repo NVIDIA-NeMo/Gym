@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
@@ -446,17 +447,24 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         sif_path = os.path.join(cache, img.replace("/", "_").replace(":", "_") + ".sif")
         if os.path.exists(sif_path):
             return sif_path
-        tmp = sif_path + ".pulling"
-        proc = subprocess.run(
-            ["apptainer", "pull", "--force", tmp, f"docker://{img}"],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise RuntimeError(f"apptainer pull failed for {img} (exit {proc.returncode}): {proc.stderr}")
-        os.rename(tmp, sif_path)
+        # Hold an exclusive file lock so concurrent rollouts (even across processes, since
+        # the agent and verifier share this cache dir) don't pull the same image at once.
+        lock_path = sif_path + ".lock"
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if os.path.exists(sif_path):
+                return sif_path
+            tmp = sif_path + ".pulling"
+            proc = subprocess.run(
+                ["apptainer", "pull", "--force", tmp, f"docker://{img}"],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise RuntimeError(f"apptainer pull failed for {img} (exit {proc.returncode}): {proc.stderr}")
+            os.rename(tmp, sif_path)
         return sif_path
 
     def _model_url(self) -> str:
@@ -517,14 +525,20 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         """runner, instruction, and response location, kept under the workdir mount so spec.files lands."""
         return f"{self.config.container_workdir.rstrip('/')}/.nv"
 
-    async def _remote_harvest(self, box: AsyncSandbox, workdir: str, globs: list[str], seeded: Dict[str, str]) -> dict:
+    async def _remote_harvest(
+        self,
+        box: AsyncSandbox,
+        workdir: str,
+        globs: list[str],
+        seeded: Dict[str, str],
+        mirror: Path,
+    ) -> dict:
         """list and download files matching globs from the sandbox, then filter via harvest()."""
         dirs = sorted({g.split("/")[0] for g in globs if "/" in g}) or ["."]
         listing = await box.exec(
             f"cd {shlex.quote(workdir)} && find {' '.join(shlex.quote(d) for d in dirs)} -type f 2>/dev/null"
         )
         rels = [line.strip().lstrip("./") for line in (listing.stdout or "").splitlines() if line.strip()]
-        mirror = Path(tempfile.mkdtemp(prefix="cvdp_harvest_"))
         for rel in rels:
             if not _safe_rel(rel):
                 continue
@@ -573,38 +587,46 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.timeout,
                 )
 
-                # the runner wrote the trajectory under the workdir mount
-                resp_local = Path(tempfile.mkdtemp(prefix="cvdp_resp_")) / "response.json"
-                try:
-                    await box.download(f"{traj}/response.json", resp_local)
-                except Exception:
-                    pass
-                response = (
-                    NeMoGymResponse.model_validate_json(resp_local.read_text())
-                    if resp_local.exists()
-                    else NeMoGymResponse(
-                        id=f"resp_{uuid4().hex}",
-                        created_at=int(time()),
-                        model=body.responses_create_params.model or "model",
-                        object="response",
-                        output=[],
-                        parallel_tool_calls=False,
-                        tool_choice="auto",
-                        tools=[],
-                    )
-                )
-
-                rtl_files = await self._remote_harvest(box, wd, self.config.harvest_globs, context_files)
-                # always include declared targets that exist, even outside the harvested dirs
-                for tf in target_files:
-                    if tf in rtl_files or not _safe_rel(tf):
-                        continue
-                    dest = Path(tempfile.mkdtemp(prefix="cvdp_tf_")) / "f"
+                with tempfile.TemporaryDirectory(prefix="cvdp_agent_run_") as scratch:
+                    scratch_path = Path(scratch)
+                    resp_local = scratch_path / "response.json"
                     try:
-                        await box.download(f"{wd.rstrip('/')}/{tf}", dest)
-                        rtl_files[tf] = dest.read_text(encoding="utf-8")
+                        await box.download(f"{traj}/response.json", resp_local)
                     except Exception:
                         pass
+                    response = (
+                        NeMoGymResponse.model_validate_json(resp_local.read_text())
+                        if resp_local.exists()
+                        else NeMoGymResponse(
+                            id=f"resp_{uuid4().hex}",
+                            created_at=int(time()),
+                            model=body.responses_create_params.model or "model",
+                            object="response",
+                            output=[],
+                            parallel_tool_calls=False,
+                            tool_choice="auto",
+                            tools=[],
+                        )
+                    )
+
+                    rtl_files = await self._remote_harvest(
+                        box,
+                        wd,
+                        self.config.harvest_globs,
+                        context_files,
+                        scratch_path / "harvest",
+                    )
+                    # always include declared targets that exist, even outside the harvested dirs
+                    for tf in target_files:
+                        if tf in rtl_files or not _safe_rel(tf):
+                            continue
+                        dest = scratch_path / "targets" / tf
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            await box.download(f"{wd.rstrip('/')}/{tf}", dest)
+                            rtl_files[tf] = dest.read_text(encoding="utf-8")
+                        except Exception:
+                            pass
 
             payload = body.model_dump() | {"response": response.model_dump()}
             if rtl_files:
