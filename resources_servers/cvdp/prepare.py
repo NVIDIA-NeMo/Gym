@@ -18,6 +18,7 @@ import yaml
 from resources_servers.cvdp.app import CVDPResourcesServerConfig
 from resources_servers.cvdp.testbench_runner import (
     _apply_substitutions,
+    _normalize_build_file,
     _safe_workspace_path,
     _service_build_key,
 )
@@ -50,7 +51,7 @@ def _write_context(root: Path, harness_files: Dict[str, Optional[str]], config: 
         if destination is None:
             raise ValueError(f"unsafe CVDP build-context path: {relative!r}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(_apply_substitutions(content, config), encoding="utf-8")
+        destination.write_text(_normalize_build_file(relative, content, config), encoding="utf-8")
 
 
 def prepare_images(

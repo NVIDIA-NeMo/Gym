@@ -215,7 +215,7 @@ This example is for using the **NV inference endpoint** with the vLLM backend. T
 **NVIDIA hosted API**
 
 ```yaml
-policy_base_url: https://integrate.api.nvidia.com/v1
+policy_base_url: https://inference-api.nvidia.com/v1
 policy_api_key: <your-api-key>
 policy_model_name: <your-model-name>
 ```

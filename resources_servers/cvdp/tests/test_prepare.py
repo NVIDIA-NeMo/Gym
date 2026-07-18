@@ -5,7 +5,7 @@ import json
 from unittest.mock import patch
 
 from resources_servers.cvdp.app import CVDPResourcesServerConfig
-from resources_servers.cvdp.prepare import prepare_images
+from resources_servers.cvdp.prepare import _write_context, prepare_images
 
 
 def _config() -> CVDPResourcesServerConfig:
@@ -16,6 +16,22 @@ def _config() -> CVDPResourcesServerConfig:
         entrypoint="app.py",
         oss_pnr_image="registry.example/cvdp-pnr:base",
     )
+
+
+def test_write_context_pins_python39_get_pip(tmp_path) -> None:
+    config = _config().model_copy(update={"oss_pnr_image": "ghcr.io/hdl/impl/pnr"})
+    _write_context(
+        tmp_path,
+        {
+            "src/Dockerfile.synth": (
+                "FROM __OSS_PNR_IMAGE__ AS base\nADD https://bootstrap.pypa.io/get-pip.py get-pip.py\n"
+            )
+        },
+        config,
+    )
+
+    dockerfile = (tmp_path / "src/Dockerfile.synth").read_text()
+    assert "https://bootstrap.pypa.io/pip/3.9/get-pip.py" in dockerfile
 
 
 def test_prepare_builds_each_unique_recipe_once(tmp_path) -> None:

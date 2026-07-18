@@ -75,6 +75,20 @@ def _apply_substitutions(content: str, config: "CVDPResourcesServerConfig") -> s
     return content
 
 
+def _normalize_build_file(path: str, content: str, config: "CVDPResourcesServerConfig") -> str:
+    content = _apply_substitutions(content, config)
+    if (
+        posixpath.basename(path).startswith("Dockerfile")
+        and config.oss_pnr_image.startswith("ghcr.io/hdl/impl/pnr")
+        and f"FROM {config.oss_pnr_image}" in content
+    ):
+        content = content.replace(
+            "https://bootstrap.pypa.io/get-pip.py",
+            "https://bootstrap.pypa.io/pip/3.9/get-pip.py",
+        )
+    return content
+
+
 def _service_build_key(
     compose_data: dict,
     service_name: str,
@@ -85,7 +99,7 @@ def _service_build_key(
     svc = (compose_data.get("services") or {}).get(service_name, {})
     build_cfg = svc.get("build", {})
     substituted_files = {
-        path: _apply_substitutions(content, config)
+        path: _normalize_build_file(path, content, config)
         for path, content in sorted(harness_files.items())
         if content is not None
     }
