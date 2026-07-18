@@ -71,6 +71,11 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+    McpCall,
+    McpListTools,
+)
 from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
     Summary,
@@ -197,6 +202,53 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseMcpCall(McpCall):
+    """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
+
+    Emitted when the upstream endpoint executes a tool *server-side* (e.g.
+    NVIDIA-hosted gpt-oss surfacing its built-in python tool as MCP) instead of
+    returning a client-executed ``function_call``. The ``output``/``error``
+    fields are already populated by the server, so the agent parses and passes
+    it through; there is no client-side execution and hence no training variant.
+
+    Inherits the upstream ``McpCall`` typing and only relaxes the fields
+    NVIDIA-hosted endpoints may omit or widen: ``id``/``server_label`` are made
+    optional and ``status`` accepts any string (upstream pins it to a Literal).
+    """
+
+    type: Literal["mcp_call"] = "mcp_call"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+    status: Optional[str] = None
+
+
+class NeMoGymResponseMcpListTools(McpListTools):
+    """A hosted-MCP tool listing (OpenAI Responses ``mcp_list_tools`` output item).
+
+    Inherits the upstream ``McpListTools`` typing; only ``id``/``server_label``
+    are relaxed to optional (NVIDIA-hosted endpoints may omit them) and ``tools``
+    is widened to ``List[Any]`` so raw tool entries pass through without being
+    coerced into the upstream ``McpListToolsTool`` schema.
+    """
+
+    type: Literal["mcp_list_tools"] = "mcp_list_tools"
+    tools: List[Any] = Field(default_factory=list)
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
+class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
+    """A hosted-MCP approval request (OpenAI Responses ``mcp_approval_request`` item).
+
+    Inherits the upstream ``McpApprovalRequest`` typing; ``id``/``server_label``
+    are relaxed to optional to tolerate endpoints that omit them.
+    """
+
+    type: Literal["mcp_approval_request"] = "mcp_approval_request"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -237,6 +289,9 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseMcpCall,
+    NeMoGymResponseMcpListTools,
+    NeMoGymResponseMcpApprovalRequest,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
