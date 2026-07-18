@@ -5,30 +5,31 @@ Agents for the **CVDP** (Comprehensive Verilog Design Problems) benchmark — ha
 CVDP resources server, which owns task data, verification, and reward computation. See
 `[resources_servers/cvdp/](../../resources_servers/cvdp/)` for benchmark details.
 
-This directory ships **two agent flavors**. They differ only in *how the model interacts
-with the task*; they all read the same task format and grade through the same `/verify`.
+This directory ships **one agent class**, `CVDPAgent` (in `app.py`), with **two flavors**
+selected by the `simple_agent` config flag. They differ only in *how the model interacts
+with the task*; both read the same task format and grade through the same `/verify`.
 
 
-| Entrypoint           | Class              | Flavor                   | When to use                                                                                                                                  |
-| -------------------- | ------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app.py`             | `SimpleAgent`      | Non-agentic, no sandbox  | Model emits the RTL directly (optionally with resources-server tool calls). Fast.                                                            |
-| `agentic_generic.py` | `CvdpGenericAgent` | Agentic, **any harness** | Runs a coding harness (Claude, Hermes, ...) inside an Apptainer sandbox so it can edit files and self-test; the harness is chosen by config. |
+| Config flag          | Flavor                   | When to use                                                                                                                                  |
+| -------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `simple_agent: true`  | Non-agentic, no sandbox  | Model emits the RTL directly (optionally with resources-server tool calls). Fast.                                                            |
+| `simple_agent: false` | Agentic, **any harness** | Runs a coding harness (Claude, Hermes, ...) inside an Apptainer sandbox so it can edit files and self-test; the harness is chosen by config. |
 
 
-> On the filename `app.py`: it is the repo-wide convention for an agent's default
-> entrypoint (see every other `responses_api_agents/*/`). The descriptive name lives on the
-> class, `SimpleAgent`. It is intentionally *not* renamed so it matches that convention and
-> the `cvdp_agent.yaml` config.
+> `CVDPAgent.run()` dispatches on `config.simple_agent`: `_run_simple()` for the non-agentic
+> flavor and `_run_agentic()` for the sandboxed harness flavor. Both live in `app.py`, the
+> repo-wide convention for an agent's default entrypoint (see every other
+> `responses_api_agents/*/`).
 
 ---
 
-## 1. `app.py` — `SimpleAgent` (non-agentic, no harness)
+## 1. `simple_agent: true` — non-agentic, no harness
 
 The simplest flow. There is **no coding harness and no sandbox**. The model itself is asked
 to produce the answer (RTL/code), and the resources server grades whatever the model
 emitted.
 
-What `run()` does:
+What `_run_simple()` does:
 
 1. `POST /seed_session` to the resources server (per-task state).
 2. Drive the model via the agent's own `/v1/responses` loop (`responses()`):
@@ -46,7 +47,7 @@ dataset. Config: `[configs/cvdp_agent.yaml](configs/cvdp_agent.yaml)`.
 
 ---
 
-## 2. `agentic_generic.py` — `CvdpGenericAgent` (agentic, any harness)
+## 2. `simple_agent: false` — agentic, any harness
 
 The agentic flavor. The coding harness is **configuration, not code**: you name a Gym agent
 in the YAML and it gets booted inside the sandbox to do the work. Proven to grade real RTL
@@ -55,7 +56,7 @@ through the unchanged CVDP verifier.
 ### The core idea
 
 Every Gym coding agent (Claude Code, Hermes, ...) exposes the same method: `responses()`.
-`CvdpGenericAgent` never needs to know a harness's CLI — it just boots the named harness
+`CVDPAgent` never needs to know a harness's CLI — it just boots the named harness
 inside the sandbox and calls its `responses()`. Each harness already knows its own CLI.
 
 ### How a run flows
@@ -63,7 +64,7 @@ inside the sandbox and calls its `responses()`. Each harness already knows its o
 ```
 config names a harness (agent_server_module/class/config_class)
         │
-CvdpGenericAgent.run()
+CVDPAgent._run_agentic()
   reads verifier_metadata        ← context_files / target_files / harness_files
   _provision_deps()              → install that harness's software into a deps prefix (once, cached)
   _seed_files()                  → copy safe context files into the workspace (never the hidden harness)
@@ -95,7 +96,7 @@ the same CVDP `/verify`.
    the shared portable-Python + nemo_gym base).
 2. Add a config under `configs/` naming the harness and its `agent_kwargs`.
 
-No Python changes — `agentic_generic.py` and `sandbox_runner.py` stay untouched.
+No Python changes — `app.py` and `sandbox_entrypoint.py` stay untouched.
 
 ### Sandbox / apptainer notes (read this before running)
 
@@ -182,13 +183,15 @@ download/conversion steps and report-output details.
 
 ### Supporting files
 
-- `**sandbox_runner.py**` — `load_runner_source()` returns the script injected into the sandbox
-(`sandbox_agent_runner.py`, a plain module that imports the named harness, calls `responses()`,
-writes the trajectory out). `harvest()` collects produced files by glob, skipping files
-unchanged from what was seeded. Plus `agent_key()` (module → deps-script key) and
-`deps_recipe_key()` (cache fingerprint).
-- `**sandbox_agent_runner.py**` — the injected runner itself. Reads the agent module/class and
-task inputs from `NV_*` env vars set by the agent; copied verbatim into the container.
+- `**app.py**` — the `CVDPAgent` class (both flavors) plus the agentic host-side helpers:
+`load_runner_source()` (reads `sandbox_entrypoint.py` and drops it into the container),
+`harvest()` (collects produced files by glob, skipping files unchanged from what was seeded),
+`agent_key()` (maps a module to its deps-script key), and `deps_recipe_key()` (fingerprints the
+deps cache).
+- `**sandbox_entrypoint.py**` — the guest entrypoint copied verbatim into the sandbox and run as
+`python agent_runner.py`. Reads the agent module/class and task inputs from `NV_*` env vars set
+by the agent, imports the named harness, calls `responses()`, and writes the trajectory out.
+Kept as a plain, lintable module rather than a string template.
 - `**setup_scripts/**`
   - `_portable_python.sh` — shared base: downloads a relocatable CPython and `pip install`s
   nemo_gym into `$DEPS_DIR`. (Leading underscore = sourced helper, not run directly.)

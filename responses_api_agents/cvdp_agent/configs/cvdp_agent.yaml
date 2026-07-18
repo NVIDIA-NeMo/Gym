@@ -2,6 +2,7 @@ cvdp_agent:
   responses_api_agents:
     cvdp_agent:
       entrypoint: app.py
+      simple_agent: true
       resources_server:
         type: resources_servers
         name: cvdp

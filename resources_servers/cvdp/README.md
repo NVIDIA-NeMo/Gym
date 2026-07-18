@@ -17,19 +17,8 @@ Mirrors `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benc
 1. Obtain the candidate RTL: grade the files the harness wrote on disk (`rtl_files` in the verify request, sandboxed-harness flow) when present, otherwise parse the model's text response via `ModelHelpers.parse_model_response()`
 2. Write harness files to temp workspace — applies image placeholder substitutions
 3. Write extracted RTL to `workdir/rtl/`
-4. For each service in `docker-compose.yml`, pull the Docker image as a cached SIF file and run it through the Apptainer sandbox provider (`instance start` + `exec`) with `--bind` mounts for `rtl/`, `verif/`, `docs/`, `src/`, `rundir/`
+4. For each service in `docker-compose.yml`, pull the Docker image as a cached SIF file and run it through the configured sandbox provider (Apptainer by default; `instance start` + `exec`) with `--bind` mounts for `rtl/`, `verif/`, `docs/`, `src/`, `rundir/`
 5. Exit code `0` across all services → reward `1.0`; any failure → reward `0.0`
-
-### Code layout: `app.py` vs `testbench_runner.py`
-
-The verifier is split by concern — **contract/policy vs execution mechanism**:
-
-- `app.py` owns the **policy**: the HTTP `verify` contract, the request/response schemas, category routing, and how an answer becomes a reward (BLEU/ROUGE for code-comprehension, pass/fail for code-generation).
-- `testbench_runner.py`'s `TestbenchRunner` owns the **mechanism**: docker-compose → Apptainer translation, the SIF cache, per-image locks, and the sandbox-provider lifecycle that actually runs the test.
-
-Keeping execution in `testbench_runner.py` lets `app.py` stay focused on the contract and scoring, and isolates the stateful/heavy sandbox machinery (which is also what the agent side reuses via `ApptainerProvider`). It's named for what it runs — CVDP's per-task **test harness** (a cocotb testbench + `docker-compose.yml`), mirroring the execution path in `repository.py` in the [CVDP source](https://github.com/NVlabs/cvdp_benchmark) — and deliberately avoids the name "harness" so it doesn't collide with the coding-**harness** concept on the agent side.
-
-> **Note:** Both the verification harness here and the sandboxed-harness agent share the same `ApptainerProvider`. Because `apptainer instance start` launches a long-lived instance, the provider starts it in "daemonize" mode (captures output to temp files and waits only for the foreground process) so the call returns immediately instead of blocking until the instance exits. This is internal to `create()` — nothing to configure here. See the [provider README](../../nemo_gym/sandbox/providers/apptainer/README.md#why-create-runs-instance-start-in-daemonize-mode).
 
 ## Configuration
 
@@ -42,6 +31,7 @@ Keeping execution in `testbench_runner.py` lets `app.py` stay focused on the con
 | `container_timeout`       | `600`                   | Seconds before an Apptainer run is killed                                                                                                                                                                                                                              |
 | `num_processes`           | `4`                     | Max concurrent Apptainer jobs                                                                                                                                                                                                                                          |
 | `sif_cache_dir`           | `~/.cache/nemo-gym/sif` | Directory for cached SIF images pulled from Docker registries                                                                                                                                                                                                          |
+| `sandbox_provider`        | `{apptainer: {}}`       | Sandbox backend used for grading, as a single-key provider config (e.g. `{apptainer: {}}` or `{opensandbox: {}}`). Selects the backend via config instead of hard-coding it; apptainer-specific knobs (writable rootfs, timeouts) are filled in automatically          |
 | `harness_workspace_dir`   | `""`                    | Optional host directory where per-rollout temp workspaces are created (default: system temp)                                                                                                                                                                           |
 | `container_tmp_bind_path` | `""`                    | If set, redirects in-container temp (e.g. `/tmp`) to per-rollout host storage and forces temp env vars (`TMPDIR`, `XCELIUM_TMPDIR`, `CDS_LOCK`, `JAVA_TOOL_OPTIONS`) — useful when default `/tmp` is too small or tools (Cadence/Java) write large temp/lock artifacts |
 
@@ -54,10 +44,10 @@ eda_sim_image: cvdp-cadence-verif:latest
 
 ## Agents
 
-There are two ways to drive this resources server. Both use a Gym agent — they differ in **how the candidate RTL is produced and graded**:
+Both flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents/cvdp_agent/app.py`); you pick the flavor with the **`simple_agent`** config flag. They differ only in **how the candidate RTL is produced and graded**:
 
-- **Direct generation** (`cvdp_agent`, `responses_api_agents/cvdp_agent/app.py`, config `configs/cvdp_agent.yaml`): the model emits the RTL inline in its response; the server parses it out (`_parse_model_response`) and runs the harness. A single completion — no tools, no file editing.
-- **Sandboxed harness** (`cvdp_agent_generic_*`, `responses_api_agents/cvdp_agent/agentic_generic.py`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a **first-class, config-selected unit** — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the illustrated default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script (no agent code changes). See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
+- **`simple_agent: true` — direct generation** (`cvdp_agent`, config `configs/cvdp_agent.yaml`): the model emits the RTL inline in its response; the server parses it out (`_parse_model_response`) and runs the harness. A single completion — no tools, no file editing.
+- **`simple_agent: false` — sandboxed harness** (`cvdp_agent_generic_*`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a config-selected unit — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script. See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
 
 ### Sandboxed harness settings (`configs/cvdp_agent_generic_claude.yaml`)
 
