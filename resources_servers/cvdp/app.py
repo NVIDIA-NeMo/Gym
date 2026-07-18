@@ -72,6 +72,7 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     sif_cache_dir: str = ""  # Defaults to ~/.cache/nemo-gym/sif
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
     container_tmp_bind_path: str = ""  # If set, redirect in-container temp (e.g. /tmp) to per-rollout host storage
+    sandbox_provider: Dict[str, Any] = {"apptainer": {}}
 
 
 # ----------------------------

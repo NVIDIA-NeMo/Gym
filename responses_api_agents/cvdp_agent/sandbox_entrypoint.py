@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runner copied verbatim into the sandbox and executed as ``python agent_runner.py``.
+"""Guest entrypoint copied verbatim into the sandbox and executed as ``python agent_runner.py``.
 
 It imports the configured gym agent (module/class chosen via ``NV_AGENT_*`` env vars),
 points it at the model server, calls ``responses()`` so the agent edits files with its own
 tools, and writes the trajectory out. Kept as a plain, lintable module rather than a string
-template so it is diffable and syntax-checked with the rest of the package; ``sandbox_runner``
-reads its source and drops it into the container unchanged.
+template so it is diffable and syntax-checked with the rest of the package;
+``app.load_runner_source`` reads its source and drops it into the container unchanged.
 """
 
 import asyncio

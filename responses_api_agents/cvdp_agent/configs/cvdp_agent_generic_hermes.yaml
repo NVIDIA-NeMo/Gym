@@ -1,7 +1,8 @@
 cvdp_agent_generic_hermes:
   responses_api_agents:
     cvdp_agent:
-      entrypoint: agentic_generic.py
+      entrypoint: app.py
+      simple_agent: false
       resources_server: {type: resources_servers, name: cvdp}
       model_server: {type: responses_api_models, name: policy_model}
       concurrency: 4

@@ -42,13 +42,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from nemo_gym.sandbox.providers.apptainer import (
-    ApptainerCreateConfig,
-    ApptainerExecConfig,
-    ApptainerProbeConfig,
-    ApptainerProvider,
+from nemo_gym.sandbox import (
+    SandboxCreateError,
+    SandboxProvider,
+    SandboxSpec,
+    create_provider,
 )
-from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxSpec
 
 
 if TYPE_CHECKING:
@@ -58,6 +57,27 @@ if TYPE_CHECKING:
 # ----------------------------
 # Compose -> Apptainer translation (pure helpers)
 # ----------------------------
+
+
+def _safe_workspace_path(workdir: Path, rel: str) -> Optional[Path]:
+    """Resolve ``rel`` under ``workdir``, rejecting absolute paths and traversal.
+
+    The request-provided file maps (``harness_files``, ``context_files``,
+    ``rtl_files``) are written into the per-rollout temp workspace before the
+    sandbox is started. A hostile or malformed key such as ``/etc/cron.d/x`` or
+    ``../../../x`` would otherwise escape the workspace on the host. Returns the
+    resolved destination path only if it stays strictly inside ``workdir``,
+    otherwise ``None`` (caller skips it). The agent side already filters
+    agent-harvested paths, but ``/verify`` can receive ``rtl_files`` directly, so
+    the verifier validates here too.
+    """
+    if not rel or os.path.isabs(rel):
+        return None
+    base = workdir.resolve()
+    dest = (workdir / rel).resolve()
+    if dest == base or base not in dest.parents:
+        return None
+    return dest
 
 
 def _apply_substitutions(content: str, config: "CVDPResourcesServerConfig") -> str:
@@ -297,9 +317,9 @@ class TestbenchRunner:
         self.config = config
         self._sif_locks: Dict[str, asyncio.Lock] = {}
         self._sif_lock_guard = asyncio.Lock()
-        # Apptainer sandbox provider — built lazily on first use so this can be
-        # constructed on hosts without apptainer.
-        self._provider: Optional[ApptainerProvider] = None
+        # Config-selected sandbox provider — built lazily on first use so this
+        # can be constructed on hosts without the backend (e.g. apptainer) present.
+        self._provider: Optional[SandboxProvider] = None
         self._provider_lock = asyncio.Lock()
         cache = config.sif_cache_dir
         if not cache:
@@ -349,7 +369,10 @@ class TestbenchRunner:
                 content = _apply_substitutions(content, self.config)
                 if filepath.endswith("docker-compose.yml"):
                     compose_content = content
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe harness file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -364,7 +387,10 @@ class TestbenchRunner:
             # repository.restore_files(self.context). Preserves the full
             # target path (e.g. verif/tb_foo.sv -> workdir/verif/tb_foo.sv).
             for filepath, code in context_files.items():
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe context file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -375,7 +401,10 @@ class TestbenchRunner:
             # Write model-generated files (overwrites context files for target slots).
             # Preserves the full target path, matching CVDP's restore_files().
             for filepath, code in rtl_files.items():
-                dest = workdir_path / filepath
+                dest = _safe_workspace_path(workdir_path, filepath)
+                if dest is None:
+                    print(f"Skipping unsafe rtl file path: {filepath}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with open(str(dest), "w+", encoding="utf-8") as f:
@@ -396,32 +425,48 @@ class TestbenchRunner:
             combined_stderr = "\n".join(f"[{r['service']}] {r['stderr']}" for r in service_results if r["stderr"])
             return final_exit_code, combined_stderr, service_results
 
-    async def _get_provider(self) -> ApptainerProvider:
-        """Build (once) and return the Apptainer sandbox provider.
+    def _build_sandbox_provider_config(self) -> Dict[str, Any]:
+        """Resolve the single-key sandbox provider config used for grading.
 
-        The provider is configured for one-shot harness runs:
-        - ``--writable-tmpfs`` on the instance so EDA tools can write to the
-          container rootfs (matches the old ``apptainer exec --writable-tmpfs``).
+        The backend is config-selected (``config.sandbox_provider``) so the
+        verifier is not hard-wired to Apptainer. When the apptainer backend is
+        used we fill in the knobs the one-shot CVDP grading path needs, without
+        clobbering anything the operator set explicitly:
+        - ``--writable-tmpfs`` so EDA tools can write to the container rootfs.
         - readiness probe disabled — we exec the real command immediately and
           surface its failure directly, so an extra probe round-trip is wasted.
         - timeouts pinned to ``container_timeout``; concurrency comfortably above
-          the outer ``num_processes`` gate so the provider never becomes the
-          bottleneck.
+          the outer ``num_processes`` gate so the provider never bottlenecks.
+        """
+        provider_cfg: Dict[str, Any] = dict(self.config.sandbox_provider or {"apptainer": {}})
+        if "apptainer" not in provider_cfg:
+            return provider_cfg
+        apptainer = dict(provider_cfg.get("apptainer") or {})
+        create = dict(apptainer.get("create") or {})
+        create.setdefault("start_timeout_s", self.config.container_timeout)
+        create.setdefault("extra_start_args", ["--writable-tmpfs"])
+        exec_cfg = dict(apptainer.get("exec") or {})
+        exec_cfg.setdefault("default_timeout_s", self.config.container_timeout)
+        exec_cfg.setdefault("concurrency", max(32, self.config.num_processes * 4))
+        probe = dict(apptainer.get("probe") or {})
+        probe.setdefault("command", None)
+        apptainer["create"] = create
+        apptainer["exec"] = exec_cfg
+        apptainer["probe"] = probe
+        provider_cfg["apptainer"] = apptainer
+        return provider_cfg
+
+    async def _get_provider(self) -> SandboxProvider:
+        """Build (once) and return the config-selected sandbox provider.
+
+        Instantiated through the generic provider registry so the grading backend
+        is swappable via config; see ``_build_sandbox_provider_config`` for the
+        apptainer defaults applied to the one-shot harness run.
         """
         if self._provider is None:
             async with self._provider_lock:
                 if self._provider is None:
-                    self._provider = ApptainerProvider(
-                        create=ApptainerCreateConfig(
-                            start_timeout_s=self.config.container_timeout,
-                            extra_start_args=["--writable-tmpfs"],
-                        ),
-                        exec=ApptainerExecConfig(
-                            default_timeout_s=self.config.container_timeout,
-                            concurrency=max(32, self.config.num_processes * 4),
-                        ),
-                        probe=ApptainerProbeConfig(command=None),
-                    )
+                    self._provider = create_provider(self._build_sandbox_provider_config())
         return self._provider
 
     async def _run_service(
