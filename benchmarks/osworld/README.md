@@ -1,26 +1,16 @@
 # OSWorld Benchmark
 
-This NeMo Gym responses API agent runs the
-[OSWorld](https://github.com/xlang-ai/OSWorld) desktop benchmark. One `/run`
-request creates an OSWorld VM, drives a complete observation/action rollout,
-runs the task evaluator, and returns the score as a NeMo Gym response.
+This package prepares and runs the
+[OSWorld](https://github.com/xlang-ai/OSWorld) desktop benchmark through NeMo
+Gym. It owns the task data, benchmark composition, runner/model overlays,
+asset preparation, launch recipes, and operational documentation.
 
-The adapter supports Gym-built prompts as well as agents supplied by upstream
-OSWorld. It
-uses an unmodified, pinned OSWorld dependency and the upstream local Docker
+The reusable Responses API runtime lives in
+[`responses_api_agents/osworld_agent`](../../responses_api_agents/osworld_agent/README.md).
+That README is the source of truth for request/response semantics, supported
+runners, agent ownership, parser contracts, and runtime configuration. The
+runtime uses an unmodified, pinned OSWorld dependency and its local Docker
 provider.
-
-### Agent ownership and terminology
-
-The module `responses_api_agents/osworld_agent/adapter_agents.py` contains the
-model-specific scaffold owned by this Gym adapter:
-`NemotronV3NanoOmniAgent`. It implements prompt construction,
-bounded image history with text compaction, response parsing, coordinate
-projection, and retry behavior around Gym's model transport. Upstream OSWorld
-does not currently define a Nemotron 3 Nano Omni scaffold, so the adapter
-provides this class while continuing to use OSWorld's unmodified environment
-and evaluator. Upstream-owned agents such as `PromptAgent`, `M3Agent`,
-`PointerAgent`, and `Qwen3VLAgent` remain identified explicitly below.
 
 ## Requirements
 
@@ -98,52 +88,12 @@ The downloader resumes interrupted transfers and verifies the extracted VM by
 size and SHA-256. Override `VM_DIR`, `VM_URL`, `VM_SHA256`, or
 `VM_SIZE_BYTES` only when intentionally selecting another upstream image.
 
-## Runners
+## Runner recipes
 
 Set `runner_name` in the agent config or pass an override to `gym env start`.
-
-| Runner | Prompt and action contract |
-| --- | --- |
-| `gym_pyautogui` | Gym prompt; Python/pyautogui code plus `WAIT`, `DONE`, and `FAIL` |
-| `prompt_agent` | OSWorld `PromptAgent` defaults: screenshot + accessibility tree, `computer_13` actions |
-| `prompt_agent_*` | Explicit PromptAgent observation/action combinations |
-| `pointer_agent` | OSWorld PointerAgent planner/executor/verifier loop |
-| `m3_agent` | OSWorld MiniMax M3 prompt, parser, and Anthropic-compatible transport |
-| `nemotron_v3_nano_omni_agent` | Nemotron 3 Nano Omni prompt, bounded image history, parser, and coordinate projection |
-| `qwen3_omni_agent` | OSWorld Qwen3VL scaffold with Gym model transport |
-
-The adapter-owned Nemotron parser requires an explicit `## Code` section so it
-never executes an unrelated code block from prose. Within that boundary it
-accepts common equivalent model formats: `## Thought`, `## Action`, and
-`## Code` values may start on the heading line or the following line; Code may
-be fenced or unfenced. Thought and Action are descriptive metadata, so an
-explicit, syntactically valid Code section is not discarded merely because an
-Action description is absent. Python actions are still syntax-checked before
-OSWorld executes them, and terminal actions still require an explicit
-`success` or `failure` status.
-
-When adding or upgrading a model, do not assume it serializes this protocol in
-the same way as an existing checkpoint. Capture representative lossless raw
-responses, including failures, then add focused parser regression cases before
-accepting a new layout. In particular, check heading placement, fenced versus
-unfenced Code, literal newline escaping, reasoning/content separation, tool
-calls, and terminal status syntax. Extend only explicit, unambiguous formats;
-do not make the parser recover executable code from arbitrary prose. Full
-model-I/O logging for this investigation is described below.
-
-The available PromptAgent variants are:
-
-- `prompt_agent_screenshot_pyautogui`
-- `prompt_agent_computer_13`
-- `prompt_agent_a11y_tree_pyautogui`
-- `prompt_agent_a11y_tree_computer_13`
-- `prompt_agent_screenshot_a11y_tree_pyautogui`
-- `prompt_agent_screenshot_a11y_tree_computer_13`
-- `prompt_agent_som_pyautogui`
-
-Runners that require accessibility data enable it when constructing
-`DesktopEnv`. Reasoning wrapped in `<think>` or `<thinking>` is removed before
-actions are executed.
+See the [agent runtime README](../../responses_api_agents/osworld_agent/README.md#supported-runners)
+for the complete runner registry and prompt/action contracts. The sections
+below document benchmark-specific smoke commands and model overlays.
 
 ### Native PromptAgent smoke
 
@@ -242,28 +192,10 @@ runtime with the generic OpenAI-compatible model transport. Advanced model and
 runner overlays remain under `benchmarks/osworld/configs/` and should be listed
 after the base config so their values win.
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `provider_name` | `docker` | Upstream OSWorld VM provider |
-| `headless` | `true` | Run without forwarding a desktop window |
-| `screen_width`, `screen_height` | `1920`, `1080` | VM resolution |
-| `require_a11y_tree` | `false` | Include AT-SPI accessibility data |
-| `enable_proxy` | `false` | Global opt-in; only a task with `proxy: true` uses it |
-| `proxy_config_file` | `null` | Local upstream-proxy JSON path; `PROXY_CONFIG_FILE` overrides it |
-| `max_steps` | `15` | Maximum observation/action iterations |
-| `max_trajectory_length` | `3` | Previous observations retained in Gym-built prompts |
-| `sleep_after_execution` | `10.0` | Wait after each action before observing again |
-| `concurrency` | `4` | Maximum simultaneous `/run` calls |
-| `max_tokens` | `1500` | Default model output limit |
-| `temperature`, `top_p` | `1.0`, `null` | Default sampling values |
-| `runner_name` | `gym_pyautogui` | Runner contract selected from the registry |
-| `task_timeout` | `1800` | Whole-rollout wall-clock limit in seconds |
-| `docker_port_lock_timeout` | `300.0` | Maximum wait for concurrent Docker VM port allocation |
-| `evaluator_disable_gpu` | `true` | Run EasyOCR evaluation on CPU |
-| `reward_mode` | `binary` | `binary` or raw OSWorld partial scores |
-
-Per-task `responses_create_params` override YAML sampling defaults. Explicit
-CLI overrides have the highest priority.
+The [agent configuration reference](../../responses_api_agents/osworld_agent/README.md#configuration)
+documents the shared environment, runner, timeout, cache, proxy, evaluation,
+and sampling fields. Per-task `responses_create_params` override YAML sampling
+defaults, and explicit CLI overrides have the highest priority.
 
 The Nano Omni overlay uses the tested three-image window, a 4096-token response
 limit, a five-second post-action wait, and parser retries. Optional parser-error
@@ -276,9 +208,6 @@ recommendation in the
 The 4096-token output limit is the tested OSWorld agent setting rather than the
 model card's longer general-purpose reasoning budget; these values are
 model-specific and do not change defaults for other runners.
-
-The response sets `mask_sample=true` when a timeout, evaluator error, or
-unfinished max-step rollout makes the reward unreliable.
 
 ### Proxy-required tasks
 

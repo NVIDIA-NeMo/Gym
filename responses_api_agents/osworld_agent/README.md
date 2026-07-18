@@ -59,6 +59,39 @@ OSWorld checkout.
 The benchmark directory contains the model- and runner-specific YAML overlays.
 Those examples do not change the generic runtime defaults in this directory.
 
+### Nemotron response contract
+
+The adapter-owned Nemotron parser requires an explicit `## Code` section, so
+it never executes an unrelated code block from prose. `## Thought`,
+`## Action`, and `## Code` values may begin on the heading line or the next
+line, and Code may be fenced or unfenced. Thought and Action are descriptive
+metadata; an explicit, syntactically valid Code section remains executable even
+when an Action description is absent. Python is syntax-checked before OSWorld
+executes it, and terminal actions require an explicit `success` or `failure`
+status.
+
+When adding or upgrading a model, capture representative lossless responses
+and add focused parser regressions for heading placement, fenced and unfenced
+Code, literal newline escaping, reasoning/content separation, tool calls, and
+terminal status syntax. Supported formats should remain explicit rather than
+recovering executable code from arbitrary prose.
+
+### PromptAgent variants
+
+The registered upstream PromptAgent variants are:
+
+- `prompt_agent_screenshot_pyautogui`
+- `prompt_agent_computer_13`
+- `prompt_agent_a11y_tree_pyautogui`
+- `prompt_agent_a11y_tree_computer_13`
+- `prompt_agent_screenshot_a11y_tree_pyautogui`
+- `prompt_agent_screenshot_a11y_tree_computer_13`
+- `prompt_agent_som_pyautogui`
+
+Runners that need accessibility data enable it when constructing `DesktopEnv`.
+Reasoning wrapped in `<think>` or `<thinking>` is removed before actions are
+executed.
+
 ## Configuration
 
 The base configuration is
