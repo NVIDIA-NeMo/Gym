@@ -152,6 +152,11 @@ env.bak/
 venv.bak/
 docker_vm_data/
 
+# OSWorld machine-local experiment overlays, notes, and cluster helpers.
+benchmarks/osworld/configs/local/
+benchmarks/osworld/docs/local/
+benchmarks/osworld/tools/local/
+
 # VSCode project settings
 .vscode/
 
