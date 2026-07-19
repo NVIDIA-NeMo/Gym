@@ -32,27 +32,23 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
-# todo refactor this
+def _resources_server() -> SimpleResourcesServer:
+    class _Server(SimpleResourcesServer):
+        async def verify(self, body):
+            pass
+
+    return _Server(
+        config=BaseResourcesServerConfig(host="", port=0, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
 class TestBaseResourcesServer:
     def test_sanity(self) -> None:
-        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
-
-        class TestSimpleResourcesServer(SimpleResourcesServer):
-            async def verify(self, body):
-                pass
-
-        agent = TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-        agent.setup_webserver()
+        _resources_server().setup_webserver()
 
     def test_reverify_mode(self) -> None:
-        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
-
-        class TestSimpleResourcesServer(SimpleResourcesServer):
-            async def verify(self, body):
-                pass
-
-        agent = TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-        assert asyncio.run(agent.get_reverify_mode()) == ReverifyMode.UNSUPPORTED
+        assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNSUPPORTED
 
 
 class TestMCPResourcesServer:
