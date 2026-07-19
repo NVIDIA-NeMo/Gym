@@ -2872,11 +2872,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             response = await self.responses(body.responses_create_params)
 
             metadata, response.metadata = response.metadata, None
-            responses_create_params = body.responses_create_params.model_dump() | {
-                "input": json.loads(metadata["input"]),
-                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
-            }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
+            responses_create_params = body.responses_create_params.model_dump()
+            trajectory_input = json.loads(metadata["input"])
+            if trajectory_input or not metrics.agent_timed_out:
+                responses_create_params["input"] = trajectory_input
+            responses_create_params["tools"] = (
+                [t.model_dump() for t in response.tools] if response.tools else []
+            )
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,

@@ -2404,6 +2404,67 @@ class TestSWEBenchWrapperResponses:
 
 class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
+    async def test_run_timeout_preserves_original_input(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps(
+                    {
+                        "resolved": False,
+                        "patch_exists": False,
+                        "agent_timed_out": True,
+                    }
+                ),
+                "instance_config": _make_instance_config(
+                    tempfile.mkdtemp(), mask_sample=True
+                ).model_dump_json(),
+            },
+        )
+
+        with patch.object(
+            SWEBenchWrapper,
+            "responses",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            from nemo_gym.base_resources_server import BaseRunRequest
+
+            original_input = [
+                {"role": "user", "content": "Fix the bug", "type": "message"}
+            ]
+            body = BaseRunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    model="test-model",
+                    input=original_input,
+                    metadata={
+                        "problem_statement": "Fix",
+                        "instance_id": "test-1",
+                        "base_commit": "abc",
+                        "dataset_name": "SWE-bench",
+                        "split": "test",
+                        "instance_dict": "{}",
+                    },
+                )
+            )
+
+            result = await wrapper.run(body)
+
+        assert result.agent_timed_out is True
+        assert result.reward == 0.0
+        assert len(result.responses_create_params.input) == 1
+        assert result.responses_create_params.input[0].content == "Fix the bug"
+
+    @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
 
