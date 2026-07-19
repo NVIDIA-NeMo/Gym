@@ -714,7 +714,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             split = body.split
             workers = 1
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
