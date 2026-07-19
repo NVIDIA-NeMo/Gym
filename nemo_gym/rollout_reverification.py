@@ -181,7 +181,7 @@ def _yield_inputs_and_rollouts_paired(
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     with open(rollouts_jsonl_fpath) as r_f:
         for i, line in tqdm(enumerate(r_f), desc="Reading rollouts"):  # never holds the whole file
-            if limit and i >= limit:
+            if limit is not None and i >= limit:
                 break
             rollout_row = orjson.loads(line)
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
@@ -396,7 +396,7 @@ class RolloutReverificationHelper(BaseModel):
         for fpath in (output_fpath, failures_fpath):
             _guard_output_file(fpath, config.overwrite)
         semaphore = nullcontext()
-        if config.num_samples_in_parallel:
+        if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 

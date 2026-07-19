@@ -302,6 +302,19 @@ class TestYieldInputsAndRolloutsPaired:
         assert len(pairs) == 3
         assert [p.rollout[TASK_INDEX_KEY_NAME] for p in pairs] == [0, 1, 2]
 
+    def test_limit_zero_yields_no_pairs(self, tmp_path: Path) -> None:
+        """limit=0 must stop immediately and yield nothing, not iterate all rows."""
+        inputs = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "q": i} for i in range(3)]
+        rollouts = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(3)]
+        self._write_jsonl(tmp_path / "inputs.jsonl", inputs)
+        self._write_jsonl(tmp_path / "rollouts.jsonl", rollouts)
+
+        pairs = list(
+            _yield_inputs_and_rollouts_paired(tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl", limit=0)
+        )
+
+        assert pairs == []
+
     def test_rollout_with_no_matching_input_raises_config_error(self, tmp_path: Path) -> None:
         inputs = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "question": "q0"}]
         rollouts = [{TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
@@ -963,6 +976,27 @@ class TestRolloutReverificationRunFromConfig:
         # but the in-memory returned list is sorted — these are independent guarantees
         output_rows = self._read_jsonl(tmp_path / "output.jsonl")
         assert len(output_rows) == 3
+
+    async def test_num_samples_in_parallel_zero_creates_semaphore_with_value_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """num_samples_in_parallel=0 must still create a Semaphore(0), not silently fall back to nullcontext."""
+        pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
+        captured_semaphore: list = []
+
+        def capturing_run_verification(payloads, semaphore):
+            captured_semaphore.append(semaphore)
+            return []
+
+        self._patch_common(monkeypatch, pairs)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", capturing_run_verification)
+        config = self._make_config(tmp_path, disable_aggregation=True, num_samples_in_parallel=0)
+
+        await RolloutReverificationHelper().run_from_config(config)
+
+        assert len(captured_semaphore) == 1
+        assert isinstance(captured_semaphore[0], Semaphore)
+        assert captured_semaphore[0]._value == 0
 
     async def test_disable_aggregation_skips_aggregate_metrics_call(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
