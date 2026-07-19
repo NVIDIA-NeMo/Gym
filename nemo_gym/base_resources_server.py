@@ -17,7 +17,8 @@ import inspect
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Optional, get_type_hints
+from enum import Enum
+from typing import Any, ClassVar, Optional, get_type_hints
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -72,8 +73,13 @@ def gym_tool(fn):
     return fn
 
 
+class ReverifyMode(str, Enum):
+    STATELESS = "stateless"
+    UNSUPPORTED = "unsupported"
+
+
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
-    pass
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class BaseResourcesServer(BaseServer):
@@ -137,6 +143,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.get("/reverify_mode")(self.get_reverify_mode)
 
         return app
 
@@ -158,6 +165,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
+
+    async def get_reverify_mode(self) -> ReverifyMode:
+        return self.config.REVERIFY_MODE
 
 
 class MCPResourcesServer(SimpleResourcesServer):

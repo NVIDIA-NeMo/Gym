@@ -1,0 +1,157 @@
+---
+title: "Reverify Rollouts"
+description: "Recompute rewards from existing rollouts without re-running model inference."
+---
+
+`gym eval reverify` replays stored rollouts through a resources server's `/verify` endpoint to produce new rewards. Use it when you want to change a verifier parameter — a grading mode, a threshold, a judge prompt — and measure the effect on the **same trajectories** you already collected, without paying for model inference again.
+
+## When to use
+
+Rollout collection fuses two steps that have very different costs: model inference (expensive) and reward computation (cheap). Both outputs land in `rollouts.jsonl` at collection time, and the reward is frozen there.
+
+`gym eval reverify` is the right tool when:
+
+- You changed a verifier hyperparameter and want to recompute rewards on existing rollouts.
+- You want to compare two verifier configurations on the **same** rollouts, without sampling noise from different trajectories.
+- You iterated on a judge prompt and want to rescore a rollout set without re-running the policy.
+
+<Note>
+LLM-as-judge verifiers will re-invoke the judge model during reverification. This is still far cheaper than re-running the full policy.
+</Note>
+
+## Prerequisites
+
+You need the two artifact files that `gym eval run` writes alongside the main rollouts output:
+
+| File | Contents |
+| --- | --- |
+| `rollouts.jsonl` | One row per rollout — includes the model `response` (the expensive artifact) |
+| `rollouts_materialized_inputs.jsonl` | One row per rollout — includes per-task verifier inputs (`options`, `expected_answer`, `grading_mode`, etc.) that are not echoed back into the rollout row |
+
+Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
+
+## Step 1 — Start a resources-server-only stack
+
+`gym eval reverify` needs a running resources server to call `/verify` against, but it does **not** need a model server or an agent. Write a stripped config that contains only the resources server block:
+
+```yaml
+# my_resources_server.yaml
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      grading_mode: lenient_boxed   # the new hyperparameter value you want to test
+      host: 127.0.0.1
+      port: 9500
+```
+
+Start it:
+
+```bash
+gym env start --config my_resources_server.yaml
+```
+
+<Tip>
+A resources-server-only config omits the agent block entirely, which means no model server reference and no `INFERENCE_KEY` is needed. This is much cheaper to start than a full evaluation stack.
+</Tip>
+
+## Step 2 — Run reverification
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  "++head_server.host=127.0.0.1" \
+  "++head_server.port=9500" \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_lenient_reverified.jsonl
+```
+
+The command:
+1. Loads both input files and joins rows on `(_ng_task_index, _ng_rollout_index)`.
+2. Checks that the resources server supports reverification (see [ReverifyMode](#reverifymode) below).
+3. POSTs each joined row to `/verify` — no model calls.
+4. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
+
+## Output files
+
+| File | Contents |
+| --- | --- |
+| `<output>.jsonl` | Recomputed rollouts with updated `reward` and any verifier-specific fields |
+| `<output>_failures.jsonl` | Sidecar with rows that encountered a non-terminal verifier failure |
+| `<output>_aggregate_metrics.json` | Aggregate metrics computed from the recomputed rollouts |
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Resources-server config YAML. Repeatable. |
+| `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
+| `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
+| `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--force` | Override the `UNSUPPORTED` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
+| `--overwrite` | Delete an existing output file instead of raising an error. |
+| `--disable-aggregation` | Skip aggregate-metrics computation. Use when sharding (see [Sharding](#sharding)). |
+
+Hydra overrides work the same as in other `gym eval` commands:
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  "++mcqa_resources_server.resources_servers.mcqa.grading_mode=strict_single_letter_boxed" \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_strict_reverified.jsonl
+```
+
+## ReverifyMode
+
+Before starting, `gym eval reverify` calls `GET /reverify_mode` on each resources server it will use. Servers report one of two modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. This is the default for most resources servers. |
+| `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that was seeded during the original run and is no longer present. Results would be silently wrong. |
+
+Session-stateful resources servers (for example, those that use cookie-keyed state seeded by `/seed_session`) report `unsupported`. By default, `gym eval reverify` refuses to proceed and prints a clear error.
+
+If you understand the risk and want to run anyway — for example, to get an approximate lower-bound estimate — pass `--force`. The output file will be prefixed with `unsafe_` to mark it as potentially incorrect:
+
+```bash
+gym eval reverify \
+  --config my_stateful_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_reverified.jsonl \
+  --force
+# Output written to: results/unsafe_rollouts_reverified.jsonl
+```
+
+## Sharding
+
+For large rollout sets you can shard reverification across multiple jobs by splitting the input files, passing `--disable-aggregation` on each shard, and then combining with `gym eval aggregate`:
+
+```bash
+# Shard 0
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --inputs shards/inputs_0.jsonl \
+  --rollouts shards/rollouts_0.jsonl \
+  --output shards/reverified_0.jsonl \
+  --disable-aggregation
+
+# Shard 1
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --inputs shards/inputs_1.jsonl \
+  --rollouts shards/rollouts_1.jsonl \
+  --output shards/reverified_1.jsonl \
+  --disable-aggregation
+
+# Merge and compute aggregate metrics
+gym eval aggregate \
+  --config my_resources_server.yaml \
+  --input-glob 'shards/reverified_*.jsonl' \
+  --output results/reverified.jsonl
+```
