@@ -1058,30 +1058,37 @@ class TestRolloutReverificationRunFromConfig:
 class TestCheckReverifyMode:
     """Tests for _check_reverify_mode — queries GET /reverify_mode per unique RS."""
 
-    def _mock_client(self, monkeypatch: pytest.MonkeyPatch, responses: list[ReverifyMode]) -> MagicMock:
-        """Return a mock client whose .get is async and patch raise_for_status + get_response_json."""
+    def _mock_client(self, monkeypatch: pytest.MonkeyPatch, responses_by_rs: dict[str, ReverifyMode]) -> MagicMock:
+        """Mock client whose .get embeds the RS name in the response so get_response_json can look it up.
+
+        This makes tests order-independent: _check_reverify_mode iterates a set() whose order
+        is non-deterministic, so positional side_effect lists would be fragile.
+        """
         mock_client = MagicMock()
-        mock_client.get = AsyncMock(return_value=MagicMock())
+
+        async def fake_get(**kwargs: object) -> str:
+            return kwargs["server_name"]  # RS name becomes the "response" object
+
+        mock_client.get = fake_get
         monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.get_response_json",
-            AsyncMock(side_effect=responses),
-        )
+
+        async def get_response_by_rs(rs_name: str) -> ReverifyMode:
+            return responses_by_rs[rs_name]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_response_json", get_response_by_rs)
         return mock_client
 
     async def test_returns_empty_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # _check_reverify_mode iterates sorted(set(rs_names)), so order is rs_a then rs_b
-        mock_client = self._mock_client(monkeypatch, [ReverifyMode.STATELESS, ReverifyMode.STATELESS])
+        mock_client = self._mock_client(monkeypatch, {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.STATELESS})
 
         result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b"})
 
         assert result == []
 
     async def test_returns_unsupported_rs_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # sorted RS names: rs_a, rs_b, rs_c — responses match that order
         mock_client = self._mock_client(
             monkeypatch,
-            [ReverifyMode.STATELESS, ReverifyMode.UNSUPPORTED, ReverifyMode.UNSUPPORTED],
+            {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.UNSUPPORTED, "rs_c": ReverifyMode.UNSUPPORTED},
         )
 
         result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b", "agent_c": "rs_c"})
