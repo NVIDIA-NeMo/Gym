@@ -212,6 +212,8 @@ class TestApp:
             "expected_answer",
             "extracted_answer",
             "judge_evaluations",
+            "judge_failed",
+            "judge_failure_reason",
             "library_reward",
             "response",
             "responses_create_params",
@@ -250,11 +252,36 @@ class TestApp:
             "expected_answer",
             "extracted_answer",
             "judge_evaluations",
+            "judge_failed",
+            "judge_failure_reason",
             "library_reward",
             "response",
             "responses_create_params",
             "reward",
         ]
+
+    async def test_verify_judge_failure_recorded(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        # Library says "not equal" -> judge is consulted; the judge call errors.
+        # The failure is recorded, not crashed and not silently scored as wrong.
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+
+        question = "Simplify the expression x + 7 - 6"
+        model_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": question}])
+        model_response = NeMoGymResponse(
+            **self._create_response("resp_id", self._create_response_output_message("the answer is 42"))
+        )
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=model_create_params,
+            response=model_response,
+            question=question,
+            expected_answer="x + 1",
+        )
+        result = await resources_server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
 
     async def test_verify_answer(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

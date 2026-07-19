@@ -284,6 +284,15 @@ class TestJudgeIntegration:
         assert result.reward == 0.0
         assert result.judge_evaluations[0].verdict_label == "judge_error"
 
+    async def test_judge_failure_recorded(self) -> None:
+        """A judge transport failure is recorded via judge_failed, distinct from a low score."""
+        server, mock = _make_server()
+        mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        result = await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
+        assert result.reward == 0.0
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+
     async def test_judge_unparseable_returns_zero_reward(self) -> None:
         """When the judge returns garbage, reward must be 0.0 — no silent fallback."""
         server, mock = _make_server()

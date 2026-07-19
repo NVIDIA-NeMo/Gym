@@ -41,6 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -198,7 +199,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(JudgeFailureMixin, TavilySearchVerifyRequest, JudgeEvaluation):
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics
@@ -1111,15 +1112,30 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         results_string = "\n\n".join(blocks)
         return BrowseResponse(results_string=results_string)
 
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
 
         if self.config.use_judge:
-            judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
+            judge_evaluation, judge_failure = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
         else:
-            judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+            judge_evaluation, judge_failure = (
+                self._verify_answer_with_regex(ground_truth, last_assistant_response),
+                None,
+            )
 
         # num_tool_calls now comes from the agent loop (counts ALL tool calls,
         # including those made before context resets). Fall back to the old
@@ -1133,6 +1149,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_tool_calls=agent_num_tool_calls,
             reset_count=getattr(body.response, "reset_count", 0) or 0,
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+            judge_failed=judge_failure is not None,
+            judge_failure_reason=judge_failure,
         )
 
         # terminal mode: clean up this session's disk workspace
@@ -1180,7 +1198,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains.append(prop["value"])
         return exclude_domains
 
-    async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
+    async def _verify_answer_with_judge(
+        self, question: str, ground_truth: str, response: str
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
@@ -1194,6 +1214,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ]
 
         judge_response = None
+        last_error: Optional[str] = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
             judge_call_start = time()
             try:
@@ -1220,19 +1241,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
                         flush=True,
                     )
-                    return JudgeEvaluation(
-                        judge_response_create_params=judge_create_params,
-                        reasoning=text,
-                        extracted_final_answer=extracted,
-                        reward=1.0 if is_correct else 0.0,
-                        judge_response=judge_response,
+                    return (
+                        JudgeEvaluation(
+                            judge_response_create_params=judge_create_params,
+                            reasoning=text,
+                            extracted_final_answer=extracted,
+                            reward=1.0 if is_correct else 0.0,
+                            judge_response=judge_response,
+                        ),
+                        None,
                     )
                 print(
                     f"[judge_call attempt={attempt + 1} status=parse_error duration_s={time() - judge_call_start:.2f} raw_output={text[:200]!r}]",
                     flush=True,
                 )
+                last_error = f"unparseable judge verdict: {text[:200]!r}"
 
             except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
                 sleep_s = min(2**attempt, 30)
                 print(
                     f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error_type={type(e).__name__} error={str(e)[:200]} backoff_s={sleep_s}]",
@@ -1244,12 +1270,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             f"[judge_exhausted max_attempts={self.JUDGE_MAX_ATTEMPTS} had_response={judge_response is not None}]",
             flush=True,
         )
-        return JudgeEvaluation(
-            judge_response_create_params=judge_create_params,
-            reasoning="",
-            extracted_final_answer="",
-            reward=0.0,
-            judge_response=judge_response,
+        # Exhausting every attempt (repeated call errors or unparseable verdicts) means the judge
+        # never produced a usable score: a distinct outcome, not a wrong answer.
+        judge_failure = last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts"
+        return (
+            JudgeEvaluation(
+                judge_response_create_params=judge_create_params,
+                reasoning="",
+                extracted_final_answer="",
+                reward=0.0,
+                judge_response=judge_response,
+            ),
+            judge_failure,
         )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:

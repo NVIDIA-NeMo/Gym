@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -292,7 +293,7 @@ class FinanceAgentVerifyRequest(FinanceAgentRunRequest, BaseVerifyRequest):
     pass
 
 
-class FinanceAgentVerifyResponse(BaseVerifyResponse):
+class FinanceAgentVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     """Verify response for SEC search tasks."""
 
     expected_answer: str
@@ -1190,6 +1191,27 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # Verify Endpoint
     # ========================================================================
 
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
+    async def _call_judge(self, judge_params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        response = await asyncio.wait_for(
+            self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=judge_params,
+            ),
+            timeout=self.config.judge_call_timeout,
+        )
+        return NeMoGymResponse.model_validate(await get_response_json(response))
+
     async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
         """Verify the agent's answer.
 
@@ -1269,25 +1291,18 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         rating = None
 
         for attempt in range(max_judge_retries):
-            try:
-                response = await asyncio.wait_for(
-                    self.server_client.post(
-                        server_name=self.config.judge_model_server.name,
-                        url_path="/v1/responses",
-                        json=judge_params,
-                    ),
-                    timeout=self.config.judge_call_timeout,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
-                logger.warning(
-                    "Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e
-                )
+            # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct
+            # outcome, not a wrong answer: record it instead of silently scoring 0.
+            judge_response, judge_failure = await run_judge(self._call_judge(judge_params))
+            if judge_failure is not None:
+                logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_failure)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
                 logger.error("Judge model call failed after %d attempts", max_judge_retries)
-                return FinanceAgentVerifyResponse(**body.model_dump(), reward=0.0)
+                return FinanceAgentVerifyResponse(
+                    **body.model_dump(), reward=0.0, judge_failed=True, judge_failure_reason=judge_failure
+                )
 
             try:
                 last_output = judge_response.output[-1]

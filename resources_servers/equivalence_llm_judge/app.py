@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -136,7 +137,7 @@ class JudgeEvaluation(BaseModel):
     verdict_label: Optional[str] = None
 
 
-class LLMJudgeVerifyResponse(BaseVerifyResponse):
+class LLMJudgeVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
@@ -400,6 +401,32 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         return self._make_response(body, expected, reward, [first_eval, second_eval])
 
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
+        # A judge call that errors (auth, rate limit, timeout, endpoint error) is
+        # a distinct outcome, not a wrong answer: record it instead of crashing
+        # the sample (the judge HTTP path re-raises on failure).
+        result, judge_failure = await run_judge(self._verify(body))
+        if judge_failure is not None:
+            return LLMJudgeVerifyResponse(
+                **body.model_dump(exclude={"expected_answer"}),
+                reward=0.0,
+                expected_answer=_extract_expected_answer(body) or "",
+                judge_evaluations=[],
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
+            )
+        return result
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
+    async def _verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:

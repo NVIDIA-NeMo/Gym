@@ -251,6 +251,27 @@ class TestFrontierScienceJudgeServer:
         assert result.reward == approx(0.0)
         assert result.verdict == "NO"
 
+    async def test_verify_judge_failure_recorded(self, config: FrontierScienceJudgeConfig) -> None:
+        """A judge transport error is recorded as judge_failed, not a wrong answer."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = FrontierScienceJudgeServer(config=config, server_client=server_mock)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        model_response = self._make_model_response("H2O")
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="Q",
+            expected_answer="A",
+            subject="chemistry",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+        assert result.verdict is None
+
     async def test_verify_unparseable_judge(self, config: FrontierScienceJudgeConfig) -> None:
         """Judge response with no Judgement: marker => verdict=None, reward=0."""
         server_mock = MagicMock(spec=ServerClient)
