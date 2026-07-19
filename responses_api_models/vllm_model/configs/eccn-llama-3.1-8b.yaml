@@ -1,9 +1,0 @@
-eccn-llama-3.1-8b-instruct:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      base_url: https://inference-api.nvidia.com/v1
-      api_key: ${oc.env:INFERENCE_KEY}
-      model: nvidia/meta/eccn-llama-3.1-8b-instruct
-      return_token_id_information: false
-      uses_reasoning_parser: false
