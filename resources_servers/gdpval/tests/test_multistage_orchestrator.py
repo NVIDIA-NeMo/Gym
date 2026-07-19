@@ -23,11 +23,11 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.path_utils import failures_path_for as _failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
-    _failures_path_for,
 )
 from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
