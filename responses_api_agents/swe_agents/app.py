@@ -1381,6 +1381,11 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         snapshot_query_bool_patch_path = (
             self.parent_dir / "patches" / "streaming_tool_call_snapshot_query_bool.patch"
         )
+        prefill_start_priority_patch_path = (
+            self.parent_dir
+            / "patches"
+            / "streaming_tool_call_prefill_start_priority.patch"
+        )
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1408,7 +1413,10 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
+        if is_applied(prefill_start_priority_patch_path):
+            return
         if is_applied(snapshot_query_bool_patch_path):
+            apply_patch(prefill_start_priority_patch_path)
             return
         if is_applied(event_driven_snapshot_toggle_patch_path):
             apply_patch(snapshot_query_bool_patch_path)
@@ -1519,6 +1527,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         apply_patch(event_driven_snapshot_patch_path)
         apply_patch(event_driven_snapshot_toggle_patch_path)
         apply_patch(snapshot_query_bool_patch_path)
+        apply_patch(prefill_start_priority_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"

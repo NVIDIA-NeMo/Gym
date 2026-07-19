@@ -52,6 +52,11 @@ streaming_tool_call_background_prefill_metrics_patch="$script_dir/../patches/str
 streaming_tool_call_cached_token_metrics_patch="$script_dir/../patches/streaming_tool_call_cached_token_metrics.patch"
 streaming_tool_call_skip_unadmitted_finalization_patch="$script_dir/../patches/streaming_tool_call_skip_unadmitted_finalization.patch"
 streaming_tool_call_deferred_abort_patch="$script_dir/../patches/streaming_tool_call_deferred_abort.patch"
+streaming_tool_call_same_request_metrics_patch="$script_dir/../patches/streaming_tool_call_same_request_metrics.patch"
+streaming_tool_call_event_driven_snapshot_patch="$script_dir/../patches/streaming_tool_call_event_driven_snapshot.patch"
+streaming_tool_call_event_driven_snapshot_toggle_patch="$script_dir/../patches/streaming_tool_call_event_driven_snapshot_toggle.patch"
+streaming_tool_call_snapshot_query_bool_patch="$script_dir/../patches/streaming_tool_call_snapshot_query_bool.patch"
+streaming_tool_call_prefill_start_priority_patch="$script_dir/../patches/streaming_tool_call_prefill_start_priority.patch"
 
 cd $setup_dir
 
@@ -185,6 +190,16 @@ git apply --check "$streaming_tool_call_skip_unadmitted_finalization_patch"
 git apply "$streaming_tool_call_skip_unadmitted_finalization_patch"
 git apply --check "$streaming_tool_call_deferred_abort_patch"
 git apply "$streaming_tool_call_deferred_abort_patch"
+git apply --check "$streaming_tool_call_same_request_metrics_patch"
+git apply "$streaming_tool_call_same_request_metrics_patch"
+git apply --check "$streaming_tool_call_event_driven_snapshot_patch"
+git apply "$streaming_tool_call_event_driven_snapshot_patch"
+git apply --check "$streaming_tool_call_event_driven_snapshot_toggle_patch"
+git apply "$streaming_tool_call_event_driven_snapshot_toggle_patch"
+git apply --check "$streaming_tool_call_snapshot_query_bool_patch"
+git apply "$streaming_tool_call_snapshot_query_bool_patch"
+git apply --check "$streaming_tool_call_prefill_start_priority_patch"
+git apply "$streaming_tool_call_prefill_start_priority_patch"
 
 # Build OpenHands
 echo "Building OpenHands (this may take 5-10 minutes)..."

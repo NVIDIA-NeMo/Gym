@@ -1,0 +1,136 @@
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -613,17 +613,6 @@
+         _update_streaming_tool_call_metrics(
+             {"streaming_tool_call_eligible_actions": 1}
+         )
+-        post_task_started_at = time.monotonic()
+-        post_task_finished_at: float | None = None
+-
+-        async def timed_post_action() -> httpx.Response:
+-            nonlocal post_task_finished_at
+-            try:
+-                return await post_action()
+-            finally:
+-                post_task_finished_at = time.monotonic()
+-
+-        post_task = asyncio.create_task(timed_post_action())
+         session_id = f"{self.sid}:{response_id}:{context.tool_call_id}"
+         sequence_no = 0
+         tokenizer_only = bool(context.config.get("tokenizer_only"))
+@@ -697,6 +686,8 @@
+         prefill_race_abort_failures = 0
+         prefill_race_deferred_aborts = 0
+         prefill_race_abort_seconds = 0.0
++        prefill_race_priority_yields = 0
++        prefill_race_priority_seconds = 0.0
+         prefill_race_cancelled_request_seconds = 0.0
+         prefill_race_cancel_drain_seconds = 0.0
+         command_finished_during_prefill_request = False
+@@ -778,6 +769,24 @@
+             raise ValueError(
+                 "snapshot long-poll timeout must be between 0 and 5 seconds"
+             )
++        post_start_event = asyncio.Event()
++        if not (final_only_prefill and not prefill_after_admission):
++            post_start_event.set()
++        post_task_started_at = time.monotonic()
++        post_task_finished_at: float | None = None
++
++        async def timed_post_action() -> httpx.Response:
++            nonlocal post_task_finished_at
++            try:
++                await post_start_event.wait()
++                return await post_action()
++            finally:
++                post_task_finished_at = time.monotonic()
++
++        # The task is created before any await so non-prefill paths retain
++        # their original scheduling. One-shot prefill opens the gate after
++        # its request has received one event-loop turn.
++        post_task = asyncio.create_task(timed_post_action())
+         snapshot_polls = 0
+         snapshot_revisions = 0
+         nonempty_snapshots = 0
+@@ -1350,6 +1359,12 @@
+                 "streaming_tool_call_prefill_race_deferred_aborts": (
+                     prefill_race_deferred_aborts
+                 ),
++                "streaming_tool_call_prefill_race_priority_yields": (
++                    prefill_race_priority_yields
++                ),
++                "streaming_tool_call_prefill_race_priority_seconds": (
++                    prefill_race_priority_seconds
++                ),
+                 "streaming_tool_call_prefill_race_abort_seconds": (
+                     prefill_race_abort_seconds
+                 ),
+@@ -1376,6 +1391,17 @@
+                     prefill_race_attempts = 1
+                     prime_started_at = time.monotonic()
+                     prime_task = asyncio.create_task(tokenize_snapshot(""))
++                    priority_started_at = time.monotonic()
++                    prefill_race_priority_yields = 1
++                    # Let the prefill request enqueue before opening the
++                    # command POST gate. This is a scheduler handoff, not a
++                    # fixed sleep, so the added command latency is measured
++                    # and bounded to one event-loop turn.
++                    await asyncio.sleep(0)
++                    post_start_event.set()
++                    prefill_race_priority_seconds = (
++                        time.monotonic() - priority_started_at
++                    )
+                     completed_tasks, _ = await asyncio.wait(
+                         (post_task, prime_task),
+                         return_when=asyncio.FIRST_COMPLETED,
+@@ -1866,6 +1892,7 @@
+             _update_streaming_tool_call_metrics(metrics)
+             return response
+         except Exception as error:
++            post_start_event.set()
+             logger.warning(f"Streaming tool call disabled for this action: {error}")
+             if session_started or (
+                 exact_incremental_tokenizer
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -713,6 +713,7 @@
+         release_post = threading.Event()
+         session = MagicMock()
+         runtime.session = session
++        request_start_order = []
+         final_observation = CmdOutputObservation(
+             content="final command output",
+             command="echo output",
+@@ -726,5 +727,6 @@
+         post_response.json.return_value = event_to_dict(final_observation)
+ 
+         def post(*args, **kwargs):
++            request_start_order.append("command")
+             assert release_post.wait(timeout=1)
+             return post_response
+@@ -736,5 +738,6 @@
+         async def tokenize_request(**kwargs):
+             assert kwargs["action"] == "tokenize"
+             if kwargs["sequence_no"] == 0:
++                request_start_order.append("prefill")
+                 release_post.set()
+             result = {
+@@ -820,6 +823,7 @@
+ 
+         assert response is post_response
+         session.get.assert_not_called()
++        assert request_start_order[:2] == ["prefill", "command"]
+         requests = streaming_client.streaming_tool_call_request.await_args_list
+         assert [request.kwargs["action"] for request in requests] == [
+             "tokenize",
+@@ -864,6 +868,8 @@
+         assert metrics["streaming_tool_call_prefill_race_prefill_first"] == 1
+         assert metrics["streaming_tool_call_prefill_race_command_first"] == 0
+         assert metrics["streaming_tool_call_prefill_race_cancellations"] == 0
++        assert metrics["streaming_tool_call_prefill_race_priority_yields"] == 1
++        assert metrics["streaming_tool_call_prefill_race_priority_seconds"] >= 0
+         assert metrics["streaming_tool_call_prefix_seed_attempts"] == 1
+         assert metrics["streaming_tool_call_prefix_seed_successes"] == 1
+         assert metrics["streaming_tool_call_prefix_seed_fallbacks"] == 0
