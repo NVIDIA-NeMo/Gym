@@ -56,6 +56,7 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
+    _filter_title_gen_records,
     _parse_switchyard_base_url,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -2429,6 +2430,7 @@ class TestSWEBenchWrapperSetupParams:
             assert "proxy_x_session_id" not in params.agent_script
 
 
+
 class TestSWEBenchWrapperResponses:
     def _setup_oh_dirs(self, wrapper):
         oh_dir = wrapper._swe_bench_wrapper_server_config.openhands_setup_dir / "OpenHands"
@@ -2765,13 +2767,98 @@ class TestSWEBenchWrapperRun:
         reconstruct_mock = MagicMock(return_value="trace")
         monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct_mock)
 
-        result = await wrapper._retrieve_switchyard_trace(instance_config)
+        result = await wrapper._retrieve_switchyard_trace(
+            instance_config.switchyard_base_url, instance_config.switchyard_session_id
+        )
 
         assert result == "trace"
         args, kwargs = request_mock.await_args
         assert args == ("GET", "http://switchyard:4000/v1/sessions/0123456789abcdef0123456789abcdef/completions")
         assert kwargs["timeout"].total == 60
         reconstruct_mock.assert_called_once_with(envelope, "0123456789abcdef0123456789abcdef", wrapper._vllm_converter)
+
+    async def test_list_switchyard_sessions_url_and_parse(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        envelope = {
+            "schema_version": 1,
+            "sessions": [
+                {"session_id": "root", "parent_session_id": None},
+                {"session_id": "sub", "parent_session_id": "root"},
+            ],
+        }
+        request_mock = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(swe_app, "request", request_mock)
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+
+        result = await wrapper._list_switchyard_sessions("http://switchyard:4000/")
+
+        assert result == envelope["sessions"]
+        args, _ = request_mock.await_args
+        assert args == ("GET", "http://switchyard:4000/v1/sessions")
+
+    @staticmethod
+    def _fake_trace(model: str) -> SwitchyardTrace:
+        item = MagicMock()
+        item.model_dump.return_value = {"model": model}
+        return SwitchyardTrace(input_items=[item], output_items=[item], tools=[], record_uuids=["u"], model=model)
+
+    async def test_reconstruct_switchyard_sessions_tree(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        # trace.model echoes the session id so we can assert per-session retrieval.
+        monkeypatch.setattr(
+            wrapper,
+            "_retrieve_switchyard_trace",
+            AsyncMock(side_effect=lambda base, sid, **kw: self._fake_trace(sid)),
+        )
+        sessions = [
+            {"session_id": "root", "parent_session_id": None},
+            {"session_id": "sub1", "parent_session_id": "root"},
+            {"session_id": "sub2", "parent_session_id": "root"},
+        ]
+        root_trace, root_id, subs = await wrapper._reconstruct_switchyard_sessions("http://sw", sessions)
+
+        assert root_id == "root" and root_trace.model == "root"
+        assert [s["session_id"] for s in subs] == ["sub1", "sub2"]
+        assert all(s["parent_session_id"] == "root" for s in subs)
+        assert subs[0]["model"] == "sub1" and subs[0]["output"] == [{"model": "sub1"}]
+
+    async def test_reconstruct_switchyard_sessions_single_root(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(
+            wrapper,
+            "_retrieve_switchyard_trace",
+            AsyncMock(side_effect=lambda base, sid, **kw: self._fake_trace(sid)),
+        )
+        root_trace, root_id, subs = await wrapper._reconstruct_switchyard_sessions(
+            "http://sw", [{"session_id": "only", "parent_session_id": None}]
+        )
+        assert root_id == "only" and subs == []
+
+    async def test_reconstruct_switchyard_sessions_requires_single_root(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", AsyncMock())
+        with pytest.raises(SwitchyardTraceError):
+            await wrapper._reconstruct_switchyard_sessions(
+                "http://sw",
+                [
+                    {"session_id": "a", "parent_session_id": None},
+                    {"session_id": "b", "parent_session_id": None},
+                ],
+            )
+
+
+def test_opencode_switchyard_config_points_at_switchyard() -> None:
+    cfg = swe_app._opencode_switchyard_config("http://switchyard:4000/", "policy-model")
+    assert cfg["model"] == "switchyard/policy-model"
+    provider_id = next(iter(cfg["provider"]))
+    # Load-bearing: a non-"opencode" provider id is what makes upstream opencode
+    # emit its native X-Session-Id correlation headers.
+    assert not provider_id.startswith("opencode")
+    provider = cfg["provider"][provider_id]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "http://switchyard:4000/v1"
+    assert "policy-model" in provider["models"]
 
 
 ########################################
@@ -2804,3 +2891,468 @@ class TestLoadRebenchLogParsers:
 
             mod = _load_rebench_log_parsers(rebench_dir)
             assert "lib_test" in mod.NAME_TO_PARSER
+
+
+########################################
+# _filter_title_gen_records tests
+########################################
+
+
+class TestFilterTitleGenRecords:
+    def _record(self, system_content: str = "", user_content: str = "fix it") -> dict:
+        # Matches the Switchyard token_capture_response_processor record shape:
+        # messages = request_msgs + assistant_turn (flat list, no "request" wrapper)
+        msgs = []
+        if system_content:
+            msgs.append({"role": "system", "content": system_content})
+        msgs.append({"role": "user", "content": user_content})
+        msgs.append({"role": "assistant", "content": "ok"})
+        return {"messages": msgs}
+
+    def test_strips_title_gen_record(self) -> None:
+        envelope = {
+            "completions": [
+                self._record("You are a title generator"),
+                self._record("You are a coding assistant"),
+            ]
+        }
+        result = _filter_title_gen_records(envelope)
+        assert len(result["completions"]) == 1
+        assert result["completions"][0]["messages"][0]["content"] == "You are a coding assistant"
+
+    def test_case_insensitive(self) -> None:
+        envelope = {"completions": [self._record("YOU ARE A TITLE GENERATOR")]}
+        assert _filter_title_gen_records(envelope)["completions"] == []
+
+    def test_preserves_non_title_gen_records(self) -> None:
+        envelope = {"completions": [self._record("You are a helpful assistant"), self._record("", "task")]}
+        assert len(_filter_title_gen_records(envelope)["completions"]) == 2
+
+    def test_empty_completions(self) -> None:
+        assert _filter_title_gen_records({"completions": []}) == {"completions": []}
+
+    def test_missing_completions_key(self) -> None:
+        assert _filter_title_gen_records({})["completions"] == []
+
+    def test_other_envelope_keys_preserved(self) -> None:
+        envelope = {"schema_version": 1, "completions": [self._record("You are a title generator")]}
+        result = _filter_title_gen_records(envelope)
+        assert result["schema_version"] == 1
+        assert result["completions"] == []
+
+
+########################################
+# Upstream opencode setup + run-command tests
+########################################
+
+
+class TestUpstreamOpenCodeSetup:
+    def _upstream_config(self, tmpdir, **overrides) -> SWEBenchWrapperInstanceConfig:
+        opencode_setup_dir = Path(tmpdir) / "upstream_opencode_setup"
+        opencode_setup_dir.mkdir(parents=True, exist_ok=True)
+        return _make_instance_config(
+            tmpdir,
+            agent_framework="opencode",
+            opencode_source="opencode",
+            opencode_setup_dir=opencode_setup_dir,
+            switchyard_base_url="http://switchyard:4000",
+            **overrides,
+        )
+
+    def test_setup_upstream_skips_if_already_installed(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            setup_dir = Path(tmpdir) / "parent" / "swe_upstream_opencode_setup"
+            bun_bin = setup_dir / "bun" / "bin" / "bun"
+            opencode_bin = setup_dir / "opencode" / "node_modules" / ".bin" / "opencode"
+            bun_bin.parent.mkdir(parents=True, exist_ok=True)
+            opencode_bin.parent.mkdir(parents=True, exist_ok=True)
+            bun_bin.touch()
+            opencode_bin.touch()
+
+            run_cmd = MagicMock()
+            monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", run_cmd)
+
+            with patch.object(
+                BaseDatasetHarnessProcessor,
+                "parent_dir",
+                new_callable=lambda: property(lambda self: Path(tmpdir) / "parent"),
+            ):
+                processor = OpenCodeHarnessProcessor(config=config)
+                result = processor._setup_upstream()
+
+            run_cmd.assert_not_called()
+            assert result == Path(tmpdir) / "parent" / "swe_upstream_opencode_setup"
+
+    def test_setup_upstream_runs_install_commands(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            run_cmd = MagicMock()
+            monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", run_cmd)
+
+            with patch.object(
+                BaseDatasetHarnessProcessor,
+                "parent_dir",
+                new_callable=lambda: property(lambda self: Path(tmpdir) / "parent"),
+            ):
+                (Path(tmpdir) / "parent" / "swe_upstream_opencode_setup" / "opencode").mkdir(
+                    parents=True, exist_ok=True
+                )
+                processor = OpenCodeHarnessProcessor(config=config)
+                processor._setup_upstream()
+
+            assert run_cmd.call_count == 2
+            calls = [c.args[0] for c in run_cmd.call_args_list]
+            assert any("bun.sh/install" in c for c in calls)
+            assert any("bun add opencode-ai" in c for c in calls)
+
+    def test_setup_dispatches_to_upstream_for_opencode_source(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            upstream_mock = MagicMock(return_value=Path(tmpdir) / "result")
+            monkeypatch.setattr(OpenCodeHarnessProcessor, "_setup_upstream", upstream_mock)
+            result = OpenCodeHarnessProcessor(config=config).setup()
+            upstream_mock.assert_called_once()
+            assert result == Path(tmpdir) / "result"
+
+
+class TestUpstreamOpenCodeRunCommand:
+    @pytest.fixture
+    def _stub_model_server(self, monkeypatch):
+        def _fake(_global, name):
+            return type("Cfg", (), {"host": "sw-host", "port": 4000, "model": "policy-model"})()
+
+        monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value={}))
+
+    def _upstream_config(self, tmpdir, **overrides) -> SWEBenchWrapperInstanceConfig:
+        opencode_setup_dir = Path(tmpdir) / "upstream_opencode_setup"
+        opencode_setup_dir.mkdir(parents=True, exist_ok=True)
+        return _make_instance_config(
+            tmpdir,
+            agent_framework="opencode",
+            opencode_source="opencode",
+            opencode_setup_dir=opencode_setup_dir,
+            switchyard_base_url="http://switchyard:4000",
+            ng_global_config_dict_str=_ng_config_dict_str(),
+            **overrides,
+        )
+
+    def _read_agent_script(self, config) -> str:
+        return (config.persistent_dir / f"agent_script_{config.agent_run_id}.sh").read_text()
+
+    def test_get_run_command_dispatches_for_opencode_source(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            upstream_mock = MagicMock(
+                return_value=ExecuteContainerCommandArgs(
+                    command="echo ok", expected_file_pattern="/tmp/*.jsonl", mode="agent", timeout=100
+                )
+            )
+            with patch.object(OpenCodeHarnessProcessor, "_get_upstream_run_command", upstream_mock):
+                result = OpenCodeHarnessProcessor(config=config).get_run_command()
+            upstream_mock.assert_called_once()
+            assert result.command == "echo ok"
+
+    def test_upstream_run_command_basic(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            result = OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            assert result.mode == "agent"
+            assert "timeout" in result.command
+            assert "output.jsonl" in result.expected_file_pattern
+            assert str(config.opencode_setup_dir) in result.expected_file_pattern
+
+    def test_upstream_agent_script_contents(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+            script = self._read_agent_script(config)
+            assert "OPENCODE_DISABLE_MODELS_FETCH=1" in script
+            assert "SWITCHYARD_BASE_URL" in script
+            assert "switchyard:4000" in script
+            assert "opencode.json" in script
+            assert "opencode run" in script
+            assert "--model" in script
+            assert "switchyard/test-model" in script  # body.model takes priority over server default
+            assert "_OC_ARGS" in script
+            assert "python3 -c" in script
+            assert "git_patch" in script
+
+    def test_upstream_writes_user_message_file(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+            user_msg_path = config.persistent_dir / f"user_message_{config.agent_run_id}.txt"
+            assert user_msg_path.exists()
+            assert "Fix bug" in user_msg_path.read_text()
+
+    def test_upstream_opencode_json_is_valid(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._upstream_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+            script = self._read_agent_script(config)
+            # Verify opencode.json is written with key Switchyard provider fields.
+            assert "opencode.json" in script
+            assert '"model": "switchyard/test-model"' in script
+            assert '"autoupdate": false' in script
+            assert '"baseURL": "http://switchyard:4000/v1"' in script
+            assert '"npm": "@ai-sdk/openai-compatible"' in script
+
+    def test_upstream_requires_switchyard_base_url(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                agent_framework="opencode",
+                opencode_source="opencode",
+                opencode_setup_dir=Path(tmpdir) / "setup",
+                switchyard_base_url=None,
+                ng_global_config_dict_str=_ng_config_dict_str(),
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            (Path(tmpdir) / "setup").mkdir(parents=True, exist_ok=True)
+            with pytest.raises(AssertionError, match="switchyard_base_url"):
+                OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+
+    def test_upstream_requires_opencode_setup_dir(self, _stub_model_server) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                agent_framework="opencode",
+                opencode_source="opencode",
+                opencode_setup_dir=None,
+                switchyard_base_url="http://switchyard:4000",
+                ng_global_config_dict_str=_ng_config_dict_str(),
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            with pytest.raises(AssertionError, match="opencode setup directory"):
+                OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
+
+
+########################################
+# _retrieve_switchyard_trace filter_title_gen tests
+########################################
+
+
+class TestRetrieveSwitchyardTraceFilterTitleGen:
+    # Envelopes use the real Switchyard shape: completions list, messages flat on each record.
+    @pytest.mark.asyncio
+    async def test_filter_false_passes_envelope_unchanged(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        envelope = {"completions": [{"messages": [{"role": "system", "content": "You are a title generator"}]}]}
+        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock()))
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+        reconstruct = MagicMock(return_value="trace")
+        monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct)
+
+        await wrapper._retrieve_switchyard_trace("http://sw:4000", "ses_1", filter_title_gen=False)
+        assert len(reconstruct.call_args[0][0]["completions"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_filter_true_strips_title_gen(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        envelope = {
+            "completions": [
+                {"messages": [{"role": "system", "content": "You are a title generator"}]},
+                {"messages": [{"role": "system", "content": "You are a coding assistant"}]},
+            ]
+        }
+        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock()))
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+        reconstruct = MagicMock(return_value="trace")
+        monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct)
+
+        await wrapper._retrieve_switchyard_trace("http://sw:4000", "ses_1", filter_title_gen=True)
+        called_env = reconstruct.call_args[0][0]
+        assert len(called_env["completions"]) == 1
+        assert called_env["completions"][0]["messages"][0]["content"] == "You are a coding assistant"
+
+
+########################################
+# _reconstruct_switchyard_sessions filter_title_gen threading
+########################################
+
+
+class TestReconstructFilterTitleGenThreading:
+    @staticmethod
+    def _fake_trace(sid: str):
+        item = MagicMock()
+        item.model_dump.return_value = {"sid": sid}
+        from nemo_gym.switchyard_trace import SwitchyardTrace
+
+        return SwitchyardTrace(input_items=[item], output_items=[item], tools=[], record_uuids=[], model=sid)
+
+    @pytest.mark.asyncio
+    async def test_filter_true_threaded_to_retrieve(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        retrieve = AsyncMock(side_effect=lambda base, sid, filter_title_gen=False: self._fake_trace(sid))
+        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", retrieve)
+        sessions = [
+            {"session_id": "root", "parent_session_id": None},
+            {"session_id": "sub", "parent_session_id": "root"},
+        ]
+        await wrapper._reconstruct_switchyard_sessions("http://sw", sessions, filter_title_gen=True)
+        for call in retrieve.await_args_list:
+            assert call.kwargs.get("filter_title_gen") is True
+
+    @pytest.mark.asyncio
+    async def test_filter_defaults_false(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        retrieve = AsyncMock(side_effect=lambda base, sid, filter_title_gen=False: self._fake_trace(sid))
+        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", retrieve)
+        sessions = [{"session_id": "only", "parent_session_id": None}]
+        await wrapper._reconstruct_switchyard_sessions("http://sw", sessions)
+        for call in retrieve.await_args_list:
+            assert call.kwargs.get("filter_title_gen") is False
+
+
+########################################
+# run() gate passes filter_title_gen=True
+########################################
+
+
+class TestRunOpencodeGateFilterTitleGen:
+    @staticmethod
+    def _opencode_response(**overrides) -> NeMoGymResponse:
+        return NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": True}),
+                "instance_config": _make_instance_config(
+                    tempfile.mkdtemp(),
+                    agent_framework="opencode",
+                    opencode_source="opencode",
+                    switchyard_base_url="http://switchyard:4000",
+                    **overrides,
+                ).model_dump_json(),
+            },
+        )
+
+    @staticmethod
+    def _run_body():
+        from nemo_gym.base_resources_server import BaseRunRequest
+
+        return BaseRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "problem_statement": "Fix",
+                    "instance_id": "test-1",
+                    "base_commit": "abc",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                },
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_calls_reconstruct_with_filter_title_gen_true(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        from nemo_gym.switchyard_trace import SwitchyardTrace
+
+        fake_trace = SwitchyardTrace(input_items=[], output_items=[], tools=[], record_uuids=[], model="m")
+        sessions_mock = AsyncMock(return_value=[{"session_id": "root", "parent_session_id": None}])
+        reconstruct_mock = AsyncMock(return_value=(fake_trace, "root", []))
+        monkeypatch.setattr(wrapper, "_list_switchyard_sessions", sessions_mock)
+        monkeypatch.setattr(wrapper, "_reconstruct_switchyard_sessions", reconstruct_mock)
+
+        with patch.object(
+            SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
+        ):
+            await wrapper.run(self._run_body())
+
+        reconstruct_mock.assert_awaited_once()
+        assert reconstruct_mock.call_args.kwargs.get("filter_title_gen") is True
+
+    @pytest.mark.asyncio
+    async def test_run_masks_on_reconstruct_failure(self, monkeypatch) -> None:
+        from nemo_gym.switchyard_trace import SwitchyardTraceError
+
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(wrapper, "_list_switchyard_sessions", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            wrapper,
+            "_reconstruct_switchyard_sessions",
+            AsyncMock(side_effect=SwitchyardTraceError("no root")),
+        )
+        with patch.object(
+            SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
+        ):
+            result = await wrapper.run(self._run_body())
+        assert result.mask_sample is True
+        assert "opencode sessions" in result.switchyard_trace_error
+
+
+########################################
+# _build_apptainer_command upstream mount tests
+########################################
+
+
+class TestBuildApptainerCommandUpstreamOpencode:
+    def _setup_upstream_dirs(self, params: SWEBenchWrapperInstanceConfig) -> None:
+        opencode_dir = Path(str(params.opencode_setup_dir)) / "opencode"
+        bun_dir = Path(str(params.opencode_setup_dir)) / "bun"
+        (opencode_dir / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
+        bun_dir.mkdir(parents=True, exist_ok=True)
+        (params.persistent_dir / f"user_message_{params.agent_run_id}.txt").write_text("task")
+
+    def test_upstream_agent_omits_migration_mount(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opencode_setup_dir = Path(tmpdir) / "upstream_setup"
+            params = _make_instance_config(
+                tmpdir,
+                agent_framework="opencode",
+                opencode_source="opencode",
+                opencode_setup_dir=opencode_setup_dir,
+                switchyard_base_url="http://switchyard:4000",
+            )
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+            self._setup_upstream_dirs(params)
+            cmd_args = ExecuteContainerCommandArgs(
+                command="x", expected_file_pattern="/tmp/*.jsonl", mode="agent", timeout=300
+            )
+            result = wrapper._build_apptainer_command(params, cmd_args)
+            assert "/opencode_setup/bun" in result
+            assert "/opencode_setup/opencode" in result
+            assert "migration" not in result
+
+    def test_fork_path_retains_migration_mount(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opencode_setup_dir = Path(tmpdir) / "fork_setup"
+            params = _make_instance_config(
+                tmpdir,
+                agent_framework="opencode",
+                opencode_source="nv-opencode",
+                opencode_setup_dir=opencode_setup_dir,
+            )
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+            opencode_dir = opencode_setup_dir / "opencode"
+            (opencode_dir / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
+            (opencode_dir / "packages" / "opencode" / "migration").mkdir(parents=True, exist_ok=True)
+            (opencode_setup_dir / "bun").mkdir(parents=True, exist_ok=True)
+            (params.persistent_dir / f"user_message_{params.agent_run_id}.txt").write_text("x")
+            cmd_args = ExecuteContainerCommandArgs(
+                command="x", expected_file_pattern="/tmp/*.jsonl", mode="agent", timeout=300
+            )
+            result = wrapper._build_apptainer_command(params, cmd_args)
+            assert "migration" in result
