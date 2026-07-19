@@ -2877,6 +2877,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             trajectory_input = json.loads(metadata["input"])
             if trajectory_input or not metrics.agent_timed_out:
                 responses_create_params["input"] = trajectory_input
+            elif not responses_create_params["input"]:
+                problem_statement = body.responses_create_params.metadata.get(
+                    "problem_statement"
+                )
+                if problem_statement:
+                    responses_create_params["input"] = [
+                        {
+                            "role": "user",
+                            "content": problem_statement,
+                            "type": "message",
+                        }
+                    ]
             responses_create_params["tools"] = (
                 [t.model_dump() for t in response.tools] if response.tools else []
             )
