@@ -112,8 +112,6 @@ def _build_agent_to_resources_server_mapping(
 
 
 class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
-    # to do - we provide description 2 times here - once in the config main.py and once in the field
-    # to do can we use Path already here?
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
@@ -454,7 +452,6 @@ class RolloutReverificationHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
-        # to do - check upload to wandb later
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
