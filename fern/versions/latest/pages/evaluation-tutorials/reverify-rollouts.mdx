@@ -26,7 +26,7 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 | File | Contents |
 | --- | --- |
 | `rollouts.jsonl` | One row per rollout — includes the model `response` (the expensive artifact) |
-| `rollouts_materialized_inputs.jsonl` | One row per rollout — includes per-task verifier inputs (`options`, `expected_answer`, `grading_mode`, etc.) that are not echoed back into the rollout row |
+| `rollouts_materialized_inputs.jsonl` | One row per rollout — includes per-task verifier inputs (for example, `options` and `expected_answer` in the `mcqa` resources server) that are not echoed back into the rollout row |
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 

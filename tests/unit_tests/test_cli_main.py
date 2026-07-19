@@ -58,6 +58,7 @@ CONFIG_COMMANDS = [
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
     (["eval", "aggregate"], "nemo_gym.cli.eval:aggregate_rollouts"),
     (["eval", "run"], "nemo_gym.cli.eval:e2e_rollout_collection"),
+    (["eval", "reverify"], "nemo_gym.cli.eval:reverify_rollouts"),
     (["dataset", "collate"], "nemo_gym.cli.dataset:prepare_data"),
 ]
 
@@ -576,6 +577,55 @@ class TestEvalProfileFlags:
         monkeypatch.setattr(sys, "argv", ["gym", "eval", "profile", "--config", "x.yaml"])
         with pytest.raises(SystemExit):
             main()
+
+
+class TestEvalReverifyFlags:
+    @pytest.mark.parametrize(
+        "flag_argv, expected_override",
+        [
+            (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
+            (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--force"], "+force=true"),
+            (["--overwrite"], "+overwrite=true"),
+        ],
+    )
+    def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify", *flag_argv])
+        assert overrides == [expected_override]
+
+    def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert overrides == []
+
+    def test_dispatches_to_reverify_rollouts(self, monkeypatch: MonkeyPatch) -> None:
+        target, _ = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert target == "nemo_gym.cli.eval:reverify_rollouts"
+
+    def test_all_flags_compose(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "reverify",
+                "--inputs",
+                "inputs.jsonl",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output",
+                "out.jsonl",
+                "--force",
+                "--overwrite",
+            ],
+        )
+        assert set(overrides) == {
+            "+materialized_inputs_jsonl_fpath=inputs.jsonl",
+            "+rollouts_jsonl_fpath=rollouts.jsonl",
+            "+output_jsonl_fpath=out.jsonl",
+            "+force=true",
+            "+overwrite=true",
+        }
 
 
 class TestEnvRunFlags:

@@ -33,5 +33,4 @@ def resolve_input_path(input_path: str | Path, error_msg: Optional[str] = None) 
 
 
 def failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar failures path derived from a rollout output path."""
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")

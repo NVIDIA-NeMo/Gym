@@ -368,7 +368,6 @@ async def _call_aggregate_metrics(
                 if isinstance(v, primitive_types)
             }
         )
-    # to do - check that wandb works
     if get_wandb_run():  # pragma: no cover
         get_wandb_run().log(metrics_to_log)
 
