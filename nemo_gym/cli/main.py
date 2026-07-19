@@ -538,7 +538,9 @@ COMMANDS = {
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
             _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
-            _bool_flag("judge-failed-only", "judge_failed_only", "Only re-verify rollouts with a failed judge call."),
+            _bool_flag(
+                "overwrite", "overwrite", "Delete existing output file before writing, instead of raising an error."
+            ),
         ),
     ),
     "eval profile": Command(

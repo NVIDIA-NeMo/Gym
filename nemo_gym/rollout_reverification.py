@@ -128,12 +128,6 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
             "incorrect); output filenames are prefixed with `unsafe_`."
         ),
     )
-    judge_failed_only: bool = Field(
-        default=False,
-        description=(
-            "Only re-verify rollouts whose judge call previously failed; successful rows are copied through unchanged."
-        ),
-    )
     disable_aggregation: bool = Field(
         default=False,
         description=(
@@ -236,7 +230,7 @@ def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
             output_fpath.unlink()
         else:
             raise ConfigError(
-                f"Output file already exists: '{output_fpath}'. Pass ++overwrite=true to delete it and start fresh."
+                f"Output file already exists: '{output_fpath}'. Pass --overwrite to delete it and start fresh."
             )
 
 
