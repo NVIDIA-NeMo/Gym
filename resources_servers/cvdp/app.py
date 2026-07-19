@@ -69,7 +69,6 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent verifier sandboxes
-    sif_cache_dir: str = ""  # Deprecated compatibility field
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
     container_workspace: str = "/code"
     container_transfer_dir: str = "/sandbox"

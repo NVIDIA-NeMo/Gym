@@ -13,17 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CVDP agent — one class, two flavors selected by ``config.simple_agent``.
-
-- **simple** (``simple_agent: true``): no harness, no sandbox. The model itself is asked to
-  produce the RTL/code (optionally with resources-server tool calls); ``/verify`` grades
-  whatever the model emitted. Fast; used by the non-agentic CVDP dataset.
-- **agentic** (``simple_agent: false``): a coding harness (Claude, Hermes, ...) is booted
-  inside an EDA-sim sandbox so it can edit files on disk and self-test with the in-container
-  EDA tools; the produced HDL files are harvested and graded through the same ``/verify``.
-  The harness is config-selected (``agent_server_module``/``class``/``config_class``), built
-  on the provider-neutral sandbox API so the backend is config, not code.
-"""
+"""CVDP simple and sandboxed-harness agent."""
 
 from __future__ import annotations
 
@@ -36,9 +26,7 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
-from time import time
 from typing import Any, Dict, List, Literal, Optional
-from uuid import uuid4
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
@@ -75,13 +63,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 
-# guest entrypoint injected into the sandbox and run as ``python agent_runner.py``.
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
-
-
-# ----------------------------
-# Agentic-flavor host helpers
-# ----------------------------
 
 
 def agent_key(agent_server_module: str) -> str:
@@ -91,12 +73,7 @@ def agent_key(agent_server_module: str) -> str:
 
 
 def load_runner_source() -> str:
-    """return the guest entrypoint script (``sandbox_entrypoint.py``) verbatim.
-
-    it is a plain module rather than a templated string, so it is diffable and syntax-checked
-    with the rest of the package. it reads the agent module/class from ``NV_AGENT_*`` env vars
-    set by the caller, so no per-agent rendering is needed.
-    """
+    """Return the guest entrypoint source."""
     return _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
 
 
@@ -133,12 +110,7 @@ def deps_build_env(deps_dir: Path) -> dict[str, str]:
 
 
 def harvest(workdir: Path, globs: list[str], *, seeded: dict[str, str] | None = None) -> dict[str, str]:
-    """collect files the agent produced under workdir that match any glob.
-
-    returns {relative_posix_path: text_content}. files identical to a seeded input are skipped
-    so unchanged context files are not reported as produced. unreadable or binary files are
-    skipped. point it at e.g. ["rtl/**/*.sv", "rtl/**/*.v"].
-    """
+    """Collect changed text files under workdir that match any glob."""
     workdir = Path(workdir)
     seeded = seeded or {}
     produced: dict[str, str] = {}
@@ -180,14 +152,8 @@ def _safe_rel(rel: str) -> bool:
     return ".." not in parts
 
 
-# ----------------------------
-# Config + request/response schemas
-# ----------------------------
-
-
 class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
-    """Config for the CVDP agent. ``simple_agent`` picks the flavor; the fields below it are
-    grouped by the flavor that reads them (the other flavor ignores them)."""
+    """Configuration for simple or agentic CVDP execution."""
 
     # flavor selector: simple (model emits code directly) vs agentic (harness in a sandbox).
     simple_agent: bool = False
@@ -213,7 +179,6 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     image: str = "nvidia/cvdp-sim:v1.0.0"
-    sif_cache_dir: str = ""  # Deprecated compatibility field
     sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"apptainer": {}})
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     container_workdir: str = "/code"
@@ -270,10 +235,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if self.config.simple_agent:
             return await self._run_simple(request, body)
         return await self._run_agentic(request, body)
-
-    # ----------------------------
-    # Simple flavor
-    # ----------------------------
 
     async def responses(
         self,
@@ -436,10 +397,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     print(f"[RETRY] exception for task_id={task_id}, retries_left={retries_left}, error={e}")
                     continue
                 raise
-
-    # ----------------------------
-    # Agentic flavor
-    # ----------------------------
 
     def _provision_deps(self) -> Path:
         """Install the configured agent's portable dependency prefix once."""
@@ -630,24 +587,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 with tempfile.TemporaryDirectory(prefix="cvdp_agent_run_") as scratch:
                     scratch_path = Path(scratch)
                     resp_local = scratch_path / "response.json"
-                    try:
-                        await box.download(f"{traj}/response.json", resp_local)
-                    except Exception:
-                        pass
-                    response = (
-                        NeMoGymResponse.model_validate_json(resp_local.read_text())
-                        if resp_local.exists()
-                        else NeMoGymResponse(
-                            id=f"resp_{uuid4().hex}",
-                            created_at=int(time()),
-                            model=body.responses_create_params.model or "model",
-                            object="response",
-                            output=[],
-                            parallel_tool_calls=False,
-                            tool_choice="auto",
-                            tools=[],
-                        )
-                    )
+                    await box.download(f"{traj}/response.json", resp_local)
+                    response = NeMoGymResponse.model_validate_json(resp_local.read_text())
 
                     rtl_files = await self._remote_harvest(
                         box,
