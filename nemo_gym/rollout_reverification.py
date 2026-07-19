@@ -276,7 +276,7 @@ async def _guard_reverify_mode(payloads: List[Dict], force: bool) -> Optional[st
     server_client = _setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
     agent_names = {p[AGENT_REF_KEY_NAME]["name"] for p in payloads}
-    rs_subset = {name: agent_to_rs[name] for name in agent_names if name in agent_to_rs}
+    rs_subset = {name: agent_to_rs[name] for name in agent_names}
     unsupported_rs = await _check_reverify_mode(server_client, rs_subset)
     if not unsupported_rs:
         return None

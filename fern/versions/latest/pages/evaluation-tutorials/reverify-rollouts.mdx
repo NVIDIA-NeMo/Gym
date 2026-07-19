@@ -30,9 +30,9 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 
-## Step 1 — Start a resources-server-only stack
+## Step 1 — Run reverification
 
-`gym eval reverify` needs a running resources server to call `/verify` against, but it does **not** need a model server or an agent. Write a stripped config that contains only the resources server block:
+`gym eval reverify` starts the resources server automatically from the config you provide. It does **not** need a model server or an agent — pass a resources-server-only config to avoid starting inference infrastructure you don't need.
 
 ```yaml
 # my_resources_server.yaml
@@ -41,38 +41,25 @@ mcqa:
     mcqa:
       entrypoint: app.py
       domain: knowledge
-      grading_mode: lenient_boxed   # the new hyperparameter value you want to test
-      host: 127.0.0.1
-      port: 9500
+      grading_mode: lenient_boxed   # the updated hyperparameter
 ```
 
-Start it:
-
-```bash
-gym env start --config my_resources_server.yaml
-```
-
-<Tip>
-A resources-server-only config omits the agent block entirely, which means no model server reference and no `INFERENCE_KEY` is needed. This is much cheaper to start than a full evaluation stack.
-</Tip>
-
-## Step 2 — Run reverification
+Then run:
 
 ```bash
 gym eval reverify \
   --config my_resources_server.yaml \
-  "++head_server.host=127.0.0.1" \
-  "++head_server.port=9500" \
   --inputs results/rollouts_materialized_inputs.jsonl \
   --rollouts results/rollouts.jsonl \
   --output results/rollouts_lenient_reverified.jsonl
 ```
 
 The command:
-1. Loads both input files and joins rows on `(_ng_task_index, _ng_rollout_index)`.
-2. Checks that the resources server supports reverification (see [ReverifyMode](#reverifymode) below).
-3. POSTs each joined row to `/verify` — no model calls.
-4. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
+1. Starts the resources server from the provided config.
+2. Loads both input files and joins rows on `(_ng_task_index, _ng_rollout_index)`.
+3. Checks that the resources server supports reverification (see [ReverifyMode](#reverifymode) below).
+4. POSTs each joined row to `/verify` — no model calls.
+5. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
 
 ## Output files
 

@@ -618,7 +618,7 @@ gym eval profile \
 
 ### `gym eval reverify`
 
-Recompute rewards from existing rollouts by replaying them through a running resources server's `/verify` endpoint — without re-running model inference. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.
+Recompute rewards from existing rollouts by replaying them through a resources server's `/verify` endpoint — without re-running model inference. Starts the resources server automatically from the provided config. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.
 
 Before starting, the command checks each resources server's `GET /reverify_mode` response. Servers that report `unsupported` (session-stateful verifiers whose state is no longer present) cause the command to abort unless `--force` is passed.
 
