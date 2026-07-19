@@ -1,0 +1,64 @@
+# Terminal Bench with OpenClaw driving a Nemotron model (choose with run_eval's -m flag, e.g.
+# -m nvidia/nvidia/nemotron-3-ultra or -3-super-v3).
+#
+# Agent parameters mirror harbor's OpenClaw adapter (harbor/agents/installed/openclaw.py):
+# thinking high, workspace ".", gateway local, tools.deny ["message"], setup 1200s, and no
+# sampling params (harbor sets none, so OpenClaw's own defaults apply). Infra-specific bits are
+# ours and not from harbor: the nvinf provider pointed at our endpoint, the request timeout (the
+# slurm overlay raises timeoutSeconds to 390), and the apptainer --no-mount home,cwd guard.
+#
+# The reasoning/thinkingLevelMap/compat block is required because we route through a custom nvinf
+# provider; harbor gets the same reasoning behavior implicitly from its built-in nvidia provider.
+
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by OpenClaw natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.openclaw_agent.app
+      agent_server_class: OpenClawAgent
+      agent_config_class: OpenClawAgentConfig
+      agent_kwargs:
+        # model comes from run_eval's -m flag (policy_model_name); nvinf-prefixed here, bare id/name
+        # in the models array below. Pass e.g. -m nvidia/nvidia/nemotron-3-ultra or -3-super-v3.
+        model: nvinf/${policy_model_name}
+        thinking: "high"
+        setup_timeout: 1200
+        timeout: 3600
+        # pin OpenClaw: unset installs @latest, which drifts across runs and breaks reproducibility
+        openclaw_version: "2026.6.11"
+        node_bin_dir: "/agent_deps_mount/bin"
+        openclaw_config:
+          agents:
+            defaults:
+              workspace: "."
+          gateway:
+            mode: local
+          tools:
+            deny: ["message"]
+          models:
+            providers:
+              nvinf:
+                api: openai-completions
+                baseUrl: ${policy_base_url}
+                apiKey: ${policy_api_key}
+                timeoutSeconds: 120
+                models:
+                - id: ${policy_model_name}
+                  name: ${policy_model_name}
+                  api: openai-completions
+                  reasoning: true
+                  thinkingLevelMap: {"off": null, low: low, medium: medium, high: high}
+                  compat: {supportsReasoningEffort: true, supportedReasoningEfforts: [low, medium, high]}
+
+      # Generic default (runtime pull); the slurm overlay overrides this to the pre-built SIF path
+      # and adds the apptainer sandbox provider, mirroring anyterminal_hermes.
+      container_formatter: "docker://{docker_image}"
+
+      concurrency: 2
+
+      datasets:
+        - {name: example, type: example, jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl}
