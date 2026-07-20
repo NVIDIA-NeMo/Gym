@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import os
 import sys
 from os import environ
@@ -48,16 +49,26 @@ def _extra_roots() -> List[Path]:
     return [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
 
 
-def component_search_roots() -> List[Path]:
+def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
     """Ordered, de-duplicated roots to look for a Gym component/artifact under: the ``NEMO_GYM_EXTRA_ROOTS``
-    roots, then cwd, then ``WORKING_DIR`` and the install root (``PARENT_DIR``, the built-ins).
+    roots first, then cwd and the install root (``PARENT_DIR``, the built-ins) last.
 
     Earlier roots win on a name collision, so user components shadow built-ins. De-duplicated by resolved
-    path, since cwd/``WORKING_DIR``/install root coincide in an editable checkout. The single source of truth
-    for where Gym looks for components — used by both path resolution (:func:`_resolve_under_cwd_or_install`) and the
-    ``gym list``/``gym search`` discovery functions.
+    path, since cwd/install root coincide in an editable checkout. The single source of truth for where Gym
+    looks for components — used by path resolution (:func:`_resolve_under_cwd_or_install`), module imports
+    (:func:`_augment_sys_path`) and the ``gym list``/``gym search`` discovery functions.
+
+    ``sys_path`` weaves existing ``sys.path`` entries in for import precedence: they slot in after the extra
+    roots but before cwd/built-ins. Any entry that is itself cwd or the install root is dropped so those two
+    always stay last — matching the file-lookup order even in a wheel install, where the install root is
+    already on ``sys.path`` as ``site-packages``.
     """
-    candidates = [*_extra_roots(), Path.cwd(), WORKING_DIR, PARENT_DIR]
+    # cwd and the built-ins are always searched last; drop them from the woven sys.path entries so they
+    # can't get pinned mid-path (e.g. site-packages == PARENT_DIR in a wheel install).
+    trailing = [Path.cwd(), PARENT_DIR]
+    trailing_resolved = {root.resolve() for root in trailing}
+    middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
+    candidates = [*_extra_roots(), *middle, *trailing]
     roots: List[Path] = []
     seen: set[Path] = set()
     for root in candidates:
@@ -100,16 +111,14 @@ def _resolve_under_cwd_or_install(
 def _augment_sys_path() -> None:
     """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
 
-    Extra roots go to the front and ``PARENT_DIR`` (the built-ins) to the end, so import precedence matches
-    file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
+    Extra roots go to the front and cwd/``PARENT_DIR`` (the built-ins) to the end, so import precedence
+    matches file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
     Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
     roots into the env (see nemo_gym.cli.main).
     """
-    extra = [str(root) for root in _extra_roots()]
-    parent = str(PARENT_DIR)
-    managed = {*extra, parent}
-    # Extra roots first, the rest of sys.path (order preserved) in the middle, PARENT_DIR last.
-    sys.path[:] = [*extra, *(entry for entry in sys.path if entry not in managed), parent]
+    new_path = [str(root) for root in component_search_roots(sys_path=(Path(path) for path in sys.path))]
+    logging.debug(f"Replacing sys.path {sys.path} with {new_path}")
+    sys.path[:] = new_path
 
 
 _augment_sys_path()

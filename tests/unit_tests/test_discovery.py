@@ -65,31 +65,66 @@ class TestComponentSearchRoots:
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "")
         assert component_search_roots()[0].resolve() == Path.cwd().resolve()
 
+    def test_sys_path_woven_after_extra_roots_and_before_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        # The import-precedence use (sys_path given): existing entries slot in AFTER the explicit extra roots
+        # but BEFORE cwd/built-ins, so extra roots shadow site-packages while cwd does not.
+        a = tmp_path / "a"
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(a))
+
+        roots = [str(r) for r in component_search_roots(sys_path=[Path("/some/site-packages")])]
+
+        assert roots == [str(a), "/some/site-packages", str(Path.cwd()), str(PARENT_DIR)]
+
+    def test_sys_path_builtins_entry_moved_last_even_if_already_present(self, tmp_path: Path, monkeypatch) -> None:
+        # Wheel install: PARENT_DIR is site-packages, already on sys.path. It must be dropped from the woven
+        # entries and appended last, so cwd/built-ins stay last and import order matches file lookup.
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+
+        resolved = [r.resolve() for r in component_search_roots(sys_path=[Path("/usr/lib/python3.12"), PARENT_DIR])]
+
+        assert resolved.count(PARENT_DIR.resolve()) == 1  # not duplicated
+        assert resolved[-2:] == [Path.cwd().resolve(), PARENT_DIR.resolve()]  # cwd then built-ins, always last
+
 
 class TestAugmentSysPath:
-    def test_extra_roots_shadow_builtins_on_import(self, tmp_path: Path, monkeypatch) -> None:
-        # Import precedence must match component_search_roots file precedence: extra roots at the front,
-        # PARENT_DIR (the built-ins) at the end, so a plugin module wins over a same-named Gym module.
+    def test_rebuilds_sys_path_from_component_search_roots(self, tmp_path: Path, monkeypatch) -> None:
+        # Import order follows component_search_roots: extra roots (explicit --search-dir) first so they
+        # shadow everything, then the existing sys.path entries, then cwd and PARENT_DIR (built-ins) last so a
+        # plugin module wins over a same-named Gym module.
         a = tmp_path / "a"
         b = tmp_path / "b"
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, os.pathsep.join([str(a), str(b)]))
-        # Start with PARENT_DIR ahead of where the extra roots would land, to prove it gets moved to the end.
+        # Start with PARENT_DIR ahead of where it should land, to prove it gets moved to the end.
         monkeypatch.setattr(sys, "path", [str(PARENT_DIR), "/some/site-packages"])
 
         _augment_sys_path()
 
-        assert sys.path[0] == str(a) and sys.path[1] == str(b)  # extra roots first, in listed order
-        assert sys.path[-1] == str(PARENT_DIR)  # built-ins last, even though they started first
-        assert sys.path.count(str(PARENT_DIR)) == 1  # not duplicated
+        cwd_on_path = str(Path.cwd())  # component_search_roots uses Path.cwd(), which may canonicalize symlinks
+        assert sys.path == [str(a), str(b), "/some/site-packages", cwd_on_path, str(PARENT_DIR)]
 
-    def test_idempotent_and_no_extra_roots_appends_parent_dir(self, monkeypatch) -> None:
+    def test_idempotent(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         monkeypatch.setattr(sys, "path", ["/some/site-packages"])
+        cwd_on_path = str(Path.cwd())
 
         _augment_sys_path()
-        _augment_sys_path()  # re-run (e.g. after --search-dir) must not pile up duplicates
+        first = list(sys.path)
+        _augment_sys_path()  # re-run (e.g. after --search-dir folds roots into the env) must not pile up entries
 
-        assert sys.path == ["/some/site-packages", str(PARENT_DIR)]
+        # existing entries preserved, then cwd, then built-ins last.
+        assert sys.path == first == ["/some/site-packages", cwd_on_path, str(PARENT_DIR)]
 
 
 class TestMergeByName:
