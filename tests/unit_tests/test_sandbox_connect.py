@@ -61,6 +61,8 @@ class FakeConnectableProvider:
             if data is None:
                 return SandboxExecResult(stdout=None, stderr="no such file", return_code=1)
             return SandboxExecResult(stdout=data.decode(), stderr=None, return_code=0)
+        if command == "pwd":
+            return SandboxExecResult(stdout=cwd or "", stderr=None, return_code=0)
         return SandboxExecResult(stdout=f"ran: {command}", stderr=None, return_code=0)
 
     async def upload_file(self, handle, source_path, target_path) -> None:
@@ -135,12 +137,17 @@ def test_serialize_then_connect_round_trip(tmp_path: Path) -> None:
 
         descriptor = await sandbox.serialize()
         assert "sandbox_id" in descriptor
+        # The facade carries workdir even though the provider descriptor omits it.
+        assert descriptor["workdir"] == "/w"
 
         # A separate provider instance rebuilds a working handle from the descriptor.
         reattached = await AsyncSandbox.connect(descriptor, provider=FakeConnectableProvider())
         result = await reattached.exec("cat /w/f.txt")
         assert result.return_code == 0
         assert result.stdout == "hello-connect"
+
+        # The reattached sandbox defaults exec to the original working directory.
+        assert (await reattached.exec("pwd")).stdout == "/w"
 
     asyncio.run(_run())
 

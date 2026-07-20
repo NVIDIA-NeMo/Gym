@@ -143,7 +143,13 @@ class AsyncSandbox:
         if not isinstance(provider, ConnectableProvider):
             name = getattr(provider, "name", type(provider).__name__)
             raise RuntimeError(f"provider {name!r} does not support serialize()/connect()")
-        return await provider.serialize_handle(self._require_handle(), scope=scope)
+        descriptor = await provider.serialize_handle(self._require_handle(), scope=scope)
+        # Carry the working directory so a reattached sandbox lands in the same
+        # place, even for providers whose descriptor does not include it (the
+        # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
+        if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
+            descriptor = {**descriptor, "workdir": self._spec.workdir}
+        return descriptor
 
     @classmethod
     async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
