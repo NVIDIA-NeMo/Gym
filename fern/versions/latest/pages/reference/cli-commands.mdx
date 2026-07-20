@@ -362,6 +362,7 @@ Each input row must **not** already have a populated `responses_create_params.in
 | `--input`, `-i` | Raw input JSONL file (rows without `responses_create_params.input`). |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--output`, `-o` | Output JSONL file. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 gym dataset render \
@@ -402,6 +403,7 @@ Resolve the configs, flags, and overrides into a final merged config and print i
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 # Merge a resources-server config with a model config, apply an override, and print the result
@@ -421,6 +423,7 @@ Validate a config without starting Ray or any server subprocess — a fast pre-f
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
@@ -438,6 +441,7 @@ Each server has its own isolated virtual environment. List the packages installe
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--outdated` | List only outdated packages. |
 | `--json` | Output the package list as JSON. |
 
@@ -457,6 +461,7 @@ Test resource server(s) by running their pytest suite. If no resources server is
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 # Test a single server
