@@ -218,12 +218,11 @@ def bind_route(route: APIRoute) -> tuple[Optional[DirectBinding], list[str], Opt
                 path_param = name
             continue
         if param.default is not inspect.Parameter.empty:
-            # FastAPI treats these as query params; MCP calls carry no query string, so the plain
-            # HTTP route would hand the handler the default too — matching direct behavior. The
-            # exception is DI markers (Depends/Security), which the plain HTTP route would resolve.
             default_type = f"{type(param.default).__module__}.{type(param.default).__name__}"
             if default_type.startswith("fastapi."):
                 reasons.append(f"DI marker default on {name!r}: {default_type}")
+            else:
+                reasons.append(f"defaulted query param {name!r} is not supported over MCP: {annotation!r}")
             continue
         reasons.append(f"unsupported required param {name!r}: {annotation!r}")
 

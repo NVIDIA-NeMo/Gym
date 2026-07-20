@@ -11,16 +11,17 @@ This tutorial shows how to expose environment tools over the **Model Context Pro
 
 ---
 
-## Two ways to combine MCP with a Resources Server
+## Three ways to combine MCP with a Resources Server
 
-There are two distinct integration shapes, and they need different amounts of plumbing:
+There are three distinct integration shapes, and they need different amounts of plumbing:
 
 | Flow | When | What you build |
 |---|---|---|
 | **Gym-owned MCP server** | You want the tools *and* their verification to live in Gym, with per-rollout session isolation | Subclass `MCPResourcesServer` — Gym mounts a Streamable-HTTP MCP endpoint at `/mcp` on the same app as `/seed_session` and `/verify` |
+| **Auto-exposed HTTP tool routes** | Your Resources Server already serves its tools as plain `POST` routes and you want them callable over MCP too | Set `expose_tools_over_mcp: true` in the server's YAML config — Gym turns the existing routes into MCP tools and mounts `/mcp`; typically no code change |
 | **Existing / external MCP server** | The MCP server already runs outside Gym (a third-party or shared service) | Point the agent at it directly with a static `mcp_config`; write a plain `SimpleResourcesServer.verify()` that scores the resulting trajectory |
 
-The rest of this page builds the **Gym-owned** flow (the one that needs new infrastructure) and then explains the **external** flow at the end.
+The rest of this page builds the **Gym-owned** flow (the one that needs new infrastructure), then explains the **external** flow, and ends with **auto-exposure** for servers whose tools already exist as HTTP routes.
 
 <Info>
 **Why a Gym-owned MCP server at all?** Mounting the MCP endpoint inside the Resources Server lets a tool call be bound to the *same per-rollout session* as `/seed_session` and `/verify`. That is what makes "was this tool actually used in this episode?" a verifiable, isolated question. An external MCP server can't offer that — Gym can't observe its calls — so external-server verification has to work off the agent's trajectory instead.
@@ -238,6 +239,124 @@ Things to know about this flow:
 - **No cookie/session entanglement.** Gym's session cookie flows only between the agent server and the Resources Server (`/seed_session` ↔ `/verify`). The agent-to-external-MCP connection is a separate channel with its own auth (whatever `headers` you put in the static config). They don't interfere.
 - **Verify off the trajectory.** Gym can't observe the external server's calls, so `verify()` must score the `function_call` / `function_call_output` items in the agent's Responses-API output — not server-side session state.
 - **Static + per-rollout compose.** When both are present, the agent merges your static `mcp_config` with the per-rollout Gym-owned entry, so a single rollout can use external tools *and* a Gym-owned MCP server at once. If a static server happens to share the **same name** as the Gym resources server, the per-rollout Gym entry takes precedence and overwrites it.
+
+---
+
+## Auto-exposing existing tool routes over MCP
+
+Many Resources Servers already serve their tools as plain HTTP routes — the agent POSTs to `/get_weather`, the handler reads `request.session[SESSION_ID_KEY]`, done. To make those same tools callable by an MCP-native agent, set one flag in the server's YAML config:
+
+```yaml
+my_server:
+  resources_servers:
+    my_server:
+      entrypoint: app.py
+      expose_tools_over_mcp: true   # a config field on BaseResourcesServerConfig, default false
+```
+
+For a server whose tools are typed `POST` routes, **no code change is needed**. At startup (`run_webserver`), Gym:
+
+- turns each plain `POST` route into an MCP tool **named after its path** (`POST /get_weather` → tool `get_weather`), with the input schema derived from the route's Pydantic body model and the description from the handler's docstring. `/seed_session`, `/verify`, `/aggregate_metrics`, and `/mcp` are never tools.
+- mounts a Streamable-HTTP `/mcp` endpoint on the same app.
+- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — the same shape `MCPResourcesServer` returns, so `claude_code_agent` connects with zero changes.
+
+An MCP `tools/call` invokes the route's own handler directly, with the rollout's session materialized on the `Request` — handlers keep their `request.session` reads exactly as written. Tool errors (`HTTPException`, validation failures, crashes) surface to the MCP client as tool errors with the same status and text the plain HTTP route would have returned.
+
+### Unsupported shapes refuse at startup
+
+Where direct dispatch cannot be proven equivalent to a real HTTP request, exposure **fails loudly at startup**, naming the route and the reason — a wrong dispatch would corrupt rollouts silently. The main refusals:
+
+- a handler with **multiple body models**, or a **union/optional body** (`body: MyModel | None`)
+- a **required non-body parameter** (e.g. a required query param — MCP calls carry no query string)
+- a **FastAPI dependency-injection default** (`Depends(...)` / `Security(...)`)
+- **non-Gym middleware** installed on the app (direct dispatch would silently skip it)
+- **multiple parameterized catch-all routes**, or a tool name outside `[A-Za-z0-9_-]+`
+- a server that **already serves `/mcp`** (an `MCPResourcesServer` keeps its existing mechanism instead)
+
+A parameter with a plain default is fine — the handler receives the default, exactly as the HTTP route would with no query string.
+
+### Catch-all dispatcher servers
+
+Some servers serve *all* their tools through one parameterized route — `workplace_assistant` routes every call through `POST /{path}` and looks the tool up by name, so there are no typed routes to harvest and the per-tool schemas live in data. For these, override one method, `mcp_tools(self, harvested, catchall)`: `harvested` is the auto-harvested typed-route tools, and `catchall.tool(name, input_schema, description)` mints a tool that dispatches through the catch-all route with the path set to `name`.
+
+The shipped `resources_servers/workplace_assistant` stays byte-identical — the override lives in a thin user-side subclass in its own entrypoint file:
+
+```python
+# resources_servers/workplace_assistant/app_mcp.py
+from resources_servers.workplace_assistant.app import WorkbenchResourcesServer
+from resources_servers.workplace_assistant.utils import get_tools
+
+TOOLKITS = ["email", "calendar", "analytics", "project_management", "customer_relationship_manager"]
+
+
+class MCPWorkbenchResourcesServer(WorkbenchResourcesServer):
+    def mcp_tools(self, harvested, catchall):
+        # One MCP tool per schema in data; each dispatches through POST /{path} with path = the tool name.
+        specs = get_tools(TOOLKITS)["schemas"]
+        return harvested + [catchall.tool(s["name"], s["parameters"], s.get("description")) for s in specs]
+
+
+if __name__ == "__main__":
+    MCPWorkbenchResourcesServer.run_webserver()
+```
+
+(For `workplace_assistant`, `harvested` is empty — its only non-reserved POST route is the catch-all — but keeping `harvested +` makes the override correct for servers that mix typed routes with a dispatcher.)
+
+The same override handles the other tailoring cases: **exclude a route** by filtering it out of `harvested` (an excluded route is never required to be dispatchable), and **disable exposure entirely** by returning `None` or `[]`.
+
+### Per-rollout tool restriction
+
+To narrow one rollout's token to the tools its task actually allows, override `mcp_allowed_tools_for_session(self, seed_body)` — `seed_body` is the JSON body POSTed to `/seed_session`. Return the allowed tool names, or `None` (the default) for unrestricted:
+
+```python
+def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
+    return (seed_body.get("verifier_metadata") or {}).get("allowed_tools")
+```
+
+The returned names are signed into that rollout's session token; `tools/list` then advertises only those tools and `tools/call` rejects any other name — per rollout, with no server-wide state.
+
+### Running workplace_assistant with Claude Code
+
+A complete, copy-pasteable run. The compose config wires the subclass entrypoint above to the [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent):
+
+```yaml
+# workplace_claude.yaml
+workplace_assistant:
+  resources_servers:
+    workplace_assistant:
+      entrypoint: app_mcp.py
+      domain: agent
+      expose_tools_over_mcp: true
+
+workplace_claude:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server: { type: resources_servers, name: workplace_assistant }
+      model: claude-sonnet-4-6
+      anthropic_api_key: ${anthropic_api_key}
+```
+
+Put your key in a repo-root `env.yaml`:
+
+```yaml
+anthropic_api_key: sk-ant-...
+```
+
+The agent talks to the Anthropic API by default; any Anthropic-format endpoint works by also setting the optional `anthropic_base_url` field. Start the servers, then collect rollouts:
+
+```bash
+gym env start --config workplace_claude.yaml
+```
+
+```bash
+gym eval run --no-serve \
+    --agent workplace_claude \
+    --input resources_servers/workplace_assistant/data/example.jsonl \
+    --output results/workplace_claude_rollouts.jsonl
+```
+
+A correct rollout shows Claude Code calling `mcp__workplace_assistant__*` tools (e.g. `mcp__workplace_assistant__email_reply_email`) and a `reward` of `1.0`. `/verify` scores MCP and HTTP trajectories identically: when the flag is on, the verify endpoint is wrapped at startup to normalize MCP-namespaced tool-call names (`mcp__workplace_assistant__email_reply_email` → `email_reply_email`) for scoring only, while the persisted rollout keeps the names the model actually emitted.
 
 ---
 

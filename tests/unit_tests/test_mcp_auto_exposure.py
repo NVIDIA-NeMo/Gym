@@ -129,10 +129,6 @@ class Shapes(SimpleResourcesServer):
         def sync_tool(body: EchoBody):
             return {"upper": body.value.upper()}
 
-        @app.post("/with_default")
-        async def with_default(body: EchoBody, limit: int = 3):
-            return {"value": body.value, "limit": limit}
-
         @app.post("/filtered", response_model=PublicView)
         async def filtered(body: EchoBody):
             return {"shown": body.value, "secret": "leak"}
@@ -388,11 +384,21 @@ def test_sync_def_handler_dispatches_correctly():
         assert payload == {"upper": "AB"}
 
 
-def test_defaulted_query_param_gets_its_default():
-    # MCP calls carry no query string, so the handler gets the default — same as the plain HTTP route.
-    with _mcp(Shapes, "shapes") as (client, token):
-        payload = _payload(_call(client, "with_default", {"value": "x"}, token=token))
-        assert payload == {"value": "x", "limit": 3}
+def test_defaulted_query_param_is_refused_at_install():
+    class Defaulted(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/with_default")
+            async def with_default(body: EchoBody, limit: int = 3):
+                return {"value": body.value, "limit": limit}
+
+            return app
+
+    server = _server(Defaulted)
+    app = server.setup_webserver()
+    with pytest.raises(ValueError, match="with_default"):
+        install_auto_exposure(server, app)
 
 
 def test_response_model_filters_extra_fields():
@@ -724,13 +730,13 @@ def test_bind_route_refusal_reasons():
         assert any(expected in reason for reason in reasons), (expected, reasons)
 
 
-def test_bind_route_accepts_defaulted_query_param():
+def test_bind_route_refuses_defaulted_query_param():
     async def handler(body: EchoBody, limit: int = 5):
         pass
 
     binding, reasons, _ = bind_route(_stub_route(handler))
-    assert binding is not None, reasons
-    assert binding.body_model is EchoBody
+    assert binding is None
+    assert any("defaulted query param" in r for r in reasons), reasons
 
 
 def test_silently_wrong_shapes_are_classified_not_degraded():
