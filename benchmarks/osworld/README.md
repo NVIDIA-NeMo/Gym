@@ -208,7 +208,7 @@ python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
 
 ### Split agent and OSWorld environment hosts
 
-The same Gym Docker provider can use a Docker daemon on another Colossus host
+The same Gym Docker provider can use a Docker daemon on another Linux host
 through Docker's standard SSH transport. The agent/control host still runs
 `prepare.py`, `start_control.sh`, and `run_eval.sh`; only the Sandbox container
 and QEMU/KVM guest run on the environment host.
