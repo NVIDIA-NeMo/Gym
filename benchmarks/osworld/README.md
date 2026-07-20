@@ -106,13 +106,6 @@ dynamic loopback ports, and mounts the qcow2 read-only. Preparation fails before
 starting Gym if the VM file is missing; the adapter checks `/dev/kvm` again at
 Sandbox startup.
 
-### PointerAgent
-
-Use `benchmarks/osworld/configs/osworld_agent_pointer.yaml` to run OSWorld's PointerAgent. The
-configured policy endpoint must support its Anthropic-compatible requests.
-If `PARALLEL_API_KEY` is set, PointerAgent can also use its optional web tools;
-without a key those tools are disabled automatically.
-
 ### Nemotron 3 Nano Omni with vLLM
 
 Start the checkpoint through the deployment layer on a model host with enough
@@ -136,8 +129,7 @@ The default overlay sends the current screenshot plus at most two historical
 screenshots and compacts older interactions into text. For an endpoint limited
 to one image per request, use the same class and set
 `agent_kwargs.max_image_history_length: 1`; no alternate agent class is
-required. Qwen3-Omni uses a different tool-call protocol and therefore has its
-own `benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml` overlay.
+required.
 
 Nano Omni history contains Thought and Action only; previously executed Code is
 not repeated. This prompt contract is implemented directly by the standard

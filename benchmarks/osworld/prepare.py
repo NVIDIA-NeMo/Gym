@@ -11,9 +11,8 @@ can be invoked without Hydra arguments::
     gym eval run --no-serve
 
 Referenced task inputs and evaluator files are prefetched through the official
-Hugging Face cache, then materialized in OSWorld's per-task cache layout. Full
-dataset conversion and advanced host/model helpers remain available under
-``benchmarks/osworld/tools``.
+Hugging Face cache, then materialized in OSWorld's per-task cache layout. The
+VM preparation and supervisor wrappers live under ``benchmarks/osworld/tools``.
 """
 
 from __future__ import annotations

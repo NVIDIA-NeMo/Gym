@@ -259,3 +259,11 @@ env.yaml
 /benchmarks/osworld/tools/check_task_input_parity.py
 /benchmarks/osworld/tools/convert_osworld_tasks.py
 /benchmarks/osworld/tests/test_task_input_parity.py
+
+# Local-only OSWorld profile experiments. Public preparation supports M3,
+# Nano Omni, Gym Docker Sandbox, and the pinned native comparison.
+/benchmarks/osworld/configs/decoupled_omni_mini.yaml
+/benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml
+/benchmarks/osworld/configs/osworld_agent_pointer.yaml
+/benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml
+/benchmarks/osworld/configs/osworld_remote_docker.yaml

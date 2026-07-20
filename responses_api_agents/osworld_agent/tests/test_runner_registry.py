@@ -105,28 +105,15 @@ def test_m3_config_overrides_the_osworld_server_config() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("config_name", "runner_name", "max_steps", "max_tokens", "task_timeout"),
-    [
-        ("osworld_agent_omni_mini.yaml", "nemotron_v3_nano_omni_agent", 100, 4096, 7200),
-        ("osworld_agent_qwen3_omni.yaml", "qwen3_omni_agent", 100, 32768, 7200),
-    ],
-)
-def test_model_runner_overlays(
-    config_name: str,
-    runner_name: str,
-    max_steps: int,
-    max_tokens: int,
-    task_timeout: int,
-) -> None:
-    config_path = BENCHMARK_CONFIG_DIR / config_name
+def test_nano_omni_runner_overlay() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_omni_mini.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
-    assert server_config["runner_name"] == runner_name
-    assert server_config["max_steps"] == max_steps
-    assert server_config["max_tokens"] == max_tokens
-    assert server_config["task_timeout"] == task_timeout
+    assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
+    assert server_config["max_steps"] == 100
+    assert server_config["max_tokens"] == 4096
+    assert server_config["task_timeout"] == 7200
 
 
 def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
@@ -139,18 +126,6 @@ def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
     assert server_config["agent_kwargs"]["thinking"] is True
     assert server_config["agent_kwargs"]["max_image_history_length"] == 3
     assert server_config["agent_kwargs"]["parse_retries"] == 5
-
-
-def test_pointer_overlay_targets_the_osworld_server() -> None:
-    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_pointer.yaml"
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-
-    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
-    assert server_config == {
-        "runner_name": "pointer_agent",
-        "max_steps": 100,
-        "sleep_after_execution": 0.0,
-    }
 
 
 @pytest.mark.parametrize(

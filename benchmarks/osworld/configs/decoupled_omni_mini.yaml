@@ -1,6 +1,0 @@
-# Composition used by prepare.py for the three-machine HTTP deployment.
-config_paths:
-  - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
-  - benchmarks/osworld/configs/osworld_agent_omni_mini.yaml
-  - benchmarks/osworld/configs/vllm_model_omni_mini.yaml
-  - benchmarks/osworld/configs/osworld_remote_docker.yaml
