@@ -587,8 +587,10 @@ class TestEvalReverifyFlags:
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--force"], "+force=true"),
             (["--overwrite"], "+overwrite=true"),
+            (["--disable-aggregation"], "+disable_aggregation=true"),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
@@ -615,16 +617,21 @@ class TestEvalReverifyFlags:
                 "rollouts.jsonl",
                 "--output",
                 "out.jsonl",
+                "--concurrency",
+                "10",
                 "--force",
                 "--overwrite",
+                "--disable-aggregation",
             ],
         )
         assert set(overrides) == {
             "+materialized_inputs_jsonl_fpath=inputs.jsonl",
             "+rollouts_jsonl_fpath=rollouts.jsonl",
             "+output_jsonl_fpath=out.jsonl",
+            "+num_samples_in_parallel=10",
             "+force=true",
             "+overwrite=true",
+            "+disable_aggregation=true",
         }
 
 

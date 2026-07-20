@@ -1088,6 +1088,16 @@ class TestRolloutReverificationRunFromConfig:
         assert agent_names_in_agg == {"agent_a", "agent_b"}
         assert len(returned) == 4
 
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    async def test_non_positive_num_samples_in_parallel_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_value: int
+    ) -> None:
+        """A non-positive concurrency raises ConfigError instead of building an unacquirable Semaphore(0)."""
+        self._patch_common(monkeypatch, pairs=[(self._make_row("rs_a", task=0), {"reward": 1.0})])
+        config = self._make_config(tmp_path, num_samples_in_parallel=bad_value)
+        with pytest.raises(ConfigError, match="num_samples_in_parallel must be a positive integer"):
+            await RolloutReverificationHelper().run_from_config(config)
+
 
 class TestCheckReverifyMode:
     """Tests for _check_reverify_mode — queries GET /reverify_mode per unique RS."""

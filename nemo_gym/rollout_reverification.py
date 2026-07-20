@@ -377,7 +377,7 @@ async def _call_aggregate_metrics(
 
 
 class RolloutReverificationHelper(BaseModel):
-    async def run_from_config(self, config: RolloutReverificationConfig) -> Tuple[List[Dict]]:
+    async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
 
@@ -394,6 +394,11 @@ class RolloutReverificationHelper(BaseModel):
             _guard_output_file(fpath, config.overwrite)
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
+            if config.num_samples_in_parallel <= 0:
+                raise ConfigError(
+                    f"num_samples_in_parallel must be a positive integer, got {config.num_samples_in_parallel}. "
+                    "Omit it (or set it to null) to run unbounded."
+                )
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 

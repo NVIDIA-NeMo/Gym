@@ -537,9 +537,15 @@ COMMANDS = {
             _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
             _bool_flag(
                 "overwrite", "overwrite", "Delete existing output file before writing, instead of raising an error."
+            ),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip the post-reverification aggregate-metrics computation and file write.",
             ),
         ),
     ),
