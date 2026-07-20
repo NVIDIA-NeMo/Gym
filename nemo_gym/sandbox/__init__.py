@@ -17,6 +17,7 @@
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
+    ConnectableProvider,
     ExecResult,
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -31,12 +32,17 @@ from nemo_gym.sandbox.providers import (
     list_providers,
     register_provider,
 )
+from nemo_gym.sandbox.ref import SCOPE_OPERATE, SCOPE_OWNER, SandboxRef
 from nemo_gym.sandbox.utils import rewrite_image
 
 
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "ConnectableProvider",
+    "SandboxRef",
+    "SCOPE_OWNER",
+    "SCOPE_OPERATE",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

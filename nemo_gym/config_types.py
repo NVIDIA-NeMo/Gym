@@ -126,7 +126,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class SandboxServerRef(BaseModel):
+    type: Literal["sandbox_servers"]
+    name: str
+
+
+ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef, SandboxServerRef]
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -595,6 +600,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["sandbox_servers"],
         ]
     ]
 
@@ -623,10 +629,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class SandboxServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["sandbox_servers"]] = "sandbox_servers"
+
+    model_config = ConfigDict(extra="allow")
+
+    sandbox_servers: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    SandboxServerTypeConfig,
 ]
 
 
@@ -709,7 +724,7 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "sandbox_servers"]
     has_server_type = any(key in server_type_config_dict for key in server_type_keys)
 
     if not has_server_type:
