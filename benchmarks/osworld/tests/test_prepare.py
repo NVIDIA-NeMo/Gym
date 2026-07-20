@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from benchmarks.osworld.prepare import (
     DEFAULT_INPUT,
     GYM_SANDBOX_CONFIG,
     POINTER_AGENT_CONFIG,
+    main,
     prepare,
     select_config_paths,
     write_env,
@@ -22,6 +24,36 @@ from benchmarks.osworld.prepare import (
 
 def test_prepare_validates_committed_example() -> None:
     assert prepare() == DEFAULT_INPUT.resolve()
+
+
+@pytest.mark.parametrize(
+    "shard_args",
+    [[], ["--num-shards", "1", "--shard-index", "0"]],
+    ids=["defaults", "explicit-single-shard"],
+)
+def test_main_single_shard_keeps_the_original_input(
+    monkeypatch, tmp_path: Path, shard_args: list[str]
+) -> None:
+    output = tmp_path / "results" / "rollouts.jsonl"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare.py",
+            "--input",
+            str(DEFAULT_INPUT),
+            "--output",
+            str(output),
+            "--skip-assets",
+            "--no-env",
+            *shard_args,
+        ],
+    )
+
+    main()
+
+    assert not list(tmp_path.rglob("input-shard-*.jsonl"))
+    assert not list(tmp_path.rglob("*.manifest.json"))
 
 
 def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> None:

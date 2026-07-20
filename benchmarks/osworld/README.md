@@ -192,6 +192,11 @@ writes a manifest containing the source SHA-256, total/shard task counts, task
 IDs, and their digest. The generated shard becomes both the rollout input and
 the asset-prefetch input; model and environment hosts never split tasks.
 
+Sharding is optional. Omitting both shard arguments is exactly the original
+single-worker behavior: `prepare.py` uses the input JSONL directly and does not
+create a shard file or manifest. Any positive shard count works; two is only
+the deployment example below.
+
 To generate a full input from the pinned OSWorld checkout before sharding:
 
 ```bash
@@ -208,23 +213,54 @@ through Docker's standard SSH transport. The agent/control host still runs
 `prepare.py`, `start_control.sh`, and `run_eval.sh`; only the Sandbox container
 and QEMU/KVM guest run on the environment host.
 
-Prepare the identical verified qcow2 at the same absolute path on both hosts,
-allow the agent host's SSH key on the environment host, and validate the data
-path before starting Gym:
+#### One-time host preparation
+
+This is infrastructure setup, not part of every benchmark run:
+
+1. Install Docker and make `/dev/kvm` read/write on the environment host.
+2. Put the identical verified qcow2 at the same absolute path on the agent and
+   environment hosts.
+3. Provision non-interactive SSH from the agent host to
+   `REMOTE_USER@ENV_HOST_REACHABLE_IP`. A dedicated, non-default key is
+   recommended.
+4. From the agent host, verify the complete transport with one command:
 
 ```bash
-# On the agent/control host
-export DOCKER_HOST=ssh://USER@ENV_HOST
-export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
-docker info
+DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP docker info
+```
 
+Provisioning may be performed by the cluster administrator. It is complete
+once the command above succeeds; no persistent interactive SSH session is
+needed.
+
+#### Every run
+
+After the one-time preparation, the public run path remains three commands.
+On each agent/control host, export its corresponding environment IP and model
+endpoint, then run:
+
+```bash
+cd /absolute/path/to/Gym/benchmarks/osworld
+
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
 export OSWORLD_RUN_ID=my-shard-0
 export NEMO_GYM_CONTROL_HOST=AGENT_HOST_REACHABLE_IP
 export GYM_BIN=/absolute/path/to/Gym/.venv/bin/gym
 
-benchmarks/osworld/tools/start_control.sh /absolute/run/root
-# After the control services report ready, in another supervisor:
-benchmarks/osworld/tools/run_eval.sh /absolute/run/root
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /same/absolute/path/on/both/hosts/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output /absolute/run/root/results/my-shard-0/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --force-env
+
+tools/start_control.sh /absolute/run/root
+# After control is ready, launch this in the run's second supervisor:
+tools/run_eval.sh /absolute/run/root
 ```
 
 The Sandbox config binds dynamically selected OSWorld ports to
