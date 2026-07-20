@@ -62,6 +62,8 @@ def test_role_checks_cover_environment_and_model_contracts() -> None:
 def test_cleanup_is_scoped_to_the_run_id() -> None:
     text = CLEANUP_RUN_SCRIPT.read_text(encoding="utf-8")
     assert "process_belongs_to_run" in text
+    assert "Ignoring stale" in text
+    assert 'rm -f "${pid_file}"' in text
     assert "label=nemo-gym.run-id=${RUN_ID}" in text
     assert "nemo-gym.workload=osworld" in text
     assert "logs and results were preserved" in text

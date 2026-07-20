@@ -85,17 +85,23 @@ tools/start_control.sh /absolute/run/root
 ```
 
 After the control log reports ready, run eval in a second terminal or
-supervisor, and clean up when it finishes:
+supervisor:
 
 ```bash
 tools/run_eval.sh /absolute/run/root
+```
+
+If normal termination fails and stale run-owned processes or containers block
+recovery, invoke the scoped cleanup fallback while preserving results:
+
+```bash
 tools/cleanup_run.sh /absolute/run/root
 ```
 
-The wrappers write logs beneath the run root. `cleanup_run.sh` stops the
-recorded processes and removes only that run's labeled Sandbox containers
-while preserving results. The exact scripts used by each role are summarized
-in [`tools/README.md`](tools/README.md).
+The wrappers write logs beneath the run root. `cleanup_run.sh` is never part of
+the normal successful path: it stops recorded processes and removes only that
+run's labeled Sandbox containers while preserving results. The exact scripts
+used by each role are summarized in [`tools/README.md`](tools/README.md).
 
 `prepare.py` validates the committed input and qcow2, records the disk identity,
 prefetches setup and evaluator files, and writes a private, gitignored

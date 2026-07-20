@@ -7,7 +7,8 @@ configuration entry point; host checks and lifecycle wrappers live here:
 ```text
 model host       -> probe_model_endpoint.py
 environment host -> check_environment.sh
-agent/control     -> prepare.py -> start_control.sh -> run_eval.sh -> cleanup_run.sh
+agent/control     -> prepare.py -> start_control.sh -> run_eval.sh
+abnormal recovery -> cleanup_run.sh
 ```
 
 | Tool | Purpose |
@@ -16,7 +17,7 @@ agent/control     -> prepare.py -> start_control.sh -> run_eval.sh -> cleanup_ru
 | `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
 | `start_control.sh` | Supervisor-friendly wrapper around `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
-| `cleanup_run.sh` | Stop one run's recorded Gym processes and remove only its labeled Sandbox containers |
+| `cleanup_run.sh` | Recovery-only cleanup for stale processes or labeled Sandbox containers after abnormal termination |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |
 
 Model serving itself belongs to the selected model's deployment project;
@@ -75,7 +76,8 @@ run uses only `prepare.py`, `start_control.sh`, and `run_eval.sh`. Export the
 same `DOCKER_HOST` when running `cleanup_run.sh` so cleanup remains scoped to
 the correct daemon.
 
-After an evaluation, stop only that run while preserving its logs and results:
+Only when normal termination fails or stale run-owned entities block recovery,
+stop that run while preserving its logs and results:
 
 ```bash
 export OSWORLD_RUN_ID=my-osworld-run

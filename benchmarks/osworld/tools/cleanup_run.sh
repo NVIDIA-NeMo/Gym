@@ -51,8 +51,9 @@ stop_role() {
         return
     fi
     if ! process_belongs_to_run "${pid}" "${expected_command}"; then
-        echo "Refusing to signal PID ${pid}: it is not ${role} for run ${RUN_ID}" >&2
-        return 1
+        echo "Ignoring stale ${role} PID ${pid}: it no longer belongs to run ${RUN_ID}" >&2
+        rm -f "${pid_file}"
+        return
     fi
 
     echo "Stopping ${role} process ${pid} for run ${RUN_ID}"
