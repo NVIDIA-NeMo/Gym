@@ -190,7 +190,7 @@ The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses
 ```json
 {
   "mcpServers": {
-    "example_mcp_weather": {
+    "workplace_assistant": {
       "type": "http",
       "url": "http://<resources-server-host>:<port>/mcp",
       "headers": { "X-NeMo-Gym-Session-Token": "<per-rollout-token>" }
@@ -199,50 +199,11 @@ The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses
 }
 ```
 
-A minimal config (`resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml`) wires the server and the agent together:
+The worked example for this wiring is **`workplace_assistant`** — a real environment with 27 tools across five toolkits. (The weather server built above runs with the same wiring; see the end of this section.)
 
-```yaml
-example_mcp_weather:
-  resources_servers:
-    example_mcp_weather:
-      entrypoint: app.py
-      domain: agent
-      expose_tools_over_mcp: true
+## workplace_assistant with Claude Code
 
-example_mcp_weather_claude_code_agent:
-  responses_api_agents:
-    claude_code_agent:
-      entrypoint: app.py
-      resources_server: { type: resources_servers, name: example_mcp_weather }
-      model: claude-sonnet-4-6
-      anthropic_api_key: ${anthropic_api_key}
-      datasets:
-        - { name: example, type: example, jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl }
-```
-
-### Run it
-
-Put your key in a repo-root `env.yaml` (the config above interpolates `${anthropic_api_key}`):
-
-```yaml
-anthropic_api_key: sk-ant-...
-```
-
-Then start the servers:
-
-```bash
-gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
-```
-
-Then collect rollouts against the `example` dataset and reward-profile as in the [quickstart](/get-started/quickstart). A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
-
-<Tip>
-To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie) — there is a copy-pasteable script in the [server's README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather). This is also the fastest way to confirm the endpoint is reachable from another host.
-</Tip>
-
----
-
-## Catch-all dispatcher servers
+### Its tools go through one catch-all route
 
 Some servers serve *all* their tools through one parameterized route — `workplace_assistant` routes every call through `POST /{path}` and looks the tool up by name, so there are no typed routes to harvest and the per-tool schemas live in data. For these, override one method, `mcp_tools(self, harvested, catchall)`: `harvested` is the auto-harvested typed-route tools, and `catchall.tool(name, input_schema, description)` mints a tool that dispatches through the catch-all route with the path set to `name`.
 
@@ -282,9 +243,9 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The returned names are signed into that rollout's session token; `tools/list` then advertises only those tools and `tools/call` rejects any other name — per rollout, with no server-wide state.
 
-### Running workplace_assistant with Claude Code
+### Run it
 
-A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent):
+A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the agent:
 
 ```yaml
 # workplace_claude.yaml
@@ -324,6 +285,20 @@ gym eval run --no-serve \
 ```
 
 A correct rollout shows Claude Code calling `mcp__workplace_assistant__*` tools (e.g. `mcp__workplace_assistant__email_reply_email`) and a `reward` of `1.0`. `/verify` scores MCP and HTTP trajectories identically: when the flag is on, the verify endpoint is wrapped at startup to normalize MCP-namespaced tool-call names (`mcp__workplace_assistant__email_reply_email` → `email_reply_email`) for scoring only, while the persisted rollout keeps the names the model actually emitted.
+
+### The weather server runs the same way
+
+The shipped config of the server built above already sets the flag and wires `claude_code_agent`:
+
+```bash
+gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+```
+
+Then collect rollouts against its `example` dataset as in the [quickstart](/get-started/quickstart) — a correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
+
+<Tip>
+To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie) — there is a copy-pasteable script in the [weather server's README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather). This is also the fastest way to confirm the endpoint is reachable from another host.
+</Tip>
 
 ---
 
