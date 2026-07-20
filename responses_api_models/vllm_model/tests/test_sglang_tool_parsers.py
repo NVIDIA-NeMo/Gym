@@ -32,6 +32,7 @@ from responses_api_models.vllm_model.sglang_tool_parsers import (
     parse_qwen3_coder_tool_calls,
 )
 
+
 # The template's own canonical example, verbatim shape.
 TEMPLATE_EXAMPLE = (
     "<tool_call>\n"
@@ -59,9 +60,7 @@ def test_template_canonical_example():
     args = json.loads(call["function"]["arguments"])
     assert args == {
         "example_parameter_1": "value_1",
-        "example_parameter_2": (
-            "This is the value for the second parameter\nthat can span\nmultiple lines"
-        ),
+        "example_parameter_2": ("This is the value for the second parameter\nthat can span\nmultiple lines"),
     }
     assert content == ""
 
@@ -81,9 +80,7 @@ def test_no_tool_call_passthrough():
 
 
 def test_multiple_tool_calls():
-    text = TEMPLATE_EXAMPLE + "\n" + TEMPLATE_EXAMPLE.replace(
-        "example_function_name", "second_function"
-    )
+    text = TEMPLATE_EXAMPLE + "\n" + TEMPLATE_EXAMPLE.replace("example_function_name", "second_function")
     tool_calls, content = parse_qwen3_coder_tool_calls(text)
     assert [c["function"]["name"] for c in tool_calls] == [
         "example_function_name",
@@ -139,22 +136,14 @@ def test_coercion_falls_back_to_string_on_mismatch():
             },
         }
     ]
-    text = (
-        "<tool_call>\n<function=f>\n"
-        "<parameter=n>\nnot_a_number\n</parameter>\n"
-        "</function>\n</tool_call>"
-    )
+    text = "<tool_call>\n<function=f>\n<parameter=n>\nnot_a_number\n</parameter>\n</function>\n</tool_call>"
     tool_calls, _ = parse_qwen3_coder_tool_calls(text, tools)
     args = json.loads(tool_calls[0]["function"]["arguments"])
     assert args == {"n": "not_a_number"}
 
 
 def test_unknown_function_params_stay_strings():
-    text = (
-        "<tool_call>\n<function=unlisted>\n"
-        "<parameter=x>\n7\n</parameter>\n"
-        "</function>\n</tool_call>"
-    )
+    text = "<tool_call>\n<function=unlisted>\n<parameter=x>\n7\n</parameter>\n</function>\n</tool_call>"
     tool_calls, _ = parse_qwen3_coder_tool_calls(text, tools=[])
     args = json.loads(tool_calls[0]["function"]["arguments"])
     assert args == {"x": "7"}
@@ -203,8 +192,7 @@ def test_normalize_decodes_string_arguments():
 
 def test_normalize_roundtrips_parser_output():
     tool_calls, _ = parse_qwen3_coder_tool_calls(
-        "<tool_call>\n<function=f>\n<parameter=k>\nv\n</parameter>\n"
-        "</function>\n</tool_call>"
+        "<tool_call>\n<function=f>\n<parameter=k>\nv\n</parameter>\n</function>\n</tool_call>"
     )
     out = normalize_tool_call_arguments([{"role": "assistant", "tool_calls": tool_calls}])
     assert out[0]["tool_calls"][0]["function"]["arguments"] == {"k": "v"}

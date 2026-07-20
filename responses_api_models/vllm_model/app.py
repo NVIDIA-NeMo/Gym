@@ -661,18 +661,26 @@ class VLLMModel(SimpleResponsesAPIModel):
         anchor = [{"role": "assistant", "content": "X"}]
         try:
             full = tokenizer.apply_chat_template(
-                anchor + list(new_msgs), tools=None, chat_template=ct,
-                add_generation_prompt=True, tokenize=False, **chat_template_kwargs,
+                anchor + list(new_msgs),
+                tools=None,
+                chat_template=ct,
+                add_generation_prompt=True,
+                tokenize=False,
+                **chat_template_kwargs,
             )
             base = tokenizer.apply_chat_template(
-                anchor, tools=None, chat_template=ct,
-                add_generation_prompt=False, tokenize=False, **chat_template_kwargs,
+                anchor,
+                tools=None,
+                chat_template=ct,
+                add_generation_prompt=False,
+                tokenize=False,
+                **chat_template_kwargs,
             )
         except Exception:
             return None
         if not isinstance(full, str) or not isinstance(base, str) or not full.startswith(base):
             return None
-        enc = tokenizer(full[len(base):], add_special_tokens=False)
+        enc = tokenizer(full[len(base) :], add_special_tokens=False)
         return [int(t) for t in enc["input_ids"]]
 
     @staticmethod
@@ -685,12 +693,13 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     @classmethod
     def _sglang_messages_match(cls, a: List[Any], b: List[Any]) -> bool:
-        return len(a) == len(b) and all(
-            cls._sglang_msg_sig(x) == cls._sglang_msg_sig(y) for x, y in zip(a, b)
-        )
+        return len(a) == len(b) and all(cls._sglang_msg_sig(x) == cls._sglang_msg_sig(y) for x, y in zip(a, b))
 
     def _build_sglang_prompt_ids(
-        self, request: Request, messages: List[Any], tools: Any,
+        self,
+        request: Request,
+        messages: List[Any],
+        tools: Any,
         chat_template_kwargs: Dict[str, Any],
     ) -> Tuple[List[int], Optional[str]]:
         """Return (prompt_token_ids, session_id). Splices the prior assistant turn's exact
@@ -707,17 +716,20 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if (
                     len(messages) > n
                     and messages[n].get("role") == "assistant"
-                    and all(m.get("role") != "assistant" for m in messages[n + 1:])
+                    and all(m.get("role") != "assistant" for m in messages[n + 1 :])
                     and self._sglang_messages_match(messages[:n], prev)
                 ):
-                    frag = self._sglang_followup_fragment_ids(messages[n + 1:], chat_template_kwargs)
+                    frag = self._sglang_followup_fragment_ids(messages[n + 1 :], chat_template_kwargs)
                     if frag is not None:
                         return state["seq"] + frag, sid
         return self._full_sglang_tokenize(messages, tools, chat_template_kwargs), sid
 
     def _update_sglang_session_seq(
-        self, sid: Optional[str], messages: List[Any],
-        prompt_token_ids: List[int], generation_token_ids: List[int],
+        self,
+        sid: Optional[str],
+        messages: List[Any],
+        prompt_token_ids: List[int],
+        generation_token_ids: List[int],
     ) -> None:
         """Cache the running sequence through this assistant turn (prompt + gen + ``<|im_end|>\\n``)
         for the next turn's splice."""
@@ -795,17 +807,20 @@ class VLLMModel(SimpleResponsesAPIModel):
         msg: Dict[str, Any] = dict(role="assistant", content=None, tool_calls=None)
         if self.config.return_token_id_information:
             msg.update(dict(prompt_token_ids=list(prompt_token_ids), generation_token_ids=[], generation_log_probs=[]))
-        return NeMoGymChatCompletion.model_validate(dict(
-            id=f"chtcmpl-{uuid4().hex}", object="chat.completion", created=int(time()),
-            model=self.config.model,
-            choices=[dict(index=0, finish_reason="length", message=msg, logprobs=None)],
-            usage=dict(prompt_tokens=len(prompt_token_ids), completion_tokens=0,
-                       total_tokens=len(prompt_token_ids)),
-        ))
+        return NeMoGymChatCompletion.model_validate(
+            dict(
+                id=f"chtcmpl-{uuid4().hex}",
+                object="chat.completion",
+                created=int(time()),
+                model=self.config.model,
+                choices=[dict(index=0, finish_reason="length", message=msg, logprobs=None)],
+                usage=dict(
+                    prompt_tokens=len(prompt_token_ids), completion_tokens=0, total_tokens=len(prompt_token_ids)
+                ),
+            )
+        )
 
-    async def _sglang_chat_completion(
-        self, request: Request, body_dict: Dict[str, Any]
-    ) -> NeMoGymChatCompletion:
+    async def _sglang_chat_completion(self, request: Request, body_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
         """SGLang v0.5.10 generation path (see VLLMModelConfig.engine).
 
         Tokenizes the chat-templated prompt locally and generates via SGLang's native
@@ -835,9 +850,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         tokenizer = self._get_sglang_tokenizer()  # used below to decode generation_token_ids
         # Build prompt token ids with contiguity-preserving splicing across turns (falls back
         # to a full chat-template tokenize on the first turn / cache miss / history condensation).
-        prompt_token_ids, _splice_sid = self._build_sglang_prompt_ids(
-            request, messages, tools, chat_template_kwargs
-        )
+        prompt_token_ids, _splice_sid = self._build_sglang_prompt_ids(request, messages, tools, chat_template_kwargs)
 
         # Map the OpenAI sampling knobs onto SGLang /generate sampling_params.
         # spaces_between_special_tokens=False mirrors the NeMo-RL SGLang backend and keeps
@@ -891,9 +904,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         # Contiguity fix: cache the running token sequence through this assistant turn so the
         # next turn splices these EXACT generation_token_ids instead of re-tokenizing them.
-        self._update_sglang_session_seq(
-            _splice_sid, messages, prompt_token_ids, generation_token_ids
-        )
+        self._update_sglang_session_seq(_splice_sid, messages, prompt_token_ids, generation_token_ids)
 
         # Decode the EXACT sampled ids with skip_special_tokens=False so reasoning markers
         # (</think> is a SPECIAL token, id 151668) survive. SGLang's gen["text"] decodes with
@@ -912,9 +923,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if generated_text.endswith(_eos):
                     generated_text = generated_text[: -len(_eos)]
                     _stripped = True
-        reasoning_content, content, tool_calls = self._parse_sglang_generation(
-            generated_text, tools=tools
-        )
+        reasoning_content, content, tool_calls = self._parse_sglang_generation(generated_text, tools=tools)
 
         if (meta_info.get("finish_reason") or {}).get("type") == "length":
             finish_reason = "length"
@@ -947,9 +956,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             object="chat.completion",
             created=int(time()),
             model=self.config.model,
-            choices=[
-                dict(index=0, finish_reason=finish_reason, message=message_dict, logprobs=None)
-            ],
+            choices=[dict(index=0, finish_reason=finish_reason, message=message_dict, logprobs=None)],
             usage=dict(
                 prompt_tokens=len(prompt_token_ids),
                 completion_tokens=len(generation_token_ids),

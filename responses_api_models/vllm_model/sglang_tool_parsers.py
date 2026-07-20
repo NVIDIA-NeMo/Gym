@@ -41,6 +41,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+
 QWEN3_CODER_TOOL_CALL_PATTERN = re.compile(
     r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s*</tool_call>",
     re.DOTALL,
@@ -51,20 +52,14 @@ QWEN3_CODER_PARAM_PATTERN = re.compile(
 )
 
 
-def _tool_param_types(
-    tools: Optional[List[Dict[str, Any]]], function_name: str
-) -> Dict[str, str]:
+def _tool_param_types(tools: Optional[List[Dict[str, Any]]], function_name: str) -> Dict[str, str]:
     """Map parameter name -> JSON-schema type for one tool, from the request's tools."""
     for tool in tools or []:
         function = tool.get("function", tool)
         if function.get("name") != function_name:
             continue
         properties = (function.get("parameters") or {}).get("properties") or {}
-        return {
-            key: prop.get("type", "string")
-            for key, prop in properties.items()
-            if isinstance(prop, dict)
-        }
+        return {key: prop.get("type", "string") for key, prop in properties.items() if isinstance(prop, dict)}
     return {}
 
 
@@ -118,9 +113,7 @@ def parse_qwen3_coder_tool_calls(
         for param_match in QWEN3_CODER_PARAM_PATTERN.finditer(params_block):
             key = param_match.group(1).strip()
             raw_value = param_match.group(2)
-            arguments[key] = _coerce_param_value(
-                raw_value, param_types.get(key, "string")
-            )
+            arguments[key] = _coerce_param_value(raw_value, param_types.get(key, "string"))
         tool_calls.append(
             dict(
                 id=f"call_{uuid4().hex}",
@@ -154,21 +147,15 @@ def normalize_tool_call_arguments(messages: List[Any]) -> List[Any]:
             continue
         new_tool_calls = []
         for tool_call in tool_calls:
-            function = (
-                tool_call.get("function") if isinstance(tool_call, dict) else None
-            )
-            arguments = (
-                function.get("arguments") if isinstance(function, dict) else None
-            )
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
             if isinstance(arguments, str):
                 try:
                     decoded = json.loads(arguments)
                 except ValueError:
                     decoded = None
                 if isinstance(decoded, dict):
-                    tool_call = dict(
-                        tool_call, function=dict(function, arguments=decoded)
-                    )
+                    tool_call = dict(tool_call, function=dict(function, arguments=decoded))
             new_tool_calls.append(tool_call)
         normalized.append(dict(message, tool_calls=new_tool_calls))
     return normalized
