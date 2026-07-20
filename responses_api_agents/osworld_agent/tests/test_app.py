@@ -627,6 +627,52 @@ class TestApp:
             "task_attempt": 1,
         }
 
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_resolves_named_gym_sandbox_config_to_plain_ray_payload(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        global_config = mock_load_from_global_config.return_value.global_config_dict
+        global_config["osworld_sandbox"] = {
+            "default_metadata": {"sandbox-api": "docker-cli", "owner": "provider"},
+            "docker": {"create": {"use_init": False}},
+        }
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        agent = OSWorldAgent(
+            config=make_config(
+                sandbox_provider="osworld_sandbox",
+                sandbox_spec={
+                    "image": "docker://osworld@sha256:fixed",
+                    "metadata": {"owner": "agent"},
+                },
+                vm_path="/assets/Ubuntu.qcow2",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert response.reward == 1.0
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        runner_kwargs = positional_args[1]
+        assert runner_kwargs["sandbox_provider_config"] == {
+            "docker": {"create": {"use_init": False}}
+        }
+        assert runner_kwargs["sandbox_spec"] == {
+            "image": "docker://osworld@sha256:fixed",
+            "metadata": {"sandbox-api": "docker-cli", "owner": "agent"},
+        }
+        assert runner_kwargs["vm_path"] == "/assets/Ubuntu.qcow2"
+        assert runner_kwargs["sandbox_vm_path"] is None
+
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     async def test_proxy_required_task_is_masked_before_ray_when_disabled(self, mock_remote) -> None:
         task = {**DEFAULT_OSWORLD_TASK, "proxy": True}

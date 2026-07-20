@@ -27,6 +27,7 @@ sandbox:
       start_timeout_s: 600
       use_init: true
       apply_resource_limits: true
+      publish_host: 127.0.0.1
       # Isolation knobs -- opt in when running untrusted code (see README):
       # network: none          # cut all networking (also breaks pip/git installs)
       # read_only: true        # read-only root filesystem

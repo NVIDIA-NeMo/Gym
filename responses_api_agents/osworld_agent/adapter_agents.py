@@ -76,16 +76,17 @@ PRE_DONE_CHECKLIST = """Before returning computer.terminate with status=success,
 - any requested output file visibly exists and is non-empty.
 If any item is not verified, take one corrective or verification action instead of terminating."""
 STEP_TEMPLATE = "# Step {step_num}:\n"
-TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n## Code:\n```python\n{code}\n```\n"
-ASSISTANT_HISTORY_TEMPLATE_THINKING = (
-    "<think>\n{thought}\n</think>\n## Action:\n{action}\n## Code:\n```python\n{code}\n```\n"
-)
+TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
+ASSISTANT_HISTORY_TEMPLATE_THINKING = "<think>\n{thought}\n</think>\n## Action:\n{action}\n"
 ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = (
-    "## Thought:\n{thought}\n\n## Action:\n{action}\n## Code:\n```python\n{code}\n```\n"
+    "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 )
 
+# Keep the validated checkpoint prompt spelling stable. Although "passoword"
+# is misspelled, changing prompt bytes here would make maintained runs differ
+# from the best-known Nano Omni OSWorld recipe.
 SYSTEM_PROMPT_THINKING = """
-You are a GUI agent. You are given an instruction, a screenshot of the screen and your previous interactions with the computer. You need to perform a series of actions to complete the task. The password of the computer is {password}.
+You are a GUI agent. You are given an instruction, a screenshot of the screen and your previous interactions with the computer. You need to perform a series of actions to complete the task. The passoword of the computer is {password}.
 
 For each step, provide your response in this format:
 {thought}
@@ -100,7 +101,7 @@ In the code section, the code should be either pyautogui code or one of the foll
 """.strip()
 
 SYSTEM_PROMPT_NON_THINKING = """
-You are a GUI agent. You are given an instruction, a screenshot of the screen and your previous interactions with the computer. You need to perform a series of actions to complete the task. The password of the computer is {password}.
+You are a GUI agent. You are given an instruction, a screenshot of the screen and your previous interactions with the computer. You need to perform a series of actions to complete the task. The passoword of the computer is {password}.
 
 For each step, provide your response in this format:
 ## Thought
@@ -524,7 +525,6 @@ class NemotronV3NanoOmniAgent:
         return self.assistant_history_template.format(
             thought=cot.get("thought", ""),
             action=cot.get("action", ""),
-            code=cot.get("original_code", cot.get("code", "")),
         )
 
     def _parse_retry_messages(
@@ -598,7 +598,6 @@ class NemotronV3NanoOmniAgent:
                     + TEXT_HISTORY_TEMPLATE.format(
                         thought=self.cots[index].get("thought", ""),
                         action=self.cots[index].get("action", ""),
-                        code=self.cots[index].get("original_code", self.cots[index].get("code", "")),
                     )
                 )
             text_history = "# Previous History Actions:\n" + "\n".join(history_parts)

@@ -1,15 +1,19 @@
 # External vLLM transport for Nemotron 3 Nano Omni ("Omni Mini").
 #
 # vLLM is intentionally managed outside `gym env start` so the model process can
-# survive Gym/Ray/OSWorld restarts. Override the three values with
-# environment variables; no env.yaml rewrite is needed.
+# survive Gym/Ray/OSWorld restarts. The generic policy_* values are written by
+# prepare.py and may themselves default from environment variables.
+policy_base_url: ${oc.env:OMNI_MINI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+policy_api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
+policy_model_name: ${oc.env:OMNI_MINI_VLLM_MODEL,nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}
+
 policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${oc.env:OMNI_MINI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
-      api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
-      model: ${oc.env:OMNI_MINI_VLLM_MODEL,nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}  # pragma: allowlist secret
+      model: ${policy_model_name}
       return_token_id_information: false
       # The vLLM server must be started with --reasoning-parser nemotron_v3.
       # Gym converts its separate reasoning field back into <think>...</think>

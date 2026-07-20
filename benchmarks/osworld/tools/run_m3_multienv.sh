@@ -2,6 +2,8 @@
 # Run MiniMax M3 with OSWorld's official M3Agent scaffold through NeMo Gym.
 #
 # Example smoke run:
+#   OSWORLD_EXECUTION_BACKEND=gym_sandbox \
+#   OSWORLD_SANDBOX_VM_PATH=/absolute/path/to/Ubuntu.qcow2 \
 #   LIMIT=4 NUM_ENVS=1 \
 #     bash benchmarks/osworld/tools/run_m3_multienv.sh
 #
@@ -18,6 +20,7 @@ export MAX_STEPS="${MAX_STEPS:-100}"
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
 export TEMPERATURE="${TEMPERATURE:-0.6}"
 export NUM_ENVS="${NUM_ENVS:-1}"
+export OSWORLD_EXECUTION_BACKEND="${OSWORLD_EXECUTION_BACKEND:-osworld_provider}"
 export CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_m3.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
 
 exec bash "${SCRIPT_DIR}/run_multienv_osworld_agent.sh"

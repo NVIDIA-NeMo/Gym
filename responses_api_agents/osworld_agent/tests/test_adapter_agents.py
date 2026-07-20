@@ -316,7 +316,25 @@ def test_nemotron_agent_routes_messages_and_compacts_old_images() -> None:
     ]
     assert len(image_parts) == 2
     assert any("# Previous History Actions" in str(message.get("content")) for message in third_messages)
+    assert any(
+        message.get("content") == "<think>\nSecond thought\n</think>\n## Action:\nWait.\n"
+        for message in third_messages
+    )
+    serialized_messages = str(third_messages)
+    assert "pyautogui.click(0.5, 0.5)" not in serialized_messages
+    assert "computer.wait()" not in serialized_messages
     assert payloads[0]["_nemo_gym_return_message"] is True
+
+
+def test_nemotron_agent_uses_the_maintained_checkpoint_prompt_contract() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=1,
+        client_password="test-password",  # pragma: allowlist secret
+    )
+
+    assert "The passoword of the computer is test-password." in agent.system_prompt
+    assert "The password of the computer is" not in agent.system_prompt
 
 
 def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
@@ -570,5 +588,6 @@ def test_nemotron_agent_sends_current_image_and_full_text_history() -> None:
     assert "Second thought" in final_user_text
     assert "First action." in final_user_text
     assert "Second action." in final_user_text
-    assert "pyautogui.click(0.5, 0.5)" in final_user_text
-    assert "pyautogui.click(0.4, 0.4)" in final_user_text
+    assert "pyautogui.click(0.5, 0.5)" not in final_user_text
+    assert "pyautogui.click(0.4, 0.4)" not in final_user_text
+    assert "## Code:" not in final_user_text

@@ -1,9 +1,11 @@
 # OSWorld Responses API Agent
 
-The OSWorld agent runs complete desktop-computer tasks through NeMo Gym. Each
-`/run` request creates an OSWorld `DesktopEnv`, sends observations to the
-configured model, parses and executes actions, invokes OSWorld's inline
-evaluator, and returns the trajectory and reward in Gym's Responses API shape.
+The OSWorld agent runs complete desktop-computer tasks through NeMo Gym. The
+agent and benchmark stay in the Gym process; only the OSWorld desktop
+container/VM lifecycle moves into Gym Docker Sandbox. Each `/run` request
+creates an OSWorld `DesktopEnv`, sends observations to the configured model,
+parses and executes actions, invokes OSWorld's inline evaluator, and returns
+the trajectory and reward in Gym's Responses API shape.
 
 This directory owns the reusable runtime. Dataset preparation, benchmark
 configuration, model-specific overlays, serving recipes, and the full user
@@ -25,8 +27,11 @@ A completed response includes:
   termination reason, model identity, artifact directory, and proxy provenance;
 - one assistant output item per executed model step.
 
-OSWorld evaluates inside `env.evaluate()`, so this agent does not require a
-separate OSWorld resources server.
+OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
+is selectable: OSWorld's provider directly, a Gym Resources Server, or Gym
+Sandbox. In the Sandbox path, OSWorld still owns `DesktopEnv`, setup,
+controllers, actions, and evaluators; Gym Sandbox owns only the VM container
+lifecycle, dynamic service endpoints, status, and cleanup.
 
 ## Runtime components
 
@@ -38,6 +43,8 @@ separate OSWorld resources server.
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
 | `proxy.py` | Explicit proxy-task configuration validation and non-secret provenance |
+| `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |
+| `sandbox_provider.py` | OSWorld provider contract backed by Gym Sandbox lifecycle and endpoints |
 
 The runtime uses a pinned, unmodified OSWorld dependency. Compatibility code
 is opt-in or narrowly scoped in the Gym adapter rather than patched into the
@@ -69,6 +76,13 @@ metadata; an explicit, syntactically valid Code section remains executable even
 when an Action description is absent. Python is syntax-checked before OSWorld
 executes it, and terminal actions require an explicit `success` or `failure`
 status.
+
+The current model response must contain Code, but maintained conversation
+history deliberately retains only Thought and Action. Thinking-mode assistant
+history preserves the model's `<think>...</think>` wrapper. Omitting previously
+executed Code matches the validated Nano Omni prompt contract and avoids sending
+the same executable payload twice; this behavior is part of the standard
+`NemotronV3NanoOmniAgent`, not a run-local subclass or import overlay.
 
 When adding or upgrading a model, capture representative lossless responses
 and add focused parser regressions for heading placement, fenced and unfenced
@@ -102,6 +116,12 @@ Environment and execution:
 
 - `provider_name`, `container_image`, `headless`, `screen_width`, and
   `screen_height` configure `DesktopEnv`.
+- `sandbox_provider` selects a named Gym Sandbox provider configuration;
+  `sandbox_spec` supplies the provider-neutral image/resources/entrypoint, and
+  `sandbox_vm_path` selects the read-only OSWorld qcow2 base. It is mutually
+  exclusive with `resources_server`.
+- `sandbox_require_kvm`, `sandbox_ready_timeout_s`, and
+  `sandbox_ready_poll_s` control the OSWorld Sandbox startup gate.
 - `concurrency` limits simultaneous `/run` requests.
 - `max_steps`, `sleep_after_execution`, `step_timeout`, and `task_timeout`
   bound rollout work.
@@ -137,7 +157,9 @@ The current Gym CLI commands are:
 
 ```bash
 cd benchmarks/osworld
-python3 prepare.py
+python3 prepare.py \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2
 
 # Terminal 1: start configured servers.
 gym env start
@@ -146,16 +168,22 @@ gym env start
 gym eval run --no-serve
 ```
 
-To let Gym start and stop the servers around collection, use `gym eval run`
-instead of the two server/collector commands.
+Choose a model-specific agent composition during preparation. For example:
 
-The legacy aliases remain compatibility shims but are deprecated:
+```bash
+python3 prepare.py \
+  --profile m3 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_M3_MODEL
+```
 
-| Deprecated alias | Current command |
-| --- | --- |
-| `ng_run` | `gym env start` |
-| `ng_collect_rollouts` | `gym eval run --no-serve` |
-| `ng_e2e_collect_rollouts` | `gym eval run` |
+The Docker backend mounts that base as read-only `/System.qcow2`. Reset means
+destroying the Sandbox container and recreating it from the base, matching
+OSWorld's Docker-provider behavior. Live RAM/device-state snapshots are not
+implemented; callers that require them must select a virtualization provider
+with an explicit live-snapshot API.
 
 For data selection, host setup, advanced launchers, model-specific examples,
 and expected outputs, use the [benchmark README](../../benchmarks/osworld/README.md).

@@ -1,0 +1,8 @@
+# Pin rollout metadata to the same OSWorld image used by both lifecycle paths.
+# The clean upstream native Docker provider still resolves its historical image
+# name locally; deployment preflight verifies that local tag has this digest.
+
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      container_image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9

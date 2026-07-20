@@ -28,6 +28,7 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -89,6 +90,7 @@ class FakeSandboxProvider:
         self.created_specs: list[SandboxSpec] = []
         self.created_handles: list[SandboxHandle] = []
         self.exec_calls: list[dict[str, Any]] = []
+        self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
         self.closed: list[SandboxHandle] = []
@@ -138,6 +140,10 @@ class FakeSandboxProvider:
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         del handle
         return SandboxStatus.RUNNING
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        self.endpoint_calls.append((handle, port))
+        return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}", headers={"x-route": "fake"})
 
     async def close(self, handle: SandboxHandle) -> None:
         self.closed.append(handle)
@@ -261,6 +267,7 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
             metadata={"suite": "unit"},
             workdir="/repo",
             files={"/tmp/bootstrap.txt": "hello"},
+            ports=[8000],
         ),
     )
 
@@ -284,6 +291,11 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
         "user": "agent",
     }
     assert await sandbox.status() == SandboxStatus.RUNNING
+    assert await sandbox.endpoint(8000) == SandboxEndpoint(
+        endpoint="http://127.0.0.1:8000",
+        headers={"x-route": "fake"},
+    )
+    assert provider.endpoint_calls == [(handle, 8000)]
 
     source_path = tmp_path / "source.txt"
     target_path = tmp_path / "nested" / "target.txt"
@@ -349,6 +361,16 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
     with pytest.raises(ValueError, match="requires a SandboxSpec"):
         await sandbox.start()
 
+    plain = AsyncSandbox(PlainSandboxProvider())
+    await plain.start(SandboxSpec(image="image:tag", ports=[8000]))
+    with pytest.raises(NotImplementedError, match="does not support service endpoints"):
+        await plain.endpoint(8000)
+    with pytest.raises(ValueError, match="was not declared"):
+        await plain.endpoint(9000)
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        await plain.endpoint(0)
+    await plain.stop()
+
 
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
@@ -356,11 +378,20 @@ def test_rewrite_image_validation() -> None:
 
 
 def test_sandbox_resources_validation() -> None:
-    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"})
+    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"}, ports=[8000, "9222"])
     assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
+    assert spec.ports == (8000, 9222)
 
     with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
         SandboxSpec(resources={"memory": "4Gi"})
+    with pytest.raises(ValueError, match="Duplicate sandbox TCP port"):
+        SandboxSpec(ports=[8000, 8000])
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        SandboxSpec(ports=[65536])
+    with pytest.raises(ValueError, match="Invalid sandbox TCP port"):
+        SandboxSpec(ports=[8000.5])
+    with pytest.raises(ValueError, match="absolute URL"):
+        SandboxEndpoint(endpoint="/relative/path")
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -144,7 +144,8 @@ class FakeM3Agent:
         self.predict_calls += 1
         assert instruction == "Use official M3Agent."
         assert obs["screenshot"] == b"not-black"
-        return "M3 response", ["DONE"]
+        # Match the real OSWorld M3Agent, which returns a mutable two-item list.
+        return ["M3 response", ["DONE"]]
 
 
 class FakeNemotronAgent:
@@ -328,6 +329,73 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
     assert FakeEnv.instances[0].kwargs["enable_proxy"] is False
     assert FakeEnv.instances[0].actions == ["DONE"]
+
+
+def test_gym_sandbox_backend_is_passed_as_plain_env_configuration(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-sandbox", "instruction": "Finish the task."},
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sandbox_provider_config={"docker": {"create": {"use_init": False}}},
+        sandbox_spec={"image": "docker://osworld@sha256:fixed"},
+        sandbox_vm_path="/assets/Ubuntu.qcow2",
+        sandbox_require_kvm=True,
+        sandbox_ready_timeout_s=123,
+        sandbox_ready_poll_s=0.25,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    kwargs = FakeEnv.instances[0].kwargs
+    assert kwargs["sandbox_provider"] == {"docker": {"create": {"use_init": False}}}
+    assert kwargs["sandbox_spec"]["image"] == "docker://osworld@sha256:fixed"
+    assert kwargs["path_to_vm"] == "/assets/Ubuntu.qcow2"
+    assert kwargs["sandbox_require_kvm"] is True
+    assert kwargs["sandbox_ready_timeout_s"] == 123
+    assert kwargs["sandbox_ready_poll_s"] == 0.25
+
+
+def test_explicit_vm_path_is_shared_by_native_and_sandbox_backends(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-native-vm", "instruction": "Finish the task."},
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        vm_path="/assets/Ubuntu.qcow2",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    assert FakeEnv.instances[0].kwargs["path_to_vm"] == "/assets/Ubuntu.qcow2"
+
+
+def test_conflicting_vm_path_aliases_are_rejected(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    with pytest.raises(ValueError, match="different qcow2"):
+        osworld_client.run_osworld_task(
+            {"id": "task-conflicting-vm", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            env_class_path="fake.FakeEnv",
+            vm_path="/assets/a.qcow2",
+            sandbox_vm_path="/assets/b.qcow2",
+        )
+
+
+def test_gym_sandbox_and_remote_resources_are_mutually_exclusive(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        osworld_client.run_osworld_task(
+            {"id": "task-invalid", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            resources_server_url="http://resources.example",
+            sandbox_provider_config={"docker": {}},
+        )
 
 
 def test_proxy_required_task_is_masked_without_starting_an_environment(monkeypatch) -> None:

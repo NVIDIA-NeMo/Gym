@@ -9,9 +9,10 @@ and ``tau2``): ``/run`` is the single entrypoint that takes a Gym JSONL row,
 runs the full OSWorld rollout against the Gym policy model, and returns a
 ``BaseVerifyResponse`` with the final reward.
 
-There is no paired ``resources_servers/osworld/`` because OSWorld's evaluator
-runs inline in ``env.evaluate()`` — splitting it out would add an extra hop
-that nothing else uses.
+For a decoupled deployment, the optional Gym-native
+``resources_servers/osworld/`` owns the live DesktopEnv and its inline
+evaluator. The agent keeps the same rollout loop and talks to that server via
+the DesktopEnv-compatible HTTP client.
 """
 
 from __future__ import annotations
@@ -41,11 +42,12 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -226,9 +228,17 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     """
 
     model_server: ModelServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     concurrency: int = 4
     provider_name: str = "docker"
     container_image: str = "docker://happysixd/osworld-docker:latest"  # OSWorld upstream's recommended VM image
+    sandbox_provider: Optional[str | Dict[str, Any]] = None
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    vm_path: Optional[str] = None
+    sandbox_vm_path: Optional[str] = None
+    sandbox_require_kvm: bool = True
+    sandbox_ready_timeout_s: float = Field(default=600.0, gt=0)
+    sandbox_ready_poll_s: float = Field(default=2.0, gt=0)
     headless: bool = True
     screen_width: int = 1920
     screen_height: int = 1080
@@ -236,6 +246,10 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     client_password: str = "password"
     enable_proxy: bool = False
     proxy_config_file: Optional[str] = None
+    resources_server_token_env: str = "OSWORLD_RESOURCES_TOKEN"
+    resources_request_timeout: float = Field(default=900.0, gt=0)
+    resources_connect_timeout: float = Field(default=10.0, gt=0)
+    resources_request_retries: int = Field(default=3, ge=1)
     max_steps: int = 15
     max_trajectory_length: int = 3
     sleep_after_execution: float = 0.5
@@ -710,6 +724,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        if self.config.resources_server is not None and self.config.sandbox_provider is not None:
+            raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
         _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
 
@@ -795,7 +811,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     termination_reason="proxy_configuration_error",
                 )
 
+            remote_resources = self.config.resources_server is not None
             proxy_config_file = os.environ.get("PROXY_CONFIG_FILE") or self.config.proxy_config_file
+            if not requires_proxy or remote_resources:
+                # A remote Resources Server owns its proxy configuration; do
+                # not leak a control-plane path into the environment plane.
+                proxy_config_file = None
             if requires_proxy and not enable_proxy:
                 return _empty_response(
                     body,
@@ -805,7 +826,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     proxy_enabled=False,
                     proxy_configured=bool(proxy_config_file),
                 )
-            if requires_proxy:
+            if requires_proxy and not remote_resources:
                 try:
                     proxy_config_file = inspect_proxy_config_file(proxy_config_file).path
                 except ValueError as exc:
@@ -824,7 +845,31 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             policy_model_name = _resolve_policy_model_name(global_config_dict, self.config.runner_name)
             policy_api_key = global_config_dict.get("policy_api_key", "")
             policy_base_url = global_config_dict.get("policy_base_url", "")
+            sandbox_provider_config: Optional[Dict[str, Any]] = None
+            sandbox_spec = dict(self.config.sandbox_spec)
+            if self.config.sandbox_provider is not None:
+                sandbox_provider_config = resolve_provider_config(
+                    self.config.sandbox_provider,
+                    global_config_dict,
+                )
+                default_metadata = resolve_provider_metadata(
+                    self.config.sandbox_provider,
+                    global_config_dict,
+                )
+                sandbox_spec["metadata"] = {
+                    **default_metadata,
+                    **dict(sandbox_spec.get("metadata") or {}),
+                }
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            resources_server_url = ""
+            if self.config.resources_server is not None:
+                resources_server_config = get_first_server_config_dict(
+                    global_config_dict,
+                    self.config.resources_server.name,
+                )
+                resources_server_url = (
+                    f"http://{resources_server_config['host']}:{resources_server_config['port']}"
+                )
 
             temperature = body.responses_create_params.temperature or self.config.temperature
             top_p = body.responses_create_params.top_p or self.config.top_p
@@ -852,6 +897,21 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "client_password": self.config.client_password,
                 "enable_proxy": enable_proxy,
                 "proxy_config_file": proxy_config_file,
+                "resources_server_url": resources_server_url,
+                "resources_server_auth_token": os.environ.get(
+                    self.config.resources_server_token_env,
+                    "",
+                ),
+                "resources_request_timeout": self.config.resources_request_timeout,
+                "resources_connect_timeout": self.config.resources_connect_timeout,
+                "resources_request_retries": self.config.resources_request_retries,
+                "sandbox_provider_config": sandbox_provider_config,
+                "sandbox_spec": sandbox_spec,
+                "vm_path": self.config.vm_path,
+                "sandbox_vm_path": self.config.sandbox_vm_path,
+                "sandbox_require_kvm": self.config.sandbox_require_kvm,
+                "sandbox_ready_timeout_s": self.config.sandbox_ready_timeout_s,
+                "sandbox_ready_poll_s": self.config.sandbox_ready_poll_s,
                 "max_steps": self.config.max_steps,
                 "max_trajectory_length": self.config.max_trajectory_length,
                 "sleep_after_execution": self.config.sleep_after_execution,

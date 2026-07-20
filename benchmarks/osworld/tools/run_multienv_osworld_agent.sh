@@ -90,9 +90,21 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 NG_RUN_WAIT_RETRIES="${NG_RUN_WAIT_RETRIES:-80}"
 NG_RUN_WAIT_INTERVAL_SECONDS="${NG_RUN_WAIT_INTERVAL_SECONDS:-3}"
 EXPECTED_SERVERS="${EXPECTED_SERVERS:-2}"
+NEMO_GYM_HEAD_HOST="${NEMO_GYM_HEAD_HOST:-127.0.0.1}"
+NEMO_GYM_HEAD_PORT="${NEMO_GYM_HEAD_PORT:-11000}"
+if [[ -z "${NEMO_GYM_HEAD_HOST}" ]]; then
+    echo "NEMO_GYM_HEAD_HOST must not be empty" >&2
+    exit 2
+fi
+if [[ ! "${NEMO_GYM_HEAD_PORT}" =~ ^[1-9][0-9]*$ ]] || (( NEMO_GYM_HEAD_PORT > 65535 )); then
+    echo "NEMO_GYM_HEAD_PORT must be an integer between 1 and 65535" >&2
+    exit 2
+fi
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-16384}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 CONFIG_PATHS="${CONFIG_PATHS:-responses_api_agents/osworld_agent/configs/osworld_agent.yaml,benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml}"
+OSWORLD_EXECUTION_BACKEND="${OSWORLD_EXECUTION_BACKEND:-osworld_provider}"
+OSWORLD_SANDBOX_VM_PATH="${OSWORLD_SANDBOX_VM_PATH:-}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-}"
 MAX_STEPS="${MAX_STEPS:-}"
 TASK_PARITY_REFERENCE_INPUT="${TASK_PARITY_REFERENCE_INPUT:-}"
@@ -107,6 +119,36 @@ SERVER_VENV_ROOT="${SERVER_VENV_ROOT:-}"
 if [[ -n "${SERVER_VENV_ROOT}" ]]; then
     SERVER_VENV_ROOT="$(gym_absolute_path "${SERVER_VENV_ROOT}")"
 fi
+
+case "${OSWORLD_EXECUTION_BACKEND}" in
+    osworld_provider)
+        ;;
+    gym_sandbox)
+        if [[ -z "${OSWORLD_SANDBOX_VM_PATH}" ]]; then
+            echo "OSWORLD_SANDBOX_VM_PATH is required for OSWORLD_EXECUTION_BACKEND=gym_sandbox" >&2
+            exit 2
+        fi
+        OSWORLD_SANDBOX_VM_PATH="$(gym_absolute_path "${OSWORLD_SANDBOX_VM_PATH}")"
+        if [[ ! -r "${OSWORLD_SANDBOX_VM_PATH}" || ! -f "${OSWORLD_SANDBOX_VM_PATH}" ]]; then
+            echo "OSWorld Sandbox qcow2 is not a readable file: ${OSWORLD_SANDBOX_VM_PATH}" >&2
+            exit 2
+        fi
+        if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            echo "OSWorld Gym Sandbox requires readable/writable /dev/kvm" >&2
+            exit 2
+        fi
+        sandbox_config="benchmarks/osworld/configs/osworld_sandbox.yaml"
+        case ",${CONFIG_PATHS}," in
+            *",${sandbox_config},"*) ;;
+            *) CONFIG_PATHS="${CONFIG_PATHS},${sandbox_config}" ;;
+        esac
+        ;;
+    *)
+        echo "OSWORLD_EXECUTION_BACKEND must be osworld_provider or gym_sandbox, got: ${OSWORLD_EXECUTION_BACKEND}" >&2
+        exit 2
+        ;;
+esac
+export OSWORLD_EXECUTION_BACKEND OSWORLD_SANDBOX_VM_PATH
 
 # A fresh invocation owns a fresh run directory. An explicit cache resume is
 # the only supported exception: it must target a terminal, failed attempt with
@@ -393,6 +435,8 @@ NUM_REPEATS=${NUM_REPEATS}
 MAX_STEPS=${MAX_STEPS}
 MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS}
 TEMPERATURE=${TEMPERATURE}
+OSWORLD_EXECUTION_BACKEND=${OSWORLD_EXECUTION_BACKEND}
+OSWORLD_SANDBOX_VM_PATH=${OSWORLD_SANDBOX_VM_PATH}
 RECORD_VIDEO=${RECORD_VIDEO}
 TASK_ARTIFACTS=${TASK_ARTIFACTS}
 FULL_MODEL_IO=${FULL_MODEL_IO}
@@ -414,6 +458,8 @@ RAY_TMPDIR=${RAY_TMPDIR}
 RAY_TMPDIR_REQUESTED=${RAY_TMPDIR_REQUESTED}
 SERVER_VENV_ROOT=${SERVER_VENV_ROOT}
 UV_BIN=${UV_BIN}
+NEMO_GYM_HEAD_HOST=${NEMO_GYM_HEAD_HOST}
+NEMO_GYM_HEAD_PORT=${NEMO_GYM_HEAD_PORT}
 VIDEO_SAMPLE_PER=${VIDEO_SAMPLE_PER}
 VIDEO_SAMPLE_COUNT=${VIDEO_SAMPLE_COUNT}
 VIDEO_SAMPLE_SEED=${VIDEO_SAMPLE_SEED}
@@ -432,6 +478,10 @@ echo "output:      ${OUTPUT_JSONL}"
 echo "limit:       ${LIMIT}"
 echo "num envs:    ${NUM_ENVS}"
 echo "parallel:    ${NUM_SAMPLES_IN_PARALLEL}"
+echo "env backend: ${OSWORLD_EXECUTION_BACKEND}"
+if [[ "${OSWORLD_EXECUTION_BACKEND}" == "gym_sandbox" ]]; then
+    echo "VM base:     ${OSWORLD_SANDBOX_VM_PATH}"
+fi
 echo "proxy:      enabled=${OSWORLD_ENABLE_PROXY} configured=${PROXY_CONFIG_CONFIGURED} entries=${PROXY_CONFIG_ENTRY_COUNT}"
 echo "resume:      ${RESUME_FROM_CACHE}"
 echo "ray tmp:     ${RAY_TMPDIR}"
@@ -439,6 +489,7 @@ if [[ -n "${SERVER_VENV_ROOT}" ]]; then
     echo "server venv: ${SERVER_VENV_ROOT}"
 fi
 echo "uv:          ${UV_BIN}"
+echo "head server: ${NEMO_GYM_HEAD_HOST}:${NEMO_GYM_HEAD_PORT}"
 if [[ -n "${MAX_STEPS}" ]]; then
     echo "max steps:   ${MAX_STEPS}"
 fi
@@ -468,6 +519,8 @@ echo
 ng_run_cmd=(
     "${NG_RUN_BIN}"
     "+config_paths=[${CONFIG_PATHS}]"
+    "++head_server.host=${NEMO_GYM_HEAD_HOST}"
+    "++head_server.port=${NEMO_GYM_HEAD_PORT}"
     "++osworld_simple_agent.responses_api_agents.osworld_agent.runner_name=${RUNNER_NAME}"
 )
 
@@ -495,6 +548,8 @@ fi
 
 collect_cmd=(
     "${NG_COLLECT_BIN}"
+    "++head_server.host=${NEMO_GYM_HEAD_HOST}"
+    "++head_server.port=${NEMO_GYM_HEAD_PORT}"
     "+agent_name=${AGENT_NAME}"
     "+input_jsonl_fpath=${INPUT_JSONL}"
     "+output_jsonl_fpath=${OUTPUT_JSONL}"
@@ -560,7 +615,7 @@ wait_for_servers_ready() {
             return 1
         fi
 
-        status_output="$("${NG_STATUS_BIN}" 2>&1 || true)"
+        status_output="$("${NG_STATUS_BIN}" "++head_server.host=${NEMO_GYM_HEAD_HOST}" "++head_server.port=${NEMO_GYM_HEAD_PORT}" 2>&1 || true)"
         if grep -Fq "${expected_line}" <<< "${status_output}"; then
             echo "servers ready: ${expected_line}"
             return 0

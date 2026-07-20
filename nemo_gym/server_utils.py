@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hmac
 import json
 import resource
 import socket
@@ -25,9 +26,9 @@ from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, Dict, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -45,7 +46,7 @@ from aiohttp import (
     TCPConnector,
 )
 from aiohttp.client import _RequestOptions
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -745,6 +746,8 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    _registered_services: ClassVar[Dict[str, Dict[str, Any]]] = {}
+    _registered_services_lock: ClassVar[Lock] = Lock()
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -752,6 +755,10 @@ class HeadServer(BaseServer):
         self.setup_liveness(app)
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
+        app.post("/services/register")(self.register_service)
+        app.post("/services/{service_id}/heartbeat")(self.heartbeat_service)
+        app.delete("/services/{service_id}")(self.unregister_service)
+        app.get("/services")(self.get_registered_services)
 
         return app
 
@@ -760,6 +767,88 @@ class HeadServer(BaseServer):
 
     def set_server_instances(self, instances: List) -> None:
         self._server_instances = instances
+
+    @staticmethod
+    def _authorize_registration(request: Request) -> None:
+        expected = getenv("NEMO_GYM_REGISTRATION_TOKEN", "").strip()
+        if not expected:
+            return
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="invalid registration token")
+
+    def register_service(self, request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Register a dynamically addressed internal service with a TTL lease."""
+
+        self._authorize_registration(request)
+        service_id = str(body.get("service_id") or "").strip()
+        service_type = str(body.get("service_type") or "").strip()
+        url = str(body.get("url") or "").strip().rstrip("/")
+        if not service_id or not service_type or not url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=422, detail="service_id, service_type, and HTTP url are required")
+        ttl_seconds = min(300, max(10, int(body.get("ttl_seconds") or 30)))
+        now = time.time()
+        record = {
+            "service_id": service_id,
+            "service_type": service_type,
+            "url": url,
+            "capacity": max(0, int(body.get("capacity") or 0)),
+            "active": max(0, int(body.get("active") or 0)),
+            "status": str(body.get("status") or "ready"),
+            "metadata": body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+            "registered_at": now,
+            "last_heartbeat": now,
+            "expires_at": now + ttl_seconds,
+            "ttl_seconds": ttl_seconds,
+        }
+        with self._registered_services_lock:
+            previous = self._registered_services.get(service_id)
+            if previous is not None:
+                record["registered_at"] = previous["registered_at"]
+            self._registered_services[service_id] = record
+        return record
+
+    def heartbeat_service(self, service_id: str, request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+        self._authorize_registration(request)
+        with self._registered_services_lock:
+            record = self._registered_services.get(service_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="service is not registered")
+            now = time.time()
+            for key in ("capacity", "active", "status", "metadata"):
+                if key in body:
+                    record[key] = body[key]
+            record["last_heartbeat"] = now
+            record["expires_at"] = now + int(record["ttl_seconds"])
+            return dict(record)
+
+    def unregister_service(self, service_id: str, request: Request) -> Dict[str, Any]:
+        self._authorize_registration(request)
+        with self._registered_services_lock:
+            removed = self._registered_services.pop(service_id, None)
+        return {"removed": removed is not None}
+
+    def get_registered_services(
+        self,
+        request: Request,
+        service_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        self._authorize_registration(request)
+        now = time.time()
+        with self._registered_services_lock:
+            expired = [
+                service_id
+                for service_id, record in self._registered_services.items()
+                if float(record["expires_at"]) <= now
+            ]
+            for service_id in expired:
+                self._registered_services.pop(service_id, None)
+            return [
+                dict(record)
+                for record in self._registered_services.values()
+                if service_type is None or record["service_type"] == service_type
+            ]
 
     @classmethod
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover

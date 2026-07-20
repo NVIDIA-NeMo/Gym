@@ -9,8 +9,9 @@ The reusable Responses API runtime lives in
 [`responses_api_agents/osworld_agent`](../../responses_api_agents/osworld_agent/README.md).
 That README is the source of truth for request/response semantics, supported
 runners, agent ownership, parser contracts, and runtime configuration. The
-runtime uses an unmodified, pinned OSWorld dependency and its local Docker
-provider.
+runtime uses an unmodified, pinned OSWorld dependency. In the current deployment
+path, Gym Docker Sandbox owns the VM container lifecycle while OSWorld keeps
+its setup, action, and evaluator behavior intact.
 
 ## Requirements
 
@@ -19,8 +20,7 @@ provider.
 - About 30 GB free disk for the Docker image and `Ubuntu.qcow2` cache.
 - A reachable vision-language model endpoint. Text-only models cannot act on
   screenshot observations.
-- `/dev/kvm` is strongly recommended. OSWorld can fall back to software QEMU,
-  but VM startup and interaction are substantially slower.
+- Read/write access to `/dev/kvm` for the Gym Docker Sandbox path.
 
 The optional host helper installs Docker, `uv`, and the video-recording tools:
 
@@ -37,15 +37,18 @@ bash benchmarks/osworld/tools/check_host_prerequisites.sh
 ## Quickstart
 
 From the Gym repository root, enter the benchmark directory and prepare the
-five-task default run. Endpoint values can also be supplied through
-`POLICY_BASE_URL`, `POLICY_API_KEY`, and `POLICY_MODEL_NAME`:
+five-task default run. The Sandbox path requires an explicit, verified qcow2.
+Endpoint values can also be supplied through `POLICY_BASE_URL`,
+`POLICY_API_KEY`, and `POLICY_MODEL_NAME`:
 
 ```bash
 cd benchmarks/osworld
 export POLICY_BASE_URL="https://your-vlm-endpoint/v1"
 export POLICY_API_KEY="your-key"  # pragma: allowlist secret
 export POLICY_MODEL_NAME="your-vlm-model"
-python3 prepare.py
+python3 prepare.py \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2
 
 gym env start
 ```
@@ -56,13 +59,13 @@ With `gym env start` still active, use a second terminal in the same directory:
 gym eval run --no-serve
 ```
 
-`prepare.py` validates the committed input, prefetches its setup and evaluator
-files, and writes a private, gitignored `env.yaml` containing the default
-config, agent, input, output, cache, and rollout settings. Hugging Face assets
-use the official client cache and `HF_TOKEN` when configured. It keeps an
-existing env file unless `--force-env` is supplied. Python component
-dependencies are installed by `gym env start` from the agent and model server project
-files.
+`prepare.py` validates the committed input and qcow2, records the disk identity,
+prefetches setup and evaluator files, and writes a private, gitignored
+`env.yaml` containing the config, agent, input, output, cache, and rollout
+settings. Hugging Face assets use the official client cache and `HF_TOKEN` when
+configured. It keeps an existing env file unless `--force-env` is supplied.
+Python component dependencies are installed by `gym env start` from the agent
+and model server project files.
 
 Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
 shared cache at server startup, then each rollout links only its task's
@@ -71,22 +74,16 @@ OSWorld's upstream runtime-download behavior. A normal run connects directly;
 `OSWORLD_ASSET_PROXY_URL` is an optional fallback used only after an official
 Hugging Face download fails.
 
-The former `ng_run` and `ng_collect_rollouts` names remain compatibility
-aliases, but Gym marks them deprecated. Their current equivalents are
-`gym env start` and `gym eval run --no-serve`. To start servers, collect, and
-stop them in one command, use `gym eval run`.
-
-The first run downloads the OSWorld container and VM image. When running more
-than one environment concurrently, pre-stage and verify the VM image to avoid
-concurrent workers racing on the same download:
+Prepare and verify the VM image before the first run:
 
 ```bash
 bash benchmarks/osworld/tools/prepare_osworld_vm.sh
 ```
 
 The downloader resumes interrupted transfers and verifies the extracted VM by
-size and SHA-256. Override `VM_DIR`, `VM_URL`, `VM_SHA256`, or
-`VM_SIZE_BYTES` only when intentionally selecting another upstream image.
+size and SHA-256. Pass the resulting qcow2 to `prepare.py --vm-path`. Override
+`VM_DIR`, `VM_URL`, `VM_SHA256`, or `VM_SIZE_BYTES` only when intentionally
+selecting another upstream image.
 
 ## Runner recipes
 
@@ -107,12 +104,23 @@ run without editing the script.
 ### MiniMax M3
 
 The M3 overlay uses OSWorld's `mm_agents.m3.M3Agent`, screenshot observations,
-relative coordinates, a 100-step limit, and an 8192-token response limit.
+relative coordinates, a 100-step limit, and an 8192-token response limit. Use
+the same canonical preparation flow with the M3 profile:
 
 ```bash
-LIMIT=4 NUM_ENVS=1 \
-  bash benchmarks/osworld/tools/run_m3_multienv.sh
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile m3 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_M3_MODEL
 ```
+
+This appends `benchmarks/osworld/configs/osworld_sandbox.yaml`, which pins the
+OSWorld image digest, requests KVM, publishes all four OSWorld service ports on
+dynamic loopback ports, and mounts the qcow2 read-only. The launcher fails
+before starting Gym if the VM file or writable `/dev/kvm` is missing.
 
 ### PointerAgent
 
@@ -132,16 +140,21 @@ bash benchmarks/osworld/tools/launch_omni_mini_vllm.sh
 ```
 
 The launcher pins the checkpoint revision and requires vLLM 0.20.0 by default.
-After the endpoint is reachable from the rollout host:
+After the endpoint is reachable from the Gym host, prepare the benchmark with
+the Nano Omni profile:
 
 ```bash
-OMNI_MINI_VLLM_BASE_URL=http://model-host:8000/v1 \
-  bash benchmarks/osworld/tools/run_omni_mini_vllm.sh
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL
 ```
 
-The runner script performs a real image request before starting Gym. It uses
-the committed five-task example by default. Override `INPUT_JSONL`, `LIMIT`,
-`NUM_ENVS`, `RUN_DIR`, or `RESUME_FROM_CACHE` for larger runs.
+Then use `gym env start` and `gym eval run --no-serve` exactly as shown in the
+quickstart.
 
 The default overlay sends the current screenshot plus at most two historical
 screenshots and compacts older interactions into text. For an endpoint limited
@@ -149,6 +162,11 @@ to one image per request, use the same class and set
 `agent_kwargs.max_image_history_length: 1`; no alternate agent class is
 required. Qwen3-Omni uses a different tool-call protocol and therefore has its
 own `benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml` overlay.
+
+Nano Omni history contains Thought and Action only; previously executed Code is
+not repeated. This prompt contract is implemented directly by the standard
+`NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
+extend `PYTHONPATH` with a reproduction overlay.
 
 ## Multi-environment runs
 
@@ -333,11 +351,13 @@ starting `gym env start` directly.
 
 ### Full model I/O
 
-For a focused diagnostic run, opt in to exact agent and transport payloads:
+For a focused diagnostic run, opt in to exact agent and transport payloads
+before starting the canonical Gym control process:
 
 ```bash
-FULL_MODEL_IO=1 RUN_DIR=results/omni-diagnostic \
-  bash benchmarks/osworld/tools/run_omni_mini_vllm.sh
+export OSWORLD_MODEL_IO_LOG="$PWD/results/omni-diagnostic/model-io-agent.jsonl"
+export NEMO_GYM_VLLM_TRANSPORT_LOG="$PWD/results/omni-diagnostic/model-io-transport.jsonl"
+gym env start
 ```
 
 This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. The agent log
