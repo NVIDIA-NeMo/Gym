@@ -14,6 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
+from nemo_gym.discovery import merge_by_name
 from nemo_gym.model_registry import _discover_models_in_dir
 
 
@@ -31,23 +32,32 @@ def _make_model(models_dir: Path, name: str, *, app: bool = True, flavors=()) ->
 
 
 class TestDiscoverModels:
-    def test_discovers_by_directory_name(self, tmp_path: Path) -> None:
+    def test_keys_by_model_name(self, tmp_path: Path) -> None:
+        # One entry per --model-type name: `<dir>` for the flavor named after the model, `<dir>/<flavor>`
+        # for the rest.
         _make_model(tmp_path, "my_model", flavors=("my_model", "some_other_flavor"))
         _make_model(tmp_path, "another_model", flavors=("another_model",))
 
         models = _discover_models_in_dir(tmp_path)
 
-        assert set(models) == {"my_model", "another_model"}
-        assert list(models["my_model"].variants) == ["my_model", "some_other_flavor"]
+        assert set(models) == {"my_model", "my_model/some_other_flavor", "another_model"}
+        assert models["my_model/some_other_flavor"].model_group == "my_model"
+        assert models["my_model"].config_path == tmp_path / "my_model" / "configs" / "my_model.yaml"
 
-    def test_model_types_are_the_model_type_tokens(self, tmp_path: Path) -> None:
-        # The flavor named after the model is the default (bare `<name>`); others are `<name>/<flavor>`.
-        _make_model(tmp_path, "my_model", flavors=("my_model", "some_other_flavor"))
+    def test_user_flavor_shadows_only_its_name_not_the_whole_group(self, tmp_path: Path) -> None:
+        # A user's `vllm_model` flavor shadows only the `vllm_model` name; the built-in
+        # `vllm_model/vllm_model_for_training` flavor stays discoverable.
+        user = tmp_path / "user"
+        builtin = tmp_path / "builtin"
+        _make_model(user, "vllm_model", flavors=("vllm_model",))
+        _make_model(builtin, "vllm_model", flavors=("vllm_model", "vllm_model_for_training"))
 
-        assert _discover_models_in_dir(tmp_path)["my_model"].model_types == [
-            "my_model",
-            "my_model/some_other_flavor",
-        ]
+        merged = merge_by_name([_discover_models_in_dir(user), _discover_models_in_dir(builtin)])
+
+        assert set(merged) == {"vllm_model", "vllm_model/vllm_model_for_training"}
+        assert merged["vllm_model"].config_path == user / "vllm_model" / "configs" / "vllm_model.yaml"  # user wins
+        survivor = merged["vllm_model/vllm_model_for_training"]  # built-in flavor survives
+        assert survivor.config_path == builtin / "vllm_model" / "configs" / "vllm_model_for_training.yaml"
 
     def test_dirs_without_a_config_are_skipped(self, tmp_path: Path) -> None:
         # Only a dir that ships a config (something to pass to --model-type) is a model: a stray .egg-info,

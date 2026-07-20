@@ -21,7 +21,7 @@ directory tree only; never loads a config.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.discovery import discover_components
@@ -34,30 +34,18 @@ MODEL_CONFIGS_SUBDIR = "configs"
 
 @dataclass(frozen=True)
 class ModelEntry:
-    """A discovered model server: its name, where it lives, and its config flavors."""
+    """A discovered model server: its name, group, and config file."""
 
     name: str
-    path: Path
-    config_paths: Tuple[Path, ...]  # flavor config files, sorted (a model always ships at least one)
-
-    @property
-    def variants(self) -> Dict[str, Path]:
-        """Map flavor name (config filename stem) -> config path."""
-        return {path.stem: path for path in self.config_paths}
-
-    @property
-    def model_types(self) -> List[str]:
-        """The tokens accepted by ``--model-type``: ``<name>`` for the flavor named after the model (the
-        default the selector resolves), ``<name>/<flavor>`` for the rest."""
-        return [self.name if stem == self.name else f"{self.name}/{stem}" for stem in sorted(self.variants)]
+    model_group: str
+    config_path: Path
 
 
 def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
-    """Map model name -> :class:`ModelEntry` for every model dir under one ``responses_api_models/`` dir.
+    """Map model name -> :class:`ModelEntry` for every config flavor under one ``responses_api_models/`` dir.
 
-    The name is the directory name. A directory is a model iff it ships at least one ``configs/*.yaml`` —
-    the config a user passes to ``--model-type`` (a config-less dir has nothing to select, so it isn't
-    listed). Returns an empty dict if the directory is missing.
+    One entry per ``configs/<flavor>.yaml``: ``<dir>`` for the flavor named after the model, ``<dir>/<flavor>``
+    for the rest. A config-less dir contributes nothing. Returns an empty dict if the directory is missing.
     """
     models: Dict[str, ModelEntry] = {}
     if not models_dir.is_dir():
@@ -67,10 +55,10 @@ def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
         if not child.is_dir():
             continue
         configs_dir = child / MODEL_CONFIGS_SUBDIR
-        config_files = tuple(sorted(configs_dir.glob("*.yaml"))) if configs_dir.is_dir() else ()
-        if not config_files:
-            continue
-        models[child.name] = ModelEntry(name=child.name, path=child, config_paths=config_files)
+        config_files = sorted(configs_dir.glob("*.yaml")) if configs_dir.is_dir() else []
+        for config in config_files:
+            name = child.name if config.stem == child.name else f"{child.name}/{config.stem}"
+            models[name] = ModelEntry(name=name, model_group=child.name, config_path=config)
 
     return models
 

@@ -43,11 +43,7 @@ def list_models() -> None:
     models = discover_models()
 
     # One row per passable `--model-type` value: `model` is the token, `model_group` its model.
-    rows = [
-        {"model": model_type, "model_group": name}
-        for name, entry in models.items()
-        for model_type in entry.model_types
-    ]
+    rows = [{"model": entry.name, "model_group": entry.model_group} for entry in models.values()]
 
     # `gym search models <query>` reuses this command, narrowing to rows matching the token or its model.
     query = global_config_dict.get(QUERY_KEY_NAME)

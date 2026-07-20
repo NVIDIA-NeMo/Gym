@@ -26,15 +26,15 @@ def _mock_global_config(config: dict = None):
     return OmegaConf.create(config or {})
 
 
-def _entry(name: str, flavors=()) -> ModelEntry:
-    path = Path("responses_api_models") / name
-    config_paths = tuple(path / "configs" / f"{f}.yaml" for f in flavors)
-    return ModelEntry(name=name, path=path, config_paths=config_paths)
+def _entry(name: str, group: str) -> ModelEntry:
+    config_path = Path("responses_api_models") / group / "configs" / f"{name.split('/')[-1]}.yaml"
+    return ModelEntry(name=name, model_group=group, config_path=config_path)
 
 
 _MODELS = {
-    "my_model": _entry("my_model", flavors=("my_model", "some_other_flavor")),
-    "another_model": _entry("another_model", flavors=("another_model",)),
+    "my_model": _entry("my_model", "my_model"),
+    "my_model/some_other_flavor": _entry("my_model/some_other_flavor", "my_model"),
+    "another_model": _entry("another_model", "another_model"),
 }
 
 
@@ -47,7 +47,7 @@ class TestListModels:
             list_models()
         out = capsys.readouterr().out
 
-        variants = [token for entry in _MODELS.values() for token in entry.model_types]
+        variants = list(_MODELS)
         assert len(variants) == 3
         # one data row per variant (data rows use the light "│"; the header uses the heavy "┃")
         assert sum(1 for line in out.splitlines() if "│" in line) == 3
