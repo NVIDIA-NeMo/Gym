@@ -2859,6 +2859,8 @@ def test_opencode_switchyard_config_points_at_switchyard() -> None:
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"]["baseURL"] == "http://switchyard:4000/v1"
     assert "policy-model" in provider["models"]
+    # Task-tool guidance is appended to opencode's system prompt via instructions.
+    assert cfg["instructions"] == [swe_app._OPENCODE_INSTRUCTIONS_PATH]
 
 
 ########################################
@@ -3104,6 +3106,9 @@ class TestUpstreamOpenCodeRunCommand:
             assert '"autoupdate": false' in script
             assert '"baseURL": "http://switchyard:4000/v1"' in script
             assert '"npm": "@ai-sdk/openai-compatible"' in script
+            # The task-tool guidance file is written and referenced as an instruction.
+            assert swe_app._OPENCODE_INSTRUCTIONS_PATH in script
+            assert "do not set the `task_id` parameter" in script
 
     def test_upstream_requires_switchyard_base_url(self, _stub_model_server) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

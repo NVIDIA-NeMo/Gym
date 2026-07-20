@@ -1983,6 +1983,25 @@ def _render_opencode_user_message(
         )
 
 
+# Container path for the system-prompt instruction file we hand opencode via the
+# config's ``instructions`` list. Kept outside the workspace so it never shows up
+# in the ``git diff HEAD`` that becomes the task patch.
+_OPENCODE_INSTRUCTIONS_PATH = "/tmp/switchyard_opencode_instructions.md"
+
+# Steer the model away from opencode's `task` tool crash: upstream opencode
+# hard-fails when the model supplies a `task_id` that does not begin with `ses`
+# (a synchronous SessionID.make throw defeats its graceful fallback — see
+# sst/opencode task tool). Smaller models routinely invent one; omitting it lets
+# opencode spawn a fresh subagent session, which Switchyard captures cleanly.
+_OPENCODE_TASK_ID_GUIDANCE = (
+    "When you use the `task` tool to start a new subagent, do not set the "
+    "`task_id` parameter — omit it so a fresh subagent session is created. "
+    "Only pass `task_id` to resume a subagent session you started earlier in "
+    "this conversation; a valid session id begins with `ses`. Never invent or "
+    "guess a `task_id` value."
+)
+
+
 def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[str, Any]:
     """opencode.json for upstream opencode routed through Switchyard (no fork).
 
@@ -1991,7 +2010,8 @@ def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[st
     opencode only emits its native ``X-Session-Id`` / ``x-parent-session-id``
     correlation headers for non-``opencode`` providers, and those headers are how
     Switchyard captures the session tree. Set as the default model so opencode does
-    not fall back to its hosted free models.
+    not fall back to its hosted free models. ``instructions`` appends the task-tool
+    guidance to opencode's system prompt (see ``_OPENCODE_TASK_ID_GUIDANCE``).
     """
     return {
         "$schema": "https://opencode.ai/config.json",
@@ -2004,6 +2024,7 @@ def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[st
             }
         },
         "model": f"switchyard/{model}",
+        "instructions": [_OPENCODE_INSTRUCTIONS_PATH],
         "autoupdate": False,
     }
 
@@ -2359,6 +2380,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"{baseline_fix_cmd}"
             f"cd {shlex.quote(workspace_path)} && "
             f"echo {shlex.quote(opencode_cfg_json)} > opencode.json && "
+            f"echo {shlex.quote(_OPENCODE_TASK_ID_GUIDANCE)} > {_OPENCODE_INSTRUCTIONS_PATH} && "
             "_OC_EXIT=0 && "
             f"timeout {self.config.swebench_agent_timeout} "
             "/opencode_setup/opencode/node_modules/.bin/opencode run "
