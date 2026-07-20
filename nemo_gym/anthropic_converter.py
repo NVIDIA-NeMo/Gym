@@ -485,7 +485,7 @@ class AnthropicConverter:
             if item_type == "message":
                 content.extend(self._output_message_to_anthropic_blocks(item))
             elif item_type == "reasoning":
-                content.extend(self._reasoning_item_to_anthropic_blocks(item))
+                content.extend(self._reasoning_item_to_anthropic_blocks(item, default_empty_signature=True))
             elif item_type == "function_call":
                 content.append(self._function_call_to_tool_use(item))
                 has_tool_use = True
@@ -712,16 +712,17 @@ class AnthropicConverter:
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
         return [{"type": "text", "text": text} for text in system_parts if text]
 
-    def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _reasoning_item_to_anthropic_blocks(
+        self, item: Dict[str, Any], default_empty_signature: bool = False
+    ) -> List[Dict[str, Any]]:
         blocks = []
         for summary in item.get("summary", []):
-            # Anthropic's ThinkingBlock requires a signature; open-model backends don't
-            # produce one, so default to "" (the synthesized SSE never emits it anyway).
-            block = {
-                "type": "thinking",
-                "thinking": summary["text"],
-                "signature": item.get("encrypted_content") or "",
-            }
+            block: Dict[str, Any] = {"type": "thinking", "thinking": summary["text"]}
+            encrypted_content = item.get("encrypted_content")
+            if encrypted_content:
+                block["signature"] = encrypted_content
+            elif default_empty_signature:
+                block["signature"] = ""
             blocks.append(block)
         return blocks
 
