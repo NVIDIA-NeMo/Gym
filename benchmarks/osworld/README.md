@@ -22,18 +22,6 @@ its setup, action, and evaluator behavior intact.
   screenshot observations.
 - Read/write access to `/dev/kvm` for the Gym Docker Sandbox path.
 
-The optional host helper installs Docker, `uv`, and the video-recording tools:
-
-```bash
-bash benchmarks/osworld/tools/bringup_local_host.sh
-```
-
-For a non-mutating audit of an existing host, run:
-
-```bash
-bash benchmarks/osworld/tools/check_host_prerequisites.sh
-```
-
 ## Quickstart
 
 From the Gym repository root, enter the benchmark directory and prepare the
@@ -370,18 +358,9 @@ The repository includes:
 - `data/example_rollouts.jsonl`: five sample rollout responses;
 - `data/test_small.jsonl`: the 39-task OSWorld smoke subset.
 
-Generate other upstream manifests with `convert_osworld_tasks.py`:
-
-```bash
-git clone https://github.com/xlang-ai/OSWorld.git /path/to/OSWorld
-python benchmarks/osworld/tools/convert_osworld_tasks.py \
-  --osworld-root /path/to/OSWorld \
-  --manifest test_all \
-  --output benchmarks/osworld/data/test_all.jsonl
-```
-
-The converter supports `test_all`, `test_small`, `test_infeasible`, and
-`test_nogdrive`. Generated full datasets are intentionally not committed.
+Additional inputs may be supplied with `prepare.py --input`; each JSONL row
+must follow the same `verifier_metadata.osworld_task` contract as the committed
+examples. Generated full datasets are intentionally not committed.
 
 ## Troubleshooting
 

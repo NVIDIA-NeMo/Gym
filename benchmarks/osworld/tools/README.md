@@ -8,18 +8,14 @@ prepare.py
   -> gym eval run --no-serve
 ```
 
-The tracked files here are optional host, VM, and dataset preparation tools.
-They do not start Gym or proxy runtime traffic.
+The tracked files here are the public runtime wrappers and the one VM
+preparation helper required by a first-time Sandbox deployment.
 
 | Tool | Purpose |
 | --- | --- |
 | `start_control.sh` | Supervisor-friendly wrapper around `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
-| `bringup_local_host.sh` | Install Docker, `uv`, and optional video tools on a Linux x86_64 Gym host |
-| `check_host_prerequisites.sh` | Audit an existing Gym host without changing it |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |
-| `convert_osworld_tasks.py` | Convert upstream OSWorld manifests and tasks to Gym JSONL |
-| `check_task_input_parity.py` | Compare materialized task definitions across two inputs |
 
 Model serving belongs to the deployment layer. Model-specific benchmark
 selection belongs to `prepare.py --profile`; neither is implemented here.

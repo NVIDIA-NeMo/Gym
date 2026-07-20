@@ -254,3 +254,8 @@ env.yaml
 /benchmarks/osworld/tools/run_multienv_osworld_agent.sh
 /benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
 /benchmarks/osworld/tools/run_omni_mini_vllm.sh
+/benchmarks/osworld/tools/bringup_local_host.sh
+/benchmarks/osworld/tools/check_host_prerequisites.sh
+/benchmarks/osworld/tools/check_task_input_parity.py
+/benchmarks/osworld/tools/convert_osworld_tasks.py
+/benchmarks/osworld/tests/test_task_input_parity.py

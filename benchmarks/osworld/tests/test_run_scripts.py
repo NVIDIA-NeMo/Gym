@@ -8,7 +8,6 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-HOST_CHECK_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/check_host_prerequisites.sh"
 VM_PREPARE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/prepare_osworld_vm.sh"
 START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
@@ -16,7 +15,7 @@ RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 
 @pytest.mark.parametrize(
     "script",
-    [HOST_CHECK_SCRIPT, VM_PREPARE_SCRIPT, START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT],
+    [VM_PREPARE_SCRIPT, START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT],
 )
 def test_public_host_setup_scripts_are_syntax_valid_and_portable(script: Path) -> None:
     subprocess.run(["bash", "-n", str(script)], check=True)
