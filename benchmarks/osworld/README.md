@@ -13,6 +13,29 @@ runtime uses an unmodified, pinned OSWorld dependency. In the current deployment
 path, Gym Docker Sandbox owns the VM container lifecycle while OSWorld keeps
 its setup, action, and evaluator behavior intact.
 
+## Deployment roles
+
+The runtime has three explicit roles:
+
+```text
+MODEL_HOST  ←─ model HTTP ─  AGENT_CONTROL_HOST  ─ Docker SSH →  ENVIRONMENT_HOST
+                              prepare / control / eval           Docker / KVM / VM
+```
+
+- The model host serves a compatible vision-language model. It does not run
+  Gym eval or OSWorld VM containers.
+- The environment host needs Docker, `/dev/kvm`, and the verified qcow2. It
+  does not need the benchmark or agent checkout.
+- The agent/control host needs this Gym checkout, the task input, and the same
+  qcow2 path for preparation-time identity validation. It runs `prepare.py`,
+  `tools/start_control.sh`, and `tools/run_eval.sh`.
+
+For a local smoke test, the agent/control and environment roles may be the same
+machine and `DOCKER_HOST` remains unset. For split hosts, complete the one-time
+Docker SSH setup below. Start the model first, verify the environment second,
+then prepare and run Gym. Neither the operator workstation nor a persistent
+interactive SSH session is part of runtime communication.
+
 ## Requirements
 
 - Linux x86_64 with Docker 20+ and access to the local Docker daemon.
@@ -24,10 +47,24 @@ its setup, action, and evaluator behavior intact.
 
 ## Quickstart
 
-From the Gym repository root, enter the benchmark directory and prepare the
-five-task default run. The Sandbox path requires an explicit, verified qcow2.
-Endpoint values can also be supplied through `POLICY_BASE_URL`,
-`POLICY_API_KEY`, and `POLICY_MODEL_NAME`:
+From the Gym repository root, first validate the two external role contracts.
+For a local environment host, run:
+
+```bash
+python3 benchmarks/osworld/tools/probe_model_endpoint.py \
+  --base-url https://your-vlm-endpoint/v1 \
+  --api-key your-key \
+  --model your-vlm-model \
+  --image-count 3
+
+bash benchmarks/osworld/tools/check_environment.sh \
+  /absolute/path/to/Ubuntu.qcow2
+```
+
+Then enter the benchmark directory and prepare the five-task default run. The
+Sandbox path requires the explicit, verified qcow2. Endpoint values can also
+be supplied through `POLICY_BASE_URL`, `POLICY_API_KEY`, and
+`POLICY_MODEL_NAME`:
 
 ```bash
 cd benchmarks/osworld
@@ -36,22 +73,29 @@ export POLICY_API_KEY="your-key"  # pragma: allowlist secret
 export POLICY_MODEL_NAME="your-vlm-model"
 python3 prepare.py \
   --execution-backend gym_sandbox \
-  --vm-path /absolute/path/to/Ubuntu.qcow2
-
-gym env start
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --force-env
 ```
 
-With `gym env start` still active, use a second terminal in the same directory:
+Set a run ID, then keep the control wrapper active:
 
 ```bash
-gym eval run --no-serve
+export OSWORLD_RUN_ID=my-osworld-run
+tools/start_control.sh /absolute/run/root
 ```
 
-For supervisor-managed deployments, the equivalent public wrappers are
-`tools/start_control.sh` and `tools/run_eval.sh`. `tools/cleanup_run.sh` stops
-the recorded processes and removes only that run's labeled Sandbox containers
-while preserving results. The wrappers require
-`OSWORLD_RUN_ID` and write logs beneath an optional run-root argument.
+After the control log reports ready, run eval in a second terminal or
+supervisor, and clean up when it finishes:
+
+```bash
+tools/run_eval.sh /absolute/run/root
+tools/cleanup_run.sh /absolute/run/root
+```
+
+The wrappers write logs beneath the run root. `cleanup_run.sh` stops the
+recorded processes and removes only that run's labeled Sandbox containers
+while preserving results. The exact scripts used by each role are summarized
+in [`tools/README.md`](tools/README.md).
 
 `prepare.py` validates the committed input and qcow2, records the disk identity,
 prefetches setup and evaluator files, and writes a private, gitignored
@@ -128,8 +172,8 @@ python3 prepare.py \
   --policy-model-name SERVED_NANO_OMNI_MODEL
 ```
 
-Then use `gym env start` and `gym eval run --no-serve` exactly as shown in the
-quickstart.
+Then use `tools/start_control.sh` and `tools/run_eval.sh` exactly as shown in
+the quickstart.
 
 The default overlay sends the current screenshot plus at most two historical
 screenshots and compacts older interactions into text. For an endpoint limited
@@ -145,8 +189,8 @@ extend `PYTHONPATH` with a reproduction overlay.
 ## Multi-environment runs
 
 Set concurrency and data selection during preparation, then use the same two
-Gym commands. `--concurrency` controls simultaneous `DesktopEnv` instances;
-the selected JSONL controls the task set.
+public runtime wrappers. `--concurrency` controls simultaneous `DesktopEnv`
+instances; the selected JSONL controls the task set.
 
 ```bash
 cd benchmarks/osworld
@@ -159,9 +203,10 @@ python3 prepare.py \
   --concurrency 4 \
   --force-env
 
-gym env start
-# In a second terminal:
-gym eval run --no-serve
+export OSWORLD_RUN_ID=my-osworld-run
+tools/start_control.sh /absolute/run/root
+# After control is ready, in a second terminal:
+tools/run_eval.sh /absolute/run/root
 ```
 
 ### Deterministic task sharding
@@ -197,14 +242,9 @@ single-worker behavior: `prepare.py` uses the input JSONL directly and does not
 create a shard file or manifest. Any positive shard count works; two is only
 the deployment example below.
 
-To generate a full input from the pinned OSWorld checkout before sharding:
-
-```bash
-python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
-  --osworld-root /absolute/path/to/OSWorld \
-  --manifest test_all \
-  --output /absolute/path/to/test_all.jsonl
-```
+The repository includes ready-to-use example and small inputs under `data/`.
+Larger inputs passed with `--input` must use the same JSONL schema; no
+untracked conversion helper is part of the public workflow.
 
 ### Split agent and OSWorld environment hosts
 
@@ -217,15 +257,19 @@ and QEMU/KVM guest run on the environment host.
 
 This is infrastructure setup, not part of every benchmark run:
 
-1. Install Docker and make `/dev/kvm` read/write on the environment host.
-2. Put the identical verified qcow2 at the same absolute path on the agent and
-   environment hosts.
-3. Provision non-interactive SSH from the agent host to
+1. Install Docker, make `/dev/kvm` read/write, and put the verified qcow2 at
+   the same absolute path on the agent and environment hosts.
+2. Provision non-interactive SSH from the agent host to
    `REMOTE_USER@ENV_HOST_REACHABLE_IP`. A dedicated, non-default key is
    recommended.
-4. From the agent host, verify the complete transport with one command:
+3. From the agent host, run the checked-in environment check, then verify the
+   Docker SSH transport:
 
 ```bash
+bash tools/check_environment.sh \
+  --ssh REMOTE_USER@ENV_HOST_REACHABLE_IP \
+  /same/absolute/path/on/both/hosts/Ubuntu.qcow2
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP
 DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP docker info
 ```
 
@@ -247,6 +291,12 @@ export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
 export OSWORLD_RUN_ID=my-shard-0
 export NEMO_GYM_CONTROL_HOST=AGENT_HOST_REACHABLE_IP
 export GYM_BIN=/absolute/path/to/Gym/.venv/bin/gym
+
+python3 tools/probe_model_endpoint.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model SERVED_NANO_OMNI_MODEL \
+  --image-count 3
 
 python3 prepare.py \
   --profile nano_omni \

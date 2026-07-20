@@ -1,25 +1,53 @@
-# OSWorld optional tools
+# OSWorld public tools
 
-The canonical runtime path does not depend on this directory:
+Each first-time deployment check and runtime step has one checked-in entry
+point. `prepare.py` remains at the benchmark root because it is the benchmark
+configuration entry point; host checks and lifecycle wrappers live here:
 
 ```text
-prepare.py
-  -> gym env start
-  -> gym eval run --no-serve
+model host       -> probe_model_endpoint.py
+environment host -> check_environment.sh
+agent/control     -> prepare.py -> start_control.sh -> run_eval.sh -> cleanup_run.sh
 ```
-
-The tracked files here are the public runtime wrappers and the one VM
-preparation helper required by a first-time Sandbox deployment.
 
 | Tool | Purpose |
 | --- | --- |
+| `probe_model_endpoint.py` | Require the configured model identity and optionally exercise the one- or three-image chat-completions request shape |
+| `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
 | `start_control.sh` | Supervisor-friendly wrapper around `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
 | `cleanup_run.sh` | Stop one run's recorded Gym processes and remove only its labeled Sandbox containers |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |
 
-Model serving belongs to the deployment layer. Model-specific benchmark
-selection belongs to `prepare.py --profile`; neither is implemented here.
+Model serving itself belongs to the selected model's deployment project;
+`probe_model_endpoint.py` is the provider-neutral contract check used before
+Gym starts. For example:
+
+```bash
+python3 benchmarks/osworld/tools/probe_model_endpoint.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model SERVED_MODEL_NAME \
+  --image-count 3
+```
+
+Validate an environment host locally, or stream the same checked-in checker to
+a remote host that does not have a Gym checkout:
+
+```bash
+# On the environment host:
+bash benchmarks/osworld/tools/check_environment.sh /absolute/path/to/Ubuntu.qcow2
+
+# Or, from its paired agent/control host:
+bash benchmarks/osworld/tools/check_environment.sh \
+  --ssh REMOTE_USER@ENV_HOST_REACHABLE_IP \
+  /same/absolute/path/on/both/hosts/Ubuntu.qcow2
+```
+
+The checker pins the public OSWorld disk size and SHA-256 by default. Set
+`EXPECTED_VM_SHA256`, `EXPECTED_VM_SIZE`, or `MIN_FREE_GIB` only when the
+deployment intentionally uses a different verified baseline or capacity
+threshold.
 
 Both runtime wrappers require `OSWORLD_RUN_ID`. Set
 `NEMO_GYM_CONTROL_HOST` when the control services must advertise a non-loopback
@@ -34,10 +62,13 @@ preparation; they are not repeated for each benchmark run:
 ```bash
 export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP
 export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
-docker info
+bash benchmarks/osworld/tools/check_environment.sh \
+  --ssh REMOTE_USER@ENV_HOST_REACHABLE_IP \
+  /same/absolute/path/on/both/hosts/Ubuntu.qcow2
+docker info  # validates Docker's SSH transport from this host
 ```
 
-`start_control.sh` validates both variables and the Docker connection before
+`start_control.sh` revalidates both variables and the Docker connection before
 starting Gym. The qcow2 path written by `prepare.py --vm-path` must exist at
 the same absolute path on the Docker host. Once `docker info` succeeds, each
 run uses only `prepare.py`, `start_control.sh`, and `run_eval.sh`. Export the
