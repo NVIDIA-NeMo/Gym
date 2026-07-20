@@ -37,7 +37,7 @@ DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
 
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
-M3_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_m3.yaml"
+POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_omni_mini.yaml"
 NANO_OMNI_MODEL_CONFIG = BENCHMARK_DIR / "configs" / "vllm_model_omni_mini.yaml"
 GYM_SANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_sandbox.yaml"
@@ -45,7 +45,7 @@ OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yam
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
-    "m3": (BASE_AGENT_CONFIG, M3_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
+    "pointer": (BASE_AGENT_CONFIG, POINTER_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
     "nano_omni": (BASE_AGENT_CONFIG, NANO_OMNI_AGENT_CONFIG, NANO_OMNI_MODEL_CONFIG),
 }
 BACKEND_CONFIGS = {

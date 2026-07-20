@@ -11,7 +11,7 @@ from benchmarks.osworld.assets import asset_specs_from_task, ensure_osworld_asse
 from benchmarks.osworld.prepare import (
     DEFAULT_INPUT,
     GYM_SANDBOX_CONFIG,
-    M3_AGENT_CONFIG,
+    POINTER_AGENT_CONFIG,
     prepare,
     select_config_paths,
     write_env,
@@ -73,9 +73,9 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
 
 
 def test_prepare_composes_profile_and_backend_for_gym_env() -> None:
-    paths = select_config_paths(profile="m3", execution_backend="gym_sandbox")
+    paths = select_config_paths(profile="pointer", execution_backend="gym_sandbox")
 
-    assert M3_AGENT_CONFIG.resolve() in paths
+    assert POINTER_AGENT_CONFIG.resolve() in paths
     assert paths[-1] == GYM_SANDBOX_CONFIG.resolve()
 
 

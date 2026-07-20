@@ -84,21 +84,25 @@ See the [agent runtime README](../../responses_api_agents/osworld_agent/README.m
 for the complete runner registry and prompt/action contracts. Prefer selecting
 the maintained model/agent composition with `prepare.py --profile`.
 
-### MiniMax M3
+### Pointer Agent with Opus 4.7
 
-The M3 overlay uses OSWorld's `mm_agents.m3.M3Agent`, screenshot observations,
-relative coordinates, a 100-step limit, and an 8192-token response limit. Use
-the same canonical preparation flow with the M3 profile:
+The Pointer overlay preserves OSWorld's native
+`mm_agents.pointer.PointerAgent` planner, executor, verifier, and screenshot
+action loop. Point it at the Anthropic-compatible endpoint serving Opus 4.7:
 
 ```bash
 cd benchmarks/osworld
 python3 prepare.py \
-  --profile m3 \
+  --profile pointer \
   --execution-backend gym_sandbox \
   --vm-path /absolute/path/to/Ubuntu.qcow2 \
-  --policy-base-url http://MODEL_HOST:8000/v1 \
-  --policy-model-name SERVED_M3_MODEL
+  --policy-base-url https://ANTHROPIC_COMPATIBLE_HOST/v1 \
+  --policy-model-name SERVED_OPUS_4_7_MODEL
 ```
+
+Pointer's optional web tools require `PARALLEL_API_KEY`. Without that variable,
+the adapter explicitly disables those tools while retaining the desktop-agent
+loop. Set it when leaderboard-aligned web-tool behavior is required.
 
 This appends `benchmarks/osworld/configs/osworld_sandbox.yaml`, which pins the
 OSWorld image digest, requests KVM, publishes all four OSWorld service ports on

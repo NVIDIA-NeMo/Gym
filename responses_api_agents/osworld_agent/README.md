@@ -172,11 +172,11 @@ Choose a model-specific agent composition during preparation. For example:
 
 ```bash
 python3 prepare.py \
-  --profile m3 \
+  --profile pointer \
   --execution-backend gym_sandbox \
   --vm-path /absolute/path/to/Ubuntu.qcow2 \
-  --policy-base-url http://MODEL_HOST:8000/v1 \
-  --policy-model-name SERVED_M3_MODEL
+  --policy-base-url https://ANTHROPIC_COMPATIBLE_HOST/v1 \
+  --policy-model-name SERVED_OPUS_4_7_MODEL
 ```
 
 The Docker backend mounts that base as read-only `/System.qcow2`. Reset means

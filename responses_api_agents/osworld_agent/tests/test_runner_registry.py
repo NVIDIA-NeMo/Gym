@@ -88,20 +88,15 @@ def test_qwen3_omni_runner_reuses_upstream_scaffold_with_gym_transport() -> None
     assert spec.agent_kwargs == {"api_backend": "openai", "coordinate_type": "relative"}
 
 
-def test_m3_config_overrides_the_osworld_server_config() -> None:
-    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_m3.yaml"
+def test_pointer_config_overrides_the_osworld_server_config() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_pointer.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config == {
-        "runner_name": "m3_agent",
+        "runner_name": "pointer_agent",
         "max_steps": 100,
-        "max_trajectory_length": 10,
-        "max_tokens": 8192,
-        "temperature": 0.6,
-        "top_p": None,
-        "sleep_after_execution": 3.0,
-        "task_timeout": 7200,
+        "sleep_after_execution": 0.0,
     }
 
 
