@@ -32,8 +32,12 @@ with `instance_id`, `task_name`, `docker_image`, and `task_dir`
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -42,6 +46,8 @@ _THIS_DIR = Path(__file__).parent
 
 DEFAULT_TASKS_CACHE = Path.home() / ".cache" / "harbor" / "tasks"
 DEFAULT_DATASET_NAME = "terminal-bench@2.0"
+IMAGE_BUILD_ATTEMPTS = 3
+IMAGE_BUILD_RETRY_DELAY_SECONDS = 2
 
 
 def _load_task_config(task_dir: Path) -> dict:
@@ -234,15 +240,47 @@ def _build_one_sif(task_name: str, docker_image: str, sif_dir: Path, force: bool
     sif_path = sif_dir / f"{task_name}.sif"
     if sif_path.exists() and not force:
         return task_name, True, "exists"
-    proc = subprocess.run(
-        ["apptainer", "build", "--force", str(sif_path), f"docker://{docker_image}"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-    )
-    if proc.returncode != 0:
-        return task_name, False, proc.stderr.strip()[-500:]
-    return task_name, True, "built"
+
+    failures: list[str] = []
+    for attempt in range(1, IMAGE_BUILD_ATTEMPTS + 1):
+        # Build beside the final image so the completed SIF can be atomically renamed into place.
+        # Keeping each attempt in its own directory also makes all failed output easy to remove.
+        build_dir = Path(tempfile.mkdtemp(prefix=f".{task_name}-", dir=sif_dir))
+        staged_path = build_dir / sif_path.name
+        built = False
+        try:
+            proc = subprocess.run(
+                ["apptainer", "build", "--force", str(staged_path), f"docker://{docker_image}"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            if proc.returncode != 0:
+                error = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+                failures.append(f"attempt {attempt}/{IMAGE_BUILD_ATTEMPTS}: {error[-500:]}")
+            elif not staged_path.is_file():
+                failures.append(
+                    f"attempt {attempt}/{IMAGE_BUILD_ATTEMPTS}: apptainer succeeded without producing {staged_path.name}"
+                )
+            else:
+                os.replace(staged_path, sif_path)
+                built = True
+        except OSError as exc:
+            failures.append(f"attempt {attempt}/{IMAGE_BUILD_ATTEMPTS}: {exc}")
+
+        try:
+            shutil.rmtree(build_dir)
+        except OSError as exc:
+            failures.append(f"attempt {attempt}/{IMAGE_BUILD_ATTEMPTS}: failed to clean {build_dir}: {exc}")
+            return task_name, False, "\n".join(failures)
+
+        if built:
+            detail = "built" if attempt == 1 else f"built after {attempt} attempts"
+            return task_name, True, detail
+        if attempt < IMAGE_BUILD_ATTEMPTS:
+            time.sleep(IMAGE_BUILD_RETRY_DELAY_SECONDS * attempt)
+
+    return task_name, False, "\n".join(failures)
 
 
 def build_images(task_rows: list[dict], sif_dir: Path, jobs: int, force: bool) -> None:
