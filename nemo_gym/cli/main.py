@@ -391,6 +391,7 @@ COMMANDS = {
             _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",)),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
+            SEARCH_DIR,
         ),
     ),
     "dataset collate": Command(
@@ -414,7 +415,7 @@ COMMANDS = {
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
         summary="Resolve the final config from configs, flags, and overrides.",
-        flags=(CONFIG,),
+        flags=(CONFIG, SEARCH_DIR),
     ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
@@ -436,6 +437,7 @@ COMMANDS = {
         summary="Print pip packages for the selected resources server.",
         flags=(
             RESOURCES_SERVER,
+            SEARCH_DIR,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
@@ -448,7 +450,7 @@ COMMANDS = {
     "env test": Command(
         target=_env_test,
         summary="Test the resources server(s); runs all if no resources server is given.",
-        flags=(RESOURCES_SERVER,),
+        flags=(RESOURCES_SERVER, SEARCH_DIR),
     ),
     "env start": Command(
         target="nemo_gym.cli.env:run",
