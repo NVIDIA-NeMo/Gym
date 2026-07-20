@@ -83,6 +83,7 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
     assert "setup_cache_dir:" in contents
     assert "asset_input_jsonl:" in contents
     assert "num_samples_in_parallel: 5" in contents
+    assert "concurrency: 5" in contents
     assert "max_output_tokens: 4096" in contents
     assert "temperature: 0.6" in contents
     assert "top_p: 0.95" in contents

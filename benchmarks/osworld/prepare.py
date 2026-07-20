@@ -281,6 +281,8 @@ def write_env(
         raise ValueError("head_host must not be empty")
     if not 1 <= head_port <= 65535:
         raise ValueError("head_port must be between 1 and 65535")
+    if num_samples_in_parallel < 1:
+        raise ValueError("num_samples_in_parallel must be >= 1")
     if execution_backend not in BACKEND_CONFIGS:
         raise ValueError(f"Unsupported OSWorld execution backend: {execution_backend!r}")
     resolved_vm_path = vm_path.expanduser().resolve() if vm_path else None
@@ -311,6 +313,7 @@ def write_env(
             "osworld_simple_agent:",
             "  responses_api_agents:",
             "    osworld_agent:",
+            f"      concurrency: {num_samples_in_parallel}",
             f"      setup_cache_dir: {_yaml_string(setup_cache_dir.resolve())}",
             f"      asset_input_jsonl: {_yaml_string((asset_input_jsonl or input_jsonl).resolve())}",
             *([] if resolved_vm_path is None else [f"      vm_path: {_yaml_string(resolved_vm_path)}"]),
@@ -390,7 +393,12 @@ def main() -> None:
     parser.add_argument("--no-env", action="store_true", help="Validate data without creating env.yaml")
     parser.add_argument("--skip-assets", action="store_true", help="Validate data without prefetching task assets")
     parser.add_argument("--force-env", action="store_true", help="Replace an existing generated env.yaml")
-    parser.add_argument("--concurrency", type=int, default=1, help="Concurrent rollout count written to env.yaml")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Concurrent eval requests and OSWorld DesktopEnv instances written to env.yaml",
+    )
     parser.add_argument("--max-output-tokens", type=int, default=1500, help="Per-step model output limit")
     parser.add_argument("--max-steps", type=int, default=None, help="Optional rollout step cap override")
     parser.add_argument("--temperature", type=float, default=1.0, help="Model sampling temperature")
@@ -429,6 +437,8 @@ def main() -> None:
     args = parser.parse_args()
 
     input_jsonl = prepare(args.input)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be >= 1")
     if args.num_shards < 1:
         parser.error("--num-shards must be >= 1")
     if not 0 <= args.shard_index < args.num_shards:
