@@ -59,6 +59,10 @@ With `gym env start` still active, use a second terminal in the same directory:
 gym eval run --no-serve
 ```
 
+For supervisor-managed deployments, the equivalent public wrappers are
+`tools/start_control.sh` and `tools/run_eval.sh`. They require
+`OSWORLD_RUN_ID` and write logs beneath an optional run-root argument.
+
 `prepare.py` validates the committed input and qcow2, records the disk identity,
 prefetches setup and evaluator files, and writes a private, gitignored
 `env.yaml` containing the config, agent, input, output, cache, and rollout
@@ -85,21 +89,12 @@ size and SHA-256. Pass the resulting qcow2 to `prepare.py --vm-path`. Override
 `VM_DIR`, `VM_URL`, `VM_SHA256`, or `VM_SIZE_BYTES` only when intentionally
 selecting another upstream image.
 
-## Runner recipes
+## Model profiles
 
 Set `runner_name` in the agent config or pass an override to `gym env start`.
 See the [agent runtime README](../../responses_api_agents/osworld_agent/README.md#supported-runners)
-for the complete runner registry and prompt/action contracts. The sections
-below document benchmark-specific smoke commands and model overlays.
-
-### Native PromptAgent smoke
-
-```bash
-bash benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
-```
-
-Use `RUNNER_NAME`, `LIMIT`, `START_NG_RUN`, or `DRY_RUN` to change the smoke
-run without editing the script.
+for the complete runner registry and prompt/action contracts. Prefer selecting
+the maintained model/agent composition with `prepare.py --profile`.
 
 ### MiniMax M3
 
@@ -119,8 +114,9 @@ python3 prepare.py \
 
 This appends `benchmarks/osworld/configs/osworld_sandbox.yaml`, which pins the
 OSWorld image digest, requests KVM, publishes all four OSWorld service ports on
-dynamic loopback ports, and mounts the qcow2 read-only. The launcher fails
-before starting Gym if the VM file or writable `/dev/kvm` is missing.
+dynamic loopback ports, and mounts the qcow2 read-only. Preparation fails before
+starting Gym if the VM file is missing; the adapter checks `/dev/kvm` again at
+Sandbox startup.
 
 ### PointerAgent
 
@@ -131,17 +127,9 @@ without a key those tools are disabled automatically.
 
 ### Nemotron 3 Nano Omni with vLLM
 
-Start the checkpoint on a model host with enough GPU memory. The launcher
-defaults to tensor parallel size 1; set `TENSOR_PARALLEL_SIZE` to use multiple
-GPUs.
-
-```bash
-bash benchmarks/osworld/tools/launch_omni_mini_vllm.sh
-```
-
-The launcher pins the checkpoint revision and requires vLLM 0.20.0 by default.
-After the endpoint is reachable from the Gym host, prepare the benchmark with
-the Nano Omni profile:
+Start the checkpoint through the deployment layer on a model host with enough
+GPU memory. After its OpenAI-compatible endpoint is reachable from the Gym
+host, prepare the benchmark with the Nano Omni profile:
 
 ```bash
 cd benchmarks/osworld
@@ -170,36 +158,24 @@ extend `PYTHONPATH` with a reproduction overlay.
 
 ## Multi-environment runs
 
-`run_multienv_osworld_agent.sh` starts the configured services, waits for
-readiness, and invokes the rollout collector. `NUM_ENVS` controls parallel
-`DesktopEnv` instances; `LIMIT` controls total input rows.
+Set concurrency and data selection during preparation, then use the same two
+Gym commands. `--concurrency` controls simultaneous `DesktopEnv` instances;
+the selected JSONL controls the task set.
 
 ```bash
-RUNNER_NAME=prompt_agent \
-POLICY_MODEL_NAME=<your-model> \
-NUM_ENVS=4 \
-LIMIT=8 \
-bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
-```
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input data/test_all.jsonl \
+  --output /absolute/path/to/results/rollouts.jsonl \
+  --concurrency 4 \
+  --force-env
 
-For resumable benchmark runs, keep the input ordering, output path, repeat
-count, and sampling settings stable:
-
-```bash
-INPUT_JSONL=benchmarks/osworld/data/test_all.jsonl \
-LIMIT=null NUM_ENVS=4 RESUME_FROM_CACHE=1 \
-bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
-```
-
-For Internal/Gym parity runs, fail before launch if the materialized task
-instruction, setup order, or evaluator differs. The JSON report is retained in
-the run directory:
-
-```bash
-TASK_PARITY_REFERENCE_INPUT=/path/to/canonical.jsonl \
-TASK_PARITY_IDS_FILE=/path/to/task_ids.txt \
-INPUT_JSONL=/path/to/gym.jsonl \
-bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
+gym env start
+# In a second terminal:
+gym eval run --no-serve
 ```
 
 ## Configuration
@@ -270,9 +246,9 @@ The adapter defaults to proxy disabled. Set both variables only for a run that
 is allowed to use a proxy:
 
 ```bash
-OSWORLD_ENABLE_PROXY=1 \
-PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json \
-bash benchmarks/osworld/tools/run_multienv_osworld_agent.sh
+export OSWORLD_ENABLE_PROXY=1
+export PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json
+gym env start
 ```
 
 The JSON file is local runtime configuration, not a repository asset. It is a
@@ -294,10 +270,9 @@ silently counted as formal reward-zero samples. Successful result metadata
 records whether proxy was required, enabled, and configured, but never stores
 credentials.
 
-The multi-environment launcher accepts exactly `OSWORLD_ENABLE_PROXY=0` or
-`1`, validates the config before starting Gym, and records the switch, config
-path, SHA-256, and entry count in `run.env`. OSWorld loads the file lazily only
-for `proxy: true` tasks, uses the upstream for APT with bounded retry, and
+The OSWorld agent accepts explicit boolean values for `OSWORLD_ENABLE_PROXY`
+and validates the config before starting work. OSWorld loads the file lazily
+only for `proxy: true` tasks, uses the upstream for APT with bounded retry, and
 launches Chrome through the loopback-only `127.0.0.1:18888` tinyproxy endpoint.
 
 Task setup commands may optionally declare `expected_returncodes` and
@@ -335,8 +310,9 @@ which continues to control the training reward returned by each rollout.
 
 ## Logs and artifacts
 
-`run_multienv_osworld_agent.sh` enables `${RUN_DIR}/task-artifacts` by default.
-Every rollout receives a collision-safe `${domain}/${task_id}` directory with:
+Set `OSWORLD_TASK_ARTIFACT_ROOT` before `gym env start` to enable per-task
+artifacts. Every rollout then receives a collision-safe
+`${domain}/${task_id}` directory with:
 
 - `worker.log` and `runtime.log`;
 - `traj.jsonl` with task/run identity, observation hashes, model/action steps,
@@ -345,9 +321,8 @@ Every rollout receives a collision-safe `${domain}/${task_id}` directory with:
 - `vm-exec.jsonl` with controller commands and VM responses;
 - `task.json`, `run.json`, `result.json`, and `manifest.json`.
 
-The directory is returned as `verifier_metadata.osworld_artifact_dir`. Set
-`TASK_ARTIFACTS=0` to disable it, or set `OSWORLD_TASK_ARTIFACT_ROOT` when
-starting `gym env start` directly.
+The directory is returned as `verifier_metadata.osworld_artifact_dir`. Leave
+`OSWORLD_TASK_ARTIFACT_ROOT` unset to disable these files.
 
 ### Full model I/O
 
@@ -369,14 +344,13 @@ contain embedded screenshots and prompt content, so these logs can be large
 and sensitive. They are disabled by default.
 
 The paths can be set independently with `OSWORLD_MODEL_IO_LOG`,
-`NEMO_GYM_VLLM_TRANSPORT_LOG`, and `OSWORLD_VM_EXEC_LOG`. The advanced runner
-still accepts `OSWORLD_TRANSPORT_IO_LOG` as a compatibility alias.
+`NEMO_GYM_VLLM_TRANSPORT_LOG`, and `OSWORLD_VM_EXEC_LOG`.
 
 ## Video recording
 
-Set `OSWORLD_RECORD_VIDEO_DIR` before `gym env start`, or use `RECORD_VIDEO=all` or
-`RECORD_VIDEO=sample` with the multi-environment runner. Recording is
-best-effort and does not fail the rollout if the VM cannot produce an mp4.
+Set `OSWORLD_RECORD_VIDEO_DIR` before `gym env start`. To select only specific
+tasks, also set `OSWORLD_RECORD_VIDEO_TASK_IDS_FILE`. Recording is best-effort
+and does not fail the rollout if the VM cannot produce an mp4.
 
 Schema-v2 events carry `run_id`, `adapter`, `task_id`, `domain`,
 `task_attempt`, logical `step`, and `parse_attempt` in addition to the event,

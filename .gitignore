@@ -244,3 +244,13 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Local-only OSWorld launchers retained for developer experiments. The public
+# path is prepare.py -> gym env start -> gym eval run --no-serve.
+/benchmarks/osworld/tools/launch_omni_mini_vllm.sh
+/benchmarks/osworld/tools/preflight_osworld_run.py
+/benchmarks/osworld/tools/probe_omni_mini_vllm.py
+/benchmarks/osworld/tools/run_m3_multienv.sh
+/benchmarks/osworld/tools/run_multienv_osworld_agent.sh
+/benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
+/benchmarks/osworld/tools/run_omni_mini_vllm.sh
