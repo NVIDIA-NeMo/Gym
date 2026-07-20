@@ -1216,3 +1216,59 @@ def test_mini_swe_sandbox_environment_submit_sentinel() -> None:
         assert exc_info.value.messages[0]["extra"]["submission"] == "final answer"
     finally:
         env.cleanup()
+
+
+@requires_tenacity
+def test_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_implements_connectable_provider(monkeypatch))
+
+
+async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    from nemo_gym.sandbox import ConnectableProvider
+
+    opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSDKSandbox:
+        connect_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def connect(cls, sandbox_id: str, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.connect_calls.append({"sandbox_id": sandbox_id, **kwargs})
+            return cls(sandbox_id)
+
+    monkeypatch.setattr(
+        opensandbox_provider_module,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, FakeConnectionConfig, object, object, object),
+    )
+
+    provider = OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "protocol": "https"},
+        create={"connect_attempt_timeout_s": 1},
+        probe={"command": None},
+    )
+
+    # The provider satisfies the optional capability protocol.
+    assert isinstance(provider, ConnectableProvider)
+
+    # serialize_handle returns a descriptor of just the id.
+    descriptor = await provider.serialize_handle(
+        SandboxHandle(sandbox_id="sdk-sandbox-9", provider_name="opensandbox", raw=object())
+    )
+    assert descriptor == {"sandbox_id": "sdk-sandbox-9"}
+
+    # connect rebuilds a live handle by reconnecting to that id via the SDK.
+    handle = await provider.connect(descriptor)
+    assert handle.sandbox_id == "sdk-sandbox-9"
+    assert isinstance(handle.raw, FakeSDKSandbox)
+    connect_call = FakeSDKSandbox.connect_calls[0]
+    assert connect_call["sandbox_id"] == "sdk-sandbox-9"
+    assert connect_call["skip_health_check"] is True
+    assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"
