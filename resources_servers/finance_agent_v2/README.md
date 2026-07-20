@@ -86,16 +86,23 @@ search_judge_model_name: gpt-5-mini
 
 ## Run
 
+The gym CLI (NeMo Gym >= 0.5.0) drives everything. The public benchmark recipe
+(dataset + `prepare.py` + config) lives in `benchmarks/finance_agent_v2/`; the
+server code and its `gym env test` fixtures (`data/example*.jsonl`,
+`data/example_metrics.json`) stay here under `resources_servers/finance_agent_v2/`.
+There is no `environments/finance_agent_v2/` entry: training runs this same
+resources server on externally generated SDG data.
+
 ```bash
-# Smoke test (mocks external services)
-ng_test +entrypoint=resources_servers/finance_agent_v2
+# Unit tests + example-data validation for this resources server
+gym env test --resources-server finance_agent_v2
 
-# Prepare the benchmark dataset (builds tool schemas from the imported Vals
-# classes; ingests questions from benchmarks/finance_agent_v2/data/)
-ng_prepare_benchmark "+config_paths=[benchmarks/finance_agent_v2/config.yaml]"
+# Build the public 27Q benchmark JSONL (downloads the Vals CSV if absent)
+gym eval prepare --benchmark finance_agent_v2
 
-# End-to-end rollout collection
-ng_e2e_collect_rollouts "+config_paths=[benchmarks/finance_agent_v2/config.yaml]"
+# End-to-end (prepare + start servers + collect rollouts) on the benchmark set
+gym eval run --benchmark finance_agent_v2 \
+  -c responses_api_models/openai_model/configs/openai_model.yaml
 ```
 
 ### Quickstart: public 27-question smoke run (OpenAI gpt-5-mini)
@@ -109,47 +116,44 @@ OpenAI model config.
    (`OPENAI_API_KEY`, `SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY`) as shown
    in [Setup](#setup-envyaml).
 
-2. **Convert** the raw Vals CSV (downloaded from
-   [finance-agent-v2](https://github.com/vals-ai/finance-agent-v2)) to benchmark
-   JSONL. Prompts come from `finance_agent.prompt` and tool schemas from
-   `finance_agent.tools`. The public CSV ships only rubric *criteria* (no single
-   gold answer), so the script synthesizes a GOLD `expected_answer` from those
-   criteria for our judge. The CSV's `rubric` is also copied through verbatim for
-   reference only (it is **not** used for reward):
+2. **Prepare** the benchmark JSONL. `gym eval prepare` runs
+   `benchmarks/finance_agent_v2/prepare.py`, which downloads the raw Vals public
+   CSV from [finance-agent-v2](https://github.com/vals-ai/finance-agent-v2) (if no
+   local source is present) and converts it. Prompts come from
+   `finance_agent.prompt` and tool schemas from `finance_agent.tools`. The public
+   CSV ships only rubric *criteria* (no single gold answer), so the script
+   synthesizes a GOLD `expected_answer` from those criteria for our judge. The
+   CSV's `rubric` is also copied through verbatim for reference only (it is **not**
+   used for reward). Run from the resource server's venv (has `finance_agent`):
 
    ```bash
-   python resources_servers/finance_agent_v2/scripts/convert_questions.py \
-     -i resources_servers/finance_agent_v2/data/vals_v2_public_27q.csv \
-     -o resources_servers/finance_agent_v2/data/vals_v2_public_27q.jsonl
+   source resources_servers/finance_agent_v2/.venv/bin/activate
+   gym eval prepare --benchmark finance_agent_v2
    ```
 
-3. **Start the servers** — environment config + OpenAI model config:
+3. **Start the servers** — resources server + OpenAI model config:
 
    ```bash
-   ng_run "+config_paths=[\
-     resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml,\
-     responses_api_models/openai_model/configs/openai_model.yaml]"
+   gym env start --resources-server finance_agent_v2 \
+     -c responses_api_models/openai_model/configs/openai_model.yaml
    ```
 
-4. **Collect rollouts** against the running servers, limited to 3 questions:
+4. **Collect rollouts** against the running servers, limited to 3 questions
+   (`--no-serve` reuses the servers from step 3):
 
    ```bash
-   ng_collect_rollouts "+config_paths=[\
-     resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml,\
-     responses_api_models/openai_model/configs/openai_model.yaml]" \
-     +agent_name=finance_agent \
-     +input_jsonl_fpath=resources_servers/finance_agent_v2/data/vals_v2_public_27q.jsonl \
-     +output_jsonl_fpath=results/finance_agent_v2_smoke.jsonl \
-     +limit=3 \
-     +num_samples_in_parallel=3
+   gym eval run --no-serve \
+     --agent finance_agent \
+     --input benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl \
+     --output results/finance_agent_v2_smoke.jsonl \
+     --limit 3 --concurrency 3
    ```
 
    Rewards land in `results/finance_agent_v2_smoke.jsonl` (1.0 = judge rated
    `[[2]]`, i.e. the answer covers all required facts in the GOLD reference;
-   else 0.0). Drop `+limit` to run the full set. To run on a
-   self-hosted model, swap the model config for
-   `responses_api_models/vllm_model/configs/vllm_model.yaml` and point
-   `policy_*` in `env.yaml` at your vLLM endpoint.
+   else 0.0). Drop `--limit` to run the full set. To run on a
+   self-hosted model, use `-c responses_api_models/vllm_model/configs/vllm_model.yaml`
+   and point `policy_*` in `env.yaml` at your vLLM endpoint.
 
 ## Caching (pricing / SEC)
 
@@ -196,7 +200,7 @@ re-runs are reproducible.
 runtime price queries are served from disk instead of hitting Tiingo:
 
 ```bash
-python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
+python benchmarks/finance_agent_v2/scripts/prefetch_prices.py \
   --cache-dir /shared/cache/finance_agent_v2 \
   --tickers AAPL MSFT NVDA --asset-class equity
 ```
@@ -204,12 +208,13 @@ python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
 ## Dataset & labels (path-A scoring)
 
 The public FABv2 release ships **only question strings** (no ground truth/grader).
-`benchmarks/finance_agent_v2/prepare.py` loads input by this precedence:
+`benchmarks/finance_agent_v2/prepare.py` (the `gym eval prepare` entry point)
+loads input from its `data/` dir by this precedence:
 
 1. `data/labeled.jsonl` — labeled rows (enables real scoring)
 2. `data/public.jsonl` — rows with at least `{question}`
 3. `data/public.txt` — one question per line (FABv2 public format)
-4. fallback: the resource server's `example_questions.jsonl`
+4. `data/public.csv` — raw Vals public CSV (`question`/`prompt` column)
 
 **Labeled JSONL schema** (one object per line):
 
@@ -224,8 +229,9 @@ The public FABv2 release ships **only question strings** (no ground truth/grader
   official grader; Vals's private per-criterion rubric grader is licensed and is
   deliberately not reproduced here.)
 - To source labels at scale, publish a labeled set to the GitLab Model Registry
-  (mirrors v1's `finance_sec_search_vals_200_eval`) and uncomment the
-  `gitlab_identifier` block in `benchmarks/finance_agent_v2/config.yaml`.
+  (mirrors v1's `finance_sec_search_vals_200_eval`) and point the dataset entry in
+  `benchmarks/finance_agent_v2/config.yaml` at it (`type: benchmark` +
+  `gitlab_identifier`).
 
 **Interim dry-run:** with no labels, `/verify` returns `reward=0` so the agent +
 tools path can be validated before ground truth is available.
@@ -236,7 +242,7 @@ The public FABv2 release ships **no official grader**, so scoring uses **our own
 approximation: the legacy `[[0]]/[[1]]/[[2]]` judge from
 `resources_servers/finance_sec_search`. The public CSV has no single gold answer,
 so the GOLD `expected_answer` is synthesized from the rubric criteria (see
-`scripts/convert_questions.py`); the judge awards `[[2]]` (reward 1.0) only when
+`benchmarks/finance_agent_v2/prepare.py`); the judge awards `[[2]]` (reward 1.0) only when
 the answer covers all required facts. The dataset's `rubric` field plays **no**
 role in reward.
 
@@ -252,32 +258,34 @@ Judge prompts live in `prompt_templates/`.
 ## File structure
 
 ```
-resources_servers/finance_agent_v2/
+resources_servers/finance_agent_v2/         # server code + gym env test fixtures
 ├── app.py                         # Resource server: tool endpoints + retrieval shim + verify
 ├── cache.py                       # ToolCache: namespaced atomic disk cache + read/write policy
 ├── cached_tools.py                # Cached* wrappers (price/edgar/parse) + SecFilingSearch
-├── requirements.txt               # Pins nemo-gym + Vals model-library + finance-agent
+├── requirements.txt               # Pins nemo-gym + Vals model-library (NVIDIA fork) + finance-agent
 ├── env.yaml.example
 ├── configs/
-│   └── finance_agent_v2.yaml      # The environment config: resources server + judge model + agent + dataset (binary scoring)
-├── scripts/
-│   ├── convert_questions.py       # Vals public CSV -> benchmark JSONL (upstream prompts/tools; criteria -> GOLD expected_answer; rubric copied through for reference)
-│   └── prefetch_prices.py         # Sequential Tiingo prefetch into the cache (idempotent/resumable)
-├── prompt_templates/              # judge / retrieval
-├── data/                          # example.jsonl, example_rollouts.jsonl, example_questions.jsonl, vals_v2_public_27q.jsonl
+│   └── finance_agent_v2.yaml      # Resources-server config used by gym env test / gym dataset collate
+│                                  # (the benchmark recipe config_paths-chains to this; no duplication)
+├── prompt_templates/              # judge / retrieval (loaded at runtime; server cwd = this dir)
+├── data/                          # gym env test fixtures: example.jsonl (5), example_metrics.json, example_rollouts.jsonl
 └── tests/                         # test_app.py (server), test_cache.py (cache layer)
 
-benchmarks/finance_agent_v2/
-├── prepare.py                     # Builds tool schemas from upstream classes; ingests questions
-└── config.yaml                    # Benchmark wiring (inherits base, overrides dataset)
+benchmarks/finance_agent_v2/                # public eval recipe (self-contained)
+├── config.yaml                    # Thin overlay: config_paths -> resources config + _inherit_from + benchmark dataset
+├── prepare.py                     # gym eval prepare entry point + CSV->JSONL converter (builds tool schemas from upstream classes)
+├── scripts/
+│   ├── prefetch_prices.py         # Sequential Tiingo prefetch into the cache (idempotent/resumable)
+│   └── compare_runs.py            # Compare rollout JSONLs by per-question reward
+└── data/                          # gitignored; prepare.py regenerates vals_v2_public_27q.jsonl from the upstream Vals export
 ```
 
 ## Licensing
 
-**This environment's code** (everything under `resources_servers/finance_agent_v2/`)
-is licensed under **Apache-2.0**, consistent with NeMo Gym and the SPDX headers in
-each source file (`app.py`, `scripts/convert_questions.py`, `tests/test_app.py`,
-`benchmarks/finance_agent_v2/*`).
+**This environment's code** (everything under `resources_servers/finance_agent_v2/`
+and `benchmarks/finance_agent_v2/`) is licensed under **Apache-2.0**, consistent
+with NeMo Gym and the SPDX headers in each source file (`app.py`,
+`tests/test_app.py`, `benchmarks/finance_agent_v2/prepare.py`).
 
 **Upstream dependencies** (imported, not vendored — see `requirements.txt`):
 
@@ -289,7 +297,8 @@ each source file (`app.py`, `scripts/convert_questions.py`, `tests/test_app.py`,
 We import these packages at install time and do not copy their source into this
 repo, so their MIT terms apply to that code as distributed by the upstream/fork.
 
-**Dataset.** `data/vals_v2_public_27q.*` and the `example.jsonl` questions derive
+**Dataset.** The `example.jsonl` fixtures (here) and
+`benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl` derive
 from the **public** Vals Finance Agent Benchmark v2 release
 ([vals-ai/finance-agent-v2](https://github.com/vals-ai/finance-agent-v2)); use is
 subject to that project's terms. The public release ships **no official grader**.

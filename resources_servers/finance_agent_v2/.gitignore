@@ -2,6 +2,7 @@
 data/*.jsonl
 data/*.csv
 
-# Keep required example files
+# Keep the required gym env test fixtures
 !data/example.jsonl
 !data/example_questions.jsonl
+!data/example_rollouts.jsonl

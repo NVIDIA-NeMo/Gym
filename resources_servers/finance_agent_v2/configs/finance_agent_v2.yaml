@@ -8,7 +8,7 @@
 # PUBLIC dataset: the public FABv2 release ships no official grader, so scoring
 # uses OUR OWN approximation — the legacy [[0]]/[[1]]/[[2]] judge (same as
 # resources_servers/finance_sec_search), grading each answer against a GOLD
-# reference synthesized from the public rubric criteria (see scripts/convert_questions.py).
+# reference synthesized from the public rubric criteria (see benchmarks/finance_agent_v2/prepare.py).
 # The dataset's `rubric` field is propagated for reference only; it is not used for
 # reward. (Vals's private per-check rubric grader is licensed and not reproduced here.)
 finance_agent_v2_resources_server:
