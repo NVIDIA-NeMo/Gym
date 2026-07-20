@@ -1,0 +1,67 @@
+agent_skills:
+  resources_servers:
+    agent_skills:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Hidden sandbox checks for coding-agent skill evaluations
+      value: Measure whether operational skills improve coding-agent task completion
+      sandbox_provider: sandbox
+      concurrency: 8
+      cleanup_timeout: 30
+      check_suites:
+        create-environment-sql-v1:
+          sandbox_spec:
+            image: ${agent_skills_sandbox_image}
+            workdir: /workspace/nemo-gym
+            ttl_s: 1800
+            resources:
+              cpu: 4
+              memory_mib: 8192
+          workspace: /workspace/nemo-gym
+          check_cwd: /tmp/nemo_gym_hidden_checks
+          user: root
+          check_user: nobody
+          hidden_file_paths:
+            run_checks.py: resources_servers/agent_skills/checks/create_environment_sql.py
+          check_command: /workspace/nemo-gym/.venv/bin/python run_checks.py
+          timeout: 900
+
+agent_skills_claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agent_skills
+      concurrency: 4
+      model: ${anthropic_model_name}
+      anthropic_api_key: ${anthropic_api_key}
+      anthropic_base_url: ${oc.select:anthropic_base_url,null}
+      max_turns: 60
+      timeout: 1800
+      bare: false
+      disallowed_tools: TaskCreate,TaskUpdate,TaskList,TaskGet
+      sandbox_provider: sandbox
+      sandbox_spec:
+        image: ${agent_skills_sandbox_image}
+        workdir: /workspace/nemo-gym
+        ttl_s: 1800
+        resources:
+          cpu: 4
+          memory_mib: 8192
+      sandbox_workspace: /workspace/nemo-gym
+      sandbox_user: root
+      sandbox_require_clean_workspace: true
+      sandbox_forbidden_workspace_paths:
+        - .agents/skills
+        - .claude/skills
+        - .codex/skills
+      datasets:
+        - name: create_environment_development
+          type: example
+          jsonl_fpath: benchmarks/agent_skills/data/create_environment_development.jsonl
+
+# Build with benchmarks/agent_skills/fixtures/create-environment-sql/Dockerfile
+# and override this value with the immutable image tag or digest.
+agent_skills_sandbox_image: ???

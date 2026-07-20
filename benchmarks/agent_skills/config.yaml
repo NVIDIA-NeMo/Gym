@@ -1,0 +1,19 @@
+config_paths:
+  - resources_servers/agent_skills/configs/agent_skills.yaml
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
+agent_skills_create_environment_resources_server:
+  _inherit_from: agent_skills
+
+agent_skills_create_environment_claude_code_agent:
+  _inherit_from: agent_skills_claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      resources_server:
+        name: agent_skills_create_environment_resources_server
+      datasets:
+        - name: create_environment_validation
+          type: benchmark
+          jsonl_fpath: benchmarks/agent_skills/data/create_environment_validation.jsonl
+          prepare_script: benchmarks/agent_skills/prepare.py
+          prompt_config: null

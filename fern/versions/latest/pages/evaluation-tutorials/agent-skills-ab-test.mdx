@@ -1,0 +1,537 @@
+---
+title: "Evaluate an Agent Skill"
+description: "Measure whether giving a coding agent one skill changes its success on a fixed task."
+position: 4
+---
+
+Suppose you wrote a skill that teaches Claude Code how to create NeMo Gym environments. How do you know the skill helps?
+
+The cleanest experiment changes one thing:
+
+- **Control**: Claude Code receives the task without the skill.
+- **Treatment**: Claude Code receives the same task with the skill.
+
+Everything else—the model, task, starting repository, sampling settings, and verifier—stays fixed. The skill is the intended intervention. With one stochastic rollout, a difference is still only an observation; repeated tasks and rollouts are needed to estimate a reliable effect.
+
+<Info>
+
+**Goal**: Run a sandboxed control-versus-treatment smoke test of `nemo-gym-create-environment`.
+
+**What the agent builds**: A native SQL-generation resources server.
+
+**Cost**: Two coding-agent sessions. Actual cost and duration depend on your model endpoint. The smoke manifest caps agent execution at 30 turns and 10 minutes; hidden verification has its own timeout.
+
+**What this proves**: That the evaluation pipeline, skill loading, and scoring work. One task is not enough to establish that the skill generalizes.
+
+</Info>
+
+<Warning>
+
+The agent sandbox runs model-generated commands as root, has network access, and receives a model credential. Docker shares the host kernel and is not a VM-grade security boundary.
+
+Use a dedicated, limited-scope credential and a disposable or appropriately hardened host. Do not mount a writable host checkout. Read [Docker Sandbox](/infrastructure/sandbox/docker) before evaluating third-party tasks or skills.
+
+</Warning>
+
+## The Experiment In One Picture
+
+```text
+                         same task
+                             │
+              ┌──────────────┴──────────────┐
+              │                             │
+       discovery control                treatment
+         no skill                      skill loaded
+              │                             │
+       fresh agent sandbox            fresh agent sandbox
+              │                             │
+              └──────► Git patches ◄────────┘
+                             │
+                    fresh verifier sandboxes
+                             │
+                 hidden checks + component scores
+                             │
+                   comparison.json + report.md
+```
+
+There are two kinds of isolation here:
+
+1. Each **agent sandbox** starts from the same Docker image. Claude can edit and run commands without touching your checkout.
+2. Each resulting Git patch is applied in a new **verifier sandbox**. Hidden checks never share the agent's filesystem state.
+
+The Docker image is the reusable starting point; a sandbox is one running container created from it. The patch is the only workspace state that crosses from agent execution into verification.
+
+## What Gets Scored
+
+The task asks Claude Code to build `resources_servers/sql_generation` from existing task data and a SQLite database.
+
+| Metric | Question it answers |
+|---|---|
+| `reward` / `task_success` | Did every required check pass? |
+| `correctness` | Does the SQL verifier behave correctly? |
+| `completeness` | Did the agent deliver the required files, data, config, tests, and validation? |
+| `convention_compliance` | Did it avoid known Gym implementation anti-patterns? |
+| `sandbox_elapsed_seconds` | How long did the coding-agent sandbox run? |
+| `input_tokens`, `output_tokens` | How much model usage did the arm consume? |
+
+`reward` is intentionally strict. A polished but incomplete implementation still receives `0`.
+
+---
+
+## 1. Check The Prerequisites
+
+Run every command from the Gym repository root.
+
+You need:
+
+- a working Gym installation and `.venv`;
+- Docker with enough disk for the fixture image;
+- at least 4 CPUs and 8 GiB for the one-rollout smoke test;
+- an Anthropic-compatible endpoint and model;
+- a clean or deliberately acknowledged Git checkout.
+
+Confirm Docker is available:
+
+```bash
+docker info --format '{{.ServerVersion}}'
+```
+
+### Configure model access
+
+The benchmark reads these values from your local `env.yaml`:
+
+```yaml
+anthropic_model_name: <model-authorized-by-your-key>
+anthropic_api_key: <your-api-key>
+
+# Omit for Anthropic's public API.
+anthropic_base_url: https://your-compatible-endpoint.example/v1
+```
+
+Gym resolves those values before starting the agent. The key and endpoint are passed into the agent sandbox at runtime; verifier sandboxes do not receive model credentials. Credentials are not baked into the Docker image.
+
+<Warning>
+
+Keep `env.yaml` local and never commit credentials.
+
+- `Invalid API key` means the credential is invalid.
+- `403 key not allowed to access model` means the key is recognized, but `anthropic_model_name` is not authorized.
+
+Fix model access before interpreting scores. Authentication failures produce no patch and are not valid model outcomes.
+
+</Warning>
+
+---
+
+## 2. Build A Clean Starting Point
+
+Both arms need the same repository and task inputs. The fixture image provides that controlled starting point.
+
+Choose the Gym revision you want the agent to work against:
+
+```bash
+GYM_REVISION="$(git rev-parse HEAD)"
+IMAGE="nemo-gym-agent-skills:create-environment-smoke"
+```
+
+The revision must exist in the repository named by `GYM_REPOSITORY`. If the commit exists only on your fork, add `--build-arg GYM_REPOSITORY=https://github.com/<you>/Gym.git` to the build command.
+
+Build the image:
+
+```bash
+docker build \
+  --file benchmarks/agent_skills/fixtures/create-environment-sql/Dockerfile \
+  --build-arg GYM_REVISION="${GYM_REVISION}" \
+  --build-arg CLAUDE_CODE_VERSION=2.1.207 \
+  --build-arg UV_VERSION=0.10.4 \
+  --tag "${IMAGE}" \
+  .
+```
+
+This command creates a Docker image containing:
+
+- the pinned Gym checkout and its Python environment;
+- Claude Code;
+- `/task_inputs/sql_tasks.jsonl`;
+- `/task_inputs/shop.db`.
+
+It deliberately removes project-local skill directories. If the control image already contained the target skill, the experiment would not have a real control.
+
+Verify the image before spending model tokens:
+
+```bash
+docker run --rm --entrypoint /bin/sh "${IMAGE}" -c '
+  set -eu
+  test -x /workspace/nemo-gym/.venv/bin/python
+  test -f /task_inputs/shop.db
+  test -f /task_inputs/sql_tasks.jsonl
+  test ! -e /workspace/nemo-gym/.agents/skills
+  cd /workspace/nemo-gym
+  test -z "$(git status --porcelain)"
+  echo "Sandbox fixture image checks passed."
+'
+```
+
+If this prints the success message, the image contains the expected tools and data, has no target skills, and starts from a clean Git state.
+
+Validate Gym's references to that image:
+
+```bash
+uv run gym env validate \
+  --benchmark agent_skills \
+  +agent_skills_sandbox_image="${IMAGE}"
+```
+
+This checks configuration and cross-references without starting servers or calling the model.
+
+---
+
+## 3. Inspect The Small Experiment
+
+The repository includes a smoke manifest:
+
+```text
+benchmarks/agent_skills/configs/experiments/create_environment_smoke.yaml
+```
+
+Its important choices are:
+
+| Setting | Smoke value | Why |
+|---|---:|---|
+| Tasks | 1 | Verify the pipeline before scaling |
+| Arms | Control + treatment | Measure the skill intervention |
+| Repeats | 1 per arm | Minimize initial cost |
+| Concurrency | 1 | Keep local resource use predictable |
+| Agent turns | 30 | Leave enough room to implement before validation |
+| Agent timeout | 10 minutes | Stop an unexpectedly long attempt |
+
+The manifest reads the model and endpoint from `env.yaml` and expects the image tag you just built:
+
+```yaml
+agent:
+  sandbox_image: nemo-gym-agent-skills:create-environment-smoke
+
+model:
+  env_key: anthropic_model_name
+```
+
+The control and treatment differ only in their `skills` fields. The task, model, image, verifier, and runtime budget are shared.
+
+---
+
+## 4. Lock The Experiment
+
+A fair comparison needs a record of exactly what ran. Think of the lock as the experiment's lab-notebook entry.
+
+The driver expects a clean checkout:
+
+```bash
+git status --short
+```
+
+Create the lock and preview the commands:
+
+```bash
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_smoke.yaml \
+  --output-dir results/agent-skills/create-environment-smoke \
+  --dry-run
+```
+
+<Note>
+
+Use `.venv/bin/python`, not project-aware `uv run python`, for the experiment driver. The driver starts Ray-backed servers from server-specific directories; inheriting the repository-root uv project makes Ray reject those working directories.
+
+</Note>
+
+The dry run does not call the model. It:
+
+1. Resolves the local image tag to an immutable digest.
+2. Reads the model name and endpoint from `env.yaml`.
+3. Hashes the dataset and benchmark configuration.
+4. Copies the treatment skill into an immutable bundle.
+5. Records the Gym revision and randomized arm order.
+6. Writes the exact commands to `experiment.lock.json`.
+
+Inspect the model and endpoint that were resolved—without printing the key:
+
+```bash
+.venv/bin/python - <<'PY'
+import json
+
+path = (
+    "results/agent-skills/create-environment-smoke/"
+    "experiment.lock.json"
+)
+lock = json.load(open(path))
+print(lock["model_access"])
+PY
+```
+
+Stop here if the model or endpoint is not what you intended.
+
+---
+
+## 5. Run The Locked Plan
+
+```bash
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_smoke.yaml \
+  --output-dir results/agent-skills/create-environment-smoke \
+  --resume
+```
+
+Here `--resume` means "execute this existing lock." If a rollout was interrupted, the same command continues from its recorded artifacts.
+
+The driver runs the arms in the locked randomized order. For each arm, Gym:
+
+1. Starts the resources server and Claude Code agent.
+2. Creates a clean agent sandbox.
+3. Gives Claude the environment-creation task.
+4. Captures Claude's repository changes as a Git patch.
+5. Starts a fresh verifier sandbox.
+6. Applies the patch and uploads hidden checks.
+7. Returns component scores.
+
+The output tree grows as the experiment progresses:
+
+```text
+results/agent-skills/create-environment-smoke/
+├── experiment.lock.json
+├── skill-bundles/
+│   └── treatment/
+├── discovery_control/
+│   ├── rollouts.jsonl
+│   └── rollouts_aggregate_metrics.json
+├── treatment/
+│   ├── rollouts.jsonl
+│   └── rollouts_aggregate_metrics.json
+├── comparison.json
+└── report.md
+```
+
+---
+
+## 6. Read The Result
+
+Start with the human-readable report:
+
+```bash
+cat results/agent-skills/create-environment-smoke/report.md
+```
+
+The headline delta is:
+
+```text
+treatment score - discovery control score
+```
+
+A positive delta means the treatment performed better on this task. It does not yet mean the skill is generally better.
+
+<Info>
+
+The configured benchmark split contains one task. This smoke run validates execution, skill provenance, and scoring. It cannot estimate generalization, and its confidence interval is shown as `n/a`.
+
+</Info>
+
+The component scores explain *why* an arm failed:
+
+- `correctness = 0`: the generated SQL verifier failed behavior checks;
+- `completeness = 0`: required files, data, config, tests, or validation were missing;
+- `convention_compliance = 0`: the implementation used a prohibited Gym pattern.
+
+Inspect the machine-readable comparison when you need exact values:
+
+```bash
+uv run python -m json.tool \
+  results/agent-skills/create-environment-smoke/comparison.json
+```
+
+### Verify that the treatment actually received the skill
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+root = Path("results/agent-skills/create-environment-smoke")
+for arm in ("discovery_control", "treatment"):
+    row = json.loads((root / arm / "rollouts.jsonl").read_text().splitlines()[0])
+    print(
+        arm,
+        {
+            "reward": row.get("reward"),
+            "status": row.get("status"),
+            "skills_hash": (row.get("skills_ref") or {}).get("hash"),
+        },
+    )
+PY
+```
+
+The control should have no skill hash. The treatment hash should match the skill snapshot recorded in `experiment.lock.json`.
+
+---
+
+## While You Wait
+
+The progress bar advances only when the complete coding-agent request returns. With one task, `0/1` can remain visible for several minutes even while Claude is editing files and running tests.
+
+Find the active container:
+
+```bash
+CONTAINER="$(
+  docker ps \
+    --filter 'name=nemo-gym-' \
+    --format '{{.Names}}' |
+  awk 'NR == 1 { print }'
+)"
+```
+
+Check resource use:
+
+```bash
+docker stats --no-stream "${CONTAINER}"
+```
+
+Check progress without printing model content or credentials:
+
+```bash
+docker exec "${CONTAINER}" sh -c '
+  printf "stdout_bytes="
+  wc -c < /tmp/nemo_gym_claude.stdout 2>/dev/null || echo 0
+
+  printf "changed_files="
+  cd /workspace/nemo-gym
+  git status --short | wc -l
+
+  printf "project_files="
+  find resources_servers/sql_generation \
+    -path "*/.venv" -prune -o \
+    -type f -print 2>/dev/null | wc -l
+'
+```
+
+Increasing output bytes or project-file counts indicate activity. The smoke manifest stops agent execution after 10 minutes; hidden verification then runs under its separate verifier timeout.
+
+---
+
+## Scale Up After The Smoke Test
+
+The checked-in manifest adds:
+
+- `bare_baseline`, which disables native discovery entirely;
+- three repeats per arm;
+- a 40-turn, 20-minute budget.
+
+The full manifest is:
+
+```text
+benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml
+```
+
+It uses the same `create-environment-smoke` image tag. Lock and run it with the same two-step workflow:
+
+```bash
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --dry-run
+
+.venv/bin/python benchmarks/agent_skills/scripts/run_experiment.py \
+  --config benchmarks/agent_skills/configs/experiments/create_environment_v1.yaml \
+  --output-dir results/agent-skills/create-environment-v1 \
+  --resume
+```
+
+Use:
+
+- treatment minus discovery control to estimate the skill effect;
+- discovery control minus bare baseline to inspect the effect of enabling native discovery.
+
+---
+
+## Troubleshooting By Symptom
+
+### `Invalid API key` or `403 key not allowed to access model`
+
+The agent never attempted the task.
+
+- Fix `anthropic_api_key` for an invalid credential.
+- Set `anthropic_model_name` to a model authorized by the configured endpoint for a 403.
+
+Start a new output directory. Resuming would reuse the invalid rollout row.
+
+### Every score is zero and token usage is zero
+
+Inspect `response.output`, `sandbox_return_code`, and `workspace_patch` in the rollout. Zero tokens, a nonzero return code, and an empty patch indicate model access failed—not poor task performance.
+
+### `500 Internal Server Error`
+
+Read the prefixed resources-server or agent-server traceback above the final client error. The final HTTP 500 usually wraps the more specific server exception.
+
+### The driver rejects a dirty checkout
+
+Commit or stash changes. For local development only, `--allow-dirty` records and permits the dirty state.
+
+### The output directory already exists
+
+Use `--resume` only when continuing the same lock. If the model, endpoint, manifest, dataset, benchmark config, or source revision changed, use a new output directory.
+
+### The sandbox cannot reach a host-local endpoint
+
+Under the Claude Code agent in `resources_servers/agent_skills/configs/agent_skills.yaml`, rewrite the host URL:
+
+```yaml
+sandbox_url_rewrites:
+  http://127.0.0.1:8000: http://host.docker.internal:8000
+```
+
+Under both the agent and verifier `sandbox_spec` blocks, make the Docker host name resolvable:
+
+```yaml
+provider_options:
+  run_args:
+    - --add-host=host.docker.internal:host-gateway
+```
+
+### Hidden verification fails before checks run
+
+Confirm that agent and verifier use the same image digest. Verify that the image contains:
+
+```text
+/workspace/nemo-gym/.venv/bin/python
+/task_inputs/shop.db
+/task_inputs/sql_tasks.jsonl
+```
+
+### The run stopped midway
+
+Run the same driver command again with `--resume`.
+
+---
+
+## What To Do Next
+
+This tutorial deliberately uses one task. Before deciding whether to ship the skill:
+
+1. Add independent create-environment tasks.
+2. Add unrelated negative controls.
+3. Run multiple rollouts per task.
+4. Define acceptable correctness, regression, latency, and token-cost thresholds.
+5. Inspect representative patches and trajectories, not only aggregate scores.
+
+<Cards>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+Understand skill bundles, native discovery, and <code>skills_ref</code>.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use rollout evidence to explain why a score changed.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand pass@k and custom verifier metrics.
+</Card>
+
+</Cards>
