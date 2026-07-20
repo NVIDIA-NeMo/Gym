@@ -19,17 +19,23 @@ from typing import Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
-from tau2.data_model.message import AssistantMessage, UserMessage
-from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
 
 from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.server_utils import ServerClient
+
+
+# Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2
+# initializes its module-level data paths.
+# isort: off
 from responses_api_agents.tau2.app import (
     ModelServerRef,
     Tau2Agent,
     Tau2Config,
     Tau2RunRequest,
 )
+from tau2.data_model.message import AssistantMessage, UserMessage
+from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
+# isort: on
 
 
 class TestApp:
@@ -97,7 +103,10 @@ class TestApp:
         )
 
     def test_sanity(self) -> None:
-        self._dummy_server()
+        config, _ = self._dummy_server()
+
+        assert config.max_agent_steps is None
+        assert config.turns_remaining_interval == 1
 
     def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
