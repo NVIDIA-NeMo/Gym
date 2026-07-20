@@ -326,18 +326,6 @@ def test_raw_body_catchall_dispatches_and_unwraps_plaintext():
         assert payload == {"tool": "lookup", "args": {"q": "iron"}}
 
 
-def test_allowed_tools_filters_list_and_gates_call():
-    server = _server()
-    app = server.setup_webserver()
-    install_auto_exposure(server, app, allowed_tools=["append"])
-    with TestClient(app) as client:
-        token = _seed(client)
-        _handshake(client)
-        assert {t["name"] for t in _list(client, token)} == {"append"}
-        blocked = _call(client, "raw_step", {}, token=token)
-        assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
-
-
 def test_error_mapping():
     with _mcp() as (client, token):
         r = _call(client, "nope", {}, token=token)
@@ -463,21 +451,11 @@ def test_sequential_calls_keep_sessions_isolated_and_ordered():
 
 
 # ==================================================================================================
-# Session tokens: floor for tokenless callers, expiry, garbage
+# Session tokens: tokenless callers, garbage tokens
 # ==================================================================================================
 
 
-def test_tokenless_list_respects_install_time_floor():
-    server = _server()
-    app = server.setup_webserver()
-    install_auto_exposure(server, app, allowed_tools=["append"])
-    with TestClient(app) as client:
-        _seed(client)
-        _handshake(client)
-        assert {t["name"] for t in _list(client, token=None)} == {"append"}
-
-
-def test_tokenless_and_garbage_token_list_without_floor():
+def test_tokenless_and_garbage_token_list_all_tools():
     with _mcp() as (client, _token):
         full = {t["name"] for t in _list(client, token=None)}
         assert {"append", "raw_step", "lookup"} <= full
@@ -514,19 +492,6 @@ def test_session_hook_restricts_that_sessions_token():
         blocked = _call(client, "raw_step", {}, token=token)
         assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
         assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
-
-
-def test_session_hook_intersects_install_time_floor():
-    server = _server(SessionScoped)
-    app = server.setup_webserver()
-    install_auto_exposure(server, app, allowed_tools=["append"])
-    with TestClient(app) as client:
-        resp = client.post("/seed_session", json={"allowed_tools": ["append", "raw_step"]})
-        token = resp.json()["mcp"]["headers"][TOKEN_HEADER]
-        _handshake(client)
-        assert {t["name"] for t in _list(client, token)} == {"append"}
-        blocked = _call(client, "raw_step", {}, token=token)
-        assert blocked["isError"] is True and "not allowed" in blocked["content"][0]["text"]
 
 
 def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
@@ -753,7 +718,6 @@ def test_bind_route_accepts_defaulted_query_param():
     outcome = bind_route(_stub_route(handler))
     assert outcome.binding is not None, outcome.reasons
     assert outcome.binding.body_model is EchoBody
-    assert outcome.binding.defaulted_params == ("limit",)
 
 
 def test_silently_wrong_shapes_are_classified_not_degraded():
