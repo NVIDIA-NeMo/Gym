@@ -15,8 +15,8 @@
 
 from typing import Any, Optional
 
-from fastapi import Request
-from pydantic import ConfigDict, Field
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -24,9 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    MCPResourcesServer,
-    MCPServerMetadata,
-    gym_tool,
+    SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -64,7 +62,17 @@ class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class ExampleMCPWeatherSeedSessionResponse(BaseSeedSessionResponse):
-    mcp: MCPServerMetadata
+    # When expose_tools_over_mcp is on, the response JSON also carries an "mcp" key
+    # (server name, /mcp URL path, per-rollout session-token header) added at startup.
+    pass
+
+
+class ExampleMCPWeatherGetWeatherRequest(BaseModel):
+    city: str
+
+
+class ExampleMCPWeatherGetWeatherResponse(BaseModel):
+    weather: str
 
 
 class ExampleMCPWeatherVerifyRequest(BaseVerifyRequest):
@@ -81,9 +89,14 @@ class ExampleMCPWeatherVerifyResponse(BaseVerifyResponse):
     final_response_mentions_weather: bool
 
 
-class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
+class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
     config: ExampleMCPWeatherResourcesServerConfig
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/get_weather")(self.get_weather)
+        return app
 
     async def seed_session(
         self,
@@ -96,17 +109,19 @@ class ExampleMCPWeatherResourcesServer(MCPResourcesServer):
             "expected_city": expected_city,
             "weather_calls": [],
         }
-        return ExampleMCPWeatherSeedSessionResponse(mcp=self.build_mcp_session_metadata(request))
+        return ExampleMCPWeatherSeedSessionResponse()
 
-    @gym_tool
-    def get_weather(self, session_id: str, city: str) -> str:
+    async def get_weather(
+        self,
+        request: Request,
+        body: ExampleMCPWeatherGetWeatherRequest,
+    ) -> ExampleMCPWeatherGetWeatherResponse:
         """Get a deterministic weather report for a city."""
-        # session_id is injected by the base class (from the per-rollout MCP token); it is hidden from
-        # the tool's MCP input schema, so the model only sees `city`.
+        session_id = request.session[SESSION_ID_KEY]
         state = self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
-        weather = _weather_sentence(city)
-        state["weather_calls"].append({"city": city, "weather": weather})
-        return weather
+        weather = _weather_sentence(body.city)
+        state["weather_calls"].append({"city": body.city, "weather": weather})
+        return ExampleMCPWeatherGetWeatherResponse(weather=weather)
 
     async def verify(
         self,

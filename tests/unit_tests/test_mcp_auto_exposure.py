@@ -234,7 +234,7 @@ def test_refuses_server_that_already_mounts_mcp():
     server = _server()
     app = server.setup_webserver()
 
-    async def existing_mcp(scope, receive, send):  # an MCPResourcesServer-style mount
+    async def existing_mcp(scope, receive, send):  # a hand-rolled /mcp mount
         pass
 
     app.router.routes.append(Mount("/mcp", app=existing_mcp))

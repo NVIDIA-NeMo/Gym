@@ -734,16 +734,15 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     ``server`` is any resources server built exactly as on main; ``app`` is the FastAPI app its
     unmodified ``setup_webserver()`` returned. Returns the tool map.
     """
-    # A second /mcp inserted at the front would shadow an MCPResourcesServer's existing /mcp
+    # A second /mcp inserted at the front would shadow a pre-existing /mcp mount
     # and silently drop its tools.
     preexisting_mcp = [
         r for r in app.router.routes if isinstance(r, (Route, Mount)) and getattr(r, "path", None) == MCP_URL_PATH
     ]
     if preexisting_mcp:
         raise ValueError(
-            f"{type(server).__name__} already serves {MCP_URL_PATH} (e.g. it is an MCPResourcesServer), which "
-            "conflicts with MCP auto-exposure on the same server. Keep the existing MCP mechanism, or drop it "
-            "and rely on expose_tools_over_mcp."
+            f"{type(server).__name__} already serves {MCP_URL_PATH}, which conflicts with MCP auto-exposure "
+            "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
     secret = server.get_session_middleware_key()
