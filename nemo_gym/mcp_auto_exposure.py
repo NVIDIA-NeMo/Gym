@@ -795,9 +795,9 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
         json_response=True,
         stateless=True,
         # The agent reaches this endpoint server-to-server via the resources server's resolved host
-        # (a routable IP/hostname on multi-node runs), so the SDK's loopback-only Host/Origin checks
-        # would reject legitimate calls with 421. DNS-rebinding protection defends browsers, which
-        # never talk to this endpoint; disabling it is not what makes the endpoint safe.
+        # (a routable IP/hostname on multi-node runs); enabling the SDK's Host/Origin allowlist would
+        # mean enumerating every such host. DNS-rebinding protection defends browsers, which never
+        # talk to this endpoint; disabling it is not what makes the endpoint safe.
         security_settings=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 

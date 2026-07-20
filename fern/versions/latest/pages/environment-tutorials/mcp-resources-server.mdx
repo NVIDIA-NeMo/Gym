@@ -91,6 +91,11 @@ class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
     verifier_metadata: Optional[dict[str, Any]] = None
 
 
+class ExampleMCPWeatherVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+    verifier_metadata: Optional[dict[str, Any]] = None
+
+
 class ExampleMCPWeatherGetWeatherRequest(BaseModel):
     city: str
 
@@ -124,7 +129,7 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         state["weather_calls"].append({"city": body.city, "weather": weather})
         return ExampleMCPWeatherGetWeatherResponse(weather=weather)
 
-    async def verify(self, request: Request, body) -> BaseVerifyResponse:
+    async def verify(self, request: Request, body: ExampleMCPWeatherVerifyRequest) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         state = self.session_id_to_state.get(session_id, {"weather_calls": []})
         expected_city = (body.verifier_metadata or {}).get("expected_city", "Paris").casefold()
@@ -160,7 +165,7 @@ At startup (`run_webserver`), Gym:
 An MCP `tools/call` invokes the route's own handler directly, with the rollout's session materialized on the `Request` — handlers keep their `request.session` reads exactly as written. The route stays callable over plain HTTP too: the same tool serves both transports, and `/verify` scores both identically. Tool errors (`HTTPException`, validation failures, crashes) surface to the MCP client as tool errors with the same status and text the plain HTTP route would have returned.
 
 <Note>
-Auto-exposure disables the MCP SDK's default DNS-rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`). That protection only accepts loopback `Host` headers and returns HTTP `421` otherwise — which would break multi-node / `use_absolute_ip=True` deployments where the agent reaches the server by a routable host. The endpoint is instead protected by the per-rollout session token. You don't need to set this yourself.
+Auto-exposure explicitly passes `TransportSecuritySettings(enable_dns_rebinding_protection=False)`. When that protection is enabled it validates `Host`/`Origin` headers against a configured allowlist and rejects mismatches (the SDK's FastMCP server auto-fills a loopback-only allowlist when bound to localhost) — an allowlist would have to enumerate every routable host agents use on multi-node / `use_absolute_ip: true` deployments. The endpoint is instead protected by the per-rollout session token; DNS-rebinding protection defends browsers, which never talk to this endpoint. You don't need to set this yourself.
 </Note>
 
 ### Unsupported shapes refuse at startup
@@ -174,7 +179,7 @@ Where direct dispatch cannot be proven equivalent to a real HTTP request, exposu
 - **multiple parameterized catch-all routes**, or a tool name outside `[A-Za-z0-9_-]+`
 - a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one)
 
-What *is* accepted besides the body model: string path parameters, a `request: Request` parameter, and defaults on fields *inside* the body model (absent fields take their Pydantic defaults). A defaulted parameter in the handler signature, by contrast, is a FastAPI query parameter — it refuses at startup like a required one; move such knobs into the body model.
+What *is* accepted besides the body model: an untyped `body: dict` (FastAPI's JSON pass-through — advertised with a permissive object schema), string path parameters, a `request: Request` parameter, and defaults on fields *inside* the body model (absent fields take their Pydantic defaults). A defaulted parameter in the handler signature, by contrast, is a FastAPI query parameter — it refuses at startup like a required one; move such knobs into the body model.
 
 ---
 
@@ -241,7 +246,7 @@ To watch the MCP round-trip without a full `gym env start`, start the Resources 
 
 Some servers serve *all* their tools through one parameterized route — `workplace_assistant` routes every call through `POST /{path}` and looks the tool up by name, so there are no typed routes to harvest and the per-tool schemas live in data. For these, override one method, `mcp_tools(self, harvested, catchall)`: `harvested` is the auto-harvested typed-route tools, and `catchall.tool(name, input_schema, description)` mints a tool that dispatches through the catch-all route with the path set to `name`.
 
-The shipped `resources_servers/workplace_assistant` stays byte-identical — the override lives in a thin user-side subclass in its own entrypoint file:
+The shipped `resources_servers/workplace_assistant` stays byte-identical — the override lives in a thin user-side subclass in its own entrypoint file. Save the following as `resources_servers/workplace_assistant/app_mcp.py` (user-written — not shipped with the repo):
 
 ```python
 # resources_servers/workplace_assistant/app_mcp.py
@@ -279,7 +284,7 @@ The returned names are signed into that rollout's session token; `tools/list` th
 
 ### Running workplace_assistant with Claude Code
 
-A complete, copy-pasteable run. The compose config wires the subclass entrypoint above to the [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent):
+A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent):
 
 ```yaml
 # workplace_claude.yaml
