@@ -16,7 +16,10 @@ osworld_sandbox:
       use_init: false
       start_timeout_s: 600
       apply_resource_limits: true
-      publish_host: 127.0.0.1
+      # Keep loopback for the normal single-host path.  When DOCKER_HOST
+      # targets a remote OSWorld worker, set this to that worker's
+      # caller-reachable IP so the agent can use Docker's dynamic ports.
+      publish_host: ${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}
     exec:
       default_timeout_s: 180
       concurrency: 32

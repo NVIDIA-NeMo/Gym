@@ -14,6 +14,23 @@ PID_FILE=${STATE_DIR}/control.pid
 [[ -x "${GYM_BIN}" ]] || { echo "Gym executable is not available: ${GYM_BIN}" >&2; exit 2; }
 [[ -r "${ENV_FILE}" ]] || { echo "prepared Gym environment is not readable: ${ENV_FILE}" >&2; exit 2; }
 
+case "${DOCKER_HOST:-}" in
+    ssh://*|tcp://*)
+        [[ -n "${OSWORLD_SANDBOX_PUBLISH_HOST:-}" ]] || {
+            echo "remote DOCKER_HOST requires OSWORLD_SANDBOX_PUBLISH_HOST" >&2
+            exit 2
+        }
+        command -v docker >/dev/null 2>&1 || {
+            echo "Docker CLI is required for the remote Gym Docker Sandbox" >&2
+            exit 2
+        }
+        docker info >/dev/null || {
+            echo "remote Docker daemon is not reachable through DOCKER_HOST=${DOCKER_HOST}" >&2
+            exit 2
+        }
+        ;;
+esac
+
 umask 077
 mkdir -p "${RUN_ROOT}/logs" "${RUN_ROOT}/results/${RUN_ID}" "${STATE_DIR}"
 printf '%s\n' "$$" >"${PID_FILE}"

@@ -12,6 +12,7 @@ VM_PREPARE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/prepare_osworld_vm.sh"
 START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
+SANDBOX_CONFIG = REPO_ROOT / "benchmarks/osworld/configs/osworld_sandbox.yaml"
 
 
 @pytest.mark.parametrize(
@@ -32,6 +33,16 @@ def test_vm_prepare_script_pins_the_verified_image_identity() -> None:
 def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
     assert 'env start \\' in START_CONTROL_SCRIPT.read_text(encoding="utf-8")
     assert 'eval run --no-serve \\' in RUN_EVAL_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_remote_docker_requires_a_reachable_publish_host() -> None:
+    start_text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
+    sandbox_text = SANDBOX_CONFIG.read_text(encoding="utf-8")
+
+    assert "DOCKER_HOST" in start_text
+    assert "OSWORLD_SANDBOX_PUBLISH_HOST" in start_text
+    assert "docker info" in start_text
+    assert "${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}" in sandbox_text
 
 
 def test_cleanup_is_scoped_to_the_run_id() -> None:

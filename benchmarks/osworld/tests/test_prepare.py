@@ -15,6 +15,7 @@ from benchmarks.osworld.prepare import (
     prepare,
     select_config_paths,
     write_env,
+    write_task_shard,
     write_vm_snapshot_manifest,
 )
 
@@ -77,6 +78,52 @@ def test_prepare_composes_profile_and_backend_for_gym_env() -> None:
 
     assert POINTER_AGENT_CONFIG.resolve() in paths
     assert paths[-1] == GYM_SANDBOX_CONFIG.resolve()
+
+
+def test_write_task_shards_are_disjoint_complete_and_manifested(tmp_path: Path) -> None:
+    source = tmp_path / "tasks.jsonl"
+    rows = [
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": f"task {index}"}]},
+            "verifier_metadata": {
+                "task_id": f"task-{index}",
+                "osworld_task": {"id": f"task-{index}"},
+            },
+        }
+        for index in range(7)
+    ]
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    shard_paths = [
+        write_task_shard(source, tmp_path / f"shard-{index}.jsonl", num_shards=2, shard_index=index)
+        for index in range(2)
+    ]
+    shard_ids = [
+        [json.loads(line)["verifier_metadata"]["task_id"] for line in path.read_text().splitlines()]
+        for path in shard_paths
+    ]
+
+    assert shard_ids == [["task-0", "task-2", "task-4", "task-6"], ["task-1", "task-3", "task-5"]]
+    assert set(shard_ids[0]).isdisjoint(shard_ids[1])
+    assert set().union(*map(set, shard_ids)) == {f"task-{index}" for index in range(7)}
+    for index, path in enumerate(shard_paths):
+        manifest = json.loads(path.with_suffix(".jsonl.manifest.json").read_text(encoding="utf-8"))
+        assert manifest["source_sha256"]
+        assert manifest["num_shards"] == 2
+        assert manifest["shard_index"] == index
+        assert manifest["total_tasks"] == 7
+        assert manifest["shard_tasks"] == len(shard_ids[index])
+
+
+def test_write_task_shard_rejects_invalid_index(tmp_path: Path) -> None:
+    source = tmp_path / "tasks.jsonl"
+    source.write_text(
+        json.dumps({"verifier_metadata": {"task_id": "task-0", "osworld_task": {"id": "task-0"}}})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="shard_index"):
+        write_task_shard(source, tmp_path / "out.jsonl", num_shards=2, shard_index=2)
 
 
 def test_write_env_pins_vm_path_for_sandbox(tmp_path: Path) -> None:

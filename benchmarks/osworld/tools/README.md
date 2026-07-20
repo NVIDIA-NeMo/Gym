@@ -26,6 +26,20 @@ Both runtime wrappers require `OSWORLD_RUN_ID`. Set
 address. Their optional positional argument selects the root for logs and
 results; it defaults to the Gym repository root.
 
+For a split-host Gym Docker deployment, run the wrappers on the agent/control
+host and point its normal Docker CLI at the OSWorld environment host:
+
+```bash
+export DOCKER_HOST=ssh://USER@ENV_HOST
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
+docker info
+```
+
+`start_control.sh` validates both variables and the Docker connection before
+starting Gym. The qcow2 path written by `prepare.py --vm-path` must exist at
+the same absolute path on the Docker host. Export the same `DOCKER_HOST` when
+running `cleanup_run.sh` so cleanup remains scoped to the correct daemon.
+
 After an evaluation, stop only that run while preserving its logs and results:
 
 ```bash

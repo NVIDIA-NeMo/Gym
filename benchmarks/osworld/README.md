@@ -164,6 +164,77 @@ gym env start
 gym eval run --no-serve
 ```
 
+### Deterministic task sharding
+
+`prepare.py` owns task splitting. Use the same canonical input on every
+agent/control host and select one zero-based shard per host:
+
+```bash
+# Agent/control host A
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output /absolute/path/to/results/shard-0/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --force-env
+
+# Agent/control host B uses the same command with --shard-index 1 and its own
+# output directory.
+```
+
+Non-empty input rows are assigned by `row_index % num_shards`. This is stable,
+disjoint, exhaustive, preserves source order inside each shard, and spreads
+adjacent tasks across workers. Beside each generated shard JSONL, preparation
+writes a manifest containing the source SHA-256, total/shard task counts, task
+IDs, and their digest. The generated shard becomes both the rollout input and
+the asset-prefetch input; model and environment hosts never split tasks.
+
+To generate a full input from the pinned OSWorld checkout before sharding:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/OSWorld \
+  --manifest test_all \
+  --output /absolute/path/to/test_all.jsonl
+```
+
+### Split agent and OSWorld environment hosts
+
+The same Gym Docker provider can use a Docker daemon on another Colossus host
+through Docker's standard SSH transport. The agent/control host still runs
+`prepare.py`, `start_control.sh`, and `run_eval.sh`; only the Sandbox container
+and QEMU/KVM guest run on the environment host.
+
+Prepare the identical verified qcow2 at the same absolute path on both hosts,
+allow the agent host's SSH key on the environment host, and validate the data
+path before starting Gym:
+
+```bash
+# On the agent/control host
+export DOCKER_HOST=ssh://USER@ENV_HOST
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
+docker info
+
+export OSWORLD_RUN_ID=my-shard-0
+export NEMO_GYM_CONTROL_HOST=AGENT_HOST_REACHABLE_IP
+export GYM_BIN=/absolute/path/to/Gym/.venv/bin/gym
+
+benchmarks/osworld/tools/start_control.sh /absolute/run/root
+# After the control services report ready, in another supervisor:
+benchmarks/osworld/tools/run_eval.sh /absolute/run/root
+```
+
+The Sandbox config binds dynamically selected OSWorld ports to
+`OSWORLD_SANDBOX_PUBLISH_HOST`, so the agent receives direct plain-HTTP
+endpoints on the environment host. Keep `DOCKER_HOST` exported when invoking
+`tools/cleanup_run.sh`; its three-label filter then removes only this run's
+remote OSWorld containers. No manually maintained interactive SSH session is
+required: the Docker CLI opens its SSH transport as needed, while Gym owns all
+container operations.
+
 ## Configuration
 
 `benchmarks/osworld/config.yaml` is the single default benchmark config. It

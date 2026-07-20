@@ -125,6 +125,77 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_task_shard(
+    input_jsonl: Path,
+    output_jsonl: Path,
+    *,
+    num_shards: int,
+    shard_index: int,
+) -> Path:
+    """Write one deterministic, disjoint round-robin shard and its manifest.
+
+    Sharding follows the zero-based index of each non-empty input row.  This
+    preserves source order inside every shard while distributing adjacent
+    tasks across workers.  The emitted manifest makes it possible to verify
+    that independently prepared workers used the same source input and shard
+    definition.
+    """
+
+    if num_shards < 1:
+        raise ValueError("num_shards must be >= 1")
+    if not 0 <= shard_index < num_shards:
+        raise ValueError(f"shard_index must be in [0, {num_shards}), got {shard_index}")
+
+    input_jsonl = input_jsonl.expanduser().resolve()
+    output_jsonl = output_jsonl.expanduser().resolve()
+    if input_jsonl == output_jsonl:
+        raise ValueError("shard output must differ from the source input")
+
+    selected_rows: list[str] = []
+    selected_task_ids: list[str] = []
+    total_tasks = 0
+    with input_jsonl.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            if not raw_line.strip():
+                continue
+            row = json.loads(raw_line)
+            if total_tasks % num_shards == shard_index:
+                selected_rows.append(raw_line.rstrip("\r\n") + "\n")
+                metadata = row.get("verifier_metadata") or {}
+                task_id = metadata.get("task_id") or (metadata.get("osworld_task") or {}).get("id")
+                selected_task_ids.append(str(task_id or f"row-{total_tasks}"))
+            total_tasks += 1
+
+    if not selected_rows:
+        raise ValueError(
+            f"shard {shard_index}/{num_shards} is empty for an input containing {total_tasks} task(s)"
+        )
+
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    output_jsonl.write_text("".join(selected_rows), encoding="utf-8")
+    task_ids_digest = hashlib.sha256("\n".join(selected_task_ids).encode()).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "kind": "osworld-task-shard",
+        "source_path": str(input_jsonl),
+        "source_sha256": _sha256_file(input_jsonl),
+        "selection": "nonempty-row-index-modulo",
+        "num_shards": num_shards,
+        "shard_index": shard_index,
+        "total_tasks": total_tasks,
+        "shard_tasks": len(selected_rows),
+        "task_ids_sha256": task_ids_digest,
+        "task_ids": selected_task_ids,
+    }
+    manifest_path = output_jsonl.with_suffix(output_jsonl.suffix + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        f"Wrote OSWorld shard {shard_index + 1}/{num_shards} "
+        f"with {len(selected_rows)}/{total_tasks} task(s): {output_jsonl}"
+    )
+    return output_jsonl
+
+
 def write_vm_snapshot_manifest(
     manifest_path: Path,
     *,
@@ -262,6 +333,24 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="OSWorld input JSONL")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Rollout output JSONL")
     parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split non-empty input rows into this many deterministic round-robin shards",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Zero-based shard selected by this worker (requires --num-shards)",
+    )
+    parser.add_argument(
+        "--shard-output",
+        type=Path,
+        default=None,
+        help="Generated shard JSONL (default: input-shard-NN-of-NN.jsonl beside --output)",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         action="append",
@@ -340,6 +429,21 @@ def main() -> None:
     args = parser.parse_args()
 
     input_jsonl = prepare(args.input)
+    if args.num_shards < 1:
+        parser.error("--num-shards must be >= 1")
+    if not 0 <= args.shard_index < args.num_shards:
+        parser.error(f"--shard-index must be in [0, {args.num_shards})")
+    if args.num_shards > 1 or args.shard_output is not None:
+        shard_output = args.shard_output or (
+            args.output.expanduser().resolve().parent
+            / f"input-shard-{args.shard_index:02d}-of-{args.num_shards:02d}.jsonl"
+        )
+        input_jsonl = write_task_shard(
+            input_jsonl,
+            shard_output,
+            num_shards=args.num_shards,
+            shard_index=args.shard_index,
+        )
     if not args.skip_assets:
         summary = ensure_osworld_assets(
             input_jsonl,
