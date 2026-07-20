@@ -10,7 +10,7 @@ All new pages and edits should land here. The Sphinx tree under `../docs/` is pr
 |---|---|
 | Published site | https://docs.nvidia.com/nemo/gym |
 | Fern dashboard | https://dashboard.buildwithfern.com (NVIDIA org) |
-| Skill for agents | [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) |
+| Skill for agents | [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md) |
 | CI workflows | [`../.github/workflows/fern-docs-*.yml`](../.github/workflows/) |
 | Make targets | [`../Makefile`](../Makefile) |
 
@@ -166,7 +166,7 @@ When the next GA cuts (for example, `v0.4.0`):
 4. Keep the `/latest` redirect rules in `docs.yml` pointed at the intended legacy target, currently `/main`
 5. `versions/latest/pages/` keeps moving forward as the bleeding-edge tree
 
-See [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.
+See [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.
 
 ## CI and publishing
 

@@ -36,7 +36,7 @@ from responses_api_agents.scicode_agent.step_utils import (
 )
 
 
-_PROMPT_FPATH = "benchmarks/scicode/prompts/default.yaml"
+_PROMPT_FPATH = "benchmarks/scicode/prompts/background.yaml"
 
 
 def _config():
