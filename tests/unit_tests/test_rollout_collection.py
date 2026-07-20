@@ -145,6 +145,224 @@ class TestRolloutCollection:
         else:
             assert "[rollout_collection] /run failed" not in captured.out
 
+    async def test_run_examples_soft_fail_run_errors_returns_reward_zero(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+            "question": "q",
+            "expected_answer": "a",
+        }
+        response = MagicMock()
+        response.status = 500
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(_response):
+            raise RuntimeError("model parser exploded")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+
+        returned_row, result = await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+        assert returned_row == row
+        assert result["reward"] == 0.0
+        assert result["_ng_soft_failed"] is True
+        assert result["_ng_soft_failure_stage"] == "agent_run"
+        assert result["_ng_soft_failure_type"] == "RuntimeError"
+        assert result["_ng_soft_failure_message"] == "model parser exploded"
+        assert result["_ng_soft_failure_http_status"] == 500
+        assert result["response"]["output"] == []
+        assert result["response"]["error"]["message"] == "model parser exploded"
+        assert result["question"] == "q"
+        assert result["expected_answer"] == "a"
+        assert TASK_INDEX_KEY_NAME not in result
+
+    @pytest.mark.parametrize("status", [400, None])
+    async def test_run_examples_soft_fail_run_errors_only_covers_5xx(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        response = MagicMock()
+        response.status = status
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(_response):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+    async def test_run_examples_soft_fail_retries_transient_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        bad_response = MagicMock()
+        bad_response.status = 503
+        good_response = MagicMock()
+        good_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=[bad_response, bad_response, good_response])
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(response):
+            if response.status != 200:
+                raise RuntimeError("transient blip")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_TRANSIENT_RUN_RETRY_DELAY_SECONDS", 0)
+
+        returned_row, result = await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+        assert returned_row == row
+        assert result == {"reward": 1.0}
+        assert mock_server_client.post.await_count == 3
+
+    async def test_run_examples_soft_fail_transient_retries_exhausted_soft_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        response = MagicMock()
+        response.status = 429
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        async def fail_raise_for_status(_response):
+            raise RuntimeError("rate limited")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_TRANSIENT_RUN_RETRY_DELAY_SECONDS", 0)
+
+        returned_row, result = await next(MockHelper().run_examples([row], soft_fail_run_errors=True))
+
+        assert returned_row == row
+        assert result["reward"] == 0.0
+        assert result["_ng_soft_failed"] is True
+        assert result["_ng_soft_failure_http_status"] == 429
+        assert mock_server_client.post.await_count == 1 + nemo_gym.rollout_collection._MAX_TRANSIENT_RUN_RETRIES
+
+    async def test_run_from_config_soft_fail_run_errors_persists_reward_zero(self, tmp_path: Path) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    "agent_ref": {"name": "my agent name"},
+                    "question": "q",
+                }
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            soft_fail_run_errors=True,
+            upload_rollouts_to_wandb=False,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                assert kwargs["soft_fail_run_errors"] is True
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        (
+                            example,
+                            {
+                                "reward": 0.0,
+                                "_ng_soft_failed": True,
+                                "_ng_soft_failure_stage": "agent_run",
+                                "response": {"output": [], "usage": None, "error": {"message": "boom"}},
+                            },
+                        )
+                    )
+                    futures.append(future)
+
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                stripped = [
+                    {k: v for k, v in r.items() if k not in ("response", "responses_create_params")} for r in results
+                ]
+                agg = compute_aggregate_metrics(stripped)
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(
+                    orjson.dumps(
+                        [{"agent_ref": {"name": "my agent name"}, **agg.model_dump()}], option=orjson.OPT_INDENT_2
+                    )
+                )
+                return metrics_fpath
+
+        returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert len(returned_results) == 1
+        assert returned_results[0]["reward"] == 0.0
+        assert returned_results[0]["_ng_soft_failed"] is True
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert len(persisted) == 1
+        assert persisted[0]["reward"] == 0.0
+        assert persisted[0]["_ng_soft_failed"] is True
+        assert persisted[0][TASK_INDEX_KEY_NAME] == 0
+        assert persisted[0][ROLLOUT_INDEX_KEY_NAME] == 0
+
+        failures_fpath = output_jsonl_fpath.with_name(output_jsonl_fpath.stem + "_failures.jsonl")
+        assert failures_fpath.read_bytes() == b""
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"
