@@ -274,6 +274,15 @@ Response content: {content}""")
         except ClientResponseError as e:
             # Set the response content here so we have access to it down the line.
             e.response_content = content
+            # request_info/history/headers are multidict.CIMultiDictProxy objects
+            # that don't pickle, which breaks Ray's cross-actor error propagation
+            # (rollout collection dies with "can't pickle CIMultiDictProxy" on any
+            # resource-server 5xx). Drop them so the error stays picklable; keep
+            # status/message/response_content.
+            e.request_info = None
+            e.history = ()
+            e.headers = None
+            e.args = (e.status, e.message)
             raise e
 
 

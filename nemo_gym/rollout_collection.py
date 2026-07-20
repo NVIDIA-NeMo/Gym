@@ -718,19 +718,32 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                    raise
-                return row, await get_response_json(res)
+                # Retry a transient 5xx/connection failure a few times so one flaky
+                # /run (e.g. a momentarily overloaded code-exec server) only costs
+                # that rollout an attempt instead of aborting the whole batch. 4xx
+                # is deterministic, so re-raise it immediately.
+                attempts = 4
+                last_exc = None
+                for attempt in range(attempts):
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    try:
+                        await raise_for_status(res)
+                    except Exception as e:
+                        last_exc = e
+                        status = getattr(e, "status", None) or getattr(res, "status", None)
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_collection] /run failed "
+                                f"status={status} attempt={attempt + 1}/{attempts} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                        if isinstance(status, int) and 400 <= status < 500:
+                            raise
+                        await asyncio.sleep(1.0)
+                        continue
+                    return row, await get_response_json(res)
+                raise last_exc
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
