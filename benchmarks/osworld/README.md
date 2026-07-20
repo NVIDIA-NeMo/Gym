@@ -48,7 +48,9 @@ gym eval run --no-serve
 ```
 
 For supervisor-managed deployments, the equivalent public wrappers are
-`tools/start_control.sh` and `tools/run_eval.sh`. They require
+`tools/start_control.sh` and `tools/run_eval.sh`. `tools/cleanup_run.sh` stops
+the recorded processes and removes only that run's labeled Sandbox containers
+while preserving results. The wrappers require
 `OSWORLD_RUN_ID` and write logs beneath an optional run-root argument.
 
 `prepare.py` validates the committed input and qcow2, records the disk identity,

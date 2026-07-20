@@ -28,6 +28,8 @@ LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
 OSWORLD_SERVICE_PORTS = (5000, 9222, 8006, 8080)
 OSWORLD_IMAGE_ENTRYPOINT = ("/usr/bin/tini", "-s", "/run/entry.sh")
 OSWORLD_QCOW2_MOUNT = "/System.qcow2"
+OSWORLD_WORKLOAD_LABEL = "nemo-gym.workload=osworld"
+OSWORLD_RUN_ID_LABEL = "nemo-gym.run-id"
 
 
 def _string_list(value: Any, *, field: str) -> list[str]:
@@ -154,6 +156,12 @@ class GymSandboxDesktopProvider:
         provider_options["volumes"] = volumes
 
         run_args = _string_list(provider_options.get("run_args"), field="run_args")
+        if not _has_option(run_args, "--label", OSWORLD_WORKLOAD_LABEL):
+            run_args.extend(["--label", OSWORLD_WORKLOAD_LABEL])
+        run_id = os.environ.get("OSWORLD_RUN_ID", "").strip()
+        run_id_label = f"{OSWORLD_RUN_ID_LABEL}={run_id}"
+        if run_id and not _has_option(run_args, "--label", run_id_label):
+            run_args.extend(["--label", run_id_label])
         if not _has_option(run_args, "--cap-add", "NET_ADMIN"):
             run_args.extend(["--cap-add", "NET_ADMIN"])
         if self._require_kvm and not _has_option(run_args, "--device", "/dev/kvm"):

@@ -52,6 +52,7 @@ def _patch_kvm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, monkeypatch) -> None:
     _patch_kvm(monkeypatch)
+    monkeypatch.setenv("OSWORLD_RUN_ID", "smoke-run")
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
@@ -75,6 +76,16 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
     assert f"{vm_path.resolve()}:/System.qcow2:ro" in spec.provider_options["volumes"]
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+    assert osworld_sandbox._has_option(
+        spec.provider_options["run_args"],
+        "--label",
+        osworld_sandbox.OSWORLD_WORKLOAD_LABEL,
+    )
+    assert osworld_sandbox._has_option(
+        spec.provider_options["run_args"],
+        "--label",
+        "nemo-gym.run-id=smoke-run",
+    )
 
 
 def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
