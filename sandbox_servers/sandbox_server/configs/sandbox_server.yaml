@@ -1,0 +1,18 @@
+# A sandbox server fronting the local Docker provider. Compose it into a run
+# with +config_paths and reference it by name from a server that operates it.
+#
+# One server instance fronts exactly ONE provider. To offer another backend
+# (e.g. opensandbox on a cluster), compose a second sandbox_servers block with
+# its own provider; operators pick one by name.
+pool_sandbox_server:
+  sandbox_servers:
+    sandbox_server:
+      entrypoint: app.py
+      sandbox_provider:
+        docker:
+          create:
+            # A container that needs to reach a service on the host uses host
+            # networking; drop this for isolated boxes.
+            network: host
+      max_concurrent: 16
+      default_ttl_s: 1800
