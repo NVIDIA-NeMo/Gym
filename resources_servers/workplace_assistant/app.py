@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -30,6 +31,7 @@ from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

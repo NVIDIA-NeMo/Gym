@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import ClassVar
+
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
@@ -19,6 +21,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import (
@@ -33,6 +36,7 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.veri
 
 
 class SingleStepToolUseArgumentComparisonResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     tool_call_comparator_config: ToolCallComparatorConfig
 
 

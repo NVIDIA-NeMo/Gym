@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Optional
+from typing import ClassVar, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -42,6 +43,7 @@ from resources_servers.math_advanced_calculations.math_advanced_calculations_too
 
 
 class MultiVerseMathHardResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

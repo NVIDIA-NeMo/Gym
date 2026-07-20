@@ -19,7 +19,7 @@ import tomllib
 from collections import defaultdict
 from enum import StrEnum
 from statistics import mean
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import xmltodict
 import yaml
@@ -30,11 +30,13 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class StructuredOutputsResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     xml_coerce_types: bool = True
 
 

@@ -25,6 +25,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from typing import ClassVar
+
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -32,6 +34,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -45,6 +48,7 @@ from nemo_gym.server_utils import get_response_json
 
 
 class XSTestResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_endpoint_max_concurrency: int = 64

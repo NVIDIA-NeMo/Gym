@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import FastAPI
 from utils import grade_assistant_response
@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -36,6 +37,7 @@ class CalendarVerifyRequest(CalendarRunRequest, BaseVerifyRequest):
 
 
 class CalendarResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

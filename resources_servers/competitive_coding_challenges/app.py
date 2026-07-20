@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
@@ -77,6 +78,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 
 
 class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     # These fields are populated from the NeMo-Gym config tree, so they can be
     # overridden from `run_grpo_nemo_gym.py` via Hydra CLI args instead of being
     # hard-coded in the server implementation.

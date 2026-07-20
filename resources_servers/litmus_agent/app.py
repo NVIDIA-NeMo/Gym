@@ -93,7 +93,7 @@ import statistics
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -104,6 +104,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -271,6 +272,8 @@ class LitmusAgentConfig(BaseResourcesServerConfig):
     turns on a single stateful code-execution tool served at
     ``/{code_exec_tool_name}`` and backed by ``nemo_gym.sandbox``.
     """
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "litmus_agent"
     float_rel_tol: float = 1e-6

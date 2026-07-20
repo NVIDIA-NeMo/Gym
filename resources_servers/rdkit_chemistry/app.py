@@ -64,7 +64,7 @@ import re
 import socket
 import statistics
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 
@@ -73,6 +73,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_first_server_config_dict
@@ -127,6 +128,7 @@ _ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
 
 
 class RDKitChemistryConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     sandbox_venv_path: str = ""
     sandbox_proxy_port: int | None = 6001
     sandbox_proxy_max_concurrency: int = 128

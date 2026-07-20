@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
@@ -22,11 +22,13 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class SWEJudgeResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,6 +41,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -82,6 +83,8 @@ class RubricEvaluation(BaseModel):
 
 class MultiChallengeConfig(BaseResourcesServerConfig):
     """Configuration for the MultiChallenge environment server."""
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "multichallenge"
 

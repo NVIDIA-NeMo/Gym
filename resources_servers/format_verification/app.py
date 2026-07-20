@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, ClassVar, Dict, List, Tuple
 
 from fastapi import FastAPI
 
@@ -21,11 +21,13 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class FormatVerificationResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

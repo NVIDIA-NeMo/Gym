@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -27,6 +28,7 @@ from nemo_gym.server_utils import get_response_json
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any]
 

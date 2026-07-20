@@ -7,7 +7,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from pydantic import ConfigDict
 
@@ -15,6 +15,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from resources_servers.spider2_lite.eval_utils import (
@@ -76,6 +77,7 @@ class FailureCode(str, Enum):
 
 
 class Spider2LiteResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "spider2_lite"
     spider2_lite_dir: str = "resources_servers/spider2_lite/.spider2_lite"
     max_concurrency: int = 32

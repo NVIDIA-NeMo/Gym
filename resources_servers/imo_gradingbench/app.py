@@ -48,7 +48,7 @@ CoT. The server README documents the required vLLM invocation.
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from pydantic import ConfigDict
 
@@ -57,6 +57,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -171,6 +172,8 @@ class ImoGradingBenchConfig(BaseResourcesServerConfig):
     ``<think>…</think>`` tokens are routed to a separate reasoning
     output item and never reach the grade regex.
     """
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
 
 class ImoGradingBenchRunRequest(BaseRunRequest):

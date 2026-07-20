@@ -9,7 +9,7 @@ import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import yaml
 from pydantic import PrivateAttr
@@ -18,6 +18,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -157,6 +158,7 @@ def parse_verification_response(
 
 
 class ProofVerificationResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_model_name: str = ""
     temperature: float = 0.6

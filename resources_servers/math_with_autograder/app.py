@@ -50,6 +50,7 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import Field
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.server_utils import get_response_json
@@ -68,6 +69,7 @@ _DEFAULT_JUDGE_PROMPT_PATH = "resources_servers/math_with_autograder/prompts/jud
 
 
 class MathWithAutograderResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_prompt_path: str = Field(
         default=_DEFAULT_JUDGE_PROMPT_PATH,
         description=(

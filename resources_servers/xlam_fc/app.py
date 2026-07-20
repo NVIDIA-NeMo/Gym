@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import json
-from typing import Any, Dict, List
+from typing import Any, ClassVar, Dict, List
 
 from pydantic import Field
 
@@ -21,11 +21,13 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class XlamFcResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

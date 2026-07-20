@@ -23,7 +23,7 @@ import asyncio
 import re
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
@@ -33,6 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -146,6 +147,8 @@ def _extract_judge_response_text(response: NeMoGymResponse) -> str:
 
 class TextToSqlResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the Text-to-SQL judge server."""
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "text_to_sql"
     judge_model_server: ModelServerRef

@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from code_extraction import preprocess_code_completion
 from setup_bcb_venv import ensure_bcb_venv
@@ -14,6 +14,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -23,6 +24,7 @@ from nemo_gym.reward_profile import (
 
 
 class BigCodeBenchResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     num_processes: int = 8
     venv_path: str = ".bcb_venv"
     bcb_python_version: str = "3.10"

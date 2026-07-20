@@ -18,7 +18,7 @@ import logging
 from contextlib import nullcontext
 from difflib import SequenceMatcher
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -181,6 +182,7 @@ def _sanitize_pydantic_model(model: BaseModel) -> BaseModel:
 
 
 class TerminusJudgeResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "terminus_judge"
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None

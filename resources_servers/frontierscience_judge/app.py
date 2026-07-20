@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import ClassVar, List, Literal, Optional, Union
 
 import yaml
 from pydantic import ConfigDict, Field
@@ -44,6 +44,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -173,6 +174,7 @@ def _resolve_prompt_path(path: str) -> Path:
 
 
 class FrontierScienceJudgeConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_mode: Literal["olympiad", "research"] = Field(

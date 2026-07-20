@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from pydantic import PrivateAttr
 
@@ -13,6 +13,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -43,6 +44,7 @@ def extract_best_solution(response: str, assert_think_end: bool = False) -> tupl
 
 
 class ProofGenSelectResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     assert_think_end: bool = False
 
 

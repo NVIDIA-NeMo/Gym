@@ -45,6 +45,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -67,6 +68,7 @@ _DEFAULT_JUDGE_PROMPT_PATH = "resources_servers/physics_judge/prompts/judge.yaml
 
 
 class PhysicsJudgeResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     use_chat_completions_for_judge: bool = Field(
         default=False,
         description="Use /v1/chat/completions instead of /v1/responses for the judge model. "

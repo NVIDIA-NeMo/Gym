@@ -14,7 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
-from typing import List, Literal
+from typing import ClassVar, List, Literal
 
 from fastapi import FastAPI
 
@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class IFBenchResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     num_processes: int = 32
 
 

@@ -33,7 +33,7 @@ Computes:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 import yaml
 from pydantic import ConfigDict, Field
@@ -43,6 +43,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -117,6 +118,7 @@ def parse_judge_grade(judge_text: str) -> str:
 
 
 class SimpleQAConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 

@@ -41,7 +41,7 @@ Dataset is selected via ``split: single_line | multi_line | random_span
 """
 
 from asyncio import Semaphore, get_running_loop
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 import ray
 from human_eval_infilling_integration.runner import check_correctness_remote
@@ -51,6 +51,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -67,6 +68,7 @@ SplitName = Literal["single_line", "multi_line", "random_span", "random_span_lig
 # Config
 # ----------------------------
 class CodeFIMResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     # HumanEval-Infilling split: single_line | multi_line | random_span | random_span_light.
     # Skills' default is `random_span` (see `nemo_skills/dataset/human-eval-infilling/__init__.py`).
     split: SplitName = "random_span"

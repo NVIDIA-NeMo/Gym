@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -55,6 +56,7 @@ from nemo_gym.server_utils import get_response_json
 
 
 class LabbenchVLMConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "labbench2_vlm"
 
     judge_model_server: ModelServerRef

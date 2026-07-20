@@ -35,7 +35,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 import yaml
 from fastapi import FastAPI
@@ -51,6 +51,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -82,6 +83,8 @@ class JailbreakDetectionConfig(BaseResourcesServerConfig):
     - Set nemotron_enable_reasoning=True for /think mode (slower but explainable)
     - Reference: https://huggingface.co/nvidia/Nemotron-Content-Safety-Reasoning-4B
     """
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "jailbreak_detection"
     judge_model_server: ModelServerRef

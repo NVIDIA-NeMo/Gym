@@ -33,12 +33,13 @@ Scoring:
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -49,6 +50,7 @@ from nemo_gym.reward_profile import (
 
 
 class GraphWalksResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

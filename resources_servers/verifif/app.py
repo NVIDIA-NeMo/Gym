@@ -38,6 +38,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
@@ -100,6 +101,8 @@ class AggregationMode(str, Enum):
 
 class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the VerifIF Resource Server."""
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     judge_server_name: Optional[str] = Field(
         default=None,

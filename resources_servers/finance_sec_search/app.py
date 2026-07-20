@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 import aiohttp
 import yaml
@@ -47,6 +47,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -63,6 +64,8 @@ logger = logging.getLogger(__name__)
 
 class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for Finance SEC Search resource server."""
+
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     cache_dir: Optional[str] = Field(
         default=None,

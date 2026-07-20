@@ -31,7 +31,7 @@ INCORRECT, or NOT_ATTEMPTED. NOT_ATTEMPTED is treated as implicit abstention.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
@@ -41,6 +41,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -242,6 +243,7 @@ def parse_judge_grade(judge_text: str) -> str:
 
 
 class AbstentionConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
