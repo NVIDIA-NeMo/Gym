@@ -150,10 +150,13 @@ class TestRowHelpers:
 
     def test_build_stage_rows_tags_and_preserves_indices(self) -> None:
         by_task = index_rows_by_task(_materialized_rows(["t0", "t1"], repeats=2))
-        rows = build_stage_rows(by_task, ["t0", "t1"], ["b", "c"], stage_index=2)
+        # Each task is judged against a single assigned reference.
+        rows = build_stage_rows(by_task, {"t0": "b", "t1": "c"}, stage_index=2)
         assert len(rows) == 4  # 2 tasks x 2 repeats
+        ref_by_task = {r["task_id"]: r["reference_ids"] for r in rows}
+        assert ref_by_task["t0"] == ["b"]
+        assert ref_by_task["t1"] == ["c"]
         for row in rows:
-            assert row["reference_ids"] == ["b", "c"]
             assert row["stage_index"] == 2
         # Indices are preserved (no per-stage offset) so the rollout index keeps
         # matching the on-disk deliverable repeat dir; stage_index is the
@@ -167,21 +170,21 @@ class TestRowHelpers:
 
     def test_build_stage_rows_skips_unknown_tasks(self) -> None:
         by_task = index_rows_by_task(_materialized_rows(["t0"]))
-        rows = build_stage_rows(by_task, ["t0", "missing"], ["a"], stage_index=0)
+        rows = build_stage_rows(by_task, {"t0": "a", "missing": "a"}, stage_index=0)
         assert len(rows) == 1
 
     def test_build_stage_rows_tags_reuse_for_produced(self) -> None:
         by_task = index_rows_by_task(_materialized_rows(["t0", "t1"], repeats=2))
         # t0's two repeats were already produced; t1 is new this stage.
         produced = {("t0", 0), ("t0", 1)}
-        rows = build_stage_rows(by_task, ["t0", "t1"], ["a"], stage_index=1, produced=produced)
+        rows = build_stage_rows(by_task, {"t0": "a", "t1": "a"}, stage_index=1, produced=produced)
         reuse = {(r["task_id"], r.get("reuse_cached_deliverable", False)) for r in rows}
         assert ("t0", True) in reuse
         assert ("t1", False) in reuse
 
     def test_build_stage_rows_no_reuse_without_produced(self) -> None:
         by_task = index_rows_by_task(_materialized_rows(["t0"]))
-        rows = build_stage_rows(by_task, ["t0"], ["a"], stage_index=0)
+        rows = build_stage_rows(by_task, {"t0": "a"}, stage_index=0)
         assert all("reuse_cached_deliverable" not in r for r in rows)
 
     def test_tag_results_stamps_identity(self) -> None:
@@ -237,11 +240,12 @@ def _fake_run_rollouts_factory(target_elo: float = 1300.0):
 
 class TestRunStages:
     async def test_threads_elo_and_shrinks_references(self) -> None:
-        task_ids = [f"t{i}" for i in range(10)]
+        task_ids = [f"t{i}" for i in range(20)]
         rows = _materialized_rows(task_ids)
         cfg = MultiStageRunConfig(
             enabled=True,
-            stages=parse_multistage_config({"enabled": True, "stages": ["3", "5:2"]}).stages,
+            # Full task set each stage (robust ELO); stage 1 narrows to 2 refs.
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}).stages,
             seed=0,
         )
         all_results, summaries = await run_multistage_stages(
@@ -269,6 +273,65 @@ class TestRunStages:
         # makes every row unique. Indices are never offset.
         keys = [(r["stage_index"], r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in all_results]
         assert len(keys) == len(set(keys))
+
+    async def test_default_full_dataset_and_single_reference_per_task(self) -> None:
+        # With num_tasks omitted, every stage judges the FULL task set, and each
+        # task's row carries a single reference drawn from the stage's included set.
+        task_ids = [f"t{i}" for i in range(40)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            # No num_tasks ⇒ full dataset; stage 1 narrows to 2 references.
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_models": 4}, {"num_models": 2}]}).stages,
+            seed=0,
+        )
+
+        seen: List[Tuple[int, str, List[str]]] = []
+        base_run = _fake_run_rollouts_factory()
+
+        async def recording_run(rows_in: List[Dict[str, Any]]):
+            for r in rows_in:
+                seen.append((r["stage_index"], r["task_id"], list(r["reference_ids"])))
+            return await base_run(rows_in)
+
+        _, summaries = await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, recording_run)
+
+        for stage_index, pool in ((0, {"a", "b", "c", "d"}), (1, {"b", "c"})):
+            stage_seen = [(t, refs) for s, t, refs in seen if s == stage_index]
+            # Full dataset: every task appears exactly once this stage.
+            assert {t for t, _ in stage_seen} == set(task_ids)
+            # Exactly one reference per task, always from the included pool.
+            assert all(len(refs) == 1 for _, refs in stage_seen)
+            assert {refs[0] for _, refs in stage_seen}.issubset(pool)
+            # With 40 tasks over the pool, every included reference is used.
+            assert {refs[0] for _, refs in stage_seen} == pool
+            assert summaries[stage_index]["num_tasks"] == len(task_ids)
+
+    async def test_num_tasks_limits_sampled_task_count(self) -> None:
+        # An explicit num_tasks samples exactly that many tasks for the stage.
+        task_ids = [f"t{i}" for i in range(40)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            # Stage 0 samples 6 tasks; stage 1 defaults to the full 40.
+            stages=parse_multistage_config({"enabled": True, "stages": [{"num_tasks": 6}, {"num_models": 2}]}).stages,
+            seed=0,
+        )
+
+        seen: Dict[int, set] = {0: set(), 1: set()}
+        base_run = _fake_run_rollouts_factory()
+
+        async def recording_run(rows_in: List[Dict[str, Any]]):
+            for r in rows_in:
+                seen[r["stage_index"]].add(r["task_id"])
+            return await base_run(rows_in)
+
+        _, summaries = await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, recording_run)
+
+        assert len(seen[0]) == 6
+        assert summaries[0]["num_tasks"] == 6
+        assert len(seen[1]) == 40
+        assert summaries[1]["num_tasks"] == 40
 
     async def test_reuses_deliverables_across_stages(self) -> None:
         # Nested tasks ⇒ stage 1 ⊇ stage 0, so every stage-0 task recurs in
