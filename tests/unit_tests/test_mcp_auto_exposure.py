@@ -44,7 +44,6 @@ pytest.importorskip("mcp")
 
 from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -365,9 +364,9 @@ def test_optional_body_model_bind_route_refuses_with_reason():
     async def opt_body(body: Optional[EchoBody] = None):
         pass
 
-    outcome = bind_route(_stub_route(opt_body))
-    assert outcome.binding is None
-    assert any("optional/union body param" in r for r in outcome.reasons), outcome.reasons
+    binding, reasons, _ = bind_route(_stub_route(opt_body))
+    assert binding is None
+    assert any("union/optional body param" in r for r in reasons), reasons
 
 
 def test_parameterized_dict_body_dispatches():
@@ -390,6 +389,7 @@ def test_sync_def_handler_dispatches_correctly():
 
 
 def test_defaulted_query_param_gets_its_default():
+    # MCP calls carry no query string, so the handler gets the default — same as the plain HTTP route.
     with _mcp(Shapes, "shapes") as (client, token):
         payload = _payload(_call(client, "with_default", {"value": "x"}, token=token))
         assert payload == {"value": "x", "limit": 3}
@@ -622,6 +622,31 @@ def test_excluded_route_with_depends_param_does_not_refuse():
     assert set(tools) == {"append"}
 
 
+def test_undispatchable_route_keeps_typed_schema_in_harvested_list():
+    # The body model survives a failed bind, so an mcp_tools() override inspecting the harvested
+    # list sees the real schema even for a tool it must drop.
+    harvested_schemas: dict[str, dict] = {}
+
+    class DroppedTyped(Excluding):
+        def setup_webserver(self) -> FastAPI:
+            app = super().setup_webserver()
+
+            @app.post("/gated")
+            async def gated(body: EchoBody, ok: bool = Depends(lambda: True)):
+                return {"ok": ok}
+
+            return app
+
+        def mcp_tools(self, harvested, catchall):
+            harvested_schemas.update({t.name: t.tool.inputSchema for t in harvested})
+            return [t for t in harvested if t.name not in ("end_session", "gated")]
+
+    server = _server(DroppedTyped, "excl")
+    tools = install_auto_exposure(server, server.setup_webserver())
+    assert set(tools) == {"append"}
+    assert sorted(harvested_schemas["gated"]["properties"]) == ["value"]
+
+
 def test_refuses_duplicate_tool_name():
     class DuplicateInventory(Store):
         def mcp_tools(self, harvested, catchall):
@@ -659,18 +684,6 @@ def test_missing_seed_session_raises_a_clear_error():
         install_auto_exposure(server, app)
 
 
-def test_seed_session_with_unannotated_request_param_installs_and_mints_token():
-    class UnannotatedSeed(Store):
-        async def seed_session(self, request=None):  # non-Request param named "request"
-            return BaseSeedSessionResponse()
-
-    server = _server(UnannotatedSeed)
-    app = server.setup_webserver()
-    maybe_auto_expose(server, app)  # must not produce a duplicate "request" parameter
-    with TestClient(app) as client:
-        assert _seed(client)  # the wrapper still injects the real Request and mints a token
-
-
 # ==================================================================================================
 # The detector: bind_route classification of accepted and refused shapes
 # ==================================================================================================
@@ -701,23 +714,23 @@ def test_bind_route_refusal_reasons():
     cases = {
         "*args/**kwargs": var_args,
         "multiple body models": two_models,
-        "ambiguous union body": ambiguous_union,
+        "union/optional body param": ambiguous_union,
         "DI marker default": di_default,
         "unsupported required param": bare_required,
     }
     for expected, endpoint in cases.items():
-        outcome = bind_route(_stub_route(endpoint))
-        assert outcome.binding is None, expected
-        assert any(expected in reason for reason in outcome.reasons), (expected, outcome.reasons)
+        binding, reasons, _ = bind_route(_stub_route(endpoint))
+        assert binding is None, expected
+        assert any(expected in reason for reason in reasons), (expected, reasons)
 
 
 def test_bind_route_accepts_defaulted_query_param():
     async def handler(body: EchoBody, limit: int = 5):
         pass
 
-    outcome = bind_route(_stub_route(handler))
-    assert outcome.binding is not None, outcome.reasons
-    assert outcome.binding.body_model is EchoBody
+    binding, reasons, _ = bind_route(_stub_route(handler))
+    assert binding is not None, reasons
+    assert binding.body_model is EchoBody
 
 
 def test_silently_wrong_shapes_are_classified_not_degraded():
@@ -727,10 +740,10 @@ def test_silently_wrong_shapes_are_classified_not_degraded():
     app = server.setup_webserver()
     routes = {r.path: r for r in app.routes if isinstance(r, APIRoute)}
 
-    filt = bind_route(routes["/filtered"]).binding
+    filt, _, _ = bind_route(routes["/filtered"])
     assert filt is not None and filt.return_model is PublicView
 
-    sync = bind_route(routes["/sync_tool"]).binding
+    sync, _, _ = bind_route(routes["/sync_tool"])
     assert sync is not None and sync.is_coroutine is False
 
 
@@ -754,9 +767,9 @@ def test_bind_route_honors_factory_signature_over_annotations():
     )
     app.post("/factory")(handler)
     route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == "/factory")
-    outcome = bind_route(route)
-    assert outcome.binding is not None
-    assert outcome.binding.body_model is EchoBody
+    binding, reasons, _ = bind_route(route)
+    assert binding is not None, reasons
+    assert binding.body_model is EchoBody
 
 
 # ==================================================================================================

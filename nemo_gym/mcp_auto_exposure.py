@@ -68,7 +68,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import UnionType
 from typing import Any, Callable, Optional, Union, get_args, get_origin, get_type_hints
 from uuid import uuid4
@@ -106,9 +106,6 @@ TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
 
-# Never tools. GET docs/openapi are excluded by the POST filter below; /mcp by path.
-BASIC_PATHS = frozenset("/" + name for name in RESERVED_MCP_TOOL_NAMES)
-
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 
 # MCP clients reject tool names outside this alphabet, and verify-time name normalization
@@ -123,7 +120,7 @@ _GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
 
 
 # ==================================================================================================
-# STARTUP — detect & bind routes: bind_route (route-level) + audit_middleware (server-level)
+# STARTUP — detect & bind routes: bind_route classifies one handler signature for direct dispatch
 # ==================================================================================================
 
 
@@ -143,18 +140,12 @@ class DirectBinding:
     is_coroutine: bool = False  # sync (def) handlers go to a threadpool, as FastAPI would send them
 
 
-@dataclass
-class BindOutcome:
-    """Holds bind_route's verdict for one route (binding, or reasons it is undispatchable, plus the
-    body model for the schema); built during STARTUP harvesting, consumed there and in _validate_tools."""
-
-    binding: Optional[DirectBinding]  # None -> this handler shape is not directly dispatchable
-    reasons: list[str] = field(default_factory=list)  # why not, when binding is None
-    body_model: Optional[type[BaseModel]] = None  # resolved body model, for the tools/list schema
-
-
-def bind_route(route: APIRoute) -> BindOutcome:
-    """Classify one route's handler signature for direct dispatch. Public introspection only.
+def bind_route(route: APIRoute) -> tuple[Optional[DirectBinding], list[str], Optional[type[BaseModel]]]:
+    """Classify one route's handler signature for direct dispatch, returning
+    ``(binding, reasons, body_model)`` where ``binding`` is None (with the reasons why) for a handler
+    shape that is not directly dispatchable. ``body_model`` is the resolved body model even when
+    ``binding`` is None, so the harvested tools/list schema stays typed for a route the ``mcp_tools()``
+    override may drop. Public introspection only.
 
     Annotation resolution matches FastAPI's own: ``inspect.signature`` first (it honors a
     factory-set ``__signature__`` — some servers rewrite it with the real body model while
@@ -179,8 +170,6 @@ def bind_route(route: APIRoute) -> BindOutcome:
 
     def resolve(name: str, raw: Any) -> Any:
         if isinstance(raw, str):  # deferred annotation — get_type_hints is the resolver
-            return hints.get(name, raw)
-        if raw is inspect.Parameter.empty:
             return hints.get(name, raw)
         return raw  # concrete object on the signature wins (FastAPI reads the signature too)
 
@@ -211,12 +200,8 @@ def bind_route(route: APIRoute) -> BindOutcome:
             # ``body: Optional[Model]``/``Model | None`` reaches FastAPI as a body param, but direct
             # MCP dispatch has no proven-equivalent unwrapping for it, so refuse rather than guess.
             members = [a for a in get_args(annotation) if a is not type(None)]
-            model_members = [m for m in members if isinstance(m, type) and issubclass(m, BaseModel)]
-            if model_members:
-                if len(members) > 1:
-                    reasons.append(f"ambiguous union body param {name!r}: {annotation!r}")
-                else:
-                    reasons.append(f"optional/union body param {name!r} is not supported over MCP: {annotation!r}")
+            if any(isinstance(m, type) and issubclass(m, BaseModel) for m in members):
+                reasons.append(f"union/optional body param {name!r} is not supported over MCP: {annotation!r}")
                 continue
         if annotation is dict or get_origin(annotation) is dict:
             # ``body: dict`` — FastAPI parses the JSON body and passes the dict through with no
@@ -251,8 +236,8 @@ def bind_route(route: APIRoute) -> BindOutcome:
         return_model = ret if isinstance(ret, type) and issubclass(ret, BaseModel) else None
 
     if reasons:
-        return BindOutcome(None, reasons, body_model)
-    return BindOutcome(
+        return None, reasons, body_model
+    return (
         DirectBinding(
             endpoint=endpoint,
             path=route.path,
@@ -269,26 +254,6 @@ def bind_route(route: APIRoute) -> BindOutcome:
     )
 
 
-def audit_middleware(app: FastAPI) -> list[str]:
-    """Return the names of non-Gym middleware installed on the app (empty == direct-safe).
-
-    Any non-Gym middleware means an env author added per-request behavior that direct dispatch would
-    silently skip, so exposure refuses. Each entry is a ``starlette.middleware.Middleware`` data
-    holder: ``.cls`` is the class, ``.kwargs`` its constructor kwargs (``dispatch=fn`` for
-    ``@app.middleware("http")`` functions).
-    """
-    custom: list[str] = []
-    for m in app.user_middleware:
-        cls = m.cls
-        if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
-            continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
-        dispatch = m.kwargs.get("dispatch")
-        if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
-            continue  # Gym's add_session_id / exception middleware
-        custom.append(f"{cls.__module__}.{cls.__name__}")
-    return custom
-
-
 # ==================================================================================================
 # PER-CALL — dispatch a frozen handler: fabricate the Request, call the route handler once
 # ==================================================================================================
@@ -302,19 +267,6 @@ class DirectDispatchError(Exception):
         super().__init__(f"HTTP {status} (direct): {detail}")
         self.status = status
         self.detail = detail
-
-
-def _make_receive(body: bytes):
-    sent = False
-
-    async def receive() -> dict:
-        nonlocal sent
-        if sent:
-            return {"type": "http.disconnect"}
-        sent = True
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    return receive
 
 
 async def call_direct(
@@ -359,7 +311,11 @@ async def call_direct(
             "app": app,
             "session": {SESSION_ID_KEY: session_id},
         }
-        request = Request(scope, _make_receive(raw))
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": raw, "more_body": False}
+
+        request = Request(scope, receive)
         for name in binding.request_params:
             kwargs[name] = request
 
@@ -425,10 +381,6 @@ class MCPTool:
     reasons: tuple[str, ...] = ()  # bind-failure reasons from harvest time, read by _validate_tools
 
 
-def _schema_for(body_model: Optional[type[BaseModel]]) -> dict:
-    return body_model.model_json_schema() if body_model is not None else dict(PERMISSIVE_SCHEMA)
-
-
 class _CatchAll:
     """Holds the single parameterized catch-all route; built during STARTUP harvesting and handed to
     ``mcp_tools()`` overrides so they can mint catch-all-backed tools.
@@ -445,14 +397,14 @@ class _CatchAll:
     def tool(self, name: str, input_schema: Optional[dict] = None, description: Optional[str] = None) -> MCPTool:
         if self._binding is None:
             # First catch-all-backed tool for this route: bind it once and cache; on failure the
-            # outcome's reasons drive the error (see bind_route's deferred-validation note).
-            outcome = bind_route(self.route)
-            if outcome.binding is None:
+            # reasons drive the error (see bind_route's deferred-validation note).
+            binding, reasons, _ = bind_route(self.route)
+            if binding is None:
                 raise ValueError(
                     f"{type(self.server).__name__} catch-all route {self.route.path!r} cannot be dispatched "
-                    f"directly: {'; '.join(outcome.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
+                    f"directly: {'; '.join(reasons)}. Direct MCP dispatch does not reproduce this handler shape."
                 )
-            self._binding = outcome.binding
+            self._binding = binding
         return MCPTool(
             name=name,
             tool=types.Tool(name=name, description=description, inputSchema=input_schema or dict(PERMISSIVE_SCHEMA)),
@@ -470,7 +422,15 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     return value is the final tool list — the default returns ``harvested`` unchanged; an override may
     filter it, append ``catchall.tool(...)`` entries, or return ``None``/``[]`` to expose nothing.
     """
-    custom_middleware = audit_middleware(app)
+    custom_middleware: list[str] = []
+    for m in app.user_middleware:
+        cls = m.cls
+        if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
+            continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
+        dispatch = m.kwargs.get("dispatch")
+        if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
+            continue  # Gym's add_session_id / exception middleware
+        custom_middleware.append(f"{cls.__module__}.{cls.__name__}")
     if custom_middleware:
         raise ValueError(
             f"{type(server).__name__} installs non-Gym middleware {custom_middleware}, which direct MCP "
@@ -482,23 +442,26 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     for route in app.routes:
         if not isinstance(route, APIRoute) or "POST" not in (route.methods or set()):
             continue
-        if route.path in BASIC_PATHS:
+        # Never tools. GET docs/openapi are excluded by the POST filter above; /mcp by path.
+        if route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES or route.path == MCP_URL_PATH:
             continue
         if "{" in route.path:
             catchall_routes.append(route)
             continue
         name = route.path.lstrip("/")
-        # Keep the binding + reasons + schema; a None binding (undispatchable) only errors later, and
-        # only if the override actually exposes this tool. See bind_route's deferred-validation note.
-        outcome = bind_route(route)
+        # Keep the binding + reasons; a None binding (undispatchable) only errors later, and only if
+        # the override actually exposes this tool. See bind_route's deferred-validation note. The
+        # schema comes from body_model, which survives a failed bind, so overrides see it typed.
+        binding, reasons, body_model = bind_route(route)
+        schema = body_model.model_json_schema() if body_model is not None else dict(PERMISSIVE_SCHEMA)
         description = (route.description or route.summary or "").strip() or None
         harvested.append(
             MCPTool(
                 name=name,
-                tool=types.Tool(name=name, description=description, inputSchema=_schema_for(outcome.body_model)),
-                binding=outcome.binding,
+                tool=types.Tool(name=name, description=description, inputSchema=schema),
+                binding=binding,
                 path=route.path,
-                reasons=tuple(outcome.reasons),
+                reasons=tuple(reasons),
             )
         )
 
@@ -559,6 +522,21 @@ def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]
 # ==================================================================================================
 
 
+def _take_route(app: FastAPI, path: str, why: str) -> tuple[int, APIRoute]:
+    found = next(
+        ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == path),
+        None,
+    )
+    if found is None:
+        raise ValueError(f"expose_tools_over_mcp requires a {path} route ({why}), but the app has none.")
+    return found
+
+
+def _swap_route(app: FastAPI, idx: int, path: str, endpoint: Callable) -> None:
+    app.post(path)(endpoint)
+    app.router.routes[idx] = app.router.routes.pop()  # in-place swap keeps ordering vs catch-all routes
+
+
 def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
     """Replace the /seed_session route with a wrapper that appends the MCP session token to its response.
 
@@ -571,16 +549,7 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     injects exactly those arguments into ``**kwargs``; ``passthrough`` records the original param names
     to forward to the real handler (the injected Request, if added, is not among them).
     """
-    found = next(
-        ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == "/seed_session"),
-        None,
-    )
-    if found is None:
-        raise ValueError(
-            "expose_tools_over_mcp requires a /seed_session route (its response carries the MCP session "
-            "token to the agent), but the app has none."
-        )
-    idx, route = found
+    idx, route = _take_route(app, "/seed_session", "its response carries the MCP session token to the agent")
     method = route.endpoint
     signature = inspect.signature(method)
     hints = get_type_hints(method)
@@ -593,12 +562,8 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     params = [p.replace(annotation=hints.get(n, p.annotation)) for n, p in signature.parameters.items()]
     passthrough = tuple(signature.parameters)  # names to forward verbatim to the original handler
     if request_param_name is None:
-        # No Request declared: prepend one. Pick a name the handler does not already use, because
-        # seed_session may declare a non-Request parameter literally named "request", and two params
-        # sharing a name is a signature error.
-        request_param_name = "request"
-        while request_param_name in signature.parameters:
-            request_param_name = "_" + request_param_name
+        # No Request declared: prepend one, under a name no real handler param can collide with.
+        request_param_name = "__nemo_gym_request"
         params = [
             inspect.Parameter(request_param_name, kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
             *params,
@@ -636,9 +601,7 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     seed_session_endpoint.__signature__ = inspect.Signature(parameters=params)
     seed_session_endpoint.__annotations__ = {p.name: p.annotation for p in params}
 
-    app.post("/seed_session")(seed_session_endpoint)
-    new_route = app.router.routes.pop()  # the route just appended by app.post
-    app.router.routes[idx] = new_route  # in-place swap keeps ordering vs catch-all routes
+    _swap_route(app, idx, "/seed_session", seed_session_endpoint)
 
 
 def _wrap_verify(app: FastAPI, server: Any) -> None:
@@ -648,16 +611,7 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
     artifacts keep transport provenance. Wrapping whatever handler the route holds at install time
     covers servers that strip and re-register /verify with their own handler.
     """
-    found = next(
-        ((i, r) for i, r in enumerate(app.router.routes) if isinstance(r, APIRoute) and r.path == "/verify"),
-        None,
-    )
-    if found is None:
-        raise ValueError(
-            "expose_tools_over_mcp requires a /verify route (its tool-call names are normalized for "
-            "scoring), but the app has none."
-        )
-    idx, route = found
+    idx, route = _take_route(app, "/verify", "its tool-call names are normalized for scoring")
     endpoint = route.endpoint
 
     def _function_calls(container: Any) -> list:
@@ -667,40 +621,33 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
             if getattr(item, "type", None) == "function_call"
         ]
 
-    def _locate_trajectory_arg(args: list, kwargs: dict) -> Optional[tuple[bool, Any, Any]]:
+    def _locate_trajectory_arg(kwargs: dict) -> Optional[tuple[str, Any]]:
         """Find the single argument that carries the trajectory (has function_call output items).
 
         Verify signatures vary ((body), (request, body), ...), so the trajectory argument is found by
-        content, not position. Returns ``(in_kwargs, key, container)`` where ``key`` indexes ``args``
-        (positional) or names ``kwargs`` (keyword); ``None`` when no argument carries a trajectory.
+        content, not name; FastAPI always invokes endpoints with keyword arguments. Returns
+        ``(name, container)``, or ``None`` when no argument carries a trajectory.
         """
-        for i, value in enumerate(args):
-            if _function_calls(value):
-                return False, i, value
         for name, value in kwargs.items():
             if _function_calls(value):
-                return True, name, value
+                return name, value
         return None
 
     @functools.wraps(endpoint)
-    async def verify_normalized(*args: Any, **kwargs: Any) -> Any:
-        args = list(args)
-        located = _locate_trajectory_arg(args, kwargs)
+    async def verify_normalized(**kwargs: Any) -> Any:
+        located = _locate_trajectory_arg(kwargs)
         if located is None:
-            result = endpoint(*args, **kwargs)
+            result = endpoint(**kwargs)
             return await result if inspect.isawaitable(result) else result
-        in_kwargs, key, container = located
+        key, container = located
 
         emitted = {item.call_id: item.name for item in _function_calls(container)}
         normalized = container.model_copy(deep=True)
         for item in _function_calls(normalized):
             item.name = server.normalize_tool_name(item.name)
-        if in_kwargs:
-            kwargs[key] = normalized
-        else:
-            args[key] = normalized
+        kwargs[key] = normalized
 
-        result = endpoint(*args, **kwargs)
+        result = endpoint(**kwargs)
         if inspect.isawaitable(result):
             result = await result
 
@@ -709,9 +656,7 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
                 item.name = emitted[item.call_id]
         return result
 
-    app.post("/verify")(verify_normalized)
-    new_route = app.router.routes.pop()  # the route just appended by app.post
-    app.router.routes[idx] = new_route  # in-place swap keeps ordering vs catch-all routes
+    _swap_route(app, idx, "/verify", verify_normalized)
 
 
 # ==================================================================================================
@@ -730,15 +675,9 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
     if not session_id:
         session_id = str(uuid4())
         request.session[SESSION_ID_KEY] = session_id
-    try:
-        session_allowed = server.mcp_allowed_tools_for_session(seed_body)
-    except Exception as e:
-        # Fail the seed request rather than mint an unrestricted token past a broken hook.
-        raise RuntimeError(
-            f"{type(server).__name__}.mcp_allowed_tools_for_session raised; refusing to mint an MCP "
-            f"session token: {e!r}"
-        ) from e
-    payload: Any = session_id if session_allowed is None else {"sid": session_id, "tools": session_allowed}
+    # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
+    session_allowed = server.mcp_allowed_tools_for_session(seed_body)
+    payload = {"sid": session_id, "tools": session_allowed}
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
@@ -753,7 +692,7 @@ def _parse_session_token(
     """Decode a Gym MCP session token into ``(session id, token allow-list)``.
 
     ``required`` callers (tools/call) raise on a missing/forged token; optional callers (tools/list)
-    fall back to ``(None, None)``. A bare-string payload carries only the session id (no narrowing).
+    fall back to ``(None, None)``. A ``tools`` of None means the session is unrestricted.
     """
     if not token:
         if required:
@@ -766,27 +705,17 @@ def _parse_session_token(
         if required:
             raise ValueError("Invalid Gym MCP session token.")
         return None, None
-    if isinstance(payload, dict):
-        allowed = payload.get("tools")
-        return payload.get("sid"), None if allowed is None else frozenset(allowed)
-    return payload, None
+    allowed = payload.get("tools")
+    return payload["sid"], None if allowed is None else frozenset(allowed)
 
 
 def _to_result(payload: Any):
-    """Render a handler payload as the MCP call_tool result the plain HTTP route would mirror.
-
-    The return shape is asymmetric on purpose, following the SDK's call_tool contract: returning
-    ``(content, structuredContent)`` populates both fields of the CallToolResult, while returning a
-    bare ``content`` list leaves structuredContent unset. Only a JSON object maps to
-    structuredContent, so the dict branch returns the 2-tuple and the str/other branches return just
-    the content list. In every branch JSONResponse renders the same bytes the plain HTTP route would
-    have returned on success.
-    """
-    if isinstance(payload, dict):
-        return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))], payload
-    if isinstance(payload, str):
-        return [types.TextContent(type="text", text=payload)]
-    return [types.TextContent(type="text", text=JSONResponse(payload).body.decode("utf-8"))]
+    """Per the SDK's call_tool contract, a ``(content, structuredContent)`` tuple populates both
+    CallToolResult fields while a bare content list leaves structuredContent unset — and only a JSON
+    object maps to structuredContent."""
+    text = payload if isinstance(payload, str) else JSONResponse(payload).body.decode("utf-8")
+    content = [types.TextContent(type="text", text=text)]
+    return (content, payload) if isinstance(payload, dict) else content
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
@@ -818,28 +747,18 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "and rely on expose_tools_over_mcp."
         )
 
-    # Build the token serializer, then harvest the tool routes into the {name: MCPTool} map.
     secret = server.get_session_middleware_key()
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
 
-    # Wrap (never edit) the endpoints: /seed_session hands the client its session token, /verify
-    # normalizes MCP-namespaced tool-call names for scoring only.
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
 
-    # Create the SDK low-level Server, then register its list_tools/call_tool handlers below.
     mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
 
-    # session_claims must stay local: it reads the token off the SDK's per-request context. All the
-    # token/allow-list math it and the handlers delegate to lives in the module-level helpers above.
-    #
-    # mcp_server.request_context is a contextvar the SDK sets for the duration of each handler call:
-    # StreamableHTTPSessionManager.handle_request stores the incoming starlette Request on the
-    # low-level Server before it dispatches list_tools/call_tool, and clears it afterward. So this
-    # attribute is only populated while one of the handlers below is on the stack — which is exactly
-    # when session_claims runs. Nothing in this file assigns it; the SDK owns that lifecycle.
+    # mcp_server.request_context is a contextvar the SDK populates only while one of the handlers
+    # below is on the stack — exactly when session_claims runs, which is why it stays local.
     def session_claims(required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
         ctx_request = mcp_server.request_context.request  # the POST /mcp starlette Request
         token = ctx_request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER) if ctx_request is not None else None
