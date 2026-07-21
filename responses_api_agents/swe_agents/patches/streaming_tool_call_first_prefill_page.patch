@@ -73,7 +73,7 @@
                  "final_only_prefill_completion_grace_seconds": 0.0,
                  "min_chunk_chars": 256,
                  "initial_chunk_chars": 128,
-@@ -1304,6 +1306,153 @@
+@@ -1304,6 +1306,165 @@
          )
  
      @pytest.mark.asyncio
@@ -140,8 +140,14 @@
 +                "prefill_failures": 0,
 +                "prefill_background_scheduled_chunks": int(not final),
 +                "prefill_background_scheduled_tokens": 13 if not final else 0,
++                "prefill_background_scheduled_cache_fill_tokens": (
++                    13 if not final else 0
++                ),
 +                "prefill_background_completed_chunks": int(final),
 +                "prefill_background_completed_tokens": 13 if final else 0,
++                "prefill_background_completed_cache_fill_tokens": (
++                    13 if final else 0
++                ),
 +                "prefill_background_effective_chunks": int(final),
 +                "prefill_background_dynamic_tokens": 13 if final else 0,
 +                "deferred_prefill_admissions": int(sequence_no == 0),
@@ -220,6 +226,12 @@
 +        assert metrics[
 +            "streaming_tool_call_prefill_background_scheduled_chunks"
 +        ] == 1
++        assert metrics[
++            "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens"
++        ] == 13
++        assert metrics[
++            "streaming_tool_call_prefill_background_completed_cache_fill_tokens"
++        ] == 13
 +        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
 +        streaming_http_session.close.assert_awaited_once()
 +
@@ -227,7 +239,7 @@
      async def test_execute_action_cancels_async_snapshot_request(self):
          runtime = LocalRuntime.__new__(LocalRuntime)
          runtime.api_url = "http://runtime"
-@@ -1362,6 +1511,7 @@
+@@ -1362,6 +1523,7 @@
                  "final_only_incremental_tokenizer": True,
                  "final_only_prefill": True,
                  "prefill_after_admission": True,
@@ -235,7 +247,7 @@
                  "final_only_prefill_completion_grace_seconds": 0.0,
                  "min_chunk_chars": 256,
                  "initial_chunk_chars": 128,
-@@ -1465,6 +1615,7 @@
+@@ -1465,6 +1627,7 @@
                  "final_only_incremental_tokenizer": True,
                  "final_only_prefill": True,
                  "prefill_after_admission": True,
@@ -243,7 +255,7 @@
                  "final_only_prefill_completion_grace_seconds": 0.0,
                  "min_chunk_chars": 256,
                  "initial_chunk_chars": 128,
-@@ -1589,6 +1740,7 @@
+@@ -1589,6 +1752,7 @@
                  "final_only_incremental_tokenizer": True,
                  "final_only_prefill": True,
                  "prefill_after_admission": True,

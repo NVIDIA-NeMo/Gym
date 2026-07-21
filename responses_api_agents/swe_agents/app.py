@@ -354,13 +354,20 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prefill_after_admission_requests: Optional[int] = None
     streaming_tool_call_prefill_after_admission_tokens: Optional[int] = None
     streaming_tool_call_prefill_after_admission_request_seconds: Optional[float] = None
+    streaming_tool_call_prefill_first_page_stops: Optional[int] = None
     streaming_tool_call_prefill_committed_tokens: Optional[int] = None
     streaming_tool_call_prefill_dynamic_tokens: Optional[int] = None
     streaming_tool_call_prefill_effective_requests: Optional[int] = None
     streaming_tool_call_prefill_background_scheduled_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_scheduled_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_scheduled_cache_fill_tokens: Optional[
+        int
+    ] = None
     streaming_tool_call_prefill_background_completed_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_completed_tokens: Optional[int] = None
+    streaming_tool_call_prefill_background_completed_cache_fill_tokens: Optional[
+        int
+    ] = None
     streaming_tool_call_prefill_background_completed_dummy_tokens: Optional[int] = None
     streaming_tool_call_prefill_background_effective_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_dynamic_tokens: Optional[int] = None
@@ -2659,13 +2666,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_prefill_after_admission_requests": 0,
                     "streaming_tool_call_prefill_after_admission_tokens": 0,
                     "streaming_tool_call_prefill_after_admission_request_seconds": 0.0,
+                    "streaming_tool_call_prefill_first_page_stops": 0,
                     "streaming_tool_call_prefill_committed_tokens": 0,
                     "streaming_tool_call_prefill_dynamic_tokens": 0,
                     "streaming_tool_call_prefill_effective_requests": 0,
                     "streaming_tool_call_prefill_background_scheduled_chunks": 0,
                     "streaming_tool_call_prefill_background_scheduled_tokens": 0,
+                    "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens": 0,
                     "streaming_tool_call_prefill_background_completed_chunks": 0,
                     "streaming_tool_call_prefill_background_completed_tokens": 0,
+                    "streaming_tool_call_prefill_background_completed_cache_fill_tokens": 0,
                     "streaming_tool_call_prefill_background_completed_dummy_tokens": 0,
                     "streaming_tool_call_prefill_background_effective_chunks": 0,
                     "streaming_tool_call_prefill_background_dynamic_tokens": 0,

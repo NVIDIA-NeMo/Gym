@@ -451,6 +451,15 @@ class TestSWEBenchVerifyResponse:
         assert "resolved" in fields
         assert "patch_exists" in fields
         assert "instance_config" in fields
+        assert "streaming_tool_call_prefill_first_page_stops" in fields
+        assert (
+            "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens"
+            in fields
+        )
+        assert (
+            "streaming_tool_call_prefill_background_completed_cache_fill_tokens"
+            in fields
+        )
 
 
 ########################################
