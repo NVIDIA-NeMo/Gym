@@ -59,6 +59,10 @@ spec:
               value: /root
             - name: OSWORLD_INPUT
               value: resources_servers/osworld/data/test_nogdrive.jsonl
+            - name: OSWORLD_REPO_DIR
+              value: <SHARED_PVC_MOUNT>/osworld-omni/nemo-gym
+            - name: OSWORLD_RUNS_DIR
+              value: <SHARED_PVC_MOUNT>/osworld-omni/runs
             - name: OSWORLD_RUN_NAME
               value: m8-full-conc48
             - name: OSWORLD_CONCURRENCY

@@ -13,7 +13,8 @@ if ! ldconfig -p 2>/dev/null | grep -q libGL.so.1; then
   apt-get update -qq && apt-get install -y -qq libgl1 libglib2.0-0 >/dev/null
 fi
 
-D=<SHARED_PVC_MOUNT>/osworld-omni/nemo-gym
+# Repo + runs locations come from the Job env (no site-specific edits needed here).
+D="${OSWORLD_REPO_DIR:?set OSWORLD_REPO_DIR in the Job env (repo checkout on the shared volume)}"
 cd "$D"
 
 # Inputs (overridable via the Job env). NOTE: the dataset actually collected comes from the
@@ -25,7 +26,7 @@ AGENT_CFG=responses_api_agents/nemotron_osworld/configs/nemotron_osworld.yaml
 sed -i -E "s#jsonl_fpath: resources_servers/osworld/data/.*\.jsonl#jsonl_fpath: ${INPUT}#" "$AGENT_CFG"
 echo "[entrypoint] dataset -> $(grep jsonl_fpath "$AGENT_CFG" | head -1 | tr -d ' ')"
 CONCURRENCY="${OSWORLD_CONCURRENCY:-8}"
-OUT_DIR="<SHARED_PVC_MOUNT>/osworld-omni/runs/${RUN_NAME}"
+OUT_DIR="${OSWORLD_RUNS_DIR:?set OSWORLD_RUNS_DIR in the Job env}/${RUN_NAME}"
 OUT="${OUT_DIR}/results.jsonl"
 mkdir -p "$OUT_DIR"
 
