@@ -18,6 +18,7 @@ import sys
 import types
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
@@ -674,7 +675,7 @@ class TestSearch:
         # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
         assert target == "nemo_gym.cli.eval:list_benchmarks"
-        assert overrides == ["+query=math"]
+        assert overrides == ['+query="math"']
 
     @pytest.mark.parametrize(
         "component_type, expected_target",
@@ -690,11 +691,21 @@ class TestSearch:
         # `gym search <type> <query>` runs that type's listing, filtered by the query.
         target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
         assert target == expected_target
-        assert overrides == ["+query=swe"]
+        assert overrides == ['+query="swe"']
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
-        assert set(overrides) == {"+query=math", "+json=true"}
+        assert set(overrides) == {'+query="math"', "+json=true"}
+
+    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B"])
+    def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
+        # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
+        # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
+        # both be valid Hydra and round-trip back to the original query string.
+        _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
+        assert overrides == [f'+query="{query}"']
+        parsed = OverridesParser.create().parse_overrides(overrides)[0]
+        assert parsed.value() == query
 
     def test_version_json_dispatches_with_override(self, monkeypatch: MonkeyPatch) -> None:
         # `gym --version --json` is the top-level path; it still forwards +json=true to the version command.

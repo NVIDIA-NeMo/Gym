@@ -164,7 +164,7 @@ SEARCH_TERMS = Flag(
         ),
         p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
     ),
-    translate_to_hydra=lambda args: [f"+query={args.query}"] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f'+query="{args.query}"'] if getattr(args, "query", None) else [],
 )
 
 
