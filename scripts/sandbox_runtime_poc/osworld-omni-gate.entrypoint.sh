@@ -30,6 +30,14 @@ OUT_DIR="${OSWORLD_RUNS_DIR:?set OSWORLD_RUNS_DIR in the Job env}/${RUN_NAME}"
 OUT="${OUT_DIR}/results.jsonl"
 mkdir -p "$OUT_DIR"
 
+# First run on a fresh checkout: build the root venv (per-server venvs are
+# created by gym itself; skip_venv_if_present makes retries fast).
+if [ ! -x .venv/bin/gym ]; then
+  echo "[entrypoint] bootstrapping root venv"
+  uv venv .venv
+  VIRTUAL_ENV="$PWD/.venv" uv sync --extra sandbox
+fi
+
 RESUME=""
 if [ -s "$OUT" ]; then
   echo "[entrypoint] found existing results ($(wc -l <"$OUT") rows) — resuming"
