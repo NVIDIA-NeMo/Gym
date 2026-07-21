@@ -27,12 +27,14 @@
 import copy
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import AliasChoices, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest
+
 
 if __package__:
     from .app import (
@@ -79,15 +81,12 @@ class SWEBenchRefineConfig(SWEBenchWrapperConfig):
         default=3000,
         ge=0,
         description=(
-            "Maximum characters of high-signal traceback/assertion evidence placed "
-            "first in a compact_raw refine seed."
+            "Maximum characters of high-signal traceback/assertion evidence placed first in a compact_raw refine seed."
         ),
     )
     skip_reset_after_initial_round: bool = Field(
         default=False,
-        validation_alias=AliasChoices(
-            "skip_reset_after_initial_round", "skip_reset_after_first"
-        ),
+        validation_alias=AliasChoices("skip_reset_after_initial_round", "skip_reset_after_first"),
         description=(
             "If True, keep the workspace (accumulated patch) across rounds instead of "
             "git-resetting (true 'refine'). Requires the persistent-instance + "
@@ -108,16 +107,47 @@ class SWEBenchRefineVerifyResponse(SWEBenchVerifyResponse):
     # extra="allow" so per-element fields consumed by the trainer (group_hash,
     # loss_multiplier, refine_round_idx) pass through model_dump into the result dict.
     model_config = ConfigDict(extra="allow")
+    # Padding is a trainer-side shape placeholder, not a real SWE episode. Avoid
+    # serializing the large per-episode instance config a second time for it.
+    instance_config: Optional[SWEBenchWrapperInstanceConfig] = None
 
 
-def _input_to_jsonable(input_value: Any) -> Any:
-    """Render responses_create_params.input to a stable JSON-able structure for hashing."""
-    if isinstance(input_value, str):
-        return input_value
-    out = []
-    for item in input_value or []:
-        out.append(item.model_dump() if hasattr(item, "model_dump") else item)
-    return out
+def _to_jsonable(value: Any) -> Any:
+    """Render Responses API values to a stable JSON-able structure."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    return value
+
+
+def _build_group_hash(responses_create_params: Any) -> str:
+    """Identify one SWE problem independently of its repeated rollout chain."""
+    metadata = _to_jsonable(responses_create_params.metadata or {})
+    instance_id = metadata.get("instance_id") if isinstance(metadata, dict) else None
+    if instance_id:
+        # The proof agent hashes its initial prompt.  SWE's equivalent stable
+        # problem identity lives in metadata because the dataset input is [].
+        payload = {
+            "dataset_name": metadata.get("dataset_name"),
+            "instance_id": instance_id,
+        }
+    else:
+        # Preserve a deterministic fallback for non-standard SWE requests.
+        payload = {
+            "input": _to_jsonable(responses_create_params.input),
+            "metadata": metadata,
+        }
+    return hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _build_padding_transport(
+    source_response: Any,
+) -> tuple[dict[str, Any], Any]:
+    """Build the smallest schema-valid payload for a masked refine slot."""
+    return {"input": ""}, source_response.model_copy(update={"output": [], "metadata": None, "tools": []})
 
 
 def _truncate_middle(text: str, max_tokens: int) -> str:
@@ -129,11 +159,7 @@ def _truncate_middle(text: str, max_tokens: int) -> str:
         return text
     head = max_chars // 2
     tail = max_chars - head
-    return (
-        text[:head]
-        + "\n...[diff truncated to fit carry-over budget]...\n"
-        + text[-tail:]
-    )
+    return text[:head] + "\n...[diff truncated to fit carry-over budget]...\n" + text[-tail:]
 
 
 def _build_refine_v1_seed(patch: str, verify_feedback: str, max_patch_tokens: int) -> str:
@@ -142,15 +168,13 @@ def _build_refine_v1_seed(patch: str, verify_feedback: str, max_patch_tokens: in
     verify_feedback = (verify_feedback or "").strip()
 
     parts = [
-        "\n\n---\n"
-        "Your previous automated refinement round did NOT resolve the issue.",
+        "\n\n---\nYour previous automated refinement round did NOT resolve the issue.",
         "Here is the diff you produced so far:",
         f"```diff\n{patch}\n```",
     ]
     if verify_feedback:
         parts.append(
-            "Running the tests on that diff produced the following output. "
-            "Use the failures below to fix the patch:"
+            "Running the tests on that diff produced the following output. Use the failures below to fix the patch:"
         )
         parts.append(f"```\n{verify_feedback}\n```")
     parts.append(
@@ -196,9 +220,7 @@ def _extract_failure_snippet(verify_feedback: str, max_chars: int) -> str:
     return snippet[-max_chars:]
 
 
-def _split_key_and_raw_verify_context(
-    key_failure_snippet: str, raw_verify_tail: str
-) -> tuple[str, str]:
+def _split_key_and_raw_verify_context(key_failure_snippet: str, raw_verify_tail: str) -> tuple[str, str]:
     """Return key and additional verifier context without duplicate evidence."""
     key_failure_snippet = (key_failure_snippet or "").strip()
     raw_verify_tail = (raw_verify_tail or "").strip()
@@ -232,18 +254,14 @@ def _build_refine_v3_seed(
     """Build refine v3 compact-raw seed with high-signal verifier evidence first."""
     patch = _truncate_middle((patch or "").strip(), max_patch_tokens)
     raw_verify_tail = (verify_feedback or "").strip()
-    key_failure_snippet = _extract_failure_snippet(
-        raw_verify_tail, max_failure_snippet_chars
-    )
-    key_failure_snippet, additional_verify_context = (
-        _split_key_and_raw_verify_context(key_failure_snippet, raw_verify_tail)
+    key_failure_snippet = _extract_failure_snippet(raw_verify_tail, max_failure_snippet_chars)
+    key_failure_snippet, additional_verify_context = _split_key_and_raw_verify_context(
+        key_failure_snippet, raw_verify_tail
     )
 
     parts = [
-        "\n\n---\n"
-        "Your previous automated refine round did NOT resolve the issue.",
-        "You are starting again from a clean repository. "
-        "Use the previous round only as debugging evidence.",
+        "\n\n---\nYour previous automated refine round did NOT resolve the issue.",
+        "You are starting again from a clean repository. Use the previous round only as debugging evidence.",
     ]
     if key_failure_snippet:
         parts.extend(
@@ -253,11 +271,7 @@ def _build_refine_v3_seed(
             ]
         )
     if additional_verify_context:
-        context_label = (
-            "Additional verifier context:"
-            if key_failure_snippet
-            else "Verifier output tail:"
-        )
+        context_label = "Additional verifier context:" if key_failure_snippet else "Verifier output tail:"
         parts.extend(
             [
                 context_label,
@@ -284,9 +298,7 @@ def _append_seed_to_problem_metadata(metadata: dict[str, Any], seed: str) -> dic
     raw_instance_dict = refined_metadata.get("instance_dict")
     try:
         instance_dict = (
-            json.loads(raw_instance_dict)
-            if isinstance(raw_instance_dict, str)
-            else copy.deepcopy(raw_instance_dict)
+            json.loads(raw_instance_dict) if isinstance(raw_instance_dict, str) else copy.deepcopy(raw_instance_dict)
         )
     except (TypeError, json.JSONDecodeError):
         instance_dict = None
@@ -306,11 +318,7 @@ def _build_chain_metrics(
 ) -> dict[str, Any]:
     """Return core metrics for one refinement chain."""
     resolved_at_refine_round = next(
-        (
-            idx
-            for idx, refine_round in enumerate(refine_rounds)
-            if refine_round["metrics"].resolved
-        ),
+        (idx for idx, refine_round in enumerate(refine_rounds) if refine_round["metrics"].resolved),
         None,
     )
     initial_round_resolved = bool(refine_rounds[0]["metrics"].resolved)
@@ -338,11 +346,11 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             base_params.tool_choice = "auto"
 
             # Stable group key shared by every refinement round and rollout of this task.
-            group_hash = hashlib.md5(
-                json.dumps(
-                    _input_to_jsonable(base_params.input), sort_keys=True, ensure_ascii=False
-                ).encode("utf-8")
-            ).hexdigest()
+            group_hash = _build_group_hash(base_params)
+            # One wrapper invocation is one independently sampled rollout chain.
+            # Its real/padded round slots share this identity so the trainer can
+            # compute RLOO across chains rather than across round slots.
+            chain_hash = f"{group_hash}:{uuid.uuid4().hex}"
 
             max_refine_rounds = self.config.max_refine_rounds
             refine_rounds: list[dict] = []
@@ -377,33 +385,32 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             # Chain-level reward = resolved by the (cumulative) final state; broadcast
             # to every round's sample. With fixed-length padding this keeps each
             # rollout's per-group count constant, so the GRPO baseline stays unbiased.
-            chain_metrics = _build_chain_metrics(
-                refine_rounds, max_refine_rounds, self.config.refine_strategy
-            )
+            chain_metrics = _build_chain_metrics(refine_rounds, max_refine_rounds, self.config.refine_strategy)
             reward = 1.0 if chain_metrics["chain_resolved"] else 0.0
 
             results: list[SWEBenchRefineVerifyResponse] = []
             for round_idx in range(max_refine_rounds):
                 is_padded = round_idx >= len(refine_rounds)
-                src = (
-                    refine_rounds[round_idx] if not is_padded else refine_rounds[-1]
-                )
+                src = refine_rounds[round_idx] if not is_padded else refine_rounds[-1]
                 metrics = src["metrics"]
-                # Padded slots reuse the last real round; deep-copy the response so the
-                # trainer's postprocess (which pops token-id fields) can't corrupt the original.
-                response = (
-                    src["response"].model_copy(deep=True) if is_padded else src["response"]
-                )
+                if is_padded:
+                    responses_create_params, response = _build_padding_transport(src["response"])
+                    instance_config = None
+                else:
+                    responses_create_params = copy.deepcopy(src["responses_create_params"])
+                    response = src["response"]
+                    instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(
+                        src["instance_config"]
+                    ).model_dump()
                 results.append(
                     SWEBenchRefineVerifyResponse(
-                        responses_create_params=copy.deepcopy(src["responses_create_params"]),
+                        responses_create_params=responses_create_params,
                         response=response,
                         reward=reward,
                         **metrics.model_dump(),
-                        instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
-                            src["instance_config"]
-                        ).model_dump(),
+                        instance_config=instance_config,
                         group_hash=group_hash,
+                        chain_hash=chain_hash,
                         loss_multiplier=0.0 if is_padded else 1.0,
                         refine_round_idx=round_idx,
                         is_padded=is_padded,
@@ -430,9 +437,7 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
 
         new_body = body.model_copy(deep=True)
         params = new_body.responses_create_params
-        params.metadata = _append_seed_to_problem_metadata(
-            params.metadata or {}, prior_summary
-        )
+        params.metadata = _append_seed_to_problem_metadata(params.metadata or {}, prior_summary)
         return new_body
 
     def _summarize_prior(self, refine_rounds: list[dict]) -> str:
@@ -462,9 +467,7 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
             max_patch_tokens=self.config.carry_over_token_budget,
         )
 
-    def _dump_refine_round(
-        self, group_hash: str, round_idx: int, refine_round: dict
-    ) -> None:
+    def _dump_refine_round(self, group_hash: str, round_idx: int, refine_round: dict) -> None:
         """Best-effort debug dump of one refinement round to disk.
 
         Writes <dump_dir>/<group_hash>/round_<k>.json (readable text) so the
@@ -487,9 +490,7 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                 # Raw verify output produced by this round (fed into the next one).
                 "verify_feedback": refine_round.get("verify_feedback") or "",
                 "input": refine_round["responses_create_params"].get("input"),
-                "output": [o.model_dump() for o in response.output]
-                if response.output
-                else [],
+                "output": [o.model_dump() for o in response.output] if response.output else [],
             }
             out_dir = Path(dump_dir) / group_hash
             out_dir.mkdir(parents=True, exist_ok=True)
