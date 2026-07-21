@@ -1,4 +1,4 @@
 -e nemo-gym[dev,sandbox] @ ../../
 # OSWorld benchmark harness — same referenced fork pin as resources_servers/osworld (keep in lockstep).
 # Provides mm_agents.nvidia.nemotron_agent (prompt contract + parsing) imported by this agent server.
-osworld @ git+https://github.com/terrykong/OSWorld.git@bcb69d3de6bc67d7c82f37a2c6f20c5249ed306a
+osworld @ git+https://github.com/terrykong/OSWorld.git@5d8c93592be588ab8e9909bed82f3b480fd4f533
