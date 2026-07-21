@@ -131,7 +131,7 @@ class Shapes(SimpleResourcesServer):
 
         @app.post("/filtered", response_model=PublicView)
         async def filtered(body: EchoBody):
-            return {"shown": body.value, "secret": "leak"}
+            return {"shown": body.value, "secret": "leak"}  # pragma: allowlist secret
 
         @app.post("/explode")
         async def explode():
