@@ -110,6 +110,21 @@ class SandboxExecResult:
     error_type: str | None = None
 
 
+@dataclass(frozen=True)
+class SandboxEndpoint:
+    """Client-reachable base URL for one sandbox port.
+
+    ``headers`` must be sent on every request to ``url`` (routing/auth headers some
+    deployments require). ``proxied`` is True when the URL goes through a provider
+    HTTP path proxy, which carries plain HTTP only — no raw-TCP/WebSocket guarantee;
+    a direct (non-proxied) endpoint carries any traffic the network path allows.
+    """
+
+    url: str
+    headers: dict[str, str] = field(default_factory=dict)
+    proxied: bool = False
+
+
 ExecResult = SandboxExecResult
 
 
@@ -155,6 +170,14 @@ class SandboxProvider(Protocol):
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         """Download one sandbox file to the local filesystem."""
+        ...
+
+    async def get_endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Return a client-reachable endpoint for one sandbox network port.
+
+        Providers whose sandboxes have no routable network endpoints raise
+        ``NotImplementedError``.
+        """
         ...
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

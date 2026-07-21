@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers import (
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
@@ -112,6 +113,15 @@ class AsyncSandbox:
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+
+    async def endpoint(self, port: int) -> SandboxEndpoint:
+        """Return a client-reachable endpoint for one sandbox network port."""
+        handle = self._require_handle()
+        get_endpoint = getattr(self._provider, "get_endpoint", None)
+        if get_endpoint is None:
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not expose network endpoints")
+        return await get_endpoint(handle, port)
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -273,6 +283,9 @@ class Sandbox:
 
     def download(self, remote_path: str, local_path: Path | str) -> None:
         self._runner.run("download", lambda: self._async_sandbox.download(remote_path, local_path))
+
+    def endpoint(self, port: int) -> SandboxEndpoint:
+        return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
 
     def status(self) -> SandboxStatus:
         if self._closed:
