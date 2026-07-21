@@ -43,7 +43,7 @@ Inputs
 
 Flow (the MCP endpoint and /verify share one session_id)
   1) Agent -> ResourcesServer POST /seed_session {"verifier_metadata": {"expected_city": "Paris"}}
-     - returns hidden MCP metadata: a per-rollout X-NeMo-Gym-Session-Token bound to this session_id
+     - returns MCP metadata: a per-rollout X-NeMo-Gym-Session-Token bound to this session_id
   2) Agent writes a per-rollout mcp_config and launches Claude Code with --mcp-config
   3) Claude Code -> ResourcesServer POST /mcp  (tools/call get_weather, carrying the token header)
      - the call resolves the token back to session_id and runs the route's own handler
@@ -185,7 +185,7 @@ What *is* accepted besides the body model: an untyped `body: dict` (FastAPI's JS
 
 ## Wiring the agent (Claude Code)
 
-The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) reads the `mcp` metadata from `/seed_session`, writes a per-rollout `gym_mcp_config.json`, and launches Claude Code with `--mcp-config`. The generated config looks like:
+The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) reads the `mcp` metadata from `/seed_session`, writes a per-rollout `gym_mcp_config.json`, and launches Claude Code with `--mcp-config`. The generated config — shown here for `workplace_assistant`, the worked example below — looks like:
 
 ```json
 {
@@ -199,7 +199,9 @@ The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses
 }
 ```
 
-The worked example for this wiring is **`workplace_assistant`** — a real environment with 27 tools across five toolkits. (The weather server built above runs with the same wiring; see the end of this section.)
+The worked example for this wiring is **`workplace_assistant`** — a real environment with 27 tools (five toolkits plus an always-included company-directory lookup). The weather server built above runs with the same wiring; see [The weather server runs the same way](#the-weather-server-runs-the-same-way) below.
+
+---
 
 ## workplace_assistant with Claude Code
 
@@ -230,7 +232,7 @@ if __name__ == "__main__":
 
 (For `workplace_assistant`, `harvested` is empty — its only non-reserved POST route is the catch-all — but keeping `harvested +` makes the override correct for servers that mix typed routes with a dispatcher.)
 
-The same override handles the other tailoring cases: **exclude a route** by filtering it out of `harvested` (an excluded route is never required to be dispatchable), and **expose no tools** by returning `None` or `[]` — `tools/list` answers empty, though `/mcp` is still mounted and `/seed_session` still carries the `mcp` metadata. To disable exposure entirely, leave `expose_tools_over_mcp` off.
+The same override handles the other tailoring cases: **exclude a route** by filtering it out of `harvested` (a route you filter out is exempt from the startup shape checks above), and **expose no tools** by returning `None` or `[]` — `tools/list` answers empty, though `/mcp` is still mounted and `/seed_session` still carries the `mcp` metadata. To disable exposure entirely, leave `expose_tools_over_mcp` off.
 
 ### Per-rollout tool restriction
 
@@ -294,7 +296,14 @@ The shipped config of the server built above already sets the flag and wires `cl
 gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
 ```
 
-Then collect rollouts against its `example` dataset as in the [quickstart](/get-started/quickstart) — a correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
+```bash
+gym eval run --no-serve \
+    --agent example_mcp_weather_claude_code_agent \
+    --input resources_servers/example_mcp_weather/data/example.jsonl \
+    --output results/weather_rollouts.jsonl
+```
+
+A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`; reward-profile as in the [quickstart](/get-started/quickstart).
 
 <Tip>
 To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie) — there is a copy-pasteable script in the [weather server's README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather). This is also the fastest way to confirm the endpoint is reachable from another host.
