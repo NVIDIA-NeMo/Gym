@@ -1,0 +1,31 @@
+# finance_agent_v2 (FABv2) benchmark — tools-only reuse of Vals's finance-agent-v2.
+# Chains to the base resource server + agent config and overrides the dataset to
+# the prepared FABv2 question set.
+config_paths:
+  - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
+
+# Isolated copy of the resource server for this benchmark.
+finance_agent_v2_benchmark_resources_server:
+  _inherit_from: finance_agent_v2_resources_server
+
+# Benchmark agent — inherits from finance_agent, overrides datasets.
+finance_agent_v2_benchmark_agent:
+  _inherit_from: finance_agent
+  responses_api_agents:
+    finance_agent:
+      resources_server:
+        name: finance_agent_v2_benchmark_resources_server
+      datasets:
+      - name: finance_agent_v2
+        type: benchmark
+        jsonl_fpath: benchmarks/finance_agent_v2/data/finance_agent_v2_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/finance_agent_v2/prepare.py
+        num_repeats: 1
+        # To enable path-A scoring against a licensed/labeled FABv2 set published
+        # to the GitLab Model Registry (mirrors v1's finance_sec_search_vals_200_eval),
+        # uncomment and fill in:
+        # gitlab_identifier:
+        #   dataset_name: finance_agent_v2_eval
+        #   version: 0.0.1
+        #   artifact_fpath: labeled.jsonl
