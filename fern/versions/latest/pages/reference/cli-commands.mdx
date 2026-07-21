@@ -221,13 +221,13 @@ gym list resources-servers --json | jq '.[].name'
 
 ### `gym search`
 
-Filter a component type's listing to fuzzy matches on a query (against each component's name/value and domain, plus type-specific fields).
+Filter a component type's listing to fuzzy matches on a query (against each component's name/value, description, domain, and type-specific fields).
 The type is optional and defaults to `benchmarks`.
 
 | Option | Description |
 | --- | --- |
 | `[<type>]` | Component type to search: `benchmarks` (default), `environments`, `agents`, `models`, or `resources-servers`. |
-| `QUERY` | Query to match (positional, required). |
+| `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
