@@ -16,16 +16,16 @@ from unittest.mock import MagicMock
 
 from app import (
     Ether0ResourcesServer,
-    Ether0ResourcesServerConfig,
     Ether0VerifyRequest,
 )
 
+from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 
 def _make_server() -> Ether0ResourcesServer:
-    config = Ether0ResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+    config = BaseResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
     return Ether0ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
