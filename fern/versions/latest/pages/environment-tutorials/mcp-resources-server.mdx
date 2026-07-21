@@ -186,7 +186,7 @@ Where direct dispatch cannot be proven equivalent to a real HTTP request, exposu
 | `async def tool(self, a: ModelA, b: ModelB)` | ❌ startup error — multiple body models |
 | `async def tool(self, dep = Depends(...))` | ❌ startup error — dependency injection (`Depends` / `Security`) |
 
-The pattern behind the ❌ rows: anything FastAPI would read from the **query string** — a bare scalar like `my_string: str`, with or without a default — refuses, because MCP calls carry no query string. Move such knobs into the body model, where field defaults work normally (absent fields take their Pydantic defaults).
+The pattern behind the two query-parameter rows: anything FastAPI would read from the **query string** — a bare scalar like `my_string: str`, with or without a default — refuses, because MCP calls carry no query string. Move such knobs into the body model, where field defaults work normally (absent fields take their Pydantic defaults). Other non-body parameter shapes — `Header(...)` / `Cookie(...)` markers, `*args`/`**kwargs`, non-`str` path parameters — also refuse at startup, each with its own named reason.
 
 Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
 
