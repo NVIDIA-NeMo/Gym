@@ -43,16 +43,11 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
-from nemo_gym.rollout_collection import (
-    E2ERolloutCollectionConfig,
-    RolloutAggregationConfig,
-    RolloutAggregationHelper,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
-    loads_jsonl_line,
-)
-from nemo_gym.train_data_utils import TrainDataProcessor
+
+
+# NOTE: `reward_profile`, `rollout_collection`, and `train_data_utils` are imported lazily inside the run/aggregate/
+# profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
+# commands in this module must not pay for on every invocation.
 
 
 def list_benchmarks() -> None:
@@ -286,6 +281,13 @@ def prepare_benchmark() -> None:
 
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
+    from nemo_gym.rollout_collection import (
+        E2ERolloutCollectionConfig,
+        RolloutCollectionConfig,
+        RolloutCollectionHelper,
+    )
+    from nemo_gym.train_data_utils import TrainDataProcessor
+
     global_config_dict = get_global_config_dict()
 
     # Ensure we have the right config first thing
@@ -364,6 +366,8 @@ def e2e_rollout_collection():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
 
@@ -372,6 +376,8 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+
     config = RolloutAggregationConfig.model_validate(get_global_config_dict())
     rah = RolloutAggregationHelper()
 
@@ -380,6 +386,9 @@ def aggregate_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
+    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.rollout_collection import loads_jsonl_line
+
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
     if not Path(config.materialized_inputs_jsonl_fpath).exists():
