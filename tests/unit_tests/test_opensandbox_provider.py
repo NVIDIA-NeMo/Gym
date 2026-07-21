@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -734,3 +735,217 @@ async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch)
 
 async def _return_value(value: Any) -> Any:
     return value
+
+
+class FakeEndpointRaw:
+    def __init__(self, endpoint: str, headers: dict[str, str] | None = None) -> None:
+        self._endpoint = endpoint
+        self._headers = headers or {}
+        self.requested_ports: list[int] = []
+
+    async def get_endpoint(self, port: int) -> Any:
+        self.requested_ports.append(port)
+        return SimpleNamespace(endpoint=self._endpoint, headers=self._headers)
+
+
+async def test_get_endpoint_prefixes_scheme_and_flags_proxy() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "localhost:18080", "protocol": "http", "use_server_proxy": True},
+    )
+    raw = FakeEndpointRaw("localhost:18080/sandboxes/s1/proxy/5000", {"X-Route-Token": "t1"})
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="s1", provider_name="opensandbox", raw=raw)
+
+    endpoint = await provider.get_endpoint(handle, 5000)
+    assert endpoint.url == "http://localhost:18080/sandboxes/s1/proxy/5000"
+    assert endpoint.headers == {"X-Route-Token": "t1"}
+    assert endpoint.proxied is True
+    assert raw.requested_ports == [5000]
+
+
+async def test_get_endpoint_direct_url_passthrough_and_errors() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"domain": "localhost:18080"})
+
+    raw = FakeEndpointRaw("https://10.0.0.7:9222")
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="s2", provider_name="opensandbox", raw=raw)
+    endpoint = await provider.get_endpoint(handle, 9222)
+    assert endpoint.url == "https://10.0.0.7:9222"
+    assert endpoint.proxied is False
+
+    empty_handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="s3", provider_name="opensandbox", raw=FakeEndpointRaw("")
+    )
+    with pytest.raises(RuntimeError, match="empty endpoint"):
+        await provider.get_endpoint(empty_handle, 5000)
+
+    rawless_handle = opensandbox_provider.SandboxHandle(sandbox_id="s4", provider_name="opensandbox", raw=None)
+    with pytest.raises(RuntimeError, match="no SDK object"):
+        await provider.get_endpoint(rawless_handle, 5000)
+
+
+class ConnectEchoSandbox(FakeSandbox):
+    """connect() echoes back the requested sandbox id (like the real SDK)."""
+
+    @classmethod
+    async def connect(cls, *args: Any, **kwargs: Any) -> "ConnectEchoSandbox":
+        cls.connected_args = args
+        cls.connected_kwargs = kwargs
+        return cls(sandbox_id=str(args[0]))
+
+
+async def test_pooled_create_via_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
+        return ConnectEchoSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
+
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_sdk", require_sdk)
+
+    rest_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def fake_rest_request(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+        rest_calls.append((method, url, kwargs))
+        return 201, '{"id": "pool-sbx-1"}'
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "localhost:18080", "api_key": "key-1"},
+        create={"retries": 0, "retry_delay_s": 0.0},
+        probe={"command": None},
+    )
+    spec = SandboxSpec(
+        ttl_s=600,
+        metadata={"run": "m1"},
+        provider_options={"extensions": {"poolRef": "osworld-kvm"}},
+    )
+    handle = await provider.create(spec)
+
+    assert handle.sandbox_id == "pool-sbx-1"
+    assert handle.raw is not None
+    assert ConnectEchoSandbox.connected_args[0] == "pool-sbx-1"
+
+    method, url, kwargs = rest_calls[0]
+    assert method == "POST"
+    assert url == "http://localhost:18080/v1/sandboxes"
+    body = kwargs["json_body"]
+    assert body["extensions"] == {"poolRef": "osworld-kvm"}
+    assert body["timeout"] == 600
+    assert body["metadata"]["run"] == "m1"
+    # Every pooled create is stamped with a marker so a lost-response record can be reaped.
+    assert body["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY]
+    assert kwargs["headers"] == {"Authorization": "Bearer key-1"}
+
+
+async def test_pooled_create_error_paths(monkeypatch: pytest.MonkeyPatch, fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "localhost:18080"},
+        create={"retries": 0, "retry_delay_s": 0.0},
+        probe={"command": None},
+    )
+
+    # Missing poolRef is a spec error, not a transient create failure.
+    with pytest.raises(ValueError, match="poolRef"):
+        await provider.create(SandboxSpec(provider_options={"extensions": {}}))
+
+    # Server error surfaces as a create error with body context.
+    async def failing_request(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+        del method, url, kwargs
+        return 500, "pool exhausted"
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", failing_request)
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError, match="pool exhausted"):
+        await provider.create(SandboxSpec(provider_options={"extensions": {"poolRef": "osworld-kvm"}}))
+
+    # Unexpected body (no id) is a create error too.
+    async def weird_request(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+        del method, url, kwargs
+        return 201, "not-json"
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", weird_request)
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError, match="unexpected body"):
+        await provider.create(SandboxSpec(provider_options={"extensions": {"poolRef": "osworld-kvm"}}))
+
+    # Missing domain is a configuration error.
+    domainless = opensandbox_provider.OpenSandboxProvider(
+        create={"retries": 0, "retry_delay_s": 0.0}, probe={"command": None}
+    )
+    with pytest.raises(ValueError, match="connection.domain"):
+        await domainless.create(SandboxSpec(provider_options={"extensions": {"poolRef": "osworld-kvm"}}))
+
+
+async def test_pooled_create_reaps_marker_on_lost_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A create POST that dies client-side must reap the server-side record it may have left.
+
+    The server creates its record on POST arrival and holds the request open until a pool
+    slot frees; a client timeout would otherwise orphan that record, which claims a slot
+    until TTL and (under contention) deadlocks the whole pool.
+    """
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "localhost:18080", "api_key": "key-1"},
+        create={"retries": 0, "retry_delay_s": 0.0},
+        probe={"command": None},
+    )
+
+    rest_calls: list[tuple[str, str]] = []
+    stamped_marker: list[str] = []
+
+    async def lost_response_request(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+        rest_calls.append((method, url))
+        if method == "POST":
+            stamped_marker.append(kwargs["json_body"]["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY])
+            raise asyncio.TimeoutError()
+        if method == "GET":
+            # The server processed the timed-out POST: the record exists, marker attached.
+            return 200, json.dumps(
+                {
+                    "items": [
+                        {"id": "other-sbx", "metadata": {opensandbox_provider.POOLED_CREATE_MARKER_KEY: "other"}},
+                        {
+                            "id": "leaked-sbx",
+                            "metadata": {opensandbox_provider.POOLED_CREATE_MARKER_KEY: stamped_marker[0]},
+                        },
+                    ]
+                }
+            )
+        return 200, "{}"
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", lost_response_request)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await provider.create(SandboxSpec(provider_options={"extensions": {"poolRef": "osworld-kvm"}}))
+
+    # Exactly the leaked record was deleted; the unrelated one was left alone.
+    assert ("DELETE", "http://localhost:18080/v1/sandboxes/leaked-sbx") in rest_calls
+    assert all(
+        url != "http://localhost:18080/v1/sandboxes/other-sbx" for method, url in rest_calls if method == "DELETE"
+    )
+
+
+async def test_pooled_create_cleans_up_on_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class NeverConnectSandbox(FakeSandbox):
+        @classmethod
+        async def connect(cls, *args: Any, **kwargs: Any) -> "NeverConnectSandbox":
+            del args, kwargs
+            raise opensandbox_provider.OpenSandboxCreateError("pod ip is not yet available")
+
+    def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
+        return NeverConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
+
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_sdk", require_sdk)
+
+    rest_calls: list[tuple[str, str]] = []
+
+    async def fake_rest_request(method: str, url: str, **kwargs: Any) -> tuple[int, str]:
+        del kwargs
+        rest_calls.append((method, url))
+        return 201, '{"id": "pool-sbx-2"}'
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "localhost:18080"},
+        create={"retries": 0, "retry_delay_s": 0.0, "timeout_s": 0.2, "connect_poll_s": 0.05},
+        probe={"command": None},
+    )
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateError):
+        await provider.create(SandboxSpec(provider_options={"extensions": {"poolRef": "osworld-kvm"}}))
+
+    assert ("DELETE", "http://localhost:18080/v1/sandboxes/pool-sbx-2") in rest_calls

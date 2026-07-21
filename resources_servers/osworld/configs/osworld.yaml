@@ -1,0 +1,20 @@
+osworld_resources_server:
+  resources_servers:
+    osworld:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: OSWorld computer-use benchmark on OpenSandbox KVM desktop VMs (nemo_gym.sandbox SDK)
+      # Sandbox provider block name, resolved from the merged global config. Compose with
+      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml (which binds `sandbox`).
+      sandbox_provider: sandbox
+      pool_ref: ${oc.env:OSWORLD_POOL_REF,osworld-kvm}
+      sandbox_ttl_s: 7200
+      boot_wait_s: 600
+      alloc_retries: 3
+      client_password: password
+      # Setup/evaluate run the pinned `osworld` fork (per-server requirements.txt) in
+      # subprocesses with OFFICIAL harness semantics (DesktopEnv.reset / DesktopEnv.evaluate).
+      cache_dir: ${oc.env:OSWORLD_CACHE_DIR,/tmp/osworld_eval_cache}
+      setup_timeout_s: 900
+      eval_timeout_s: 1200

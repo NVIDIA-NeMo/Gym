@@ -1,0 +1,57 @@
+# KVM device plugin — lets NON-privileged sandbox pods get /dev/kvm + /dev/net/tun.
+#
+# Why: a k8s hostPath mount of /dev/kvm grants *visibility* but NOT device-cgroup *write* access
+# (open(/dev/kvm,O_RDWR) -> EPERM in a non-privileged container). The k8s-native equivalent of
+# docker's `--device` is a device plugin: it advertises a countable resource, and its Allocate()
+# tells the runtime to inject the device (mount + cgroup rw) into pods that request it. Then the
+# OSWorld "main" container drops `privileged` and just requests `devic.es/kvm` + `devic.es/tun`.
+#
+# Tool: squat/generic-device-plugin (Apache-2.0; advertises `devic.es/<name>`). The plugin itself
+# is trusted node infra; it runs privileged to enumerate/inject host devices, so that the MANY
+# untrusted sandbox pods can be non-privileged (same trade as CSI/CNI drivers).
+#
+# `count: 100` = how many "copies" of each device to advertise. /dev/kvm is shareable, so this is a
+# generous cap (RAM binds first at ~10-12 GiB/VM), NOT a hardware limit — size it >= max VMs/node.
+#
+# DaemonSet: auto-covers every current AND FUTURE kata metal node — required for Karpenter
+# scale-out of the kata-metal NodePool (a new node without the plugin advertises no devic.es/kvm,
+# so VM pods never schedule there). (Standing node infra like this is arguably SRE-owned — hand
+# off when ready.)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: generic-device-plugin
+  namespace: sbx-2
+  labels: {app.kubernetes.io/name: generic-device-plugin}
+spec:
+  selector:
+    matchLabels: {name: generic-device-plugin}
+  template:
+    metadata:
+      labels: {name: generic-device-plugin, app.kubernetes.io/name: generic-device-plugin, istio.io/dataplane-mode: none}
+    spec:
+      nodeSelector: {katacontainers.io/kata-runtime: "true"}   # metal nodes (have /dev/kvm)
+      tolerations:
+      - {operator: Exists, effect: NoSchedule}
+      - {operator: Exists, effect: NoExecute}
+      containers:
+      - name: generic-device-plugin
+        image: docker.io/squat/generic-device-plugin:0.2.0
+        args:
+        - --device
+        - |
+          name: kvm
+          groups: [{count: 100, paths: [{path: /dev/kvm}]}]
+        - --device
+        - |
+          name: tun
+          groups: [{count: 100, paths: [{path: /dev/net/tun}]}]
+        resources: {requests: {cpu: 50m, memory: 10Mi}, limits: {cpu: 50m, memory: 20Mi}}
+        ports: [{containerPort: 8080, name: http}]
+        securityContext: {privileged: true}   # trusted node-infra plugin; workloads stay non-privileged
+        volumeMounts:
+        - {name: device-plugin, mountPath: /var/lib/kubelet/device-plugins}
+        - {name: dev, mountPath: /dev}
+      volumes:
+      - {name: device-plugin, hostPath: {path: /var/lib/kubelet/device-plugins}}
+      - {name: dev, hostPath: {path: /dev}}

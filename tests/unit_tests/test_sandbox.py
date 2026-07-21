@@ -28,6 +28,7 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -739,11 +740,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
-def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
+def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
 
 
-async def _assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+async def _assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeConnectionConfig:
@@ -768,7 +769,7 @@ async def _assert_opensandbox_connect_after_create_preserves_request_timeout(mon
     )
 
     provider = OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "protocol": "https", "request_timeout_s": 300},
+        connection={"domain": "sandbox.example", "protocol": "https"},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
     )
@@ -784,7 +785,7 @@ async def _assert_opensandbox_connect_after_create_preserves_request_timeout(mon
     assert connect_call["connection_config"].kwargs == {
         "domain": "sandbox.example",
         "protocol": "https",
-        "request_timeout": timedelta(seconds=300),
+        "request_timeout": timedelta(seconds=1),
     }
 
 
@@ -1216,3 +1217,57 @@ def test_mini_swe_sandbox_environment_submit_sentinel() -> None:
         assert exc_info.value.messages[0]["extra"]["submission"] == "final answer"
     finally:
         env.cleanup()
+
+
+class EndpointSandboxProvider(FakeSandboxProvider):
+    name = "endpoint-fake"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
+
+    async def get_endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        self.endpoint_calls.append((handle, port))
+        return SandboxEndpoint(
+            url=f"http://proxy/sandboxes/{handle.sandbox_id}/proxy/{port}",
+            headers={"X-Route": "r1"},
+            proxied=True,
+        )
+
+
+async def test_async_sandbox_endpoint_delegates_to_provider() -> None:
+    provider = EndpointSandboxProvider()
+    sandbox = AsyncSandbox(provider, SandboxSpec(image="image:tag"))
+
+    with pytest.raises(RuntimeError, match="has not been started"):
+        await sandbox.endpoint(5000)
+
+    await sandbox.start()
+    try:
+        endpoint = await sandbox.endpoint(5000)
+        assert endpoint.url == "http://proxy/sandboxes/fake-1/proxy/5000"
+        assert endpoint.headers == {"X-Route": "r1"}
+        assert endpoint.proxied is True
+        assert provider.endpoint_calls == [(provider.created_handles[0], 5000)]
+    finally:
+        await sandbox.stop()
+
+
+async def test_async_sandbox_endpoint_requires_provider_support() -> None:
+    provider = PlainSandboxProvider()
+    sandbox = AsyncSandbox(provider, SandboxSpec(image="image:tag"))
+    await sandbox.start()
+    try:
+        with pytest.raises(NotImplementedError, match="does not expose network endpoints"):
+            await sandbox.endpoint(5000)
+    finally:
+        await sandbox.stop()
+
+
+def test_sync_sandbox_endpoint_mirror() -> None:
+    provider = EndpointSandboxProvider()
+    with Sandbox(provider, SandboxSpec(image="image:tag")) as sandbox:
+        sandbox.start()
+        endpoint = sandbox.endpoint(8080)
+        assert endpoint.url == "http://proxy/sandboxes/fake-1/proxy/8080"
+        assert endpoint.proxied is True
