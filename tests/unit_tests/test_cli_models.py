@@ -105,11 +105,11 @@ class TestListModels:
             list_models()
         out = capsys.readouterr().out
         assert "The my_model model" in out
-        assert "model-types: my_model, my_model/some_other_flavor" in out
+        assert f"config: {_MODELS['my_model'].config_path.resolve()}" in out
         assert "Usage example:" not in out  # thin view
 
     def test_inspect_model_by_flavor_token(self, capsys) -> None:
-        # A valid `<model>/<flavor>` token renders the model's (main) inspection.
+        # A `<model>/<flavor>` token inspects that flavor's config.
         with (
             patch(
                 "nemo_gym.cli.models.get_global_config_dict",
@@ -119,8 +119,8 @@ class TestListModels:
         ):
             list_models()
         out = capsys.readouterr().out
-        assert "The my_model model" in out
-        assert "model-types: my_model, my_model/some_other_flavor" in out
+        assert "The my_model/some_other_flavor model" in out
+        assert f"config: {_MODELS['my_model/some_other_flavor'].config_path.resolve()}" in out
 
     def test_inspect_unknown_model_exits(self, capsys) -> None:
         with (
@@ -149,8 +149,8 @@ class TestListModels:
         out = capsys.readouterr().out
         assert "Unknown model 'my_model/nope'" in out
 
-    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
-        # Real discovery (via an extra root): the path line must be the model dir's absolute path.
+    def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        # Real discovery (via an extra root): the config line must be the config's absolute path.
         model_dir = tmp_path / "responses_api_models" / "my_model"
         (model_dir / "configs").mkdir(parents=True)
         (model_dir / "configs" / "my_model.yaml").write_text("my_model: {}\n")
@@ -160,4 +160,5 @@ class TestListModels:
             return_value=_mock_global_config({"component_name": "my_model"}),
         ):
             list_models()
-        assert f"path: {model_dir.resolve()}" in capsys.readouterr().out
+        expected_config = (model_dir / "configs" / "my_model.yaml").resolve()
+        assert f"config: {expected_config}" in capsys.readouterr().out

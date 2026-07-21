@@ -40,21 +40,17 @@ def _inspect_model(name: str, models: dict, global_config_dict) -> None:
     ``name`` may be a bare model or a ``<model>/<flavor>`` token; a valid flavor renders the model's
     (main) inspection.
     """
-    model = name.split("/", 1)[0]
-    entry = models.get(model)
-    if entry is None or (name != model and name not in entry.model_types):
-        exit_unknown_component(name, [token for e in models.values() for token in e.model_types], "model")
-        return
 
-    details = {"path": str(entry.path.resolve())}
-    if entry.model_types:
-        details["model-types"] = ", ".join(entry.model_types)
+    entry = models.get(name)
+    if entry is None:
+        exit_unknown_component(name, models, "model")
+        return
 
     render_component_inspection(
         json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
-        name=model,
+        name=name,
         type_noun="model",
-        details=details,
+        details={"config": str(entry.config_path.resolve())},
     )
 
 
