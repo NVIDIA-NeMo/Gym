@@ -389,6 +389,79 @@ class TestRerunIncompleteMode:
         assert json.loads(cache_path.read_text()) == {"reward": 0.7, "judge_response": "ok"}
 
     @pytest.mark.asyncio
+    async def test_full_mode_legacy_flat_task_dir_is_reused(self, tmp_path) -> None:
+        """A pre-repeat cache remains readable when artifacts live directly in
+        ``task_<id>/`` rather than a ``repeat_<n>/`` child."""
+        deliverables_root = tmp_path / "task_task-1"
+        deliverables_root.mkdir()
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "report.docx").write_text("legacy cached deliverable")
+
+        config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock()
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.65}),
+            ),
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        responses_mock.assert_not_awaited()
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["deliverables_dir"] == str(deliverables_root)
+        assert result == {"reward": 0.65}
+
+    @pytest.mark.asyncio
+    async def test_full_mode_new_repeat_does_not_fall_back_to_sibling_repeat(self, tmp_path) -> None:
+        """A task root containing another repeat is not a legacy flat cache."""
+        sibling_repeat = tmp_path / "task_task-1" / "repeat_0"
+        sibling_repeat.mkdir(parents=True)
+        (sibling_repeat / "finish_params.json").write_text("{}")
+
+        config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+        body = self._make_body()
+        body.responses_create_params.metadata["_ng_rollout_index"] = "1"
+        new_repeat = tmp_path / "task_task-1" / "repeat_1"
+
+        async def _responses_side_effect(*_args, **_kwargs):
+            new_repeat.mkdir()
+            (new_repeat / "finish_params.json").write_text("{}")
+            (new_repeat / "report.docx").write_text("new repeat deliverable")
+            return _fake_response()
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock(side_effect=_responses_side_effect)),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.45}),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["deliverables_dir"] == str(new_repeat)
+        assert result == {"reward": 0.45}
+
+    @pytest.mark.asyncio
     async def test_full_mode_already_judged_returns_cached_judgement(self, tmp_path) -> None:
         """A finished task AND a cached /verify result must return that judgement
         directly — no rollout and no /verify call."""

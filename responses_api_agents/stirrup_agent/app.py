@@ -1211,15 +1211,25 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             rollout_index = existing_metadata.get("_ng_rollout_index")
             if self.config.persist_deliverables_dir and task_id:
                 repeat_name = f"repeat_{rollout_index}" if rollout_index is not None else "repeat_0"
-                deliverables_dir = str(
-                    (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
-                )
+                task_root = (Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute()
+                repeat_dir = task_root / repeat_name
+                deliverables_dir = str(repeat_dir)
 
-                # Fall back to no repeat_index dir for backwards compatibility with older runs.
-                if not Path(deliverables_dir).is_dir():
-                    deliverables_dir = str(
-                    (Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute()
-                )
+                # Fall back to the pre-repeat flat layout only when the task root
+                # actually contains legacy artifacts. A missing repeat directory
+                # is normal before a fresh rollout: ``responses()`` creates it
+                # while persisting that rollout. Falling back merely because it
+                # does not exist yet makes the post-rollout finish check look in
+                # ``task_<id>/`` even though the marker was written beneath
+                # ``task_<id>/repeat_<n>/``. It also breaks a new repeat whenever
+                # a sibling repeat directory already exists.
+                if not repeat_dir.is_dir() and task_root.is_dir():
+                    has_flat_legacy_artifacts = any(
+                        not (entry.is_dir() and entry.name.startswith("repeat_"))
+                        for entry in task_root.iterdir()
+                    )
+                    if has_flat_legacy_artifacts:
+                        deliverables_dir = str(task_root)
                 
 
             # Per-request opt-in to judge an already-cached deliverable instead of
