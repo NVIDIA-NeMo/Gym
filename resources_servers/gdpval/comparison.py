@@ -330,9 +330,7 @@ def get_file_image_text_blocks(
             info = FILE_TYPE_MAP.get(file_extension) or {}
             mime = info.get("mime_type") or "application/octet-stream"
             data = _load_media(full_path)
-            return [
-                audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)
-            ]
+            return [audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)]
 
         # Text and native images pass through exactly as in native mode.
         block = get_file_content_block(file_dir, file_name)

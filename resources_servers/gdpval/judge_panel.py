@@ -259,7 +259,5 @@ def select_av_judges(judges: Sequence[_A]) -> List[_A]:
     we return every judge so downstream sampling still has a non-empty panel to
     draw from (grading with a text-only judge beats failing the task outright).
     """
-    capable = [
-        j for j in judges if getattr(j, "handles_audio", False) or getattr(j, "handles_video", False)
-    ]
+    capable = [j for j in judges if getattr(j, "handles_audio", False) or getattr(j, "handles_video", False)]
     return capable if capable else list(judges)
