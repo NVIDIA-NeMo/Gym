@@ -1011,32 +1011,53 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
+    @staticmethod
+    def _apply_from_patch_state(
+        processor: OpenHandsHarnessProcessor,
+        openhands_dir: Path,
+        applied_patch_names: set[str],
+    ) -> list[list[str]]:
+        def patch_command_result(command: list[str], **_kwargs) -> MagicMock:
+            is_reverse_check = command[2:4] == ["--reverse", "--check"]
+            patch_name = Path(command[-1]).name
+            return MagicMock(
+                returncode=(
+                    0
+                    if not is_reverse_check or patch_name in applied_patch_names
+                    else 1
+                )
+            )
+
+        with patch.object(
+            swe_app,
+            "subprocess_run",
+            side_effect=patch_command_result,
+        ) as subprocess_run:
+            processor._apply_streaming_tool_call_patch(openhands_dir)
+
+        return [call.args[0] for call in subprocess_run.call_args_list]
+
+    @staticmethod
+    def _last_applied_patch(commands: list[list[str]]) -> str:
+        apply_commands = [
+            command
+            for command in commands
+            if len(command) == 3 and command[:2] == ["git", "apply"]
+        ]
+        return Path(apply_commands[-1][-1]).name
+
     def test_cached_cancellable_patch_gets_effective_prefill_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot reverse check
-                MagicMock(returncode=1),  # same-request-metrics reverse check
-                MagicMock(returncode=1),  # deferred-abort reverse check
-                MagicMock(returncode=1),  # skip-unadmitted-finalization reverse check
-                MagicMock(returncode=1),  # cached-token-metrics reverse check
-                MagicMock(returncode=1),  # background-prefill-metrics reverse check
-                MagicMock(returncode=1),  # effective-prefill reverse check
-                MagicMock(returncode=0),  # cancellable-long-poll reverse check
-                MagicMock(returncode=0),  # effective-prefill apply check
-                MagicMock(returncode=0),  # effective-prefill apply
-            ]
-
-            with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 13
-            assert commands[-1][2].endswith("streaming_tool_call_effective_prefill.patch")
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_cancellable_long_poll.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_effective_prefill.patch"
+            )
 
     def test_cached_deferred_abort_patch_gets_same_request_metrics_upgrade(
         self,
@@ -1044,27 +1065,14 @@ class TestOpenHandsHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot reverse check
-                MagicMock(returncode=1),  # same-request-metrics reverse check
-                MagicMock(returncode=0),  # deferred-abort reverse check
-                MagicMock(returncode=0),  # same-request-metrics apply check
-                MagicMock(returncode=0),  # same-request-metrics apply
-            ]
-
-            with patch.object(
-                swe_app,
-                "subprocess_run",
-                side_effect=command_results,
-            ) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 8
-            assert commands[-1][2].endswith("streaming_tool_call_same_request_metrics.patch")
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_deferred_abort.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_same_request_metrics.patch"
+            )
 
     def test_cached_same_request_patch_gets_event_driven_snapshot_upgrade(
         self,
@@ -1072,73 +1080,38 @@ class TestOpenHandsHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot reverse check
-                MagicMock(returncode=0),  # same-request-metrics reverse check
-                MagicMock(returncode=0),  # event-driven-snapshot apply check
-                MagicMock(returncode=0),  # event-driven-snapshot apply
-            ]
-
-            with patch.object(
-                swe_app,
-                "subprocess_run",
-                side_effect=command_results,
-            ) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 7
-            assert commands[-1][2].endswith("streaming_tool_call_event_driven_snapshot.patch")
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_same_request_metrics.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_event_driven_snapshot.patch"
+            )
 
     def test_cached_event_driven_snapshot_gets_toggle_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=0),  # event-driven-snapshot reverse check
-                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply check
-                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply
-            ]
-
-            with patch.object(
-                swe_app,
-                "subprocess_run",
-                side_effect=command_results,
-            ) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 6
-            assert commands[-1][2].endswith("streaming_tool_call_event_driven_snapshot_toggle.patch")
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_event_driven_snapshot.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_event_driven_snapshot_toggle.patch"
+            )
 
     def test_cached_snapshot_toggle_gets_query_bool_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=0),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=0),  # snapshot-query-bool apply check
-                MagicMock(returncode=0),  # snapshot-query-bool apply
-            ]
-
-            with patch.object(
-                swe_app,
-                "subprocess_run",
-                side_effect=command_results,
-            ) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 5
-            assert commands[-1][2].endswith(
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_event_driven_snapshot_toggle.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
                 "streaming_tool_call_snapshot_query_bool.patch"
             )
 
@@ -1148,136 +1121,54 @@ class TestOpenHandsHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=0),  # snapshot-query-bool reverse check
-                MagicMock(returncode=0),  # prefill-start-priority apply check
-                MagicMock(returncode=0),  # prefill-start-priority apply
-            ]
-
-            with patch.object(
-                swe_app,
-                "subprocess_run",
-                side_effect=command_results,
-            ) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 4
-            assert commands[-1][2].endswith(
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_snapshot_query_bool.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
                 "streaming_tool_call_prefill_start_priority.patch"
+            )
+
+    def test_cached_prefill_start_priority_gets_first_page_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_prefill_start_priority.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_first_prefill_page.patch"
+            )
+
+    def test_cached_legacy_first_page_gets_cache_fill_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_first_prefill_page_legacy_marker.patch"},
+            )
+            assert self._last_applied_patch(commands) == (
+                "streaming_tool_call_first_prefill_page_cache_fill_upgrade.patch"
             )
 
     def test_cached_admission_patch_gets_remaining_upgrades(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
             processor = OpenHandsHarnessProcessor(config=config)
-            command_results = [
-                MagicMock(returncode=1),  # prefill-start-priority reverse check
-                MagicMock(returncode=1),  # snapshot-query-bool reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot-toggle reverse check
-                MagicMock(returncode=1),  # event-driven-snapshot reverse check
-                MagicMock(returncode=1),  # same-request-metrics reverse check
-                MagicMock(returncode=1),  # deferred-abort reverse check
-                MagicMock(returncode=1),  # skip-unadmitted-finalization reverse check
-                MagicMock(returncode=1),  # cached-token-metrics reverse check
-                MagicMock(returncode=1),  # background-prefill-metrics reverse check
-                MagicMock(returncode=1),  # effective-prefill reverse check
-                MagicMock(returncode=1),  # cancellable-long-poll reverse check
-                MagicMock(returncode=1),  # model-call-attribution reverse check
-                MagicMock(returncode=1),  # compact-request-context reverse check
-                MagicMock(returncode=1),  # request-timing reverse check
-                MagicMock(returncode=1),  # error-observation reverse check
-                MagicMock(returncode=1),  # fallback-metrics reverse check
-                MagicMock(returncode=1),  # deferred-admission reverse check
-                MagicMock(returncode=1),  # server-timing reverse check
-                MagicMock(returncode=1),  # bucketed-long-poll reverse check
-                MagicMock(returncode=1),  # prefill-after-admission reverse check
-                MagicMock(returncode=1),  # prefix-seed-metrics reverse check
-                MagicMock(returncode=1),  # prefill-race reverse check
-                MagicMock(returncode=1),  # final-only prefill reverse check
-                MagicMock(returncode=1),  # final-only tokenizer reverse check
-                MagicMock(returncode=1),  # counterfactual-metrics reverse check
-                MagicMock(returncode=1),  # action-timeout reverse check
-                MagicMock(returncode=1),  # exact incremental tokenizer reverse check
-                MagicMock(returncode=1),  # prompt-reuse reverse check
-                MagicMock(returncode=1),  # runtime-breakdown reverse check
-                MagicMock(returncode=1),  # valid-action-metrics reverse check
-                MagicMock(returncode=1),  # tokenizer-only reverse check
-                MagicMock(returncode=0),  # base reverse check
-                MagicMock(returncode=0),  # observability reverse check
-                MagicMock(returncode=0),  # admission-observability reverse check
-                MagicMock(returncode=0),  # tokenizer-only apply check
-                MagicMock(returncode=0),  # tokenizer-only apply
-                MagicMock(returncode=0),  # valid-action-metrics apply check
-                MagicMock(returncode=0),  # valid-action-metrics apply
-                MagicMock(returncode=0),  # runtime-breakdown apply check
-                MagicMock(returncode=0),  # runtime-breakdown apply
-                MagicMock(returncode=0),  # prompt-reuse apply check
-                MagicMock(returncode=0),  # prompt-reuse apply
-                MagicMock(returncode=0),  # exact incremental tokenizer apply check
-                MagicMock(returncode=0),  # exact incremental tokenizer apply
-                MagicMock(returncode=0),  # action-timeout apply check
-                MagicMock(returncode=0),  # action-timeout apply
-                MagicMock(returncode=0),  # counterfactual-metrics apply check
-                MagicMock(returncode=0),  # counterfactual-metrics apply
-                MagicMock(returncode=0),  # final-only tokenizer apply check
-                MagicMock(returncode=0),  # final-only tokenizer apply
-                MagicMock(returncode=0),  # final-only prefill apply check
-                MagicMock(returncode=0),  # final-only prefill apply
-                MagicMock(returncode=0),  # prefill-race apply check
-                MagicMock(returncode=0),  # prefill-race apply
-                MagicMock(returncode=0),  # prefix-seed-metrics apply check
-                MagicMock(returncode=0),  # prefix-seed-metrics apply
-                MagicMock(returncode=0),  # prefill-after-admission apply check
-                MagicMock(returncode=0),  # prefill-after-admission apply
-                MagicMock(returncode=0),  # bucketed-long-poll apply check
-                MagicMock(returncode=0),  # bucketed-long-poll apply
-                MagicMock(returncode=0),  # server-timing apply check
-                MagicMock(returncode=0),  # server-timing apply
-                MagicMock(returncode=0),  # deferred-admission apply check
-                MagicMock(returncode=0),  # deferred-admission apply
-                MagicMock(returncode=0),  # fallback-metrics apply check
-                MagicMock(returncode=0),  # fallback-metrics apply
-                MagicMock(returncode=0),  # error-observation apply check
-                MagicMock(returncode=0),  # error-observation apply
-                MagicMock(returncode=0),  # request-timing apply check
-                MagicMock(returncode=0),  # request-timing apply
-                MagicMock(returncode=0),  # compact-request-context apply check
-                MagicMock(returncode=0),  # compact-request-context apply
-                MagicMock(returncode=0),  # model-call-attribution apply check
-                MagicMock(returncode=0),  # model-call-attribution apply
-                MagicMock(returncode=0),  # cancellable-long-poll apply check
-                MagicMock(returncode=0),  # cancellable-long-poll apply
-                MagicMock(returncode=0),  # effective-prefill apply check
-                MagicMock(returncode=0),  # effective-prefill apply
-                MagicMock(returncode=0),  # background-prefill-metrics apply check
-                MagicMock(returncode=0),  # background-prefill-metrics apply
-                MagicMock(returncode=0),  # cached-token-metrics apply check
-                MagicMock(returncode=0),  # cached-token-metrics apply
-                MagicMock(returncode=0),  # skip-unadmitted-finalization apply check
-                MagicMock(returncode=0),  # skip-unadmitted-finalization apply
-                MagicMock(returncode=0),  # deferred-abort apply check
-                MagicMock(returncode=0),  # deferred-abort apply
-                MagicMock(returncode=0),  # same-request-metrics apply check
-                MagicMock(returncode=0),  # same-request-metrics apply
-                MagicMock(returncode=0),  # event-driven-snapshot apply check
-                MagicMock(returncode=0),  # event-driven-snapshot apply
-                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply check
-                MagicMock(returncode=0),  # event-driven-snapshot-toggle apply
-                MagicMock(returncode=0),  # snapshot-query-bool apply check
-                MagicMock(returncode=0),  # snapshot-query-bool apply
-                MagicMock(returncode=0),  # prefill-start-priority apply check
-                MagicMock(returncode=0),  # prefill-start-priority apply
-            ]
-
-            with patch.object(swe_app, "subprocess_run", side_effect=command_results) as subprocess_run:
-                processor._apply_streaming_tool_call_patch(Path(tmpdir))
-
-            commands = [call.args[0] for call in subprocess_run.call_args_list]
-            assert len(commands) == 96
-            for command in commands[:34]:
-                assert command[2:4] == ["--reverse", "--check"]
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {
+                    "streaming_tool_call.patch",
+                    "streaming_tool_call_observability.patch",
+                    "streaming_tool_call_admission_observability.patch",
+                },
+            )
             expected_applied_patches = [
                 "streaming_tool_call_tokenizer_only.patch",
                 "streaming_tool_call_valid_action_metrics.patch",
@@ -1310,12 +1201,14 @@ class TestOpenHandsHarnessProcessor:
                 "streaming_tool_call_event_driven_snapshot_toggle.patch",
                 "streaming_tool_call_snapshot_query_bool.patch",
                 "streaming_tool_call_prefill_start_priority.patch",
+                "streaming_tool_call_first_prefill_page.patch",
             ]
-            for patch_index, patch_name in enumerate(expected_applied_patches):
-                check_command_index = 34 + 2 * patch_index
-                assert commands[check_command_index][2] == "--check"
-                assert commands[check_command_index][3].endswith(patch_name)
-                assert commands[check_command_index + 1][2].endswith(patch_name)
+            applied_patch_names = [
+                Path(command[-1]).name
+                for command in commands
+                if len(command) == 3 and command[:2] == ["git", "apply"]
+            ]
+            assert applied_patch_names == expected_applied_patches
 
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

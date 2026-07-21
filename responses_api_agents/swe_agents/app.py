@@ -1398,6 +1398,16 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             / "patches"
             / "streaming_tool_call_first_prefill_page.patch"
         )
+        first_prefill_page_legacy_marker_patch_path = (
+            self.parent_dir
+            / "patches"
+            / "streaming_tool_call_first_prefill_page_legacy_marker.patch"
+        )
+        first_prefill_page_cache_fill_upgrade_patch_path = (
+            self.parent_dir
+            / "patches"
+            / "streaming_tool_call_first_prefill_page_cache_fill_upgrade.patch"
+        )
 
         def is_applied(patch_path: Path) -> bool:
             reverse_check = subprocess_run(
@@ -1426,6 +1436,9 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
         if is_applied(first_prefill_page_patch_path):
+            return
+        if is_applied(first_prefill_page_legacy_marker_patch_path):
+            apply_patch(first_prefill_page_cache_fill_upgrade_patch_path)
             return
         if is_applied(prefill_start_priority_patch_path):
             apply_patch(first_prefill_page_patch_path)

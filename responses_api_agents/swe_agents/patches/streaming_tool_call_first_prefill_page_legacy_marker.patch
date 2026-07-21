@@ -1,0 +1,12 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -629,6 +629,9 @@
+         prefill_after_admission = final_only_prefill and bool(
+             context.config.get("prefill_after_admission")
+         )
++        stop_after_first_prefill_page = prefill_after_admission and bool(
++            context.config["stop_after_first_prefill_page"]
++        )
+         final_only_prefill_completion_grace_seconds = (
+             float(
+                 context.config[

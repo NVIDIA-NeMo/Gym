@@ -1,0 +1,43 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -720,8 +720,10 @@
+         background_prefill_metrics = {
+             "streaming_tool_call_prefill_background_scheduled_chunks": 0,
+             "streaming_tool_call_prefill_background_scheduled_tokens": 0,
++            "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens": 0,
+             "streaming_tool_call_prefill_background_completed_chunks": 0,
+             "streaming_tool_call_prefill_background_completed_tokens": 0,
++            "streaming_tool_call_prefill_background_completed_cache_fill_tokens": 0,
+             "streaming_tool_call_prefill_background_completed_dummy_tokens": 0,
+             "streaming_tool_call_prefill_background_effective_chunks": 0,
+             "streaming_tool_call_prefill_background_dynamic_tokens": 0,
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1369,8 +1369,14 @@
+                 "prefill_failures": 0,
+                 "prefill_background_scheduled_chunks": int(not final),
+                 "prefill_background_scheduled_tokens": 13 if not final else 0,
++                "prefill_background_scheduled_cache_fill_tokens": (
++                    13 if not final else 0
++                ),
+                 "prefill_background_completed_chunks": int(final),
+                 "prefill_background_completed_tokens": 13 if final else 0,
++                "prefill_background_completed_cache_fill_tokens": (
++                    13 if final else 0
++                ),
+                 "prefill_background_effective_chunks": int(final),
+                 "prefill_background_dynamic_tokens": 13 if final else 0,
+                 "deferred_prefill_admissions": int(sequence_no == 0),
+@@ -1449,6 +1455,12 @@
+         assert metrics[
+             "streaming_tool_call_prefill_background_scheduled_chunks"
+         ] == 1
++        assert metrics[
++            "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens"
++        ] == 13
++        assert metrics[
++            "streaming_tool_call_prefill_background_completed_cache_fill_tokens"
++        ] == 13
+         assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
+         streaming_http_session.close.assert_awaited_once()
+
