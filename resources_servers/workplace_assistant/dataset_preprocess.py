@@ -16,7 +16,6 @@
 # Run as `python resources_servers/workplace_assistant/dataset_preprocess.py --split test``
 import argparse
 import json
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
