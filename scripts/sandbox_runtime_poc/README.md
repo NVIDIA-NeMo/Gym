@@ -13,15 +13,17 @@ environment-specific.
 | `generic-device-plugin.yaml` | DaemonSet advertising `devic.es/kvm` + `devic.es/tun` on VM nodes so sandbox pods run non-privileged |
 | `osworld-kvm-pool.yaml` | OpenSandbox `Pool` of pre-warmed QEMU/KVM Ubuntu desktops |
 | `kata-metal-nodeoverlay.yaml` | Karpenter NodeOverlay declaring the device-plugin resources so metal nodes autoscale on VM demand (requires the `NodeOverlay` feature gate) |
-| `cell-1-5-alias-svc-*.yaml` | cross-cluster (istio ambient) global Service alias for the cell, one per cluster |
 
 Upload the guest image once: `aws s3 cp System.qcow2 s3://<YOUR_S3_BUCKET>/osworld/System.qcow2`.
 
-## GPU cluster (per run)
+## The eval Job (per run)
+
+Inference is assumed to be an existing OpenAI-compatible endpoint — point
+`POLICY_BASE_URL` at it (any vLLM deployment or hosted service serving
+`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` with its model-card recipe).
 
 | file | what it does |
 |---|---|
-| `osworld-omni-vllm-023.yaml` | vLLM v0.23.0 serving `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` with the reference recipe flags (assets in `serving_assets/`) |
 | `osworld-omni-gate.yaml` + `osworld-omni-gate.entrypoint.sh` | durable eval Job: runs `gym eval run` with per-rollout result flush and automatic `--resume` on pod retry |
 
 ## Dataset
