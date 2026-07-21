@@ -48,10 +48,6 @@ class StatefulCounterVerifyRequest(BaseVerifyRequest):
     expected_count: int
 
 
-class BaseVerifyResponse(BaseVerifyRequest):
-    reward: float
-
-
 class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
     initial_count: int
 

@@ -749,12 +749,31 @@ class TestDownloadAndParseFiling:
         assert "iXBRL Header" in result
 
     def test_url_to_filing_path(self, server) -> None:
-        """Test URL-to-filepath conversion for SEC URLs."""
+        """Test URL-to-filepath conversion for SEC URLs (keyed by document)."""
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/aapl-20250104.htm"
         path = server._url_to_filing_path(url)
         assert path is not None
-        assert path.name == "000032019325000008.txt"
+        # Path is filings/{CIK}/{accession}/{document}.txt
+        assert path.name == "aapl-20250104.htm.txt"
+        assert path.parent.name == "000032019325000008"
         assert "0000320193" in str(path.parent)
+
+    def test_url_to_filing_path_documents_do_not_collide(self, server) -> None:
+        """Two documents under the same accession map to distinct cache files."""
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008"
+        p_primary = server._url_to_filing_path(f"{base}/aapl-20241228.htm")
+        p_exhibit = server._url_to_filing_path(f"{base}/exhibit99-1.htm")
+        assert p_primary is not None and p_exhibit is not None
+        assert p_primary != p_exhibit
+        # ...but they still share the same accession directory.
+        assert p_primary.parent == p_exhibit.parent
+
+    def test_url_to_filing_path_no_document(self, server) -> None:
+        """A URL ending at the accession directory falls back to an index filename."""
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/"
+        path = server._url_to_filing_path(url)
+        assert path is not None
+        assert path.name == "index.txt"
 
     def test_url_to_filing_path_invalid(self, server) -> None:
         """Invalid URLs return None."""
