@@ -37,8 +37,6 @@ for cls_name in (
     "SimpleResourcesServer",
 ):
     setattr(_nemo_base, cls_name, type(cls_name, (), {}))
-# ReverifyMode is an enum-like the app references as ReverifyMode.STATELESS / .UNSUPPORTED.
-_nemo_base.ReverifyMode = type("ReverifyMode", (), {"STATELESS": "stateless", "UNSUPPORTED": "unsupported"})
 _nemo_stub.base_resources_server = _nemo_base
 sys.modules["nemo_gym"] = _nemo_stub
 sys.modules["nemo_gym.base_resources_server"] = _nemo_base
