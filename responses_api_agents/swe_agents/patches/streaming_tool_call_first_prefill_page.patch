@@ -1,0 +1,253 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -629,6 +629,9 @@
+         prefill_after_admission = final_only_prefill and bool(
+             context.config.get("prefill_after_admission")
+         )
++        stop_after_first_prefill_page = prefill_after_admission and bool(
++            context.config["stop_after_first_prefill_page"]
++        )
+         final_only_prefill_completion_grace_seconds = (
+             float(
+                 context.config[
+@@ -647,6 +650,7 @@
+         session_started = False
+         prefill_session_active = False
+         prefill_after_admission_used = False
++        prefill_first_page_stops = 0
+         last_sent_content = ""
+         last_revision = -1
+         last_send_time = time.monotonic()
+@@ -900,6 +904,7 @@
+             nonlocal deferred_prefill_admissions
+             nonlocal final_prefix_tokenizations
+             nonlocal prefill_after_admission_used
++            nonlocal prefill_first_page_stops
+             nonlocal prefill_after_admission_request_seconds
+             nonlocal prefill_after_admission_requests
+             nonlocal prefill_after_admission_tokens
+@@ -1078,6 +1083,18 @@
+                     "prefill_tokens", 0
+                 )
+                 prefill_after_admission_request_seconds += request_seconds
++            if (
++                stop_after_first_prefill_page
++                and request_prefill
++                and not final
++                and prefill_session_active
++                and tokenize_result.get(
++                    "prefill_background_scheduled_chunks", 0
++                )
++                > 0
++            ):
++                prefill_session_active = False
++                prefill_first_page_stops += 1
+             if request_prefill_failures > 0 or final:
+                 prefill_session_active = False
+             incremental_encoded_chars += tokenize_result.get("encoded_chars", 0)
+@@ -1249,6 +1266,9 @@
+                 "streaming_tool_call_prefill_after_admission_request_seconds": (
+                     prefill_after_admission_request_seconds
+                 ),
++                "streaming_tool_call_prefill_first_page_stops": (
++                    prefill_first_page_stops
++                ),
+                 "streaming_tool_call_prefill_committed_tokens": (
+                     prefill_committed_tokens
+                 ),
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -945,6 +945,7 @@
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
++                "stop_after_first_prefill_page": False,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
+@@ -1153,6 +1154,7 @@
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
++                "stop_after_first_prefill_page": False,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
+@@ -1304,6 +1306,153 @@
+         )
+ 
+     @pytest.mark.asyncio
++    async def test_execute_action_stops_after_first_scheduled_prefill_page(self):
++        runtime = LocalRuntime.__new__(LocalRuntime)
++        runtime.api_url = "http://runtime"
++        runtime.sid = "runtime-session"
++        release_post = threading.Event()
++        session = MagicMock()
++        runtime.session = session
++        streamed_content = "x" * 300
++        snapshot_calls = 0
++
++        def get_snapshot(*args, **kwargs):
++            nonlocal snapshot_calls
++            snapshot_calls += 1
++            assert snapshot_calls == 1
++            return _async_response_context(
++                {"revision": 1, "content": streamed_content}
++            )
++
++        streaming_http_session = MagicMock()
++        streaming_http_session.get.side_effect = get_snapshot
++        streaming_http_session.close = AsyncMock()
++        final_observation = CmdOutputObservation(
++            content=f"{streamed_content} done",
++            command="produce output",
++            metadata=CmdOutputMetadata(
++                exit_code=0,
++                suffix="\n[The command completed with exit code 0.]",
++            ),
++        )
++        post_response = MagicMock()
++        post_response.json.return_value = event_to_dict(final_observation)
++
++        def post(*args, **kwargs):
++            assert release_post.wait(timeout=1)
++            return post_response
++
++        session.post.side_effect = post
++        streaming_client = MagicMock()
++        streaming_client.llm.config.max_message_chars = 1_000
++
++        async def tokenize_request(**kwargs):
++            final = kwargs["final"]
++            sequence_no = kwargs["sequence_no"]
++            result = {
++                "sequence_no": sequence_no,
++                "token_count": 40,
++                "encoded_chars": 300,
++                "encoded_tokens": 20,
++                "reused_tokens": 13 if final else 0,
++                "rollback_tokens": 0,
++                "checkpoint_count": 0,
++                "checkpoint_tokens": 0,
++                "checkpoint_mismatches": 0,
++                "incremental_valid": True,
++                "prefill_sessions_started": int(sequence_no == 0),
++                "prefill_control_plane_requests": int(not final),
++                "prefill_tokens": 13 if not final else 0,
++                "prefill_effective_requests": int(not final),
++                "prefill_completed_chunks": int(final),
++                "prefill_prefix_matched": final,
++                "prefill_failures": 0,
++                "prefill_background_scheduled_chunks": int(not final),
++                "prefill_background_scheduled_tokens": 13 if not final else 0,
++                "prefill_background_completed_chunks": int(final),
++                "prefill_background_completed_tokens": 13 if final else 0,
++                "prefill_background_effective_chunks": int(final),
++                "prefill_background_dynamic_tokens": 13 if final else 0,
++                "deferred_prefill_admissions": int(sequence_no == 0),
++                "final_prefix_tokenizations": 0,
++            }
++            if final:
++                result["reuse_id"] = "runtime-session:response:call"
++            else:
++                asyncio.get_running_loop().call_later(0.01, release_post.set)
++            return result
++
++        streaming_client.streaming_tool_call_request = AsyncMock(
++            side_effect=tokenize_request
++        )
++        context = StreamingToolCallContext(
++            client=streaming_client,
++            response_id="response",
++            tool_call_id="call",
++            function_name="execute_bash",
++            chat_completion={"messages": [], "tools": []},
++            config={
++                "enabled": True,
++                "tokenizer_only": True,
++                "exact_incremental_tokenizer": True,
++                "final_only_incremental_tokenizer": True,
++                "final_only_prefill": True,
++                "prefill_after_admission": True,
++                "stop_after_first_prefill_page": True,
++                "final_only_prefill_completion_grace_seconds": 0.0,
++                "min_chunk_chars": 256,
++                "initial_chunk_chars": 128,
++                "snapshot_poll_interval_seconds": 0.001,
++                "snapshot_long_poll_timeout_seconds": 1.0,
++                "event_driven_snapshot_wait": True,
++                "flush_interval_seconds": 0.25,
++                "request_timeout_seconds": 5,
++            },
++        )
++        _STREAMING_TOOL_CALL_CONTEXTS["response"] = context
++        action = CmdRunAction(command="produce output")
++        action.tool_call_metadata = ToolCallMetadata(
++            model_response=ModelResponse(id="response", choices=[]),
++            total_calls_in_response=1,
++        )
++        action.response_id = "response"
++
++        with (
++            patch(
++                "openhands.runtime.impl.local.local_runtime.get_global_config_dict",
++                return_value={"streaming_tool_call": {"enabled": True}},
++            ),
++            patch(
++                "openhands.runtime.impl.local.local_runtime._update_streaming_tool_call_metrics"
++            ) as update_metrics,
++            patch(
++                "openhands.runtime.impl.local.local_runtime.ClientSession",
++                return_value=streaming_http_session,
++            ),
++        ):
++            response = runtime._send_action_server_request(
++                "POST",
++                "http://runtime/execute_action",
++                json={"action": event_to_dict(action)},
++                timeout=5,
++            )
++
++        assert response is post_response
++        assert streaming_http_session.get.call_count == 1
++        requests = streaming_client.streaming_tool_call_request.await_args_list
++        assert [request.kwargs["sequence_no"] for request in requests] == [0, 1]
++        assert [request.kwargs["final"] for request in requests] == [False, True]
++        assert requests[0].kwargs["tool_output"] == streamed_content
++        assert " done" in requests[1].kwargs["tool_output"]
++        metrics = update_metrics.call_args_list[-1].args[0]
++        assert metrics["streaming_tool_call_prefill_first_page_stops"] == 1
++        assert metrics[
++            "streaming_tool_call_prefill_background_scheduled_chunks"
++        ] == 1
++        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
++        streaming_http_session.close.assert_awaited_once()
++
++    @pytest.mark.asyncio
+     async def test_execute_action_cancels_async_snapshot_request(self):
+         runtime = LocalRuntime.__new__(LocalRuntime)
+         runtime.api_url = "http://runtime"
+@@ -1362,6 +1511,7 @@
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
++                "stop_after_first_prefill_page": False,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
+@@ -1465,6 +1615,7 @@
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
++                "stop_after_first_prefill_page": False,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
+@@ -1589,6 +1740,7 @@
+                 "final_only_incremental_tokenizer": True,
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
++                "stop_after_first_prefill_page": False,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
