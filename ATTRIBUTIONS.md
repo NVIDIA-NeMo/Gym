@@ -36,14 +36,25 @@ All third-party software is used as obtained, without modification, unless other
 ## 📦 Vendored Components (modified)
 
 The following third-party source is **vendored** (a copy is checked into this
-repository) and has been **modified** by NVIDIA. Modified files carry a
-`Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES` notice in
-addition to the original upstream copyright header; all upstream files retain
-their original copyright headers.
+repository) and has been **modified** by NVIDIA. Each modified file retains its
+original upstream copyright header verbatim and adds an NVIDIA modifications
+block:
+
+```text
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+```
+
+Because this repository is licensed under **Apache-2.0**, all NVIDIA
+modifications to the vendored sources are licensed under Apache-2.0. The
+original upstream-authored portions remain subject to their upstream license
+(reproduced in full below and kept in-tree at the paths listed under each
+component). NVIDIA does not relicense the upstream work — only NVIDIA's own
+changes are placed under Apache-2.0.
 
 | Component | Type | License | Author / Copyright | URL |
 |------------|------|----------|--------------------|-----|
-| **ToolSandbox** | Tool-use benchmark (scenarios, tools, sandbox, scoring) | Apple custom source license (see full text below) | Copyright (C) 2024 Apple Inc. | https://github.com/apple/ToolSandbox |
+| **ToolSandbox** | Tool-use benchmark (scenarios, tools, sandbox, scoring) | Original: Apple custom source license (see full text below). NVIDIA modifications: Apache-2.0 | Copyright (C) 2024 Apple Inc.; Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES | https://github.com/apple/ToolSandbox |
 
 - Vendored at: `resources_servers/toolsandbox/tool_sandbox/`
 - Upstream license: `resources_servers/toolsandbox/tool_sandbox/LICENSE`
