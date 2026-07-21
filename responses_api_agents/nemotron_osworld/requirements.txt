@@ -2,3 +2,7 @@
 # OSWorld benchmark harness — same referenced fork pin as resources_servers/osworld (keep in lockstep).
 # Provides mm_agents.nvidia.nemotron_agent (prompt contract + parsing) imported by this agent server.
 osworld @ git+https://github.com/terrykong/OSWorld.git@5d8c93592be588ab8e9909bed82f3b480fd4f533
+
+# Match the root venv's ray (uv.lock) — the servers join the head's Ray cluster and
+# Ray refuses mixed versions; an unpinned resolve here drifts ahead of the lock.
+ray[default]==2.55.1
