@@ -41,9 +41,19 @@ fi
 # A failed requirements install leaves a half-built venv that
 # skip_venv_if_present would then trust forever — detect and remove those
 # so gym's per-server setup rebuilds them.
+venv_ok() {
+  case "$1" in
+    resources_servers/osworld)
+      "$1/.venv/bin/python" -c "import fastapi, ray, cryptography; ray.__version__; from desktop_env.evaluators.getters import chrome" 2>/dev/null ;;
+    responses_api_agents/nemotron_osworld)
+      "$1/.venv/bin/python" -c "import fastapi, ray; ray.__version__; import mm_agents.nvidia.nemotron_agent" 2>/dev/null ;;
+    *)
+      "$1/.venv/bin/python" -c "import fastapi, ray; ray.__version__" 2>/dev/null ;;
+  esac
+}
 for srv in resources_servers/osworld responses_api_agents/nemotron_osworld responses_api_models/vllm_model; do
-  if [ -d "$srv/.venv" ] && ! "$srv/.venv/bin/python" -c "import fastapi, ray; ray.__version__" 2>/dev/null; then
-    echo "[entrypoint] $srv/.venv is broken (half-installed) — removing for rebuild"
+  if [ -d "$srv/.venv" ] && ! venv_ok "$srv"; then
+    echo "[entrypoint] $srv/.venv fails its import sentinel (half-installed) — removing for rebuild"
     rm -rf "$srv/.venv"
   fi
 done
