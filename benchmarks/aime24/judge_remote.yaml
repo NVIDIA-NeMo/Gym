@@ -1,0 +1,33 @@
+# Separate / remote judge model server for aime24.
+#
+# Added to `config_paths` by `ns eval --backend=gym --judge_model=…`, which:
+#   1. launches the judge vLLM on its OWN node (a dedicated ServerScript), and
+#   2. passes `+judge_base_url` / `+judge_api_key` / `+judge_model_name` to
+#      ng_run.
+#
+# This overlay defines a `judge_model` remote model server that resolves to
+# that node (mirroring how `policy_model` resolves to `${policy_base_url}`),
+# and flips aime24's math_with_judge resources server to call it instead of
+# self-judging with the policy. Without this overlay (no `--judge_model`),
+# aime24 scores with math-verify + optional self-judge, unchanged.
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}
+
+aime24_math_with_judge_resources_server:
+  resources_servers:
+    math_with_judge:
+      should_use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
