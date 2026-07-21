@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,7 +43,8 @@ How to read this file
 Two timelines run here, and every function belongs to exactly one. Keep them apart while reading.
 
 STARTUP (runs once at boot, per opted-in server):
-    ``maybe_auto_expose`` (flag gate) -> ``install_auto_exposure``, which:
+    ``maybe_auto_expose`` (flag gate) -> ``install_auto_exposure``, which (after refusing a server
+    that already serves /mcp):
       * ``harvest_tools`` — walks the app's POST routes, calls ``bind_route`` on each, and builds the
         ``{tool name: MCPTool}`` map (advertisement + a direct binding per tool);
       * wraps endpoints — ``_wrap_seed_session`` makes the /seed_session response hand the client a
@@ -100,8 +101,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 LOG = logging.getLogger(__name__)
 
-# Re-export for existing importers; the canonical value lives in base_resources_server so the two
-# MCP mechanisms cannot drift apart on the wire.
+# Alias for readability; the canonical value lives in base_resources_server because the header is
+# wire contract — claude_code_agent reads the same constant from the /seed_session metadata.
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
