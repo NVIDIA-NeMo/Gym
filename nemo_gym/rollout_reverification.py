@@ -135,9 +135,11 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         ),
     )
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Maximum number of samples to re-verify in parallel."
+        default=None, ge=1, description="Maximum number of samples to re-verify in parallel (omit for unbounded)."
     )
-    limit: Optional[int] = Field(default=None, description="Maximum number of examples to re-verify.")
+    limit: Optional[int] = Field(
+        default=None, ge=1, description="Maximum number of examples to re-verify (omit for no limit)."
+    )
     upload_rollouts_to_wandb: bool = Field(
         default=True,
         description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
@@ -201,7 +203,10 @@ def _run_verification_payloads(
             rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
             try:
-                await raise_for_status(res)
+                await raise_for_status(
+                    res
+                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
+            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
             except Exception:
                 if is_global_aiohttp_client_request_debug_enabled():
                     print(
@@ -394,11 +399,6 @@ class RolloutReverificationHelper(BaseModel):
             _guard_output_file(fpath, config.overwrite)
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
-            if config.num_samples_in_parallel <= 0:
-                raise ConfigError(
-                    f"num_samples_in_parallel must be a positive integer, got {config.num_samples_in_parallel}. "
-                    "Omit it (or set it to null) to run unbounded."
-                )
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 

@@ -61,6 +61,24 @@ The command:
 4. POSTs each joined row to `/verify` — no model calls.
 5. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
 
+### Reverifying against a benchmark config
+
+You don't have to write a resources-server-only config. You can point `--config` at an existing benchmark or agent config and override verifier parameters inline with `++` — convenient when you'd rather not maintain a separate file just to tweak a hyperparameter e.g.:
+
+```bash
+gym eval reverify \
+  --config benchmarks/birdbench/config.yaml \
+  --model-type vllm_model \
+  "++birdbench_bird_sql_resources_server.resources_servers.bird_sql.sql_execution_timeout_s=60" \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_reverified.jsonl
+```
+
+<Note>
+A benchmark/agent config's agent references a model server, so a model config must also be present for that reference to resolve — pass `--model-type` (or the model config you used at collection time). The trade-off of this convenience: reverify then starts **all** the servers in the config (agent and model included), even though it only calls the resources server's `/verify`.
+</Note>
+
 ## Output files
 
 | File | Contents |

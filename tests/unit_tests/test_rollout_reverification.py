@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
@@ -56,6 +57,31 @@ from nemo_gym.rollout_reverification import (
 #     _rollout_request_debug_summary,
 #     loads_jsonl_line,
 # )
+
+
+class TestRolloutReverificationConfig:
+    """Field-level validation on RolloutReverificationConfig."""
+
+    def _kwargs(self, **overrides) -> dict:
+        return {
+            "materialized_inputs_jsonl_fpath": "in.jsonl",
+            "rollouts_jsonl_fpath": "r.jsonl",
+            "output_jsonl_fpath": "out.jsonl",
+            **overrides,
+        }
+
+    @pytest.mark.parametrize("field", ["num_samples_in_parallel", "limit"])
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_non_positive_positive_int_fields_rejected(self, field: str, bad_value: int) -> None:
+        """num_samples_in_parallel and limit must be >= 1 (0 is meaningless: Semaphore(0) / re-verify no rows)."""
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            RolloutReverificationConfig(**self._kwargs(**{field: bad_value}))
+
+    @pytest.mark.parametrize("field", ["num_samples_in_parallel", "limit"])
+    def test_positive_int_fields_none_and_positive_allowed(self, field: str) -> None:
+        """Omitting the field (None) means unbounded/no-limit; a positive value is kept."""
+        assert getattr(RolloutReverificationConfig(**self._kwargs()), field) is None
+        assert getattr(RolloutReverificationConfig(**self._kwargs(**{field: 4})), field) == 4
 
 
 class TestAgentToRsMappingFromAgentBlocks:
@@ -1107,16 +1133,6 @@ class TestRolloutReverificationRunFromConfig:
         agent_names_in_agg = {r[AGENT_REF_KEY_NAME]["name"] for r in agg_results}
         assert agent_names_in_agg == {"agent_a", "agent_b"}
         assert len(returned) == 4
-
-    @pytest.mark.parametrize("bad_value", [0, -1])
-    async def test_non_positive_num_samples_in_parallel_raises(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_value: int
-    ) -> None:
-        """A non-positive concurrency raises ConfigError instead of building an unacquirable Semaphore(0)."""
-        self._patch_common(monkeypatch, pairs=[(self._make_row("rs_a", task=0), {"reward": 1.0})])
-        config = self._make_config(tmp_path, num_samples_in_parallel=bad_value)
-        with pytest.raises(ConfigError, match="num_samples_in_parallel must be a positive integer"):
-            await RolloutReverificationHelper().run_from_config(config)
 
 
 class TestCheckReverifyMode:
