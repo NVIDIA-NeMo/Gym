@@ -1,0 +1,101 @@
+# OSWorld runc-kvm Pool for OpenSandbox (M1 —
+#
+# Validated end-to-end 2026-07-12 on cell 1.5 (v0.3.0-nemo.1), ns sbx-2, metal node:
+#   poolRef allocate -> warm OSWorld sandbox -> guest desktop control API (:5000) via the
+#   OpenSandbox server proxy. Proven interaction (through the proxy):
+#     GET  /platform    -> 200 "Linux"
+#     GET  /screenshot  -> 200 image/png 1920x1080 (live Ubuntu 22.04 GNOME desktop)
+#     POST /execute     -> ran a command in the guest, guest kernel 6.5.0-15-generic (!= host
+#                          6.12.90 => real KVM VM isolation)
+#     POST /screen_size -> 200 {height:1080,width:1920}
+#
+# TWO permanent-design properties (vs the earlier temporary bootstrap):
+#   * DISK from S3 (not baked): the ~22.8 GiB Ubuntu.qcow2 is mounted READ-ONLY from S3 via the
+#     Mountpoint-S3 CSI driver (osworld-qcow2-s3.yaml) as a COW backing file. Small base image.
+#   * NON-privileged "main": /dev/kvm + /dev/net/tun come from the KVM device plugin
+#     (generic-device-plugin.yaml) via resource requests -- NOT hostPath + privileged. The only
+#     capability is NET_ADMIN (qemux bridge/TAP setup). The disk is a plain SYMLINK to the S3
+#     file, made possible by a one-line image patch (find -L, so `find -type f` follows symlinks) —
+#     nemo-rl/osworld-docker:symlink-boot — which removes the bind-mount that needed CAP_SYS_ADMIN.
+#
+# Model: one pod, two containers sharing the netns:
+#   * "sandbox" = OpenSandbox task-executor (control; SANDBOX_MAIN_CONTAINER=main)
+#   * "main"    = patched osworld-docker (QEMU). Guest :5000 is exposed via the image's bridge +
+#                 iptables DNAT on the pod IP/eth0 — the path the OpenSandbox proxy dials.
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: osworld-kvm
+  namespace: sbx-2
+spec:
+  # Keep 1 warm OSWorld VM ready; allow up to 10 total for concurrent full-suite eval
+  # (metal node ~197 GiB RAM / 72 CPU / 100 KVM => 10 x ~12 GiB VM = 120 GiB, safe headroom).
+  capacitySpec: {bufferMin: 1, bufferMax: 1, poolMin: 1, poolMax: 10}
+  template:
+    metadata:
+      # ambient/sidecar OFF: the qemux bridge + DNAT networking must not be intercepted by Istio.
+      labels: {istio.io/dataplane-mode: none}
+    spec:
+      # no runtimeClassName => runc; QEMU runs in "main" with /dev/kvm passthrough (runc + KVM).
+      nodeSelector: {katacontainers.io/kata-runtime: "true"}   # the metal pool (has /dev/kvm)
+      schedulerName: default-scheduler
+      tolerations:
+      - {effect: NoSchedule, key: kata-runtime, operator: Equal, value: "true"}
+      initContainers:
+      - name: task-executor-installer
+        image: <YOUR_REGISTRY>/opensandbox/task-executor@sha256:272c5db1bb649e18a2f018141b938030ad606fd96528863f2ca6698a97bfe7d1
+        command: ["/bin/sh", "-c"]
+        args: ["cp /workspace/server /opt/opensandbox/bin/task-executor && chmod +x /opt/opensandbox/bin/task-executor\n"]
+        volumeMounts: [{mountPath: /opt/opensandbox/bin, name: opensandbox-bin}]
+      - name: execd-installer
+        image: <YOUR_REGISTRY>/opensandbox/execd@sha256:a89cae3157be428e3761a46b3e9b651394f5c0dc17a26dfc3de906abbfcf46ce
+        command: ["/bin/sh", "-c"]
+        args: ["cp ./execd /opt/opensandbox/bin/execd && cp ./bootstrap.sh /opt/opensandbox/bin/bootstrap.sh && chmod +x /opt/opensandbox/bin/execd && chmod +x /opt/opensandbox/bin/bootstrap.sh\n"]
+        volumeMounts: [{mountPath: /opt/opensandbox/bin, name: opensandbox-bin}]
+      containers:
+      # --- control-plane slot: OpenSandbox task-executor ---
+      - name: sandbox
+        image: docker.io/astral/uv@sha256:5d275ca5f0da33c3368ac8fbb85fafabad023b3b8a7cff39a94ac0baecfd9a50
+        command: ["/bin/sh", "-c"]
+        args: ["/opt/opensandbox/bin/task-executor -listen-addr=0.0.0.0:5758 >/tmp/task-executor.log 2>&1\n"]
+        env:
+        - {name: SANDBOX_MAIN_CONTAINER, value: main}
+        - {name: EXECD_ENVS, value: /opt/opensandbox/.env}
+        - {name: EXECD, value: /opt/opensandbox/bin/execd}
+        resources:
+          limits: {cpu: 500m, memory: 512Mi}
+          requests: {cpu: 500m, memory: 512Mi}
+        volumeMounts:
+        - {mountPath: /var/lib/sandbox, name: sandbox-storage}
+        - {mountPath: /opt/opensandbox/bin, name: opensandbox-bin}
+        - {mountPath: /workspace/logs, name: sandbox-logs}
+      # --- workload: OSWorld QEMU (patched base image; qcow2 read-only from S3; NON-privileged) ---
+      - name: main
+        image: <YOUR_REGISTRY>/osworld-docker:symlink-boot
+        command: ["/bin/sh", "-c"]
+        # patched image (find -L) => a plain symlink is found; no bind-mount, so no CAP_SYS_ADMIN.
+        args: ["rm -f /System.qcow2; ln -sf /mnt/osworld-qcow2/System.qcow2 /System.qcow2 && exec /usr/bin/tini -s /run/entry.sh\n"]
+        env:
+        - {name: RAM_SIZE, value: "8G"}
+        - {name: CPU_CORES, value: "4"}
+        - {name: DISK_SIZE, value: "32G"}
+        securityContext:
+          privileged: false                 # NON-privileged: /dev/kvm via the device plugin
+          capabilities: {add: ["NET_ADMIN"]} # only cap needed (qemux bridge/TAP)
+        ports:
+        - {containerPort: 5000}   # OSWorld control API (guest, via DNAT)
+        - {containerPort: 8006}   # noVNC (host-side)
+        resources:
+          # devic.es/kvm + /tun are injected (mount + cgroup rw) by generic-device-plugin.yaml
+          requests: {cpu: "4", memory: "10Gi", devic.es/kvm: "1", devic.es/tun: "1"}
+          limits: {cpu: "6", memory: "12Gi", devic.es/kvm: "1", devic.es/tun: "1"}
+        volumeMounts:
+        - {mountPath: /storage, name: storage}
+        - {mountPath: /mnt/osworld-qcow2, name: qcow2, readOnly: true}   # S3 CSI (read-only)
+      volumes:
+      - {name: sandbox-storage, emptyDir: {}}
+      - {name: opensandbox-bin, emptyDir: {}}
+      - {name: sandbox-logs, emptyDir: {}}
+      - {name: storage, emptyDir: {}}       # dockur writable scratch (QEMU overlay + data disk)
+      # the shared read-only qcow2 from S3 (see osworld-qcow2-s3.yaml) — ONE PVC for all pods
+      - {name: qcow2, persistentVolumeClaim: {claimName: osworld-qcow2-s3, readOnly: true}}

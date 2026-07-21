@@ -1,0 +1,33 @@
+# OpenSandbox provider block for the OSWorld KVM pool (use INSTEAD of the shipped
+# nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
+#
+# Differences from the shipped block:
+# - probe.command: null — pod-level execd on the KVM pool template returns 500 (known
+#   limitation; see STATUS.md M1). Readiness is enforced by the resources server's own
+#   guest :5000 boot wait + desktop-render check instead.
+# - api_key defaults to "" (the dev cell has no auth).
+sandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,""}
+      protocol: http
+      request_timeout_s: 300
+      use_server_proxy: true
+    create:
+      request_timeout_s: 1200
+      timeout_s: 1200
+      skip_health_check: true
+      retries: 3
+      retry_delay_s: 5.0
+      retry_max_delay_s: 60.0
+    probe:
+      command: null
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 30
