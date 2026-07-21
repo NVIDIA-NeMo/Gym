@@ -425,7 +425,8 @@ class TestListEnvironments:
         ]
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # `gym search environments <query>` reuses this command via the `query` config key (matches name + domain).
+        # `gym search environments <query>` reuses this command via the `query` config key
+        # (matches name + domain + description).
         beta = EnvironmentEntry(
             name="beta",
             config_path=Path("environments/beta/config.yaml"),
@@ -446,3 +447,25 @@ class TestListEnvironments:
         assert "Environments matching 'alpha'" in out
         assert "agent" in out  # alpha's domain -> its row was rendered
         assert "beta" not in out and "math" not in out  # beta and its domain filtered out
+
+    def test_query_matches_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # "Robotics" only appears in gamma's description, not its name or domain.
+        gamma = EnvironmentEntry(
+            name="gamma",
+            config_path=Path("environments/gamma/config.yaml"),
+            path=Path("environments/gamma"),
+            description="Robotics manipulation tasks",
+            domain="control",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "Robotics"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "gamma": gamma}
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "gamma" in out
+        assert "alpha" not in out

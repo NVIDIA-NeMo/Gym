@@ -940,11 +940,14 @@ def list_environments() -> None:
 
     environments = discover_environments()
 
-    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on name + domain.
+    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on
+    # name + domain + description.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
         environments = {
-            name: env for name, env in environments.items() if fuzzy_matches(query, name, env.domain or "")
+            name: env
+            for name, env in environments.items()
+            if fuzzy_matches(query, name, env.domain or "", env.description or "")
         }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):

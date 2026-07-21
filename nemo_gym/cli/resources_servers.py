@@ -41,10 +41,13 @@ def list_resources_servers() -> None:
 
     servers = discover_resources_servers()
 
-    # `gym search resources-servers <query>` reuses this command, narrowing to fuzzy matches on name + domain.
+    # `gym search resources-servers <query>` reuses this command, narrowing to fuzzy matches on
+    # name + domain + description.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        servers = {name: s for name, s in servers.items() if fuzzy_matches(query, name, s.domain or "")}
+        servers = {
+            name: s for name, s in servers.items() if fuzzy_matches(query, name, s.domain or "", s.description or "")
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(

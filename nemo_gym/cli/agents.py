@@ -42,10 +42,15 @@ def list_agents() -> None:
 
     agents = discover_agents()
 
-    # `gym search agents <query>` reuses this command, narrowing to fuzzy matches on name + variant names.
+    # `gym search agents <query>` reuses this command, narrowing to fuzzy matches on
+    # name + description + variant names.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        agents = {name: entry for name, entry in agents.items() if fuzzy_matches(query, name, *entry.variants)}
+        agents = {
+            name: entry
+            for name, entry in agents.items()
+            if fuzzy_matches(query, name, entry.description or "", *entry.variants)
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [

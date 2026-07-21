@@ -76,7 +76,8 @@ class TestListResourcesServers:
             assert row in payload
 
     def test_query_filters_servers(self, capsys) -> None:
-        # `gym search resources-servers <query>` reuses this command via the `query` config key (name + domain).
+        # `gym search resources-servers <query>` reuses this command via the `query` config key
+        # (name + domain + description).
         with (
             patch(
                 "nemo_gym.cli.resources_servers.get_global_config_dict",
@@ -88,3 +89,17 @@ class TestListResourcesServers:
         out = capsys.readouterr().out
         assert "aviary" in out and "Resources servers matching" in out
         assert "mcqa" not in out and "knowledge" not in out
+
+    def test_query_matches_description(self, capsys) -> None:
+        # "multichoice" only appears in mcqa's description ("Multi-choice QA"), not its name or domain.
+        with (
+            patch(
+                "nemo_gym.cli.resources_servers.get_global_config_dict",
+                return_value=_mock_global_config({"query": "multichoice"}),
+            ),
+            patch("nemo_gym.cli.resources_servers.discover_resources_servers", return_value=_SERVERS),
+        ):
+            list_resources_servers()
+        out = capsys.readouterr().out
+        assert "mcqa" in out and "Resources servers matching" in out
+        assert "aviary" not in out

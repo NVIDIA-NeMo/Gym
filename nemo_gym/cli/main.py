@@ -162,7 +162,11 @@ SEARCH_TERMS = Flag(
             choices=list(_SEARCHABLE_TYPES),
             help="Component type to search (default: benchmarks).",
         ),
-        p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
+        p.add_argument(
+            "query",
+            metavar="QUERY",
+            help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
+        ),
     ),
     translate_to_hydra=lambda args: [f'+query="{args.query}"'] if getattr(args, "query", None) else [],
 )

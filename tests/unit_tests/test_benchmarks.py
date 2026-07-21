@@ -220,6 +220,11 @@ class TestSearchBenchmarks:
         "aime24": "math",
         "gpqa_diamond": "science",
     }
+    # Descriptions carry text found in neither the name nor the domain, so a match proves description is searched.
+    DESCRIPTIONS = {
+        "aime24": "Competition problems from the AIME.",
+        "gpqa_diamond": "Graduate-level questions written by PhD experts.",
+    }
 
     def _bench(self, key: str):
         bench = MagicMock(agent_name="my_agent", num_repeats=1)
@@ -234,7 +239,10 @@ class TestSearchBenchmarks:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"query": query})),
             patch("nemo_gym.cli.eval.discover_benchmarks", return_value=benchmarks),
-            patch("nemo_gym.cli.eval.read_config_metadata", side_effect=lambda path: (self.DOMAINS[path], None)),
+            patch(
+                "nemo_gym.cli.eval.read_config_metadata",
+                side_effect=lambda path: (self.DOMAINS[path], self.DESCRIPTIONS[path]),
+            ),
         ):
             list_benchmarks()
         return capsys.readouterr().out
@@ -250,9 +258,15 @@ class TestSearchBenchmarks:
         assert "gpqa_diamond" in out
         assert "aime24" not in out
 
+    def test_query_matches_description(self, capsys) -> None:
+        # "PhD" only appears in gpqa's description, not its name/domain.
+        out = self._run("PhD", self._benchmarks(), capsys)
+        assert "gpqa_diamond" in out
+        assert "aime24" not in out
+
     def test_query_does_not_match_resource_server(self, capsys) -> None:
         # "judge" appears only in a resources server name, which is no longer searched:
-        # matching is restricted to the benchmark name and domain.
+        # matching is restricted to the benchmark name, domain, and description.
         assert "No benchmarks match 'judge'" in self._run("judge", self._benchmarks(), capsys)
 
     def test_query_no_match_message(self, capsys) -> None:

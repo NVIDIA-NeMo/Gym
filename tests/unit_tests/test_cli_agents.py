@@ -40,7 +40,12 @@ def _entry(name: str, self_contained: bool, variants=(), description=None) -> Ag
 
 _AGENTS = {
     "simple_agent": _entry("simple_agent", self_contained=False, variants=("simple_agent",)),
-    "swe_agents": _entry("swe_agents", self_contained=True, variants=("swebench_openhands",), description="SWE tasks"),
+    "swe_agents": _entry(
+        "swe_agents",
+        self_contained=True,
+        variants=("swebench_openhands",),
+        description="Agent for software engineering tasks",
+    ),
 }
 
 
@@ -77,9 +82,23 @@ class TestListAgents:
         assert by_name["swe_agents"]["variants"] == ["swebench_openhands"]
 
     def test_query_filters_agents(self, capsys) -> None:
-        # `gym search agents <query>` reuses this command via the `query` config key (name + variant names).
+        # `gym search agents <query>` reuses this command via the `query` config key (name + description + variants).
         with (
             patch("nemo_gym.cli.agents.get_global_config_dict", return_value=_mock_global_config({"query": "swe"})),
+            patch("nemo_gym.cli.agents.discover_agents", return_value=_AGENTS),
+        ):
+            list_agents()
+        out = capsys.readouterr().out
+        assert "swe_agents" in out and "Agents matching" in out
+        assert "simple_agent" not in out
+
+    def test_query_matches_description(self, capsys) -> None:
+        # "engineering" only appears in swe_agents' description, not its name or variants.
+        with (
+            patch(
+                "nemo_gym.cli.agents.get_global_config_dict",
+                return_value=_mock_global_config({"query": "engineering"}),
+            ),
             patch("nemo_gym.cli.agents.discover_agents", return_value=_AGENTS),
         ):
             list_agents()
