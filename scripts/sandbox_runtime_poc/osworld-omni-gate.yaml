@@ -1,9 +1,9 @@
 # M5/M6: durable in-cluster OSWorld Omni-Nano-v3 domain gate.
 #
-# Runs `gym eval run` (CPU-only; the model is the separate osworld-omni-vllm GB300 server)
+# Runs `gym eval run` (CPU-only; inference is an external OpenAI-compatible endpoint via POLICY_BASE_URL)
 # on an x86 node, reaching:
 #   - the sandbox KVM pool cross-cluster via istio: opensandbox-cell-1-5.opensandbox-system:80
-#   - the Nemotron-Omni endpoint in-cluster: osworld-omni-vllm.default.svc:8000
+#   - the Nemotron-Omni endpoint: whatever POLICY_BASE_URL points at
 # Code + per-server venvs are staged on the <YOUR_SHARED_PVC> PVC (no image build).
 #
 # Durability: results flush per-rollout to the PVC; backoffLimit + a resume-aware
@@ -75,7 +75,7 @@ spec:
                   name: opensandbox-api-key
                   key: api-key
             - name: POLICY_BASE_URL
-              value: http://osworld-omni-vllm-023.default.svc.cluster.local:8000/v1
+              value: <YOUR_OPENAI_COMPATIBLE_ENDPOINT>/v1
             - name: POLICY_MODEL_NAME
               value: vllm_local
             - name: POLICY_API_KEY
