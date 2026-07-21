@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sys
 import time
 import uuid
@@ -197,6 +198,26 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
             "per-call token records are retrieved after the agent finishes to build the training rollout. "
             "Must be reachable from both this process and the agent container. When absent, behavior is "
             "unchanged."
+        ),
+    )
+
+    switchyard_spawn_routing_profile: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a Switchyard routing-profiles YAML. When set, one dedicated token-capture Switchyard "
+            "instance is spawned per agent run on a free port (stateful token injection requires every "
+            "call of a session to reach the same process) and torn down after trace retrieval in run(). "
+            "Records land under the run's persistent_dir, so retrieval and /v1/sessions listing are "
+            "scoped per run. Mutually exclusive with switchyard_base_url. The `switchyard` CLI must be "
+            "on PATH. Instances are reaped in run(); calling responses() directly leaks the instance."
+        ),
+    )
+    switchyard_spawn_host: Optional[str] = Field(
+        default=None,
+        description=(
+            "Host advertised to agent containers for spawned Switchyard instances (the instance binds "
+            "0.0.0.0). Defaults to this node's hostname, which peer nodes resolve on Slurm clusters. "
+            "Set explicitly when containers must use a specific routable IP."
         ),
     )
 
@@ -1524,6 +1545,29 @@ fi
             }
         }
         report_path.write_text(json.dumps(report, indent=2))
+
+
+def _validate_switchyard_config(config: SWEBenchWrapperConfig) -> None:
+    """Fail fast on malformed Switchyard settings (URL shape, spawn-mode conflicts)."""
+    if config.switchyard_base_url:
+        _parse_switchyard_base_url(config.switchyard_base_url)
+    if config.switchyard_spawn_routing_profile:
+        if config.switchyard_base_url:
+            raise ValueError(
+                "switchyard_spawn_routing_profile and switchyard_base_url are mutually exclusive: "
+                "spawn mode assigns each run its own instance URL"
+            )
+        if not Path(config.switchyard_spawn_routing_profile).is_file():
+            raise ValueError(
+                f"switchyard_spawn_routing_profile does not exist: {config.switchyard_spawn_routing_profile!r}"
+            )
+
+
+def _find_free_port() -> int:
+    """An OS-assigned free TCP port (small bind-to-use race, acceptable per run)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return int(sock.getsockname()[1])
 
 
 def _parse_switchyard_base_url(switchyard_base_url: str) -> Tuple[str, int]:
@@ -3071,9 +3115,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
 
     def model_post_init(self, context: Any) -> None:
-        # Fail fast on a malformed Switchyard URL rather than masking every sample.
-        if self.config.switchyard_base_url:
-            _parse_switchyard_base_url(self.config.switchyard_base_url)
+        # Fail fast on a malformed Switchyard config rather than masking every sample.
+        _validate_switchyard_config(self.config)
+        # Spawned per-run Switchyard instances, keyed by agent_run_id; reaped in run().
+        self._switchyard_procs: Dict[str, Process] = {}
 
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
@@ -3730,7 +3775,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # retries. Golden-patch verification makes no policy calls, so no session.
         switchyard_session_id = None
         if (
-            self.config.switchyard_base_url
+            (self.config.switchyard_base_url or self.config.switchyard_spawn_routing_profile)
             and self.config.agent_framework == "openhands"
             and not self.config.verify_golden_patch
         ):
@@ -3851,6 +3896,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
+        # Spawn mode defers the build to responses(): the script embeds the
+        # Switchyard routing, and the run's instance URL is not known yet.
+        if not self._switchyard_spawn_needed(params):
+            self._build_agent_command(params)
+
+        return params, dataset_processor
+
+    def _build_agent_command(self, params: SWEBenchWrapperInstanceConfig) -> None:
+        """Build the agent script and command from the current params.
+
+        Called at the end of ``_setup_params``, except in spawn mode, where
+        ``responses`` calls it after assigning the run's ``switchyard_base_url``.
+        """
         if self.config.agent_framework == "opencode":
             params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
         else:
@@ -3858,10 +3916,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
 
-        return params, dataset_processor
-
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
+
+        if self._switchyard_spawn_needed(params):
+            # The agent script embeds the Switchyard routing, so it is built
+            # here (not in _setup_params) once the run's instance URL is known;
+            # run() reaps the instance after trace retrieval.
+            params.switchyard_base_url = await self._spawn_switchyard(params)
+            self._build_agent_command(params)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3875,6 +3938,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             print(f"Hit an exception in {self.config.name}! See {traceback_file} for more details", file=sys.stderr)
 
+            # The agent never ran to completion; run() may never see this
+            # instance, so reap its Switchyard instance here.
+            await self._teardown_switchyard(params.agent_run_id)
             raise e
 
     async def _inner_responses(
@@ -4026,42 +4092,47 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
             switchyard_trace_error = None
-            if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
-                try:
-                    trace = await self._retrieve_switchyard_trace(
-                        instance_config.switchyard_base_url, instance_config.switchyard_session_id
-                    )
-                    self._apply_switchyard_trace(
-                        responses_create_params, response, trace, instance_config.switchyard_session_id
-                    )
-                except Exception as e:
-                    # Fail closed for training, open for diagnostics: keep the
-                    # OpenHands-derived rollout/patch/reward, but mask the sample
-                    # rather than emit a partially token-annotated trajectory.
-                    instance_config.mask_sample = True
-                    switchyard_trace_error = (
-                        f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
-                    )
-            elif (
-                instance_config.switchyard_base_url
-                and instance_config.agent_framework == "opencode"
-                and instance_config.opencode_source == "opencode"
-            ):
-                # Upstream opencode mints its own session id per (sub)agent, so
-                # there is no Gym-minted switchyard_session_id: discover the session
-                # tree from
-                # Switchyard (no harness logs), then reconstruct root -> main rollout
-                # and subagents -> token-annotated subagent_trajectories (replacing
-                # the text ones on success).
-                try:
-                    sessions = await self._list_switchyard_sessions(instance_config.switchyard_base_url)
-                    root_trace, root_id, subagent_trajectories = await self._reconstruct_switchyard_sessions(
-                        instance_config.switchyard_base_url, sessions, filter_title_gen=True
-                    )
-                    self._apply_switchyard_trace(responses_create_params, response, root_trace, root_id)
-                except Exception as e:
-                    instance_config.mask_sample = True
-                    switchyard_trace_error = f"opencode sessions: {type(e).__name__}: {e}"
+            try:
+                if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
+                    try:
+                        trace = await self._retrieve_switchyard_trace(
+                            instance_config.switchyard_base_url, instance_config.switchyard_session_id
+                        )
+                        self._apply_switchyard_trace(
+                            responses_create_params, response, trace, instance_config.switchyard_session_id
+                        )
+                    except Exception as e:
+                        # Fail closed for training, open for diagnostics: keep the
+                        # OpenHands-derived rollout/patch/reward, but mask the sample
+                        # rather than emit a partially token-annotated trajectory.
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = (
+                            f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
+                        )
+                elif (
+                    instance_config.switchyard_base_url
+                    and instance_config.agent_framework == "opencode"
+                    and instance_config.opencode_source == "opencode"
+                ):
+                    # Upstream opencode mints its own session id per (sub)agent, so
+                    # there is no Gym-minted switchyard_session_id: discover the session
+                    # tree from
+                    # Switchyard (no harness logs), then reconstruct root -> main rollout
+                    # and subagents -> token-annotated subagent_trajectories (replacing
+                    # the text ones on success).
+                    try:
+                        sessions = await self._list_switchyard_sessions(instance_config.switchyard_base_url)
+                        root_trace, root_id, subagent_trajectories = await self._reconstruct_switchyard_sessions(
+                            instance_config.switchyard_base_url, sessions, filter_title_gen=True
+                        )
+                        self._apply_switchyard_trace(responses_create_params, response, root_trace, root_id)
+                    except Exception as e:
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = f"opencode sessions: {type(e).__name__}: {e}"
+            finally:
+                # The run's dedicated Switchyard instance (spawn mode) has served
+                # its records; reap it regardless of retrieval outcome.
+                await self._teardown_switchyard(instance_config.agent_run_id)
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -4073,6 +4144,87 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 subagent_trajectories=subagent_trajectories,
                 switchyard_trace_error=switchyard_trace_error,
             )
+
+    def _switchyard_spawn_needed(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether this run gets its own Switchyard instance.
+
+        Spawn for exactly the runs whose calls are captured: OpenHands runs
+        with a minted session id, and upstream-opencode runs (which mint their
+        own ids). Golden-patch verification makes no policy calls.
+        """
+        if not self.config.switchyard_spawn_routing_profile or self.config.verify_golden_patch:
+            return False
+        if params.switchyard_session_id:
+            return True
+        return self.config.agent_framework == "opencode" and self.config.opencode_source == "opencode"
+
+    async def _spawn_switchyard(self, params: SWEBenchWrapperInstanceConfig) -> str:
+        """Spawn this run's Switchyard instance and return its base URL when ready.
+
+        The instance binds 0.0.0.0 on a free port and is advertised via
+        ``switchyard_spawn_host`` (default: this node's hostname) so agent
+        containers on peer nodes can reach it. Records go under the run's
+        ``persistent_dir`` so retrieval is scoped per run. Registered under
+        ``agent_run_id`` and reaped by :meth:`_teardown_switchyard`.
+        """
+        port = _find_free_port()
+        host = self.config.switchyard_spawn_host or socket.gethostname()
+        base_url = f"http://{host}:{port}"
+        rl_log_dir = params.persistent_dir / "switchyard_traces"
+        rl_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = params.persistent_dir / "switchyard.log"
+        with log_path.open("w") as log_file:
+            process = await asyncio.create_subprocess_exec(
+                "switchyard",
+                "--routing-profiles",
+                str(self.config.switchyard_spawn_routing_profile),
+                "--enable-rl-logging",
+                "--rl-log-dir",
+                str(rl_log_dir),
+                "--",
+                "serve",
+                "--port",
+                str(port),
+                stdout=log_file,
+                stderr=log_file,
+            )
+        self._switchyard_procs[params.agent_run_id] = process
+        try:
+            await self._wait_switchyard_ready(f"http://127.0.0.1:{port}", process)
+        except Exception:
+            await self._teardown_switchyard(params.agent_run_id)
+            raise
+        return base_url
+
+    async def _wait_switchyard_ready(self, local_url: str, process: Process, timeout_s: float = 60.0) -> None:
+        """Poll the spawned instance until it serves ``/v1/models`` or fail."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if process.returncode is not None:
+                raise RuntimeError(
+                    f"spawned Switchyard exited with code {process.returncode} before ready "
+                    "(see the run's switchyard.log)"
+                )
+            try:
+                response = await request("GET", f"{local_url}/v1/models", timeout=ClientTimeout(total=5))
+                if response.status == 200:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        raise RuntimeError(f"spawned Switchyard not ready after {timeout_s}s")
+
+    async def _teardown_switchyard(self, agent_run_id: str) -> None:
+        """Reap the run's spawned Switchyard instance, if any. Idempotent."""
+        process = self._switchyard_procs.pop(agent_run_id, None)
+        if process is None or process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
 
     async def _list_switchyard_sessions(self, base_url: str) -> List[Dict[str, Any]]:
         """Session ids (with parent links) Switchyard captured for this run.

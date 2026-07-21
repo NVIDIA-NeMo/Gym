@@ -2429,6 +2429,123 @@ class TestSWEBenchWrapperSetupParams:
             assert params.switchyard_session_id is None
             assert "proxy_x_session_id" not in params.agent_script
 
+    def test_validate_switchyard_config_spawn_conflicts(self, tmp_path: Path) -> None:
+        profile = tmp_path / "profile.yaml"
+        profile.write_text("routes: {}\n")
+        config = _minimal_server_config()
+
+        config.switchyard_spawn_routing_profile = str(profile)
+        swe_app._validate_switchyard_config(config)  # valid: spawn only
+
+        config.switchyard_base_url = "http://switchyard:4000"
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            swe_app._validate_switchyard_config(config)
+
+        config.switchyard_base_url = None
+        config.switchyard_spawn_routing_profile = str(tmp_path / "missing.yaml")
+        with pytest.raises(ValueError, match="does not exist"):
+            swe_app._validate_switchyard_config(config)
+
+    def test_setup_params_spawn_mode_mints_session_and_rebuild(self, monkeypatch, tmp_path: Path) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            profile = tmp_path / "profile.yaml"
+            profile.write_text("routes: {}\n")
+            wrapper.config.switchyard_spawn_routing_profile = str(profile)
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
+
+            params, _ = wrapper._setup_params(self._switchyard_body())
+            # A session is minted even though the instance URL is not known yet.
+            assert params.switchyard_session_id is not None
+            assert params.switchyard_base_url is None
+            assert wrapper._switchyard_spawn_needed(params)
+
+            # Spawn mode assigns the URL after setup and rebuilds the script.
+            params.switchyard_base_url = "http://spawnhost:12345"
+            wrapper._build_agent_command(params)
+            assert "host: spawnhost" in params.agent_script
+            assert f'proxy_x_session_id = "{params.switchyard_session_id}"' in params.agent_script
+
+    def test_spawn_not_needed_for_golden_patch(self, monkeypatch, tmp_path: Path) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            profile = tmp_path / "profile.yaml"
+            profile.write_text("routes: {}\n")
+            wrapper.config.switchyard_spawn_routing_profile = str(profile)
+            wrapper.config.verify_golden_patch = True
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
+
+            params, _ = wrapper._setup_params(self._switchyard_body())
+            assert not wrapper._switchyard_spawn_needed(params)
+
+
+class _FakeSwitchyardProc:
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+        self.terminated = False
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+class TestSwitchyardSpawnLifecycle:
+    def _spawn_wrapper(self, monkeypatch, tmp_path: Path) -> SWEBenchWrapper:
+        wrapper = _create_wrapper(monkeypatch)
+        profile = tmp_path / "profile.yaml"
+        profile.write_text("routes: {}\n")
+        wrapper.config.switchyard_spawn_routing_profile = str(profile)
+        wrapper.config.switchyard_spawn_host = "spawnhost"
+        return wrapper
+
+    @pytest.mark.asyncio
+    async def test_spawn_and_teardown(self, monkeypatch, tmp_path: Path) -> None:
+        wrapper = self._spawn_wrapper(monkeypatch, tmp_path)
+        params = _make_instance_config(str(tmp_path), agent_run_id="run-1")
+        proc = _FakeSwitchyardProc()
+        spawn_mock = AsyncMock(return_value=proc)
+        monkeypatch.setattr(swe_app.asyncio, "create_subprocess_exec", spawn_mock)
+        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock(status=200)))
+
+        base_url = await wrapper._spawn_switchyard(params)
+
+        assert base_url.startswith("http://spawnhost:")
+        assert wrapper._switchyard_procs["run-1"] is proc
+        argv = spawn_mock.call_args.args
+        assert argv[0] == "switchyard"
+        assert "--enable-rl-logging" in argv
+        assert str(tmp_path / "persistent" / "switchyard_traces") in argv
+        assert (tmp_path / "persistent" / "switchyard_traces").is_dir()
+
+        await wrapper._teardown_switchyard("run-1")
+        assert proc.terminated
+        assert wrapper._switchyard_procs == {}
+        # Idempotent.
+        await wrapper._teardown_switchyard("run-1")
+
+    @pytest.mark.asyncio
+    async def test_spawn_readiness_failure_reaps(self, monkeypatch, tmp_path: Path) -> None:
+        wrapper = self._spawn_wrapper(monkeypatch, tmp_path)
+        params = _make_instance_config(str(tmp_path), agent_run_id="run-2")
+        proc = _FakeSwitchyardProc(returncode=1)  # exits before ready
+        monkeypatch.setattr(swe_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+        monkeypatch.setattr(swe_app, "request", AsyncMock(side_effect=ConnectionError))
+
+        with pytest.raises(RuntimeError, match="exited with code 1"):
+            await wrapper._spawn_switchyard(params)
+        assert wrapper._switchyard_procs == {}
 
 
 class TestSWEBenchWrapperResponses:
