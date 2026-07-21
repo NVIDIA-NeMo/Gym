@@ -3,7 +3,7 @@
 # Public fork of xlang-ai/OSWorld: packaging fix, no-lifecycle "remote" provider seam, and the
 # evaluator-transport fixes documented in scripts/sandbox_runtime_poc/ (validated Omni-Nano-v3
 # reference baseline: 48.28%/48.44%).
-osworld @ git+https://github.com/terrykong/OSWorld.git@bcb69d3de6bc67d7c82f37a2c6f20c5249ed306a
+osworld @ git+https://github.com/terrykong/OSWorld.git@5d8c93592be588ab8e9909bed82f3b480fd4f533
 # NOTE: borb 3.x wheels collide on case-insensitive filesystems (macOS): they ship both
 # operator_Td.py and operator_TD.py. On macOS, install the fork with borb excluded
 # (imports are guarded); PDF-comparison chrome metrics then require Linux.
