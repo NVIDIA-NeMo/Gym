@@ -7,3 +7,7 @@ osworld @ git+https://github.com/terrykong/OSWorld.git@5d8c93592be588ab8e9909bed
 # NOTE: borb 3.x wheels collide on case-insensitive filesystems (macOS): they ship both
 # operator_Td.py and operator_TD.py. On macOS, install the fork with borb excluded
 # (imports are guarded); PDF-comparison chrome metrics then require Linux.
+
+# Match the root venv's ray (uv.lock) — the servers join the head's Ray cluster and
+# Ray refuses mixed versions; an unpinned resolve here drifts ahead of the lock.
+ray[default]==2.55.1
