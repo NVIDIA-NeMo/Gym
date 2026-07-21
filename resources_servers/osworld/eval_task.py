@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import traceback
 
 
@@ -136,7 +137,20 @@ def main() -> int:
             # (= the thunderbird "evaluate_exception" infra crashes).
             env.setup_controller.reset_cache_dir(env.cache_dir)
             env.action_history = action_history
-            score = env.evaluate()
+            # The guest control API occasionally answers a transient 500 mid-evaluation
+            # (observed as "Internal Server Error for url: .../platform"); one such blip
+            # otherwise scores a solved task 0 with `evaluate_exception`. Retry briefly.
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    score = env.evaluate()
+                    break
+                except Exception as exc:  # noqa: BLE001 - inspect and re-raise if not transient
+                    if "Internal Server Error" not in str(exc) or attempt == 2:
+                        raise
+                    last_exc = exc
+                    sys.stderr.write(f"evaluate transient 5xx (attempt {attempt + 1}/3): {exc}\n")
+                    time.sleep(10)
             _emit(True, score=float(score))
     except Exception:  # noqa: BLE001 - report, don't crash: the caller decides the consequence
         sys.stderr.write(f"eval_task ({args.phase}) failed:\n" + traceback.format_exc())
