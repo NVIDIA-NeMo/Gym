@@ -41,8 +41,8 @@ fi
 # A failed requirements install leaves a half-built venv that
 # skip_venv_if_present would then trust forever — detect and remove those
 # so gym's per-server setup rebuilds them.
-for srv in resources_servers/osworld responses_api_agents/nemotron_osworld; do
-  if [ -d "$srv/.venv" ] && ! "$srv/.venv/bin/python" -c "import fastapi" 2>/dev/null; then
+for srv in resources_servers/osworld responses_api_agents/nemotron_osworld responses_api_models/vllm_model; do
+  if [ -d "$srv/.venv" ] && ! "$srv/.venv/bin/python" -c "import fastapi, ray; ray.__version__" 2>/dev/null; then
     echo "[entrypoint] $srv/.venv is broken (half-installed) — removing for rebuild"
     rm -rf "$srv/.venv"
   fi
