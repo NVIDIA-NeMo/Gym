@@ -168,18 +168,27 @@ An MCP `tools/call` invokes the route's own handler directly, with the rollout's
 Auto-exposure explicitly passes `TransportSecuritySettings(enable_dns_rebinding_protection=False)`. When that protection is enabled it validates `Host`/`Origin` headers against a configured allowlist and rejects mismatches (the SDK's FastMCP server auto-fills a loopback-only allowlist when bound to localhost) — an allowlist would have to enumerate every routable host agents use on multi-node / `use_absolute_ip: true` deployments. The endpoint is instead protected by the per-rollout session token; DNS-rebinding protection defends browsers, which never talk to this endpoint. You don't need to set this yourself.
 </Note>
 
-### Unsupported shapes refuse at startup
+### Which handler shapes are supported
 
-Where direct dispatch cannot be proven equivalent to a real HTTP request, exposure **fails loudly at startup**, naming the route and the reason — a wrong dispatch would corrupt rollouts silently. The main refusals:
+Where direct dispatch cannot be proven equivalent to a real HTTP request, exposure **fails loudly at startup**, naming the route and the reason — a wrong dispatch would corrupt rollouts silently. By handler signature:
 
-- a handler with **multiple body models**, or a **union/optional body** (`body: MyModel | None`)
-- a **non-body parameter**, required or defaulted (e.g. a query param — MCP calls carry no query string)
-- a **FastAPI dependency-injection default** (`Depends(...)` / `Security(...)`)
-- **non-Gym middleware** installed on the app (direct dispatch would silently skip it)
-- **multiple parameterized catch-all routes**, or a tool name outside `[A-Za-z0-9_-]+`
-- a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one)
+| Handler signature | Exposed over MCP? |
+|---|---|
+| `async def tool(self, body: MyModel)` | ✅ — input schema is `MyModel`'s JSON schema |
+| `async def tool(self, request: Request, body: MyModel)` | ✅ — the handler's `request.session` reads work unchanged |
+| `def tool(self, body: MyModel)` (sync) | ✅ — runs in a threadpool, exactly like FastAPI |
+| `async def tool(self, body: dict)` | ✅ — advertised with a permissive object schema |
+| `async def tool(self, request: Request)` reading `await request.json()` | ✅ — permissive object schema |
+| `async def tool(self, request: Request, path: str)` on `POST /{path}` | ✅ — via the catch-all `mcp_tools()` override below |
+| `async def tool(self, request: Request, my_string: str)` | ❌ startup error — `my_string` is a FastAPI *query* parameter |
+| `async def tool(self, body: MyModel, limit: int = 3)` | ❌ startup error — a defaulted scalar is a query parameter too |
+| `async def tool(self, body: MyModel \| None)` | ❌ startup error — union/optional body |
+| `async def tool(self, a: ModelA, b: ModelB)` | ❌ startup error — multiple body models |
+| `async def tool(self, dep = Depends(...))` | ❌ startup error — dependency injection (`Depends` / `Security`) |
 
-What *is* accepted besides the body model: an untyped `body: dict` (FastAPI's JSON pass-through — advertised with a permissive object schema), string path parameters, a `request: Request` parameter, and defaults on fields *inside* the body model (absent fields take their Pydantic defaults). A defaulted parameter in the handler signature, by contrast, is a FastAPI query parameter — it refuses at startup like a required one; move such knobs into the body model.
+The pattern behind the ❌ rows: anything FastAPI would read from the **query string** — a bare scalar like `my_string: str`, with or without a default — refuses, because MCP calls carry no query string. Move such knobs into the body model, where field defaults work normally (absent fields take their Pydantic defaults).
+
+Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
 
 ---
 
