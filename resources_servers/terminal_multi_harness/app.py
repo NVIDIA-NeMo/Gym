@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, ClassVar
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -21,7 +21,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from resources_servers.terminal_multi_harness.common.response_utils import extract_action
@@ -34,7 +33,6 @@ from resources_servers.terminal_multi_harness.common.verification_utils import (
 
 
 class TerminalMultiHarnessResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     tool_call_comparator_config: ToolCallComparatorConfig
 
 

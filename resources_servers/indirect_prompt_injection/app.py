@@ -15,7 +15,7 @@
 import copy
 import json
 import logging
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,7 +26,6 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -59,7 +58,6 @@ logger = logging.getLogger(__name__)
 
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

@@ -18,7 +18,7 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -27,7 +27,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
@@ -340,7 +339,6 @@ def build_correction_prompt(
 
 
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
     compilation_timeout: float = 30.0

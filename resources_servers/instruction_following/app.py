@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import ClassVar, List, Literal
+from typing import List, Literal
 
 from fastapi import FastAPI
 from verifiable_instructions import instructions_registry
@@ -22,13 +22,11 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

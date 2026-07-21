@@ -15,7 +15,7 @@
 
 from asyncio import Semaphore
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
@@ -26,7 +26,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -41,7 +40,6 @@ from nemo_gym.reward_profile import (
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool

@@ -28,7 +28,7 @@
 # `nemo_skills/evaluation/metrics/hotpotqa_metrics.py` and
 # `nemo_skills/evaluation/metrics/hotpotqa_filtering.py`.
 
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict
 
@@ -37,7 +37,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
@@ -52,7 +51,6 @@ from resources_servers.hotpotqa_qa.scoring import (
 
 
 class HotpotQAQAResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "hotpotqa_qa"
     # When True, /aggregate_metrics also reports "filtered_*" channels that
     # exclude tasks whose ground-truth answers are unreliable for substring

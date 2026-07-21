@@ -40,7 +40,7 @@ import re
 from collections import defaultdict
 from contextlib import nullcontext
 from functools import lru_cache
-from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
@@ -50,7 +50,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -418,8 +417,6 @@ class RoleMRCResourcesServerConfig(BaseResourcesServerConfig):
         judge_endpoint_max_concurrency: bound on concurrent judge HTTP calls.
             None disables limiting.
     """
-
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "rolemrc"
     mode: Literal["reference", "judge"] = "reference"

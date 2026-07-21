@@ -53,7 +53,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -102,8 +101,6 @@ def sanitize_generation(generation: str) -> str:
 
 class ArenaJudgeConfig(BaseResourcesServerConfig):
     """Arena Hard v2 pairwise-judge server config."""
-
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     judge_model_server: ModelServerRef
     # The judge is called via /v1/chat/completions; this is the endpoint

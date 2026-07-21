@@ -30,7 +30,7 @@ import logging
 import re
 from difflib import SequenceMatcher
 from enum import Enum
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict
@@ -40,7 +40,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -474,7 +473,6 @@ class FailureCode(str, Enum):
 
 
 class SwePivotResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "swe_pivot"
     # Reward mode: "binary" (0 or 1) or "continuous" (0.0 to 1.0 with partial credit)
     reward_mode: str = "binary"

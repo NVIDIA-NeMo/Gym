@@ -19,7 +19,7 @@ import multiprocessing
 import signal
 import time
 from contextlib import redirect_stderr, redirect_stdout
-from typing import ClassVar, Dict, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -32,14 +32,12 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     max_execution_time: int = 10
 
 

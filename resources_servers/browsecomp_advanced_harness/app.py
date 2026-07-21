@@ -38,7 +38,6 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -54,7 +53,6 @@ from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PRO
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
     # key must be present (validated below). exclude_domains are honored by both.
     search_provider: str = "tavily"

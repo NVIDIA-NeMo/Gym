@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
@@ -58,7 +58,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -89,8 +88,6 @@ class OverRefusalDetectionConfig(BaseResourcesServerConfig):
     - Uses reasoning mode to detect refusal patterns
     - Reference: https://huggingface.co/nvidia/Nemotron-Content-Safety-Reasoning-4B
     """
-
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "over_refusal_detection"
     judge_model_server: ModelServerRef

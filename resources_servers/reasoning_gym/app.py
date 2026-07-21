@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import re
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 import reasoning_gym
 from fastapi import FastAPI
@@ -23,13 +23,11 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class ReasoningGymResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

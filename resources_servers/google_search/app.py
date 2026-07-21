@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 import re
-from typing import ClassVar, Optional
+from typing import Optional
 
 import requests
 import trafilatura
@@ -26,13 +26,11 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     google_api_key: str
     google_cx: str
 

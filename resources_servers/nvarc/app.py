@@ -27,7 +27,7 @@ import asyncio
 import json
 import re
 import sys
-from typing import ClassVar, List, Optional
+from typing import List, Optional
 
 from fastapi import FastAPI
 from problem import Board, ColorPalette
@@ -38,7 +38,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -160,7 +159,6 @@ except Exception as e:
 
 
 class NVARCResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     agent_mode: str = "transductive"
     python_timeout_seconds: int = 30
 

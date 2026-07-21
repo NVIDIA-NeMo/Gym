@@ -43,7 +43,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, ClassVar, Dict, List
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import ConfigDict
@@ -53,7 +53,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -164,7 +163,6 @@ def _f1(tp: int, fp: int, fn: int) -> Dict[str, float]:
 
 
 class RagtruthResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "ragtruth"
     # Tag name for stripping thinking-model reasoning blocks (e.g. "think" for
     # <think>…</think>, "reasoning" for <reasoning>…</reasoning>).

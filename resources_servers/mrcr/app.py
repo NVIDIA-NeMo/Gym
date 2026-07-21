@@ -27,13 +27,12 @@ response and expected answer and compute `SequenceMatcher.ratio()` in
 """
 
 from difflib import SequenceMatcher
-from typing import Any, ClassVar, Dict, List, Union
+from typing import Any, Dict, List, Union
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -44,7 +43,6 @@ from nemo_gym.reward_profile import (
 
 
 class MRCRResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import ClassVar, List, Optional
+from typing import List, Optional
 
 import yaml
 from latex2sympy2_extended import NormalizationConfig, normalize_latex
@@ -42,7 +42,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -271,7 +270,6 @@ def search_boxed(text: str) -> Optional[str]:
 
 
 class ImoProofBenchJudgeConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 

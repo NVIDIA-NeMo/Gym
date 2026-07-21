@@ -14,7 +14,7 @@
 
 import json
 import re
-from typing import ClassVar, List, Optional
+from typing import List, Optional
 
 from fastapi import FastAPI
 
@@ -23,13 +23,11 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
 
 class ARCAGIResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

@@ -31,7 +31,6 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -47,7 +46,6 @@ from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     tavily_api_key: str | List[str]
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge

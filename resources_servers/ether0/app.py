@@ -14,7 +14,7 @@
 
 import logging
 import re
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 from resources_servers.ether0.setup_ether0 import ensure_ether0
 
@@ -30,7 +30,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -52,12 +51,8 @@ class Ether0VerifyResponse(BaseVerifyResponse):
     problem_type: Optional[str] = None
 
 
-class Ether0ResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
-
-
 class Ether0ResourcesServer(SimpleResourcesServer):
-    config: Ether0ResourcesServerConfig
+    config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:
         text = _extract_last_assistant_text(body)

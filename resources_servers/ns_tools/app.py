@@ -30,7 +30,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, Request
@@ -44,7 +44,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ResourcesServerRef
@@ -61,8 +60,6 @@ logger = logging.getLogger(__name__)
 
 class NSToolsConfig(BaseResourcesServerConfig):
     """Config for the NeMo Skills tools resources server."""
-
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Default verifier (typically math_with_judge)
     default_verifier: str = "math_with_judge"

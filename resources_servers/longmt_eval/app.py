@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from fastapi import FastAPI
@@ -30,7 +30,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -99,8 +98,6 @@ class LongmtEvalConfig(BaseResourcesServerConfig):
             cluster and a separate node registers extra_gpu resources via
             `ray start --resources='{"extra_gpu": N}'`.
     """
-
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     compute_segale: bool = True
     comet_model: str = "Unbabel/wmt22-cometkiwi-da"

@@ -22,8 +22,9 @@ from resources_servers.mcqa.app import (
 
 
 class BunsenChemResourcesServerConfig(MCQAResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
-    pass
+    # Reuses mcqa's MCQAResourcesServerConfig (STATELESS); pin back to the safe default so this
+    # benchmark does not inherit reverify support until it is separately reviewed.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class BunsenChemVerifyRequest(MCQAVerifyRequest):

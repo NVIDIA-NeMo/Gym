@@ -34,7 +34,7 @@ overridden per row via the verify request body's ``task_type`` field.
 """
 
 import re
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 from pydantic import ConfigDict
@@ -43,7 +43,6 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
@@ -228,7 +227,6 @@ _TASK_TYPES = Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD"]
 
 
 class ASRWithPCConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     # Default scoring task type; can be overridden per-row via task_type on the
     # request.
     task_type: _TASK_TYPES = "ASR-PC"

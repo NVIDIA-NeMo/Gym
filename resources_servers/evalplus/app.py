@@ -34,7 +34,7 @@ benchmark dir (no server changes).
 """
 
 from asyncio import Semaphore, get_running_loop
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from evalplus_integration.runner import check_correctness_remote
@@ -44,7 +44,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -57,7 +56,6 @@ from nemo_gym.reward_profile import (
 # Config
 # ----------------------------
 class EvalPlusResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     dataset: str  # "humaneval" or "mbpp"
     num_processes: int
     # Time-limit knobs are fed straight into evalplus.evaluate.check_correctness.

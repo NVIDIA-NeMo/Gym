@@ -37,9 +37,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
@@ -54,7 +53,6 @@ from resources_servers.math_with_judge.app import (
 
 
 class PolyMathResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     pass
 
 

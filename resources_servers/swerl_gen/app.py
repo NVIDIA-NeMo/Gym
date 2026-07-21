@@ -16,7 +16,7 @@ import base64
 import json
 import time
 from asyncio import Semaphore
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI
 
@@ -25,7 +25,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ReverifyMode,
     SimpleResourcesServer,
 )
 from resources_servers.swerl_gen.eval.process_patch import (
@@ -39,7 +38,6 @@ from resources_servers.swerl_gen.eval.singularity_utils import (
 
 
 class SWEGenResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     num_processes: int = 1
     sandbox_timeout: int = 600
     debug: bool = False
