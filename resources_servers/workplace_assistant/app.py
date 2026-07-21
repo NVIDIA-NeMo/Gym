@@ -61,6 +61,13 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         app.post("/{path}")(self.route_to_python_function)
         return app
 
+    # Register all 27 workplace tools as MCP tools via the catch-all route when expose_tools_over_mcp is enabled.
+    def mcp_tools(self, harvested, catchall):
+        specs = get_tools(["email", "calendar", "analytics", "project_management", "customer_relationship_manager"])[
+            "schemas"
+        ]
+        return harvested + [catchall.tool(s["name"], s["parameters"], s.get("description")) for s in specs]
+
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
