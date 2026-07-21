@@ -34,7 +34,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
-    CODEX_API_KEY_ENV,
     CodexAgent,
     CodexAgentConfig,
     CodexAgentRunRequest,
@@ -152,7 +151,7 @@ class TestBuildConfig:
         assert config["features"] == {"multi_agent": False, "code_mode": False}
         provider = config["model_providers"]["gym"]
         assert provider["base_url"] == "http://model:9000/v1"
-        assert provider["env_key"] == CODEX_API_KEY_ENV
+        assert provider["env_key"] == "OPENAI_API_KEY"
         assert provider["wire_api"] == "responses"
         # idle budget defaults to the whole-run timeout (Gym servers stream only at completion)
         assert provider["stream_idle_timeout_ms"] == 30_000
@@ -325,7 +324,7 @@ class TestRunCodex:
             codex_home = env["CODEX_HOME"]
             captured["cmd"] = list(cmd)
             captured["codex_home"] = codex_home
-            captured["api_key"] = env[CODEX_API_KEY_ENV]
+            captured["api_key"] = env["OPENAI_API_KEY"]
             captured["stdin"] = kwargs.get("stdin")
             captured["start_new_session"] = kwargs.get("start_new_session")
             # the staged home + config must exist while the subprocess runs

@@ -73,10 +73,10 @@ model_provider = "gym"
 [model_providers.gym]
 name = "gym"
 base_url = "$URL/v1"
-env_key = "GYM_API_KEY"
+env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 EOF
-CODEX_HOME=/tmp/codex_home GYM_API_KEY=local \
+CODEX_HOME=/tmp/codex_home OPENAI_API_KEY=local \
   codex exec --json --ephemeral --skip-git-repo-check "What is 2+2?" < /dev/null
 ```
 
@@ -86,7 +86,7 @@ The agent runs `codex exec --json` as an async subprocess for each request. Code
 
 Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/responses_streaming.py`).
 
-Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — auth is a plain API key env var), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool. Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
+Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool. Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 
 Codex is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.
 

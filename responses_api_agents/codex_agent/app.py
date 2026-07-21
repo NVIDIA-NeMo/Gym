@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -54,18 +55,9 @@ from responses_api_agents.codex_agent.setup_codex import ensure_codex
 
 LOG = logging.getLogger(__name__)
 
-# Env var the generated model provider reads its API key from (config.toml `env_key`). Using a
-# Gym-owned custom provider bypasses Codex's login/auth.json flow entirely, so a plain API key
-# (or any placeholder for local endpoints) is all that is ever needed.
-CODEX_API_KEY_ENV = "NEMO_GYM_CODEX_API_KEY"
-
-_OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
-
-_BARE_KEY_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-
 
 def _toml_key(key: str) -> str:
-    if key and set(key) <= _BARE_KEY_CHARS:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", key):
         return key
     return json.dumps(key)
 
@@ -353,7 +345,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         """
         if self.config.model_server:
             return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-        return self.config.openai_base_url or _OPENAI_DEFAULT_BASE_URL
+        # Mirrors claude_code_agent's null anthropic_base_url: null means the provider's real API.
+        return self.config.openai_base_url or "https://api.openai.com/v1"
 
     def _build_config(
         self,
@@ -384,7 +377,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "gym": {
                     "name": "gym",
                     "base_url": base_url,
-                    "env_key": CODEX_API_KEY_ENV,
+                    # A custom provider reads its API key only from the env var named here; the
+                    # agent sets it on the codex subprocess from `openai_api_key` (see _run_codex),
+                    # so no `codex login` is ever needed.
+                    "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
                     "stream_idle_timeout_ms": self.config.stream_idle_timeout_ms or self.config.timeout * 1000,
                 }
@@ -481,7 +477,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             env = {
                 **os.environ,
                 "CODEX_HOME": str(codex_home),
-                CODEX_API_KEY_ENV: self.config.openai_api_key or "local",
+                # The provider's `env_key` in the generated config.toml; always set from config so
+                # a key inherited from the server's environment can never leak into a rollout.
+                "OPENAI_API_KEY": self.config.openai_api_key or "local",  # pragma: allowlist secret
             }
 
             proc = await asyncio.create_subprocess_exec(
