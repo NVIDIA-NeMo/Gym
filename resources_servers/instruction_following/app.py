@@ -12,9 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI
+from pydantic import model_validator
 from verifiable_instructions import instructions_registry
 
 from nemo_gym.base_resources_server import (
@@ -32,13 +33,29 @@ class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
 
 class InstructionFollowingRunRequest(BaseRunRequest):
     id: int
-    instruction_id_list: List
-    prompt: str
-    kwargs: List
-    grading_mode: Literal[
-        "binary",
-        "fraction",
-    ] = "binary"
+    # Benchmark rows store verifier fields under verifier_metadata.
+    # Training rows store them at the top level for backward compatibility.
+    # The validator below resolves whichever is present.
+    verifier_metadata: Optional[Dict[str, Any]] = None
+    instruction_id_list: Optional[List] = None
+    prompt: Optional[str] = None
+    kwargs: Optional[List] = None
+    grading_mode: Literal["binary", "fraction"] = "binary"
+
+    @model_validator(mode="after")
+    def _resolve_verifier_fields(self) -> "InstructionFollowingRunRequest":
+        """Pull verifier fields from verifier_metadata when not set at top level."""
+        vm = self.verifier_metadata or {}
+        if self.instruction_id_list is None:
+            self.instruction_id_list = vm.get("instruction_id_list")
+        if self.prompt is None:
+            self.prompt = vm.get("prompt")
+        if self.kwargs is None:
+            self.kwargs = vm.get("kwargs")
+        vm_grading = vm.get("grading_mode")
+        if vm_grading is not None:
+            self.grading_mode = vm_grading
+        return self
 
 
 class InstructionFollowingVerifyRequest(InstructionFollowingRunRequest, BaseVerifyRequest):
