@@ -27,7 +27,10 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, S
 from nemo_gym.rollout_reverification import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    CacheKeysByStatus,
     InputRolloutPair,
+    OutputPaths,
     RolloutReverificationConfig,
     RolloutReverificationHelper,
     _agent_to_rs_mapping_from_agent_blocks,
@@ -36,27 +39,18 @@ from nemo_gym.rollout_reverification import (
     _build_verify_payload,
     _call_aggregate_metrics,
     _check_reverify_mode,
-    _guard_output_file,
+    _drop_cache_from_payloads,
     _guard_reverify_mode,
-    _prepare_payloads_from_config,
+    _load_cache_keys_by_status,
+    _load_reverified_results,
+    _parse_output_line_key,
+    _prepare_output_fpaths,
+    _prepare_payloads,
     _rollout_verify_debug_summary,
     _run_verification_payloads,
-    _setup_server_client,
     _yield_inputs_and_rollouts_paired,
+    summarize_cache_usage,
 )
-
-
-#  (
-#     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
-#     RolloutAggregationConfig,
-#     RolloutAggregationHelper,
-#     RolloutCollectionConfig,
-#     RolloutCollectionHelper,
-#     _expand_input_glob,
-#     _get_max_rollout_attempts,
-#     _rollout_request_debug_summary,
-#     loads_jsonl_line,
-# )
 
 
 class TestRolloutReverificationConfig:
@@ -82,6 +76,16 @@ class TestRolloutReverificationConfig:
         """Omitting the field (None) means unbounded/no-limit; a positive value is kept."""
         assert getattr(RolloutReverificationConfig(**self._kwargs()), field) is None
         assert getattr(RolloutReverificationConfig(**self._kwargs(**{field: 4})), field) == 4
+
+    def test_resume_from_cache_defaults_to_false(self) -> None:
+        """resume_from_cache is opt-in: default runs start fresh."""
+        assert RolloutReverificationConfig(**self._kwargs()).resume_from_cache is False
+        assert RolloutReverificationConfig(**self._kwargs(resume_from_cache=True)).resume_from_cache is True
+
+    def test_overwrite_defaults_to_false(self) -> None:
+        """overwrite is opt-in: by default an existing output file is protected (raises)."""
+        assert RolloutReverificationConfig(**self._kwargs()).overwrite is False
+        assert RolloutReverificationConfig(**self._kwargs(overwrite=True)).overwrite is True
 
 
 class TestAgentToRsMappingFromAgentBlocks:
@@ -201,75 +205,6 @@ class TestRolloutVerifyDebugSummary:
         }
 
 
-class TestSetupServerClient:
-    def test_returns_server_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_client = MagicMock()
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
-            lambda _: mock_client,
-        )
-        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
-
-        result = _setup_server_client()
-
-        assert result is mock_client
-
-    def test_configures_aiohttp_client_when_not_yet_set_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_client = MagicMock()
-        mock_client.global_config_dict = {"max_connections": 10}
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
-            lambda _: mock_client,
-        )
-        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: False)
-
-        set_aiohttp_calls = []
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.set_global_aiohttp_client",
-            lambda cfg: set_aiohttp_calls.append(cfg),
-        )
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.GlobalAIOHTTPAsyncClientConfig.model_validate",
-            lambda d: d,
-        )
-
-        _setup_server_client()
-
-        assert len(set_aiohttp_calls) == 1
-        assert set_aiohttp_calls[0] == {"max_connections": 10}
-
-    def test_skips_aiohttp_setup_when_already_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_client = MagicMock()
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
-            lambda _: mock_client,
-        )
-        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
-
-        set_aiohttp_calls = []
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.set_global_aiohttp_client",
-            lambda cfg: set_aiohttp_calls.append(cfg),
-        )
-
-        _setup_server_client()
-
-        assert set_aiohttp_calls == []
-
-    def test_passes_head_server_config_to_loader(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        received = []
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.ServerClient.load_from_global_config",
-            lambda cfg: received.append(cfg) or MagicMock(),
-        )
-        monkeypatch.setattr("nemo_gym.rollout_reverification.is_global_aiohttp_client_setup", lambda: True)
-
-        sentinel = MagicMock()
-        _setup_server_client(head_server_config=sentinel)
-
-        assert received == [sentinel]
-
-
 class TestYieldInputsAndRolloutsPaired:
     def _write_jsonl(self, path: Path, rows: list) -> None:
         path.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
@@ -376,6 +311,279 @@ class TestYieldInputsAndRolloutsPaired:
         assert pairs[1].input[ROLLOUT_INDEX_KEY_NAME] == 1
 
 
+class TestBuildVerifyPayload:
+    def test_merges_input_row_with_response(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1", "verifier_metadata": {"answer": 42}},
+            rollout={"response": {"output": "hello"}, "reward": 1.0},
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {"task": "q1", "verifier_metadata": {"answer": 42}, "response": {"output": "hello"}}
+
+    def test_response_key_overwrites_any_existing_response_in_input(self) -> None:
+        pair = InputRolloutPair(
+            input={"response": {"output": "stale"}, "task": "q1"},
+            rollout={"response": {"output": "fresh"}},
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result["response"] == {"output": "fresh"}
+
+    def test_does_not_mutate_input_row(self) -> None:
+        pair = InputRolloutPair(input={"task": "q1"}, rollout={"response": {"output": "x"}})
+
+        _build_verify_payload(pair)
+
+        assert "response" not in pair.input
+
+    def test_extra_rollout_fields_are_not_included(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={"response": {"output": "x"}, "reward": 0.9, "rollout_index": 2},
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert set(result.keys()) == {"task", "response"}
+
+
+# ---------------------------------------------------------------------------
+# Cache / resume-from-cache helpers
+# ---------------------------------------------------------------------------
+
+
+class TestParseOutputLineKey:
+    def test_extracts_task_and_rollout_index(self) -> None:
+        line = orjson.dumps({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 7, "reward": 1.0})
+        assert _parse_output_line_key(line) == (3, 7)
+
+    def test_tolerates_trailing_newline(self) -> None:
+        line = orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 2}) + b"\n"
+        assert _parse_output_line_key(line) == (1, 2)
+
+    def test_missing_indices_return_none_tuple(self) -> None:
+        line = orjson.dumps({"reward": 1.0})
+        assert _parse_output_line_key(line) == (None, None)
+
+
+class TestLoadCacheKeysByStatus:
+    def _paths(self, tmp_path: Path) -> OutputPaths:
+        return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
+
+    def _write(self, path: Path, rows: list[dict]) -> None:
+        path.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+
+    def test_no_cache_files_returns_empty_and_prints_skip(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        cache = _load_cache_keys_by_status(self._paths(tmp_path))
+        assert cache.successful_keys == set()
+        assert cache.terminal_keys == set()
+        assert cache.maxed_out_keys == set()
+        assert "Skipping resume_from_cache" in capsys.readouterr().out
+
+    def test_successful_keys_read_from_main_output_file(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.output,
+            [
+                {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+                {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 2, "reward": 0.0},
+            ],
+        )
+        cache = _load_cache_keys_by_status(paths)
+        assert cache.successful_keys == {(0, 0), (1, 2)}
+
+    def test_terminal_keys_flagged_from_failures_sidecar(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True},
+                {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0},  # non-terminal attempt
+            ],
+        )
+        cache = _load_cache_keys_by_status(paths)
+        assert cache.terminal_keys == {(5, 0)}
+
+    def test_maxed_out_keys_when_attempts_reach_configured_max(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_reverification._get_max_rollout_attempts", lambda: 2)
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {TASK_INDEX_KEY_NAME: 7, ROLLOUT_INDEX_KEY_NAME: 0},  # attempt 1
+                {TASK_INDEX_KEY_NAME: 7, ROLLOUT_INDEX_KEY_NAME: 0},  # attempt 2 -> maxed out
+                {TASK_INDEX_KEY_NAME: 8, ROLLOUT_INDEX_KEY_NAME: 0},  # attempt 1 -> not maxed out
+            ],
+        )
+        cache = _load_cache_keys_by_status(paths)
+        assert cache.maxed_out_keys == {(7, 0)}
+        assert (8, 0) not in cache.maxed_out_keys
+
+    def test_failure_rows_without_indices_or_blank_lines_are_skipped(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        paths.failures.write_bytes(
+            orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True})
+            + b"\n"
+            + orjson.dumps({"reward": 0.0})  # no indices -> skipped
+            + b"\n"
+            + b"\n"  # blank line -> skipped
+        )
+        cache = _load_cache_keys_by_status(paths)
+        assert cache.terminal_keys == {(1, 0)}
+
+    def test_only_failures_file_present_still_loads_sidecar(self, tmp_path: Path) -> None:
+        """Output file absent but failures present: successes empty, terminal keys still read."""
+        paths = self._paths(tmp_path)
+        self._write(paths.failures, [{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, NG_TERMINAL_KEY: True}])
+        cache = _load_cache_keys_by_status(paths)
+        assert cache.successful_keys == set()
+        assert cache.terminal_keys == {(2, 3)}
+
+
+class TestDropCacheFromPayloads:
+    def _payload(self, task: int, rollout: int = 0) -> dict:
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout, "data": f"{task}-{rollout}"}
+
+    def test_drops_successful_terminal_and_maxed_out_keeps_the_rest(self) -> None:
+        payloads = [self._payload(t) for t in range(5)]  # keys (0,0)..(4,0)
+        cache = CacheKeysByStatus(
+            successful_keys={(0, 0)},
+            terminal_keys={(1, 0)},
+            maxed_out_keys={(2, 0)},
+        )
+        remaining = list(_drop_cache_from_payloads(payloads, cache))
+        assert [p[TASK_INDEX_KEY_NAME] for p in remaining] == [3, 4]
+
+    def test_empty_cache_keeps_every_payload(self) -> None:
+        payloads = [self._payload(0), self._payload(1)]
+        cache = CacheKeysByStatus(successful_keys=set(), terminal_keys=set(), maxed_out_keys=set())
+        assert list(_drop_cache_from_payloads(payloads, cache)) == payloads
+
+    def test_drops_at_rollout_index_granularity_within_a_single_task(self) -> None:
+        """The cache key is the full (task, rollout) tuple: caching (0,0) must NOT drop (0,1)."""
+        payloads = [self._payload(0, 0), self._payload(0, 1), self._payload(0, 2)]
+        cache = CacheKeysByStatus(successful_keys={(0, 0)}, terminal_keys=set(), maxed_out_keys=set())
+        remaining = list(_drop_cache_from_payloads(payloads, cache))
+        assert [p[ROLLOUT_INDEX_KEY_NAME] for p in remaining] == [1, 2]
+
+
+class TestSummarizeCacheUsage:
+    def test_prints_the_expected_counts(self, capsys: pytest.CaptureFixture) -> None:
+        cache = CacheKeysByStatus(
+            successful_keys={(0, 0)},
+            terminal_keys={(1, 0)},
+            maxed_out_keys={(2, 0)},
+        )
+        summarize_cache_usage(cache, all_payloads=[{}] * 10, filtered_payloads=[{}] * 7)
+        out = capsys.readouterr().out
+        assert "10 total rows to be re-verified" in out
+        assert "1 rows already done" in out
+        assert "7 rows that still need to be run" in out
+
+
+class TestPreparePayloads:
+    """Tests for _prepare_payloads (the paths are already resolved by run_from_config)."""
+
+    def _paths(self, tmp_path: Path) -> OutputPaths:
+        return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
+
+    def _pair(self, task: int, rollout: int = 0) -> InputRolloutPair:
+        return InputRolloutPair(
+            input={TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout, "q": task},
+            rollout={"response": {"out": task}},
+        )
+
+    def _patch_yield(self, monkeypatch: pytest.MonkeyPatch, pairs: list, capture: dict | None = None) -> None:
+        def fake_yield(inputs_path, rollouts_path, limit=None):
+            if capture is not None:
+                capture["inputs_path"] = inputs_path
+                capture["rollouts_path"] = rollouts_path
+                capture["limit"] = limit
+            return iter(pairs)
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", fake_yield)
+
+    def test_returns_one_payload_per_pair_when_not_resuming(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch_yield(monkeypatch, [self._pair(0), self._pair(1), self._pair(2)])
+
+        payloads = _prepare_payloads(
+            tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False
+        )
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in payloads] == [0, 1, 2]
+        assert all(p["response"] == {"out": p[TASK_INDEX_KEY_NAME]} for p in payloads)
+
+    def test_limit_is_forwarded_to_yield_pairs(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        capture: dict = {}
+        self._patch_yield(monkeypatch, [], capture)
+
+        _prepare_payloads(
+            tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False, limit=7
+        )
+
+        assert capture["limit"] == 7
+
+    def test_paths_are_passed_through_without_being_swapped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        capture: dict = {}
+        self._patch_yield(monkeypatch, [], capture)
+
+        _prepare_payloads(
+            tmp_path / "materialized.jsonl",
+            tmp_path / "rollouts.jsonl",
+            self._paths(tmp_path),
+            resume_from_cache=False,
+        )
+
+        assert capture["inputs_path"] == tmp_path / "materialized.jsonl"
+        assert capture["rollouts_path"] == tmp_path / "rollouts.jsonl"
+
+    def test_passes_full_pair_to_build_verify_payload(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        pair = self._pair(0)
+        self._patch_yield(monkeypatch, [pair])
+        build_calls: list = []
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_verify_payload",
+            lambda p: build_calls.append(p) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+
+        _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
+
+        assert len(build_calls) == 1
+        assert build_calls[0] is pair
+
+    def test_resume_from_cache_drops_already_completed_keys(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """With an existing output file marking (0,0) done, resuming re-verifies only the missing keys."""
+        paths = self._paths(tmp_path)
+        paths.output.write_bytes(orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n")
+        self._patch_yield(monkeypatch, [self._pair(0), self._pair(1)])
+
+        payloads = _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", paths, resume_from_cache=True)
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in payloads] == [1]
+
+    def test_resume_from_cache_with_no_cache_files_keeps_all(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch_yield(monkeypatch, [self._pair(0), self._pair(1)])
+
+        payloads = _prepare_payloads(
+            tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=True
+        )
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in payloads] == [0, 1]
+
+
 class TestRunVerificationPayloads:
     """Tests for _run_verification_payloads: routing, success/error paths, and semaphore enforcement."""
 
@@ -390,7 +598,7 @@ class TestRunVerificationPayloads:
         raise_for_status_side_effect=None,
         response_json: dict | None = None,
     ) -> None:
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: agent_to_rs
         )
@@ -526,7 +734,7 @@ class TestRunVerificationPayloads:
         sentinel_config = {"the": "global_config"}
         mock_client.global_config_dict = sentinel_config
         mock_client.post = AsyncMock(return_value=MagicMock())
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
         received: list = []
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
@@ -578,145 +786,121 @@ class TestRunVerificationPayloads:
         assert sem._value == 3
 
 
-class TestGuardOutputFile:
-    def test_raises_if_file_exists_and_overwrite_false(self, tmp_path: Path) -> None:
-        fpath = tmp_path / "output.jsonl"
-        fpath.write_text("stale")
-        with pytest.raises(ConfigError, match="Output file already exists"):
-            _guard_output_file(fpath, overwrite=False)
+class TestPrepareOutputFpaths:
+    """Tests for _prepare_output_fpaths: prefixing, parent-dir creation, and resume-aware cleanup."""
 
-    def test_deletes_file_when_overwrite_true(self, tmp_path: Path) -> None:
-        fpath = tmp_path / "output.jsonl"
-        fpath.write_text("stale")
-        _guard_output_file(fpath, overwrite=True)
-        assert not fpath.exists()
+    def test_creates_the_parent_directory_not_the_file_path(self, tmp_path: Path) -> None:
+        """Regression: the output *file* must remain a writable file, and only its parent dir is created.
 
-    def test_no_error_when_file_absent(self, tmp_path: Path) -> None:
-        _guard_output_file(tmp_path / "output.jsonl", overwrite=False)
+        A prior version called .mkdir() on the file path itself, turning output.jsonl into a directory
+        and crashing run_from_config on its default (non-resume) path.
+        """
+        nested = tmp_path / "does" / "not" / "exist" / "out.jsonl"
+        paths = _prepare_output_fpaths("", str(nested), resume_from_cache=False, overwrite=False)
+
+        assert paths.output.parent.is_dir()
+        assert not paths.output.is_dir()
+        # the returned path must be openable as a file
+        paths.output.open("ab").close()
+        assert paths.output.is_file()
+
+    def test_applies_name_prefix_to_output_and_failures(self, tmp_path: Path) -> None:
+        paths = _prepare_output_fpaths(
+            "unsafe_", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False
+        )
+        assert paths.output.name == "unsafe_out.jsonl"
+        assert paths.failures.name == "unsafe_out_failures.jsonl"
+
+    def test_empty_prefix_leaves_names_unchanged(self, tmp_path: Path) -> None:
+        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        assert paths.output.name == "out.jsonl"
+        assert paths.failures.name == "out_failures.jsonl"
+
+    def test_raises_when_existing_and_not_overwrite_and_not_resuming(self, tmp_path: Path) -> None:
+        """The safety guard: a fresh run must refuse to clobber an existing output file by default."""
+        out = tmp_path / "out.jsonl"
+        out.write_text("precious prior rollouts")
+        with pytest.raises(ConfigError, match="already exists"):
+            _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False)
+        # the file is left untouched
+        assert out.read_text() == "precious prior rollouts"
+
+    def test_raises_when_only_the_failures_sidecar_exists(self, tmp_path: Path) -> None:
+        """The guard also protects the failures sidecar, not just the main output file."""
+        failures = tmp_path / "out_failures.jsonl"
+        failures.write_text("prior failures")
+        with pytest.raises(ConfigError, match="already exists"):
+            _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+
+    def test_deletes_existing_files_when_overwrite_and_not_resuming(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        out = tmp_path / "out.jsonl"
+        failures = tmp_path / "out_failures.jsonl"
+        out.write_text("stale")
+        failures.write_text("stale")
+
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=True)
+
+        assert not paths.output.exists()
+        assert not paths.failures.exists()
+        assert "Deleted existing output file" in capsys.readouterr().out
+
+    def test_no_existing_files_is_fine_without_overwrite(self, tmp_path: Path) -> None:
+        """A first run (no prior files) proceeds without needing overwrite."""
+        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        assert not paths.output.exists()
+
+    def test_keeps_existing_files_when_resuming_regardless_of_overwrite(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.jsonl"
+        failures = tmp_path / "out_failures.jsonl"
+        out.write_text("keep me")
+        failures.write_text("keep me too")
+
+        # resume reuses the file; overwrite is ignored and nothing is deleted or raised
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=True, overwrite=False)
+
+        assert paths.output.read_text() == "keep me"
+        assert paths.failures.read_text() == "keep me too"
 
 
-class TestBuildVerifyPayload:
-    def test_merges_input_row_with_response(self) -> None:
-        pair = InputRolloutPair(
-            input={"task": "q1", "verifier_metadata": {"answer": 42}},
-            rollout={"response": {"output": "hello"}, "reward": 1.0},
+class TestLoadReverifiedResults:
+    """Tests for _load_reverified_results: read the main jsonl once, sorted, with minimal routing rows."""
+
+    def test_reads_sorted_results_and_minimal_routing_rows(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.jsonl"
+        # written out of (task, rollout) order; the helper must sort
+        out.write_bytes(
+            orjson.dumps(
+                {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0}
+            )
+            + b"\n"
+            + orjson.dumps(
+                {AGENT_REF_KEY_NAME: {"name": "b"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
+            )
+            + b"\n"
         )
 
-        result = _build_verify_payload(pair)
+        results, rows = _load_reverified_results(out)
 
-        assert result == {"task": "q1", "verifier_metadata": {"answer": 42}, "response": {"output": "hello"}}
+        # results sorted by (task, rollout), full payload preserved
+        assert [r[TASK_INDEX_KEY_NAME] for r in results] == [0, 1]
+        assert results[0]["reward"] == 1.0
+        # rows carry only AGENT_REF, aligned with results
+        assert rows == [{AGENT_REF_KEY_NAME: {"name": "b"}}, {AGENT_REF_KEY_NAME: {"name": "a"}}]
 
-    def test_response_key_overwrites_any_existing_response_in_input(self) -> None:
-        pair = InputRolloutPair(
-            input={"response": {"output": "stale"}, "task": "q1"},
-            rollout={"response": {"output": "fresh"}},
+    def test_empty_and_blank_lines(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.jsonl"
+        out.write_bytes(b"")
+        assert _load_reverified_results(out) == ([], [])
+
+        out.write_bytes(
+            orjson.dumps({AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+            + b"\n\n"
         )
-
-        result = _build_verify_payload(pair)
-
-        assert result["response"] == {"output": "fresh"}
-
-    def test_does_not_mutate_input_row(self) -> None:
-        pair = InputRolloutPair(input={"task": "q1"}, rollout={"response": {"output": "x"}})
-
-        _build_verify_payload(pair)
-
-        assert "response" not in pair.input
-
-    def test_extra_rollout_fields_are_not_included(self) -> None:
-        pair = InputRolloutPair(
-            input={"task": "q1"},
-            rollout={"response": {"output": "x"}, "reward": 0.9, "rollout_index": 2},
-        )
-
-        result = _build_verify_payload(pair)
-
-        assert set(result.keys()) == {"task", "response"}
-
-
-class TestPreparePayloadsFromConfig:
-    def _make_config(self, limit: int | None = None) -> RolloutReverificationConfig:
-        return RolloutReverificationConfig(
-            materialized_inputs_jsonl_fpath="/inputs.jsonl",
-            rollouts_jsonl_fpath="/rollouts.jsonl",
-            output_jsonl_fpath="/output.jsonl",
-            limit=limit,
-        )
-
-    def _patch_yield(self, monkeypatch: pytest.MonkeyPatch, pairs: list, capture: dict | None = None) -> None:
-        def fake_yield(inputs_path, rollouts_path, limit=None):
-            if capture is not None:
-                capture["inputs_path"] = inputs_path
-                capture["rollouts_path"] = rollouts_path
-                capture["limit"] = limit
-            return iter(pairs)
-
-        monkeypatch.setattr("nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", fake_yield)
-
-    def test_resolves_both_paths_before_pairing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        resolved = {}
-
-        def fake_resolve(path):
-            r = Path(f"/resolved{path}")
-            resolved[path] = r
-            return r
-
-        capture: dict = {}
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", fake_resolve)
-        self._patch_yield(monkeypatch, [], capture)
-        monkeypatch.setattr("nemo_gym.rollout_reverification._build_verify_payload", lambda _pair: {})
-
-        _prepare_payloads_from_config(self._make_config())
-
-        assert capture["inputs_path"] == resolved["/inputs.jsonl"]
-        assert capture["rollouts_path"] == resolved["/rollouts.jsonl"]
-
-    def test_materialized_inputs_and_rollouts_paths_are_not_swapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
-        capture: dict = {}
-        self._patch_yield(monkeypatch, [], capture)
-
-        _prepare_payloads_from_config(self._make_config())
-
-        assert str(capture["inputs_path"]) == "/inputs.jsonl"
-        assert str(capture["rollouts_path"]) == "/rollouts.jsonl"
-
-    def test_limit_is_forwarded_to_yield_pairs(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
-        capture: dict = {}
-        self._patch_yield(monkeypatch, [], capture)
-
-        _prepare_payloads_from_config(self._make_config(limit=7))
-
-        assert capture["limit"] == 7
-
-    def test_returns_one_payload_per_pair(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pairs = [InputRolloutPair(input={"q": i}, rollout={"response": {"out": i}}) for i in range(3)]
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
-        self._patch_yield(monkeypatch, pairs)
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._build_verify_payload",
-            lambda pair: {"payload_for": pair.input["q"]},
-        )
-
-        payloads = _prepare_payloads_from_config(self._make_config())
-
-        assert payloads == [{"payload_for": 0}, {"payload_for": 1}, {"payload_for": 2}]
-
-    def test_passes_full_pair_to_build_verify_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pair = InputRolloutPair(input={"task": "x"}, rollout={"response": {"out": "y"}})
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
-        self._patch_yield(monkeypatch, [pair])
-        build_calls: list = []
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._build_verify_payload",
-            lambda p: build_calls.append(p) or {},
-        )
-
-        _prepare_payloads_from_config(self._make_config())
-
-        assert len(build_calls) == 1
-        assert build_calls[0] is pair
+        results, rows = _load_reverified_results(out)
+        assert len(results) == 1
+        assert len(rows) == 1
 
 
 class TestCallAggregateMetrics:
@@ -738,7 +922,7 @@ class TestCallAggregateMetrics:
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=MagicMock(), side_effect=post_side_effect)
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
             lambda _: agent_to_rs,
@@ -839,6 +1023,174 @@ class TestCallAggregateMetrics:
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
 
+    async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """No results → no aggregate file written and None returned."""
+        self._patch(monkeypatch, {"agent_a": "rs_a"})
+        assert await _call_aggregate_metrics([], [], tmp_path / "out.jsonl") is None
+
+    async def test_rows_without_an_agent_name_are_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A row whose AGENT_REF has no name contributes nothing (it can't be routed to an RS)."""
+        posted: list[str] = []
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted.append(server_name)
+            return MagicMock()
+
+        mock_client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        mock_client.post = capture_post
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0},  # no name -> skipped
+        ]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0}, {"reward": 0.0, TASK_INDEX_KEY_NAME: 1}]
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
+
+        # only agent_a's RS is contacted; the nameless row never reaches aggregation
+        assert posted == ["rs_a"]
+
+
+class TestCheckReverifyMode:
+    """Tests for _check_reverify_mode — queries GET /reverify_mode per unique RS."""
+
+    def _mock_client(self, monkeypatch: pytest.MonkeyPatch, responses_by_rs: dict[str, ReverifyMode]) -> MagicMock:
+        """Mock client whose .get embeds the RS name in the response so get_response_json can look it up.
+
+        This makes tests order-independent: _check_reverify_mode iterates a set() whose order
+        is non-deterministic, so positional side_effect lists would be fragile.
+        """
+        mock_client = MagicMock()
+
+        async def fake_get(**kwargs: object) -> str:
+            return kwargs["server_name"]  # RS name becomes the "response" object
+
+        mock_client.get = fake_get
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+
+        async def get_response_by_rs(rs_name: str) -> ReverifyMode:
+            return responses_by_rs[rs_name]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_response_json", get_response_by_rs)
+        return mock_client
+
+    async def test_returns_empty_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = self._mock_client(monkeypatch, {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.STATELESS})
+
+        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b"})
+
+        assert result == []
+
+    async def test_returns_unsupported_rs_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = self._mock_client(
+            monkeypatch,
+            {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.UNSUPPORTED, "rs_c": ReverifyMode.UNSUPPORTED},
+        )
+
+        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b", "agent_c": "rs_c"})
+
+        assert result == ["rs_b", "rs_c"]
+
+    async def test_queries_each_unique_rs_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two agents sharing the same RS must result in only one GET /reverify_mode call."""
+        queried: list[str] = []
+
+        async def capturing_get(**kwargs: object) -> MagicMock:
+            queried.append(kwargs["server_name"])
+            return MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.get = capturing_get
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(return_value=ReverifyMode.STATELESS),
+        )
+
+        await _check_reverify_mode(mock_client, {"agent_a": "rs_shared", "agent_b": "rs_shared"})
+
+        assert queried == ["rs_shared"]
+
+
+class TestGuardReverifyMode:
+    """Tests for _guard_reverify_mode — raises or returns a warning based on config.force.
+
+    The refactored guard checks *every* resource server declared in the config (not just the
+    subset referenced by the current payload batch), reading the force flag from the config.
+    """
+
+    def _make_config(self, tmp_path: Path, *, force: bool = False) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "r.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            force=force,
+        )
+
+    def _patch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        unsupported_rs: list[str],
+        agent_to_rs: dict[str, str] | None = None,
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: agent_to_rs or {"agent_a": "rs_a"},
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._check_reverify_mode",
+            AsyncMock(return_value=unsupported_rs),
+        )
+
+    async def test_returns_none_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self._patch(monkeypatch, unsupported_rs=[])
+        assert await _guard_reverify_mode(self._make_config(tmp_path)) is None
+
+    async def test_raises_config_error_when_unsupported_and_not_force(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch, unsupported_rs=["rs_a"])
+        with pytest.raises(ConfigError, match="rs_a"):
+            await _guard_reverify_mode(self._make_config(tmp_path, force=False))
+
+    async def test_returns_warning_string_when_unsupported_and_force(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch, unsupported_rs=["rs_a"])
+        result = await _guard_reverify_mode(self._make_config(tmp_path, force=True))
+        assert result is not None
+        assert "WARNING" in result
+        assert "rs_a" in result
+        assert "unsafe_" in result
+
+    async def test_every_rs_in_config_is_checked_not_just_a_payload_subset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """All RS from the config mapping are passed to _check_reverify_mode, regardless of payloads."""
+        captured: list[dict] = []
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: {"agent_a": "rs_a", "agent_b": "rs_b"},
+        )
+
+        async def capture_check(_client: object, agent_to_rs: dict) -> list:
+            captured.append(dict(agent_to_rs))
+            return []
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._check_reverify_mode", capture_check)
+
+        await _guard_reverify_mode(self._make_config(tmp_path))
+
+        assert captured == [{"agent_a": "rs_a", "agent_b": "rs_b"}]
+
 
 class TestRolloutReverificationRunFromConfig:
     """Tests for RolloutReverificationHelper.run_from_config.
@@ -882,9 +1234,9 @@ class TestRolloutReverificationRunFromConfig:
         return row
 
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, pairs: list[tuple[dict, dict]]) -> None:
-        """Patch the five delegates that run_from_config calls."""
+        """Patch the delegates that run_from_config calls."""
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
 
         async def fake_future(row: dict, result: dict) -> tuple[dict, dict]:
             return row, result
@@ -896,7 +1248,8 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
-        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
+        # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
+        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         if not path.exists():
@@ -968,15 +1321,17 @@ class TestRolloutReverificationRunFromConfig:
             AGENT_REF_KEY_NAME,
         }
 
-        # run_from_config accumulates all 3 results regardless of routing
-        assert len(returned) == 3
+        # run_from_config returns the persisted main-jsonl rows only: exactly the 1 success —
+        # NOT the failure (sidecar) or the no_persist row (written nowhere).
+        assert len(returned) == 1
+        assert returned[0][TASK_INDEX_KEY_NAME] == 0
+        assert returned[0]["reward"] == 1.0
 
     async def test_results_sorted_by_task_and_rollout_index_before_aggregate_metrics(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Futures complete in reverse order; run_from_config must sort before calling
-        _call_aggregate_metrics and before returning — so both the returned list and
-        the args passed to aggregate metrics are in deterministic (task, rollout) order."""
+        """Futures complete in reverse order; run_from_config must sort the results it passes to
+        _call_aggregate_metrics into deterministic (task, rollout) order."""
         # futures arrive: task 2, then 1, then 0
         pairs = [
             (self._make_row("agent_a", task=2), {"reward": 0.2}),
@@ -988,18 +1343,20 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
         config = self._make_config(tmp_path)
 
-        returned: list[dict] = await RolloutReverificationHelper().run_from_config(config)  # type: ignore[assignment]
+        returned = await RolloutReverificationHelper().run_from_config(config)
 
-        # returned list must be sorted task 0 → 1 → 2
+        # all 3 successes are returned, sorted task 0 → 1 → 2 (despite arriving 2 → 1 → 0)
+        assert len(returned) == 3
         assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1, 2]
 
-        # both positional args to _call_aggregate_metrics must be sorted
+        # aggregate metrics are computed over the main jsonl, sorted by (task, rollout);
+        # the routing rows are aligned with them
         agg_results, agg_rows = agg_mock.call_args.args[0], agg_mock.call_args.args[1]
         assert [r[TASK_INDEX_KEY_NAME] for r in agg_results] == [0, 1, 2]
-        assert [r[TASK_INDEX_KEY_NAME] for r in agg_rows] == [0, 1, 2]
+        assert len(agg_rows) == 3
+        assert all(r[AGENT_REF_KEY_NAME] == {"name": "agent_a"} for r in agg_rows)
 
-        # output file on disk must also be in arrival order (written before the sort)
-        # but the in-memory returned list is sorted — these are independent guarantees
+        # output file on disk is in arrival order (written as futures complete, before the sort)
         output_rows = self._read_jsonl(tmp_path / "output.jsonl")
         assert len(output_rows) == 3
 
@@ -1048,7 +1405,7 @@ class TestRolloutReverificationRunFromConfig:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """disable_aggregation=True must suppress _call_aggregate_metrics entirely.
-        The output file must still be written and the results returned normally."""
+        The output file must still be written normally."""
         pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
         self._patch_common(monkeypatch, pairs)
         agg_mock = AsyncMock(return_value=None)
@@ -1058,8 +1415,10 @@ class TestRolloutReverificationRunFromConfig:
         returned = await RolloutReverificationHelper().run_from_config(config)
 
         agg_mock.assert_not_awaited()
-        assert len(returned) == 1
         assert len(self._read_jsonl(tmp_path / "output.jsonl")) == 1
+        # results are still returned even though aggregation was skipped
+        assert len(returned) == 1
+        assert returned[0][TASK_INDEX_KEY_NAME] == 0
 
     async def test_multi_agent_multi_rs_routing_end_to_end(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1075,10 +1434,10 @@ class TestRolloutReverificationRunFromConfig:
             (self._make_row("agent_b", task=3), {"reward": 0.3}),
         ]
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: payloads)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
 
         # Wire _run_verification_payloads through its real impl so routing is exercised.
-        # Patch the three hooks it relies on instead.
+        # Patch the hooks it relies on instead.
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         verify_calls: list[tuple[str, dict]] = []
@@ -1088,7 +1447,7 @@ class TestRolloutReverificationRunFromConfig:
             return MagicMock()
 
         mock_client.post = capturing_post
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
             lambda _: {"agent_a": "rs_a", "agent_b": "rs_b"},
@@ -1103,7 +1462,7 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
-        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
         config = self._make_config(tmp_path)
 
         returned = await RolloutReverificationHelper().run_from_config(config)
@@ -1132,132 +1491,11 @@ class TestRolloutReverificationRunFromConfig:
         agg_results = agg_mock.call_args.args[0]
         agent_names_in_agg = {r[AGENT_REF_KEY_NAME]["name"] for r in agg_results}
         assert agent_names_in_agg == {"agent_a", "agent_b"}
+
+        # all 4 successes are returned, both agents represented
         assert len(returned) == 4
-
-
-class TestCheckReverifyMode:
-    """Tests for _check_reverify_mode — queries GET /reverify_mode per unique RS."""
-
-    def _mock_client(self, monkeypatch: pytest.MonkeyPatch, responses_by_rs: dict[str, ReverifyMode]) -> MagicMock:
-        """Mock client whose .get embeds the RS name in the response so get_response_json can look it up.
-
-        This makes tests order-independent: _check_reverify_mode iterates a set() whose order
-        is non-deterministic, so positional side_effect lists would be fragile.
-        """
-        mock_client = MagicMock()
-
-        async def fake_get(**kwargs: object) -> str:
-            return kwargs["server_name"]  # RS name becomes the "response" object
-
-        mock_client.get = fake_get
-        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
-
-        async def get_response_by_rs(rs_name: str) -> ReverifyMode:
-            return responses_by_rs[rs_name]
-
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_response_json", get_response_by_rs)
-        return mock_client
-
-    async def test_returns_empty_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_client = self._mock_client(monkeypatch, {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.STATELESS})
-
-        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b"})
-
-        assert result == []
-
-    async def test_returns_unsupported_rs_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_client = self._mock_client(
-            monkeypatch,
-            {"rs_a": ReverifyMode.STATELESS, "rs_b": ReverifyMode.UNSUPPORTED, "rs_c": ReverifyMode.UNSUPPORTED},
-        )
-
-        result = await _check_reverify_mode(mock_client, {"agent_a": "rs_a", "agent_b": "rs_b", "agent_c": "rs_c"})
-
-        assert result == ["rs_b", "rs_c"]
-
-    async def test_queries_each_unique_rs_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Two agents sharing the same RS must result in only one GET /reverify_mode call."""
-        queried: list[str] = []
-
-        async def capturing_get(**kwargs: object) -> MagicMock:
-            queried.append(kwargs["server_name"])
-            return MagicMock()
-
-        mock_client = MagicMock()
-        mock_client.get = capturing_get
-        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.get_response_json",
-            AsyncMock(return_value=ReverifyMode.STATELESS),
-        )
-
-        await _check_reverify_mode(mock_client, {"agent_a": "rs_shared", "agent_b": "rs_shared"})
-
-        assert queried == ["rs_shared"]
-
-
-class TestGuardReverifyMode:
-    """Tests for _guard_reverify_mode — raises or returns warning based on force flag."""
-
-    def _make_payload(self, agent: str) -> dict:
-        return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
-
-    def _patch(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        unsupported_rs: list[str],
-        agent_to_rs: dict[str, str] | None = None,
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client.global_config_dict = {}
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
-            lambda _: agent_to_rs or {"agent_a": "rs_a"},
-        )
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._check_reverify_mode",
-            AsyncMock(return_value=unsupported_rs),
-        )
-
-    async def test_returns_none_when_all_stateless(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch(monkeypatch, unsupported_rs=[])
-        result = await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
-        assert result is None
-
-    async def test_raises_config_error_when_unsupported_and_not_force(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch(monkeypatch, unsupported_rs=["rs_a"])
-        with pytest.raises(ConfigError, match="rs_a"):
-            await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
-
-    async def test_returns_warning_string_when_unsupported_and_force(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch(monkeypatch, unsupported_rs=["rs_a"])
-        result = await _guard_reverify_mode([self._make_payload("agent_a")], force=True)
-        assert result is not None
-        assert "WARNING" in result
-        assert "rs_a" in result
-        assert "unsafe_" in result
-
-    async def test_only_rs_referenced_by_payloads_are_checked(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Payloads only reference agent_a; rs_b (from agent_b) must not be queried."""
-        captured: list[dict] = []
-        mock_client = MagicMock()
-        mock_client.global_config_dict = {}
-        monkeypatch.setattr("nemo_gym.rollout_reverification._setup_server_client", lambda: mock_client)
-        monkeypatch.setattr(
-            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
-            lambda _: {"agent_a": "rs_a", "agent_b": "rs_b"},
-        )
-
-        async def capture_check(_client: object, agent_to_rs: dict) -> list:
-            captured.append(dict(agent_to_rs))
-            return []
-
-        monkeypatch.setattr("nemo_gym.rollout_reverification._check_reverify_mode", capture_check)
-
-        await _guard_reverify_mode([self._make_payload("agent_a")], force=False)
-
-        assert captured == [{"agent_a": "rs_a"}]
+        assert {r[AGENT_REF_KEY_NAME]["name"] for r in returned} == {"agent_a", "agent_b"}
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1, 2, 3]
 
 
 class TestRunFromConfigForceFlag:
@@ -1284,7 +1522,7 @@ class TestRunFromConfigForceFlag:
         async def fake_future() -> tuple[dict, dict]:
             return row, result
 
-        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads_from_config", lambda *_: [row])
+        monkeypatch.setattr("nemo_gym.rollout_reverification._prepare_payloads", lambda *_a, **_kw: [row])
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._guard_reverify_mode",
             AsyncMock(return_value=force_warning),
@@ -1295,7 +1533,7 @@ class TestRunFromConfigForceFlag:
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
-        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_output_file", lambda *_: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
 
     async def test_no_unsafe_prefix_when_all_rs_stateless(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1328,3 +1566,197 @@ class TestRunFromConfigForceFlag:
 
         out = capsys.readouterr().out
         assert out.count(warning) == 2
+
+
+class TestRunFromConfigResumeFromCache:
+    """End-to-end resume behavior for run_from_config.
+
+    _prepare_output_fpaths and _prepare_payloads run for real here; only the input file yield,
+    path resolution, the verify dispatch, guard, and aggregate call are stubbed. This exercises
+    the full resume path (preserve output, skip cached keys, append only the missing ones).
+    """
+
+    def _make_config(
+        self, tmp_path: Path, *, resume_from_cache: bool, disable_aggregation: bool = True, overwrite: bool = False
+    ) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=disable_aggregation,
+            resume_from_cache=resume_from_cache,
+            overwrite=overwrite,
+        )
+
+    def _row(self, agent: str, task: int, rollout: int = 0) -> dict:
+        return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, pairs: list[InputRolloutPair], dispatched: list) -> None:
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", lambda *_a, **_kw: iter(pairs)
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
+
+        def fake_run(payloads, semaphore=None):
+            dispatched.extend(payloads)
+
+            async def fut(p: dict) -> tuple[dict, dict]:
+                return p, {"reward": 0.5}
+
+            return [fut(p) for p in payloads]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+
+    def _read_jsonl(self, path: Path) -> list[dict]:
+        return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    async def test_resume_preserves_prior_output_and_reruns_only_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "output.jsonl"
+        # task 0 already completed by a prior run, with a distinctive reward
+        out.write_bytes(orjson.dumps({**self._row("agent_a", 0), "reward": 1.0}) + b"\n")
+
+        pairs = [
+            InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {"o": 0}}),
+            InputRolloutPair(input=self._row("agent_a", 1), rollout={"response": {"o": 1}}),
+        ]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True)
+        )
+
+        # only the missing task (1) is re-verified
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [1]
+
+        # The cached task-0 row appears in the file EXACTLY ONCE (append mode preserves it on disk;
+        # the dispatch loop only writes newly-verified rows).
+        rows = self._read_jsonl(out)
+        assert len(rows) == 2
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
+        assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1
+        # the pre-existing task-0 row was preserved (reward 1.0, not overwritten by a fresh 0.5)
+        task0 = next(r for r in rows if r[TASK_INDEX_KEY_NAME] == 0)
+        assert task0["reward"] == 1.0
+
+        # the returned set covers cached + new (full dataset), one row per key, sorted
+        assert len(returned) == 2
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1]
+        assert next(r for r in returned if r[TASK_INDEX_KEY_NAME] == 0)["reward"] == 1.0
+
+    async def test_overwrite_without_resume_deletes_prior_output_and_reruns_everything(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(orjson.dumps({**self._row("agent_a", 0), "reward": 1.0}) + b"\n")
+
+        pairs = [
+            InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}}),
+            InputRolloutPair(input=self._row("agent_a", 1), rollout={"response": {}}),
+        ]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=False, overwrite=True)
+        )
+
+        # both tasks re-run (stale output was cleared first)
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == [0, 1]
+        rows = self._read_jsonl(out)
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
+        # every row is a fresh 0.5 — the old reward 1.0 was discarded with the truncated file
+        assert all(r["reward"] == 0.5 for r in rows)
+        # exactly the 2 fresh rows are returned (no stale row lingering)
+        assert len(returned) == 2
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1]
+        assert all(r["reward"] == 0.5 for r in returned)
+
+    async def test_fresh_run_refuses_to_clobber_existing_output_without_overwrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The safety guard end-to-end: a default (no resume, no overwrite) run raises on an existing file."""
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(orjson.dumps({**self._row("agent_a", 0), "reward": 1.0}) + b"\n")
+
+        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        with pytest.raises(ConfigError, match="already exists"):
+            await RolloutReverificationHelper().run_from_config(
+                self._make_config(tmp_path, resume_from_cache=False, overwrite=False)
+            )
+
+        # nothing dispatched and the prior output is untouched
+        assert dispatched == []
+        assert self._read_jsonl(out)[0]["reward"] == 1.0
+
+    async def test_resume_with_everything_cached_dispatches_nothing_and_leaves_output_intact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(
+            orjson.dumps({**self._row("agent_a", 0), "reward": 1.0})
+            + b"\n"
+            + orjson.dumps({**self._row("agent_a", 1), "reward": 0.0})
+            + b"\n"
+        )
+
+        pairs = [
+            InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}}),
+            InputRolloutPair(input=self._row("agent_a", 1), rollout={"response": {}}),
+        ]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True)
+        )
+
+        # nothing left to run; no division-by-zero on an empty payload set
+        assert dispatched == []
+        # the cached rows are left intact on disk (aggregation would read them from here)
+        rows = self._read_jsonl(out)
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
+        # even with nothing re-verified, the return still covers the full cached dataset
+        assert len(returned) == 2
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1]
+
+    async def test_resume_aggregates_over_full_main_jsonl_not_just_new_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The core resume-metrics guarantee: aggregate metrics are computed over the full main
+        jsonl (cached + newly re-verified), not just the re-verified remainder (regression guard
+        for the partial-aggregation bug)."""
+        out = tmp_path / "output.jsonl"
+        # tasks 0 and 1 already done in a prior run
+        out.write_bytes(
+            orjson.dumps({**self._row("agent_a", 0), "reward": 1.0})
+            + b"\n"
+            + orjson.dumps({**self._row("agent_a", 1), "reward": 1.0})
+            + b"\n"
+        )
+
+        pairs = [InputRolloutPair(input=self._row("agent_a", t), rollout={"response": {}}) for t in range(3)]
+        dispatched: list = []
+        self._patch(monkeypatch, pairs, dispatched)
+        agg_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
+
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True, disable_aggregation=False)
+        )
+
+        # only task 2 was re-verified...
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        # ...but aggregate metrics still see all three (cached 0,1 + fresh 2), read from the file
+        agg_results, agg_rows = agg_mock.call_args.args[0], agg_mock.call_args.args[1]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in agg_results) == [0, 1, 2]
+        assert len(agg_rows) == 3
+        assert all(r[AGENT_REF_KEY_NAME] == {"name": "agent_a"} for r in agg_rows)

@@ -538,9 +538,15 @@ COMMANDS = {
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
+            _value_flag("limit", "limit", "Maximum number of examples to re-verify."),
             _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
             _bool_flag(
                 "overwrite", "overwrite", "Delete existing output file before writing, instead of raising an error."
+            ),
+            _bool_flag(
+                "resume",
+                "resume_from_cache",
+                "Resume from a partially-completed output file: skip rows already done and re-verify only the rest.",
             ),
             _bool_flag(
                 "disable-aggregation",

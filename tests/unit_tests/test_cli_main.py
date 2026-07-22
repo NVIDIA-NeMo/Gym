@@ -588,8 +588,10 @@ class TestEvalReverifyFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
+            (["--limit", "50"], "+limit=50"),
             (["--force"], "+force=true"),
             (["--overwrite"], "+overwrite=true"),
+            (["--resume"], "+resume_from_cache=true"),
             (["--disable-aggregation"], "+disable_aggregation=true"),
         ],
     )
@@ -619,8 +621,11 @@ class TestEvalReverifyFlags:
                 "out.jsonl",
                 "--concurrency",
                 "10",
+                "--limit",
+                "50",
                 "--force",
                 "--overwrite",
+                "--resume",
                 "--disable-aggregation",
             ],
         )
@@ -629,8 +634,10 @@ class TestEvalReverifyFlags:
             "+rollouts_jsonl_fpath=rollouts.jsonl",
             "+output_jsonl_fpath=out.jsonl",
             "+num_samples_in_parallel=10",
+            "+limit=50",
             "+force=true",
             "+overwrite=true",
+            "+resume_from_cache=true",
             "+disable_aggregation=true",
         }
 

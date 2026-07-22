@@ -89,7 +89,8 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=False,
         description=(
             "If the output file already exists, delete it and start fresh. "
-            "By default, an existing output file raises an error to prevent accidental appending or overwriting."
+            "By default, an existing output file raises an error to prevent accidental appending or overwriting. "
+            "Ignored when resume_from_cache=true (the existing file is intentionally reused)."
         ),
     )
     resume_from_cache: bool = Field(
@@ -496,17 +497,43 @@ async def _call_aggregate_metrics(
 # ---------------------------------------------------------------------------
 
 
-def _prepare_output_fpaths(output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool) -> OutputPaths:
+def _prepare_output_fpaths(
+    output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool, overwrite: bool
+) -> OutputPaths:
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
-    output_fpath.mkdir(parents=True, exist_ok=True)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
     failures_fpath = failures_path_for(output_fpath)
     if not resume_from_cache:
+        # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
+        # explicitly opts in via overwrite, otherwise refuse. resume_from_cache reuses the file.
         for fpath in (output_fpath, failures_fpath):
-            if fpath.exists():
+            if not fpath.exists():
+                continue
+            if overwrite:
                 fpath.unlink()
                 print(f"Deleted existing output file: '{fpath}'")
+            else:
+                raise ConfigError(
+                    f"Output file already exists: '{fpath}'. Pass --overwrite to delete it and start fresh, "
+                    "or --resume to continue from it."
+                )
     return OutputPaths(output=output_fpath, failures=failures_fpath)
+
+
+def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]]:
+    """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
+
+    Returns ``(results, rows)``: ``results`` are the parsed rows — the source of truth used for both
+    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal ``{AGENT_REF}``
+    projection used only to route each result to its resources server. Read once and reused for both
+    so the file is never read twice.
+    """
+    with output_fpath.open("rb") as f:
+        results = [orjson.loads(line) for line in f if line.strip()]
+    results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+    rows = [{AGENT_REF_KEY_NAME: r.get(AGENT_REF_KEY_NAME)} for r in results]
+    return results, rows
 
 
 class RolloutReverificationHelper(BaseModel):
@@ -518,7 +545,9 @@ class RolloutReverificationHelper(BaseModel):
         else:
             output_name_prefix = ""
 
-        output_fpaths = _prepare_output_fpaths(output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache)
+        output_fpaths = _prepare_output_fpaths(
+            output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite
+        )
         materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
         rollouts_jsonl_fpath = resolve_input_path(
             config.rollouts_jsonl_fpath
@@ -540,9 +569,7 @@ class RolloutReverificationHelper(BaseModel):
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
-        rows: List[Dict] = []
-        results: List[Dict] = []
-        result_strs: List[List[str]] = []
+        completed = 0  # number of rows re-verified this run (for progress reporting)
         for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
             row, result = await future
 
@@ -555,10 +582,7 @@ class RolloutReverificationHelper(BaseModel):
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
 
-            rows.append(row)
-            results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -578,7 +602,8 @@ class RolloutReverificationHelper(BaseModel):
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * len(results) / len(payloads_to_reverify)
+            completed += 1
+            current_pct = 100 * completed / len(payloads_to_reverify)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
@@ -591,14 +616,14 @@ class RolloutReverificationHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+
+        # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
+        # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
+        results, agg_rows = _load_reverified_results(output_fpaths.output)
+
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
-
-        print("Sorting results to ensure consistent ordering")
-        rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-        results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+            get_wandb_run().log({"Rollouts": Table(data=[[orjson.dumps(r)] for r in results], columns=["Rollout"])})
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         if config.disable_aggregation:
@@ -609,7 +634,7 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, rows, output_fpaths.output)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
 
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpaths.output}
@@ -617,4 +642,5 @@ class RolloutReverificationHelper(BaseModel):
         if force_warning:
             print(force_warning)
 
+        # The full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
         return results
