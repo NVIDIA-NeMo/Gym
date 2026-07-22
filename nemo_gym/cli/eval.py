@@ -467,3 +467,9 @@ Reward profile completion: {completion_summary["completed_rollout_rows"]}/{compl
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
+
+
+@exit_cleanly_on_config_error
+def submit() -> None:  # pragma: no cover
+    get_global_config_dict()
+    rich.print("[bold]gym eval submit[/bold]: not yet implemented.")

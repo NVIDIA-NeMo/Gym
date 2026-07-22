@@ -257,6 +257,7 @@ SEARCH_DIR = Flag(
 )
 
 
+
 def _merge_config_paths(overrides: list[str]) -> list[str]:
     """Coalesce all `+config_paths=[...]` tokens (from --config and asset selectors) into one (Hydra rejects dupes)."""
     prefix = "+config_paths=["
@@ -535,6 +536,11 @@ COMMANDS = {
             ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
+    ),
+    "eval submit": Command(
+        target="nemo_gym.cli.eval:submit",
+        summary="Submit a job.",
+        flags=(CONFIG,),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
 }
