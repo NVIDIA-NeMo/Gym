@@ -21,9 +21,11 @@ between the eval model and a reference model's deliverables) and
 from __future__ import annotations
 
 import base64
+import logging
 import math
 import os
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -35,6 +37,9 @@ from typing import Any, Optional
 from openai import APITimeoutError
 
 from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 JUDGE_PROMPT = (
@@ -71,12 +76,15 @@ REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
 REQUEST_BACKOFF_MULTIPLIER = 2.0
 REQUEST_MAX_BACKOFF_SECONDS = 60.0
-# Per-request OpenAI client timeout. Multimodal payloads through a flaky
-# proxy have historically taken hours when this defaulted to 600 s × 5
-# retries (50 min/trial × 4 trials = 200 min/verify worst case). 120 s here,
-# combined with non-retryable ``APITimeoutError`` below, bounds wall-clock
-# damage to ~8 min/verify when the upstream is genuinely down.
-JUDGE_REQUEST_TIMEOUT_SECONDS = 120.0
+# Per-request OpenAI client timeout. A local multimodal VLM judge must prefill
+# the whole payload (dozens of rasterized pages + extracted text per side)
+# before the first token, which for image-dense deliverables can exceed the
+# 120 s originally tuned for a flaky frontier proxy -- silently dropping
+# slow-but-healthy local judgements and biasing the ELO fit. Default 300 s;
+# override with ``GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS``. Kept non-retryable
+# (below) so a genuinely dead upstream still bounds wall-clock rather than
+# retrying N x timeout.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "300"))
 # Per-file size cap on multimodal content blocks. Above this the file is
 # replaced with a one-line text marker so the judge still knows what was
 # claimed without us pushing 100s of MB of base64 through the proxy.
@@ -296,6 +304,16 @@ def get_file_image_text_blocks(
             pdf_bytes: bytes | None = Path(full_path).read_bytes()
         elif file_type == "DOC":
             pdf_bytes = _convert_to_pdf(full_path)
+            if pdf_bytes is None:
+                # No sibling .pdf render exists, so this Office deliverable's content
+                # is invisible to an image-only judge (only the filename is shown).
+                # Warn so an incomplete-preconvert reference cache surfaces instead of
+                # silently scoring empty -- run preconvert on the cache to include it.
+                LOGGER.warning(
+                    "office file %r has no sibling .pdf render; its content is invisible "
+                    "to this judge -- preconvert the deliverables cache to include it",
+                    file_name,
+                )
         else:
             pdf_bytes = None
 
@@ -344,7 +362,7 @@ def build_file_section(
     clean_up_list: list[Path] | None = None,
     *,
     media_mode: str = "native_pdf",
-    render_dpi: int = 150,
+    render_dpi: int = 144,
     max_pages: int = 50,
     include_text: bool = True,
     audio_capable: bool = False,
@@ -515,15 +533,29 @@ def send_judge_request(
 # ---------------------------------------------------------------------------
 
 
+_BOXED_RE = re.compile(r"BOXED\[(A|B|TIE)\]")
+
+_BOXED_TO_RESPONSE = {"A": A_WIN_RESPONSE, "B": B_WIN_RESPONSE, "TIE": TIE_RESPONSE}
+
+
 def parse_judgement(response_text: str) -> str:
-    """Extract ``BOXED[A]``, ``BOXED[B]``, or ``BOXED[TIE]`` from judge response."""
-    if A_WIN_RESPONSE in response_text:
-        return A_WIN_RESPONSE
-    if B_WIN_RESPONSE in response_text:
-        return B_WIN_RESPONSE
-    if TIE_RESPONSE in response_text:
+    """Extract the judge's verdict (``BOXED[A|B|TIE]``) from its response.
+
+    Uses the **last** boxed token so a verbose/reasoning judge that writes e.g.
+    ``"not BOXED[A]; the answer is BOXED[B]"`` is scored on its conclusion rather
+    than the first token mentioned (the old first-substring match scored A here).
+    When no boxed verdict is present the response is mis-formatted; we log it and
+    fall back to a TIE so the failure is visible rather than silently pulling the
+    win rate toward 0.5.
+    """
+    matches = _BOXED_RE.findall(response_text or "")
+    if not matches:
+        LOGGER.warning(
+            "judge response has no BOXED[A|B|TIE] verdict; scoring as TIE. head=%r",
+            (response_text or "")[:200],
+        )
         return TIE_RESPONSE
-    return TIE_RESPONSE
+    return _BOXED_TO_RESPONSE[matches[-1]]
 
 
 def tally_result(

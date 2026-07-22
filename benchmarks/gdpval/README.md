@@ -320,27 +320,26 @@ Two pieces make this work:
 
 ### Run it
 
-First serve MiniMax-M3 yourself from the container on your GPU node(s) (the
-vendor GB200 command, TP=8 across two nodes):
+First serve MiniMax-M3 yourself on your GPU node(s) using the provided sbatch
+scripts, which pin the **validated single-node topology**. Do NOT serve TP=8
+across nodes: the cross-node MXFP8 all-reduce path on this container produces
+*garbage logits that still start cleanly* (see the header of
+`serve_minimax_multimodal_1node.sh`).
 
 ```bash
-IFACE_NAME=<fabric-nic>; HEAD_IP=<this-node-ip>
-docker run --gpus all --privileged --ipc=host -p 8000:8000 \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -e GLOO_SOCKET_IFNAME=$IFACE_NAME -e NCCL_SOCKET_IFNAME=$IFACE_NAME \
-    vllm/vllm-openai:minimax-m3 MiniMaxAI/MiniMax-M3 \
-    --block-size 128 -cc.pass_config.fuse_allreduce_rms=False \
-    --tensor-parallel-size 8 --nnodes 2 --node-rank 0 --master-addr $HEAD_IP \
-    --tool-call-parser minimax_m3 --enable-auto-tool_choice \
-    --reasoning-parser minimax_m3
-# On Slurm without Docker, convert with enroot/pyxis and run the same args via
-# `srun --container-image=...`. Verify: curl -s http://$HEAD_IP:8000/v1/models
+# 1 GB200 node (TP=4) — simplest:
+sbatch resources_servers/gdpval/serve_minimax_multimodal_1node.sh
+# or 2 nodes (TP=4 x DP=2) for ~2x judge throughput:
+sbatch resources_servers/gdpval/serve_minimax_multimodal_dp2.sh
+# Verify (from the gym host): curl -s http://<node-ip>:5000/v1/models
 ```
 
-Then point gym at your endpoint:
+Then point gym at the endpoint the script wrote (note port **5000** and the
+served-model name):
 
 ```bash
-export MINIMAX_BASE_URL=http://$HEAD_IP:8000/v1   # your server's /v1 route
+export MINIMAX_BASE_URL=$(. ${OUTPUT_DIR}/server_info/minimax-m3.env; echo "$SERVER_URL")
+export MINIMAX_MODEL=minimax-m3   # must match the server's --served-model-name
 
 gym eval run \
     --model-type vllm_model \

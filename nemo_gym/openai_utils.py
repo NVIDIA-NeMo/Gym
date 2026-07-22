@@ -359,9 +359,37 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
+class _NeMoGymVideoURL(TypedDict, total=False):
+    url: Required[str]
+
+
+class NeMoGymChatCompletionContentPartVideoParam(TypedDict, total=False):
+    # vLLM-standard ``video_url`` content part (not in the OpenAI SDK). Self-hosted
+    # VLM judges (e.g. MiniMax-M3) read video through this type; the proxy forwards
+    # it unchanged so it reaches the model's video tower. Without it in the union
+    # the proxy schema rejected video parts with a 422 and the matchup was silently
+    # dropped.
+    type: Required[Literal["video_url"]]
+    video_url: Required[_NeMoGymVideoURL]
+
+
+class _NeMoGymInputAudio(TypedDict, total=False):
+    data: Required[str]
+    format: Required[str]
+
+
+class NeMoGymChatCompletionContentPartInputAudioParam(TypedDict, total=False):
+    # OpenAI/vLLM ``input_audio`` content part (raw base64 + a format token) for
+    # self-hosted judges that read audio.
+    type: Required[Literal["input_audio"]]
+    input_audio: Required[_NeMoGymInputAudio]
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
+    NeMoGymChatCompletionContentPartVideoParam,
+    NeMoGymChatCompletionContentPartInputAudioParam,
 ]
 
 
