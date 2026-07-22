@@ -1,33 +1,28 @@
 #!/bin/bash
 
 command=$(cat <<EOF
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
-    vllm serve $MODEL \
-        --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
-        --gpu-memory-utilization 0.85 \
-        --distributed-executor-backend ray \
-        --data-parallel-backend ray \
-        --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
-        --tensor-parallel-size 4 \
-        --trust-remote-code \
-        --enable-auto-tool-choice \
-        --tool-call-parser qwen3_coder \
-        --reasoning-parser nemotron_v3 \
-        --enable-prefix-caching \
-        --enable-chunked-prefill \
-        --api-server-count 1 \
-        --kv-cache-dtype fp8 \
-        -cc.pass_config.fuse_allreduce_rms=False \
-        --mamba-ssm-cache-dtype float32 \
-        --model-loader-extra-config '{\"enable_multithread_load\": true, \"num_threads\": 96}' \
-        --moe-backend triton \
-        --max-num-batched-tokens 32768 \
-        > "vllm_$(date +%Y%m%d_%H%M%S).log" 2>&1
-EOF
-)
-command=$(cat <<EOF
-    echo "hello"
+    VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \\
+    vllm serve $MODEL \\
+        --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \\
+        --gpu-memory-utilization 0.85 \\
+        --distributed-executor-backend ray \\
+        --data-parallel-backend ray \\
+        --data-parallel-size 2 \\
+        --data-parallel-size-local 1 \\
+        --tensor-parallel-size 4 \\
+        --trust-remote-code \\
+        --enable-auto-tool-choice \\
+        --tool-call-parser qwen3_coder \\
+        --reasoning-parser nemotron_v3 \\
+        --enable-prefix-caching \\
+        --enable-chunked-prefill \\
+        --api-server-count 1 \\
+        --kv-cache-dtype fp8 \\
+        -cc.pass_config.fuse_allreduce_rms=False \\
+        --mamba-ssm-cache-dtype float32 \\
+        --model-loader-extra-config '{\"enable_multithread_load\": true, \"num_threads\": 96}' \\
+        --moe-backend triton \\
+        --max-num-batched-tokens 32768 \\
 EOF
 )
 
