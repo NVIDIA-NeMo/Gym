@@ -74,6 +74,7 @@ gdpval_judge_model:
 gdpval_resources_server:
   resources_servers:
     gdpval:
+      verified: false
       # Keep judge_model_server on the default `gdpval_judge_model` proxy, which
       # we repointed at your endpoint above.
       judge_model_server:

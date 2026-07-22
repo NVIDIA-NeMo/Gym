@@ -1215,8 +1215,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
                 )
 
-                # Fall back to no repeat_index dir for backwards compatibility with older runs.
-                if not Path(deliverables_dir).is_dir():
+                # Fall back to the flat (no repeat_index) layout for backwards compat with older
+                # runs. Only applies when we expect pre-existing deliverables; for fresh runs the
+                # repeat dir is created during the rollout so the check would always fire.
+                if (self.config.judge_only or self.config.rerun_incomplete) and not Path(deliverables_dir).is_dir():
                     deliverables_dir = str((Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute())
 
             # Per-request opt-in to judge an already-cached deliverable instead of
