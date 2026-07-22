@@ -237,6 +237,60 @@ class TestExec:
         with pytest.raises(RuntimeError, match="not running"):
             await env.exec("true")
 
+    @pytest.mark.asyncio
+    async def test_exec_cpu_pin_wraps_outside_exec_shell(self, tmp_path):
+        env = _make_environment(tmp_path, exec_shell="bash -ic", cpu_pin_enabled=True)
+        await env.start(force_build=False)
+        await env.exec("tmux -V")
+        command = _provider().exec_calls[-1]["command"]
+        # Width comes from the task's cpu count (4 in _make_environment) and
+        # the pin wraps the whole `bash -ic '...'` invocation so children
+        # (e.g. the tmux server) inherit the affinity.
+        assert command.startswith("__osb_w=4; ")
+        assert command.endswith("$__osb_pin bash -ic 'tmux -V'")
+        assert 'taskset -c $__osb_s-$((__osb_s + __osb_w - 1))' in command
+        # Fail-open branch present: unpinned when taskset/nproc can't cooperate.
+        assert '__osb_pin=""' in command
+
+    @pytest.mark.asyncio
+    async def test_exec_cpu_pin_disabled_by_default(self, tmp_path):
+        env = _make_environment(tmp_path, exec_shell=None)
+        await env.start(force_build=False)
+        await env.exec("true")
+        assert _provider().exec_calls[-1]["command"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_exec_cpu_pin_width_tracks_task_cpu_default(self, tmp_path):
+        # Harbor defaults EnvironmentConfig.cpus to 1, so a task without an
+        # explicit cpu count pins with width 1 (matching its cgroup limit).
+        env = _make_environment(
+            tmp_path,
+            exec_shell=None,
+            cpu_pin_enabled=True,
+            task_env_config=TaskEnvironmentConfig(docker_image="docker.io/example/task:1.0"),
+        )
+        await env.start(force_build=False)
+        await env.exec("true")
+        command = _provider().exec_calls[-1]["command"]
+        assert command.startswith("__osb_w=1; ")
+        assert command.endswith("$__osb_pin true")
+
+    def test_cpu_pin_prefix_is_valid_posix_sh(self):
+        import shutil
+        import subprocess
+
+        if shutil.which("sh") is None:
+            pytest.skip("sh not available")
+        # The prefix must parse and run under plain POSIX sh (execd does not
+        # guarantee bash); with a huge width the fail-open branch must leave
+        # the command unpinned but still run it.
+        from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import _cpu_pin_prefix
+
+        script = f"{_cpu_pin_prefix(100000)} echo pinned-ok"
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "pinned-ok"
+
 
 class TestFileTransfer:
     @pytest.mark.asyncio

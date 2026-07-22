@@ -99,6 +99,12 @@ harbor_agent:
         override_cpus: 8
         override_memory_mb: 16384
         override_storage_mb: 30720
+        # Pin each Harbor exec (and thus the agent's tmux session + verifier)
+        # to a random contiguous core block sized by the cpu count above.
+        # Sandboxes see the host's full core count, so build tools otherwise
+        # fan out to nproc workers and get CFS-throttled. Fail-open (no
+        # taskset / small host -> unpinned).
+        cpu_pin_enabled: false
 
       model_server:
         type: responses_api_models

@@ -56,6 +56,29 @@ from nemo_gym.sandbox import (
 _TRANSFER_DIR = "/tmp"
 
 
+def _cpu_pin_prefix(width: int) -> str:
+    """Shell prefix that pins the following command to a random contiguous
+    ``width``-core block.
+
+    Sandbox containers see the host's full core count (cgroup cpu limits don't
+    shrink ``nproc``), so build tools fan out to e.g. 96 workers and get CFS
+    throttled. Pinning a) makes ``nproc`` report ``width`` inside the command
+    (tools right-size their parallelism) and b) spreads co-resident sandboxes
+    across different core blocks instead of all stacking on cores 0..width-1.
+
+    POSIX sh (execd runs commands through sh, not bash) and fail-open: no
+    ``taskset`` in the image, ``nproc`` <= width, or unreadable urandom leaves
+    ``$__osb_pin`` empty and the command runs unpinned.
+    """
+    return (
+        f'__osb_w={width}; __osb_n=$(nproc 2>/dev/null || echo 0); '
+        f'if [ "$__osb_n" -gt "$__osb_w" ] && command -v taskset >/dev/null 2>&1; then '
+        f'__osb_s=$(( $(od -An -N2 -tu2 /dev/urandom | tr -d " ") % (__osb_n - __osb_w) )); '
+        f'__osb_pin="taskset -c $__osb_s-$((__osb_s + __osb_w - 1))"; '
+        f'else __osb_pin=""; fi; $__osb_pin'
+    )
+
+
 class NemoGymSandboxEnvironment(BaseEnvironment):
     """Harbor ``BaseEnvironment`` that runs the task in a NeMo Gym sandbox.
 
@@ -84,6 +107,11 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         exec_shell: Shell prefix wrapped around every Harbor-issued command
             (default ``"bash -ic"``, matching Harbor's docker/daytona
             backends). Set to null to run commands verbatim.
+        cpu_pin_enabled: Pin every Harbor-issued command to a random
+            contiguous core block sized by the task's cpu count (default
+            False). The tmux server Terminus-2 starts is itself launched via
+            ``exec``, so the whole agent session inherits the affinity; the
+            verifier exec gets its own block. See ``_cpu_pin_prefix``.
         image_rewrites: Ordered ``[{from: ..., to: ...}]`` prefix rewrites
             applied to the task's ``docker_image`` (see
             ``nemo_gym.sandbox.rewrite_image``).
@@ -105,6 +133,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         sandbox_ready_timeout_s: Optional[float] = 900,
         default_exec_timeout_s: Optional[float] = 300,
         exec_shell: Optional[str] = "bash -ic",
+        cpu_pin_enabled: bool = False,
         image_rewrites: Optional[list[Mapping[str, str]]] = None,
         workdir: Optional[str] = None,
         allow_unenforced_internet_isolation: bool = False,
@@ -119,6 +148,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         self._sandbox_ready_timeout_s = sandbox_ready_timeout_s
         self._default_exec_timeout_s = default_exec_timeout_s
         self._exec_shell = exec_shell
+        self._cpu_pin_enabled = cpu_pin_enabled
         self._image_rewrites = [dict(rewrite) for rewrite in (image_rewrites or [])]
         self._workdir = workdir
         self._allow_unenforced_internet_isolation = allow_unenforced_internet_isolation
@@ -262,6 +292,10 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         # (conda, pyenv, custom PATH) behave identically.
         if self._exec_shell:
             command = f"{self._exec_shell} {shlex.quote(command)}"
+        if self._cpu_pin_enabled:
+            width = int(self.task_env_config.cpus or 0)
+            if width > 0:
+                command = f"{_cpu_pin_prefix(width)} {command}"
         result = await self._require_sandbox().exec(
             command,
             cwd=cwd,
