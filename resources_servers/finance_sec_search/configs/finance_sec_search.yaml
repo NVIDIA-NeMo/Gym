@@ -8,7 +8,11 @@ finance_sec_search_resources_server:
       description: SEC EDGAR filing search for financial analysis questions
       value: Enable LLMs to search and analyze SEC filings
       cache_dir: null  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
-      tavily_api_key: ${tavily_api_key}
+      use_cache: false  # keep false for eval to fetch fresh filings, set to true for training to reuse cached filings
+      # Wrapped in oc.select (Gym convention, cf. labbench2_vlm) so the env resolves
+      # standalone (`gym env start` / `+dry_run`); override via env / NVFlow overlay.
+      # null default => web search disabled unless a key is supplied.
+      tavily_api_key: ${oc.select:tavily_api_key,null}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model
@@ -38,9 +42,11 @@ search_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
-      openai_base_url: ${search_judge_model_base_url}
-      openai_api_key: ${search_judge_model_api_key}
-      openai_model: ${search_judge_model_name}
+      # oc.select w/ defaults => env resolves standalone (dry_run/bake); overlays
+      # (or env.yaml) still override by setting the referenced keys.
+      openai_base_url: ${oc.select:search_judge_model_base_url,https://api.openai.com/v1}
+      openai_api_key: ${oc.select:search_judge_model_api_key,unset}
+      openai_model: ${oc.select:search_judge_model_name,gpt-5-mini}
 
 finance_agent:
   responses_api_agents:

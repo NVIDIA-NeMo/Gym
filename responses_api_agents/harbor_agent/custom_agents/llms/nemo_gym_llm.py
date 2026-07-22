@@ -34,7 +34,7 @@ from tenacity import (
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
-_RoutedExperts = list[list[list[int]]]
+_RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
 
 
@@ -352,7 +352,7 @@ class NemoGymLLM(BaseLLM):
         routed_experts = message.get("routed_experts") if isinstance(message, dict) else None
         if routed_experts is None:
             routed_experts = response.get("routed_experts")
-        if not isinstance(routed_experts, list):
+        if not isinstance(routed_experts, (list, str)):
             return None
         return cast(_RoutedExperts, routed_experts)
 
