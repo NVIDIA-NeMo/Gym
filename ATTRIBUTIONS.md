@@ -54,10 +54,10 @@ changes are placed under Apache-2.0.
 
 | Component | Type | License | Author / Copyright | URL |
 |------------|------|----------|--------------------|-----|
-| **ToolSandbox** | Tool-use benchmark (scenarios, tools, sandbox, scoring) | Original: Apple custom source license (see full text below). NVIDIA modifications: Apache-2.0 | Copyright (C) 2024 Apple Inc.; Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES | https://github.com/apple/ToolSandbox |
+| **ToolSandbox** | Tool-use benchmark (scenarios, tools, sandbox, scoring) | Original: Apple MIT License (see full text below). NVIDIA modifications: Apache-2.0 | Copyright (C) 2024 Apple Inc.; Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES | https://github.com/apple/ToolSandbox |
 
 - Vendored at: `resources_servers/toolsandbox/tool_sandbox/`
-- Upstream license: `resources_servers/toolsandbox/tool_sandbox/LICENSE`
+- Upstream license: reproduced in full in the section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
 
@@ -296,10 +296,12 @@ The copy is attached below.
 
 ---
 
-### ToolSandbox (Apple custom source license)
+### Apple MIT License
+
+### ToolSandbox
 
 Applies to the vendored `resources_servers/toolsandbox/tool_sandbox/` sources.
-Reproduced verbatim from that directory's `LICENSE`; subcomponent notices are in
+Reproduced verbatim from the upstream repository; subcomponent notices are in
 its `ACKNOWLEDGEMENTS` file.
 
 ```text

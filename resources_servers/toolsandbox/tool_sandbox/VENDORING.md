@@ -25,7 +25,7 @@ NVIDIA modifications to the vendored Apple sources are licensed under
 
 - Files **modified** by NVIDIA retain Apple's original notice verbatim
   (`# Copyright (C) 2024 Apple Inc. All Rights Reserved.` +
-  `# For licensing see accompanying LICENSE file.`) and add an NVIDIA
+  `# Originally Apple MIT License`) and add an NVIDIA
   modifications block below it:
 
   ```text
