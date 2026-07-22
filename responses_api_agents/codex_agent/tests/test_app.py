@@ -307,7 +307,7 @@ class TestRunForwardsSkillsPath:
 
 class TestRunCodex:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
-        agent = _make_agent(openai_api_key="sk-test", system_prompt=None)
+        agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
         captured: dict = {}
 
         class FakeProc:
@@ -341,7 +341,7 @@ class TestRunCodex:
 
         assert captured["cmd"][0] == "codex"
         assert captured["cmd"][-1] == "hello"
-        assert captured["api_key"] == "sk-test"
+        assert captured["api_key"] == "sk-test"  # pragma: allowlist secret
         assert captured["stdin"] == asyncio.subprocess.DEVNULL
         # own process group, so a timeout kill reaps the npm shim's vendored-binary child too
         assert captured["start_new_session"] is True
