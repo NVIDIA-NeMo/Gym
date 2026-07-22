@@ -504,6 +504,38 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             return f"{self.config.container_workdir.rstrip('/')}/.agent_deps"
         return "/agent_deps_mount"
 
+    def _failed_agentic_response(
+        self,
+        body: CVDPAgentRunRequest,
+        error: str,
+        *,
+        return_code: int | None = None,
+    ) -> CVDPAgentVerifyResponse:
+        """Return a zero-reward rollout for a per-task harness failure."""
+        meta = (body.model_extra or {}).get("verifier_metadata") or {}
+        categories = meta.get("categories") or []
+        response = NeMoGymResponse(
+            id="cvdp-agent-error",
+            created_at=0.0,
+            model=body.responses_create_params.model or "error",
+            object="response",
+            output=[],
+            tools=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+        )
+        print(f"[CVDP AGENT ERROR] task_id={meta.get('task_id')}: {error}", flush=True)
+        return CVDPAgentVerifyResponse(
+            **body.model_dump(),
+            response=response,
+            reward=0.0,
+            task_id=meta.get("task_id"),
+            category=categories[0] if categories else None,
+            difficulty=meta.get("difficulty"),
+            container_exit_code=return_code,
+            container_stderr=error,
+        )
+
     async def _remote_harvest(
         self,
         box: AsyncSandbox,
@@ -529,7 +561,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 pass
         return harvest(mirror, globs, seeded=seeded)
 
-    async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest):
+    async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
         meta = (body.model_extra or {}).get("verifier_metadata") or {}
         context_files = meta.get("context_files") or {}
         target_files = meta.get("target_files") or []
@@ -582,13 +614,20 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 )
                 if agent_result.return_code != 0:
                     details = (agent_result.stderr or agent_result.stdout or "")[-2000:]
-                    raise RuntimeError(f"sandbox harness exited with code {agent_result.return_code}: {details}")
+                    return self._failed_agentic_response(
+                        body,
+                        f"sandbox harness exited with code {agent_result.return_code}: {details}",
+                        return_code=agent_result.return_code,
+                    )
 
                 with tempfile.TemporaryDirectory(prefix="cvdp_agent_run_") as scratch:
                     scratch_path = Path(scratch)
                     resp_local = scratch_path / "response.json"
-                    await box.download(f"{traj}/response.json", resp_local)
-                    response = NeMoGymResponse.model_validate_json(resp_local.read_text())
+                    try:
+                        await box.download(f"{traj}/response.json", resp_local)
+                        response = NeMoGymResponse.model_validate_json(resp_local.read_text())
+                    except Exception as e:
+                        return self._failed_agentic_response(body, f"could not load harness response.json: {e}")
 
                     rtl_files = await self._remote_harvest(
                         box,

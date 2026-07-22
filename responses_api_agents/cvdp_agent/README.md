@@ -103,7 +103,8 @@ No Python changes — `app.py` and `sandbox_entrypoint.py` stay untouched.
 
 The agent uses the common sandbox API. `sandbox_provider` accepts an inline config or a
 named top-level config. `archive` uploads the runtime without provider-specific mounts.
-Use a registry OCI image for Apptainer and OpenSandbox. Local `.sif` images require Apptainer.
+Bare refs must be pullable from a registry (`docker://...`). Local-only images must use an
+explicit `.sif` path and the Apptainer provider.
 
 ### Running
 

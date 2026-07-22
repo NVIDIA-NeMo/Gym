@@ -15,7 +15,8 @@
 import json
 import tarfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,6 +33,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cvdp_agent.app import (
     CVDPAgent,
     CVDPAgentConfig,
+    CVDPAgentRunRequest,
     deps_build_env,
 )
 
@@ -186,6 +188,29 @@ class TestAgenticSandboxSpec:
         )
         return CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    @staticmethod
+    def _run_request() -> CVDPAgentRunRequest:
+        return CVDPAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "build rtl"}],
+                    "model": "test-model",
+                },
+                "verifier_metadata": {
+                    "task_id": "task-1",
+                    "categories": ["cid001"],
+                    "difficulty": "easy",
+                },
+            }
+        )
+
+    @staticmethod
+    def _sandbox_context(box):
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=box)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return context
+
     def test_open_sandbox_uses_oci_ref_without_provider_options(self) -> None:
         agent = self._agent(deps_provision="archive")
         agent._model_url = MagicMock(return_value="https://model.example/v1")
@@ -200,6 +225,55 @@ class TestAgenticSandboxSpec:
         agent = self._agent(image="/tmp/cvdp.sif")
         with pytest.raises(ValueError, match="Apptainer"):
             agent._resolve_image()
+
+    async def test_harness_failure_returns_zero_reward(self) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=7, stdout="", stderr="harness failed"),
+            ]
+        )
+
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            result = await agent.run(MagicMock(cookies={}), self._run_request())
+
+        assert result.reward == 0.0
+        assert result.task_id == "task-1"
+        assert result.container_exit_code == 7
+        assert "harness failed" in result.container_stderr
+        agent.server_client.post.assert_not_called()
+
+    async def test_missing_harness_response_returns_zero_reward(self) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+            ]
+        )
+        box.download = AsyncMock(side_effect=FileNotFoundError("response.json"))
+
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            result = await agent.run(MagicMock(cookies={}), self._run_request())
+
+        assert result.reward == 0.0
+        assert result.task_id == "task-1"
+        assert result.container_exit_code is None
+        assert "response.json" in result.container_stderr
+        agent.server_client.post.assert_not_called()
 
     def test_deps_archive_contains_runtime_root(self, tmp_path) -> None:
         agent = self._agent()
