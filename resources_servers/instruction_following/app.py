@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal
 
 from fastapi import FastAPI
 from pydantic import model_validator
@@ -33,34 +33,13 @@ class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
 
 class InstructionFollowingRunRequest(BaseRunRequest):
     id: int
-    # Benchmark rows store verifier fields under verifier_metadata.
-    # Training rows store them at the top level for backward compatibility.
-    # The validator below resolves whichever is present.
-    verifier_metadata: Optional[Dict[str, Any]] = None
-    instruction_id_list: Optional[List] = None
-    prompt: Optional[str] = None
-    kwargs: Optional[List] = None
-    grading_mode: Literal["binary", "fraction"] = "binary"
+    verifier_metadata: Dict[str, Any]
 
     @model_validator(mode="after")
-    def _resolve_verifier_fields(self) -> "InstructionFollowingRunRequest":
-        """Pull verifier fields from verifier_metadata when not set at top level."""
-        vm = self.verifier_metadata or {}
-        if self.instruction_id_list is None:
-            self.instruction_id_list = vm.get("instruction_id_list")
-        if self.prompt is None:
-            self.prompt = vm.get("prompt")
-        if self.kwargs is None:
-            self.kwargs = vm.get("kwargs")
-        vm_grading = vm.get("grading_mode")
-        if vm_grading is not None:
-            self.grading_mode = vm_grading
-        if self.instruction_id_list is None:
-            raise ValueError("instruction_id_list is required (provide at top level or in verifier_metadata)")
-        if self.kwargs is None:
-            raise ValueError("kwargs is required (provide at top level or in verifier_metadata)")
-        if self.prompt is None:
-            raise ValueError("prompt is required (provide at top level or in verifier_metadata)")
+    def _validate_verifier_metadata(self) -> "InstructionFollowingRunRequest":
+        missing = [f for f in ("instruction_id_list", "prompt", "kwargs") if f not in self.verifier_metadata]
+        if missing:
+            raise ValueError(f"verifier_metadata is missing required fields: {missing}")
         return self
 
 
@@ -71,14 +50,7 @@ class InstructionFollowingVerifyRequest(InstructionFollowingRunRequest, BaseVeri
 class InstructionFollowingVerifyResponse(BaseVerifyResponse):
     follow_all_instructions: bool
     follow_instruction_list: List[bool]
-    kwargs: List
-    instruction_id_list: List
-    prompt: str
-    grading_mode: Literal[
-        "binary",
-        "fraction",
-    ] = "binary"
-    verifier_metadata: Optional[Dict[str, Any]] = None
+    verifier_metadata: Dict[str, Any]
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
@@ -122,9 +94,10 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
                 # Extract text from the nested content structure
                 final_response_text = last_output.content[0].text
 
-        # Verify each instruction using the verifiable instructions
-        instruction_list = body.instruction_id_list
-        kwargs_list = body.kwargs
+        vm = body.verifier_metadata
+        instruction_list = vm["instruction_id_list"]
+        kwargs_list = vm["kwargs"]
+        grading_mode = vm.get("grading_mode", "binary")
         is_following_list = []
 
         for instruction_id, kwargs in zip(instruction_list, kwargs_list):
@@ -155,13 +128,12 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
                 is_following_list.append(False)
 
         # Calculate overall success
-        reward_mode = getattr(body, "grading_mode", "binary")
-        if reward_mode == "binary":
+        if grading_mode == "binary":
             reward = float(all(is_following_list))
-        elif reward_mode == "fraction":
+        elif grading_mode == "fraction":
             reward = float((sum(is_following_list) / len(is_following_list)) if is_following_list else 0.0)
         else:
-            raise ValueError(f"Invalid reward mode: {reward_mode}")
+            raise ValueError(f"Invalid grading_mode: {grading_mode}")
 
         return InstructionFollowingVerifyResponse(
             **body.model_dump(),

@@ -19,15 +19,9 @@ Downloads the original IFEval test data from the google-research GitHub repo
 and converts it to Gym JSONL format compatible with the
 `instruction_following` resources server.
 
-Each output row uses the standard two-key Gym layout:
-
+Each output row has two keys:
   responses_create_params  — the agent input (user message with the prompt)
   verifier_metadata        — scoring fields read by the resources server
-
-The verifier fields (prompt, instruction_id_list, kwargs, grading_mode) live
-under verifier_metadata rather than at the top level so the data structure
-matches the Gym convention: the agent input and the verifier input are clearly
-separated and neither bleeds into the other.
 
 grading_mode is set to "binary" to align with the original paper's
 prompt-level strict accuracy metric (1 if all instructions pass, 0 otherwise).
