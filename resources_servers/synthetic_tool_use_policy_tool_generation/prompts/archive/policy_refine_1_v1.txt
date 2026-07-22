@@ -1,0 +1,24 @@
+Your job is to edit the policy.md file for an automated agent for the {domain} domain given the tools.jsonl.
+Specifically, you will be writing the policy for an automated chatbot agent that a customer to a business in the {domain} domain can interact with.
+The provided tools.jsonl is the list of tools the agent can actually interact with. You must re-generate the policy.md file to reflect specific tools the agent can use.
+
+Your task is as follows:
+1. Carefully read the tools.jsonl and check whether the policy contains exact references to the tools provided to the agent.
+2. If the tool is present in the policy, make sure that the policy makes it clear how to use the tool.
+3. If the tool is not present in the policy but has a reference to its functionality, edit the policy such that it accurately reflects the existence and positioning of the tool.
+4. If the tools is not present in the policy and has no reference to its functionality, edit the policy such that it now includes the tool and its functionality in a way that does not majorly disrupt or change the original policy.
+5. Write the new policy.md file for the chatbot agent between <policy> </policy> tags.
+
+When writing the policy, consider:
+- Do not change the original policy too much. Your job is to edit the policy, not re-write it from scratch.
+- Keep all original keywords and ideas from the policy, such as the timestamp, constraints, limitations, escalation policy, authentication policy, etc.
+
+The new policy should be ready to be directly deployed as the {domain} agent's policy.
+
+<original_policy>
+{policy}
+</original_policy>
+
+<tools.jsonl>
+{tools}
+</tools.jsonl>

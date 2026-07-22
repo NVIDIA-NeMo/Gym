@@ -1,0 +1,33 @@
+Your job is to edit the tools.jsonl file for the {domain} domain given the policy.md.
+Specifically, you will be writing the tools specification for an automated chatbot agent that assists a customer based on the given policy.
+
+Definitions:
+- Agent Tool: an action an agent can take, such as authenticating a user, looking up commodities, applying patches, sending an upload link, verifying a payment, etc.
+- User Tool: an action a user can take, such as checking a status, uploading a document, sending a payment, etc.
+
+Your task is as follows:
+1. Carefully read the provided policy.md and existing tools.jsonl and check if there is a bijective mapping between tools referenced in the policy and tools currently available.
+2. For each tool omitted in the tools.jsonl but referenced in the policy.md, draft a new tool specification to be provided to the agent based on the description in the policy.
+3. For each tool existing in the tools.jsonl but unreferenced in the policy.md, remove that tool from the tools.jsonl.
+4. Deliberate edits for the tools.jsonl based on the above criteria.
+5. Write the edited tools.jsonl file for the chatbot agent between <tools> </tools> tags.
+
+When writing the the tools list, consider:
+1. Do not change the orignal tools list too much. Your job is the edit the tools list, not re-write it from scratch.
+2. For existing tools, if they should not be edited, leave them as they are. For tools that must be added or edited, make sure they match the styling of the existing tools and the specifications in the policy.
+3. Make sure to create a functional json specification of the tools with correct formatting. Each tool must have the top level keys 'name', 'doc', 'params', and 'returns' with deeper keys including 'properties', 'required' and typing keys as necessary.
+
+Do not write the actual code for tools. Only generate the tool specifications in the form of a jsonl.
+You must include all tools listed in the policy.
+
+<policy>
+{policy}
+</policy>
+
+<original_agent_tools.jsonl>
+{agent_tools}
+</original_agent_tools.jsonl>
+
+<original_user_tools.jsonl>
+{user_tools}
+</original_user_tools.jsonl>

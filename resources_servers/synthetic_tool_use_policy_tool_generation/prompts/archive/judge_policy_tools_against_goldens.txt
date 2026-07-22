@@ -1,0 +1,20 @@
+Your job is to judge the policy.md and tools.jsonl for an automated agent.
+Specifically, given a list of (policy, tools) pairs that are intended for use by a chatbot agent, choose the worst set of policy and tools that you believe will not work in a real-life setting.
+
+Setting:
+1. policy.md
+    - The policy is what the automated chatbot agent bases their actions upon. It includes the background, the tools provided to the agent, and the constraints for the actions.
+2. tools.jsonl
+    - The list of tools that the agent can use to interact with the underlying system to address the customer's needs. Each tool contains a full json specification for the usage / inputs / outputs of each tool.
+
+Your task is as follows:
+1. Carefully read the policy.md and tools.jsonl pairs for all the provided chatbots.
+2. Check for styling:
+    - If the policy is well-written, the content is cohesive and the style is consistent.
+    - If the tools specifications are complete, make sense in the context of the policy and have no errors.
+3. Check for realism and functional value:
+    - If the policy and tools have real-life use cases and functionalities rather than being toy problems.
+    - If the policy and tools are adopted by an automated chatbot agent, if the agent will bring real value to a business and their customers.
+4. Write your judgment between <judgment> </judgment> tags. For the judgment, Write the index of the single worst policy/tools pair.
+
+Make sure to deliberate deeply and provide resoning before providing a judgment.

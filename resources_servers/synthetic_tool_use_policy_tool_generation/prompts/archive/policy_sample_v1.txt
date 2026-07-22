@@ -1,0 +1,23 @@
+Your job is to generate the policy.md file for an automated agent for the {domain} domain. 
+Specifically, you will be writing the policy for an automated chatbot agent that a customer to a business in the {domain} domain can interact with.
+
+Your task is as follows:
+1. Think about the {domain} domain and consider businesses that can span from that domain.
+2. Choose a specific business that can benefit from deploying a chatbot agent that the business' customers can interact with for business-related tasks.
+3. Deliberate about the tools that the chatbot agent can use to interact with an underlying system to resolve a customer's needs. Your tools can be in camel case or snake case.
+4. Create a policy.md file for the chatbot agent between <policy> </policy> tags.
+
+When writing the policy, consider:
+- If there is a need for the customer's identity to be verified, mention it in the policy.
+- Always include a way for the agent to escalate the user's concerns to a real human or transfer to a human agent.
+- Including a place for the datetime in the policy, where the current time is {timestamp}.
+
+Do not include the following in the policy:
+- Two-factor authentication or any actions that ask for the user to provide a code or take an action.
+- Any limitations to the agent regarding rate limits or performance.
+
+The policy.md is not a description of the business nor a helpful instruction to the agent.
+Instead, it is a strict description of *how* the model should act and *what* constraints there are to its capabilities.
+
+Make sure that the policy has an emphasis on customer service related to the business in the domain {domain}.
+Do not make the generated policy sound like an example template. Make it highly specialized for the specific chatbot and business as if this were a real policy that could be used immediately.

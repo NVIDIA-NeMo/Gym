@@ -1,0 +1,57 @@
+run_name: synthetic-tool-use-proactive
+output_dir: /tmp/synthetic-tool-use-proactive
+generation_profile: proactive
+source_name: synthetic_tool_use_proactive
+random_seed: 1
+
+domain_model:
+  model: Qwen/Qwen3-235B-A22B-Thinking-2507
+  base_url: $DOMAIN_MODEL_BASE_URL
+  api_key_env: DOMAIN_MODEL_API_KEY
+  concurrency: 8
+  sampling:
+    temperature: 1
+
+policy_tools_model:
+  model: deepseek-ai/deepseek-r1-0528
+  base_url: $POLICY_MODEL_BASE_URL
+  api_key_env: POLICY_MODEL_API_KEY
+  concurrency: 8
+  sampling:
+    temperature: 1
+
+judge_model:
+  model: openai/gpt-oss-120b
+  base_url: $JUDGE_MODEL_BASE_URL
+  api_key_env: JUDGE_MODEL_API_KEY
+  concurrency: 8
+  sampling:
+    temperature: 1
+
+scenario_model:
+  model: Qwen/Qwen3-235B-A22B-Thinking-2507
+  base_url: $SCENARIO_MODEL_BASE_URL
+  api_key_env: SCENARIO_MODEL_API_KEY
+  concurrency: 16
+  sampling:
+    temperature: 0.7
+
+domains:
+  request_count: 100
+  semantic_attempts: 2
+
+policy_tools:
+  semantic_attempts: 3
+  refine: true
+  judge_enabled: true
+  judge_votes: 3
+  judge_max_failure_fraction: 0.5
+  golden_comparison_enabled: true
+  golden_comparison_count: 4
+
+scenarios:
+  scenarios_per_request: 80
+  request_count_per_domain: 20
+  outside_policy_scope_fraction: 0.1
+  semantic_attempts: 3
+  scenarios_per_file: 3000

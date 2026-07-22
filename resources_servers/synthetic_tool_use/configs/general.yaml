@@ -1,0 +1,41 @@
+run_name: synthetic-tool-use-general
+output_dir: /tmp/synthetic-tool-use-general
+generation_profile: general
+source_name: synthetic_tool_use_general
+random_seed: 1
+
+domain_model:
+  model: Qwen/Qwen3-235B-A22B-Thinking-2507
+  base_url: $DOMAIN_MODEL_BASE_URL
+  api_key_env: DOMAIN_MODEL_API_KEY
+
+policy_tools_model:
+  model: deepseek-ai/deepseek-r1-0528
+  base_url: $POLICY_MODEL_BASE_URL
+  api_key_env: POLICY_MODEL_API_KEY
+
+judge_model:
+  model: openai/gpt-oss-120b
+  base_url: $JUDGE_MODEL_BASE_URL
+  api_key_env: JUDGE_MODEL_API_KEY
+
+scenario_model:
+  model: Qwen/Qwen3-235B-A22B-Thinking-2507
+  base_url: $SCENARIO_MODEL_BASE_URL
+  api_key_env: SCENARIO_MODEL_API_KEY
+  sampling:
+    temperature: 0.7
+
+domains:
+  request_count: 100
+
+policy_tools:
+  refine: true
+  judge_enabled: true
+  golden_comparison_enabled: true
+  golden_comparison_count: 4
+
+scenarios:
+  scenarios_per_request: 80
+  request_count_per_domain: 20
+  outside_policy_scope_fraction: 0.1

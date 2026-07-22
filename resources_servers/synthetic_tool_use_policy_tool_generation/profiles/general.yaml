@@ -1,0 +1,9 @@
+name: general
+golden_reference_dir: golden_policies
+prompts:
+  policy_prompt: general_policy.txt
+  tools_prompt: general_tools.txt
+  policy_refine_prompt: general_policy_refine.txt
+  tools_refine_prompt: tools_refine.txt
+  cohesion_judge_prompt: cohesion_judge.txt
+  golden_judge_prompt: golden_judge.txt

@@ -1,0 +1,7 @@
+Please give me list of all business/industry sectors.
+
+
+Please format your response as a JSON such as:
+```json
+[sector_1, sector_2, sector_3, ...]
+```

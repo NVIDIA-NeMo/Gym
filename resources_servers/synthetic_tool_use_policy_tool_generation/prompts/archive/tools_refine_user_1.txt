@@ -1,0 +1,39 @@
+Your job is to edit the tools.jsonl file for the {domain} domain given the policy.md and the original tools.jsonl files.
+Specifically, you will be writing the tools specification for an automated chatbot agent that assists a customer based on the given policy.
+You are given the original agent and user tools to serve as a guidance for your tool editing.
+
+Definitions:
+- Agent Tool: an action an agent can take, such as authenticating a user, looking up commodities, applying patches, sending an upload link, verifying a payment, etc.
+- User Tool: an action a user can take, such as checking a status, uploading a document, sending a payment, etc.
+- The user cannot call a user tool unless prompted by the agent.
+- The agent cannot call a user tool, but can prompt the user to call it.
+
+Your task is as follows:
+1. Carefully read the provided policy.md and existing tools.jsonl and check if the original tools fit naturally for the use cases of the policy.
+2. If a tool is referenced in the policy but omitted in the tools.jsonl, draft a new tool specification to be provided to the agent based on the description in the policy.
+3. If an existing tool's execution result must be followed up with another tool, make sure that follow-up tool exists. If it does not exist, create the tool.
+4. If the user can take any action based on the agent's directions as per the policy, make sure that agent's directions are grounded on a tool that exists. If it does not exist, create the tool.
+5. If the agent can ask the user to take an action (e.g. upload a file or send a payment), make sure there are appropriate tools to verify the user's actions.
+6. For any user tool and agent tool that is misclassified, move them and edit them as needed.
+7. Write the edited agent tools.jsonl file for the chatbot agent between <agent_tools> </agent_tools> tags and the user actions as user_tools.jsonl file between <user_tools> </user_tools> tags
+
+When writing the the tools list, consider:
+1. Do not change the original tools list too much unless needed.
+2. For existing tools, if they should not be edited, leave them as they are. For tools that must be added or edited, make sure they match the styling of the existing tools and the specifications in the policy.
+3. Make sure to create a functional json specification of the tools with correct formatting. Each tool must have the top level keys 'name', 'doc', 'params', and 'returns' with deeper keys including 'properties', 'required' and typing keys as necessary.
+4. Return types must be explicit and simple. Do not use 'returns' as a return type property name.
+
+Do not write the actual code for tools. Only generate the tool specifications in the form of a jsonl.
+You must include all agent tools listed in the policy.
+
+<policy>
+{policy}
+</policy>
+
+<original_agent_tools.jsonl>
+{agent_tools}
+</original_agent_tools.jsonl>
+
+<original_user_tools.jsonl>
+{user_tools}
+</original_user_tools.jsonl>

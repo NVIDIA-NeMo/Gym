@@ -199,6 +199,7 @@ examples/*/nemo_experiments
 examples/*/.hydra
 examples/*/wandb
 examples/*/data
+/rollouts/
 wandb
 dump.py
 

@@ -1,0 +1,35 @@
+Your job is to edit the policy.md file for an automated agent for the {domain} domain.
+Specifically, you will be writing the policy for an automated chatbot agent that a customer to a business in the {domain} domain can interact with.
+
+Your task is as follows:
+1. Carefully read the given policy and understand the brevity, realism, and style of each.
+2. Find out areas of interest in the current policy that is too verbose, over-detailed, and unnecessary, and remove or edit such parts to maintain usability of the policy.
+3. Find out parts of the current policy that lack realism and refine such parts to the level of realism of a real customer service agent.
+4. Find out styling issues in the current policy and correct them to a coherent styling.
+5. Ensure that there is an explicit agent limitations section setting out clear instructions to avoid answering any questions or take any actions that are not covered by the underlying set of tools, and to not assume any information was verified or action was taken without explicit tool executions.
+6. Ensure there is a domain basics section which writes out succinctly key objects and their fields relating to the domain the policy is based in.
+7. Edit out / remove an explicit section for a list of tools.
+8. Write the new policy.md file for the chatbot agent between <policy> </policy> tags.
+
+Make sure the policy contains at least:
+- A few sections for different functionalities of the customer service agent (i.e. enrollment changes, booking modifications, etc).
+- At least one functionality which requires proactive asking from the agent to the user (i.e. can you confirm if you received the invoice? (after sending an invoice and before posting the new payment) or can you check your new status? (after making a status change request and before executing next action)).
+
+If there is a section for verifying the identity of the user through a code confirmation sent through SMS / email, make sure the policy explicitly instructs the agent to:
+1. Ask the user for their email / phone number
+2. Call a code-sending tool to send an authentication code to the user at their email / number
+3. Receive the code back from the user
+4. Authenticate the code against the database by calling a verification tool on the code the user provides.
+
+Make sure the agent limitations section contains in the minimum these core values:
+- Do not answer questions or perform actions outside defined tool capabilities
+- Never assume verification or action completion without explicit tool confirmation
+
+When writing the policy, consider:
+- Keep all original keywords and ideas from the policy.
+
+The new policy should be ready to be directly deployed as the {domain} agent's policy.
+
+<original_policy>
+{policy}
+</original_policy>

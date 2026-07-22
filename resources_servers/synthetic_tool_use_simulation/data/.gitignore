@@ -1,0 +1,5 @@
+*.jsonl
+*.report.json
+*.tmp
+!example.jsonl
+!example_parallel_tool_calls.jsonl
