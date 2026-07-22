@@ -219,9 +219,6 @@ def extract_config_metadata(yaml_path: Path, from_agent: bool = False) -> Config
                             type: huggingface
                             repo_id: {example_repo_id_1}
                             artifact_fpath: {example_artifact_fpath_1}
-                          # Deprecated fallback:
-                          # huggingface_identifier:
-                          #   repo_id: {example_repo_id_1}
                         - name: validation
                           type: {example_type_2}
                           license: {example_license_2}
