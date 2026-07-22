@@ -25,6 +25,7 @@ command="
         --max-num-batched-tokens 32768 \
         > "vllm_$(date +%Y%m%d_%H%M%S).log" 2>&1
 "
+CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
 sbatch \
     --nodes=2 \
     --account=nemotron_n4_post \
