@@ -37,6 +37,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for, resolve_input_path
+from nemo_gym.rollout_collection import _get_max_rollout_attempts
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -151,6 +152,14 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
             "By default, an existing output file raises an error to prevent accidental appending or overwriting."
         ),
     )
+    resume_from_cache: bool = Field(
+        default=False,
+        description=(
+            "Resume reverification from a partially-completed output file. "
+            "Rows already present in the output file (or flagged terminal/maxed-out in the failures sidecar) "
+            "are skipped; only the remaining rows are re-verified and appended."
+        ),
+    )
 
 
 def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
@@ -227,30 +236,133 @@ def _run_verification_payloads(
     )
 
 
-def _guard_output_file(output_fpath: Path, overwrite: bool) -> None:
-    if output_fpath.exists():
-        if overwrite:
-            output_fpath.unlink()
-        else:
-            raise ConfigError(
-                f"Output file already exists: '{output_fpath}'. Pass --overwrite to delete it and start fresh."
-            )
+@dataclass
+class OutputPaths:
+    output: Path
+    failures: Path
+
+
+def _prepare_output_fpaths(output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool) -> OutputPaths:
+    output_fpath = Path(output_jsonl_fpath)
+    output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
+    failures_fpath = failures_path_for(output_fpath)
+    if not resume_from_cache:
+        for fpath in (output_fpath, failures_fpath):
+            if fpath.exists():
+                fpath.unlink()
+                print(f"Deleted existing output file: '{fpath}'")
+    return OutputPaths(output=output_fpath, failures=failures_fpath)
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     return pair.input | {"response": pair.rollout["response"]}
 
 
-def _prepare_payloads_from_config(config: RolloutReverificationConfig) -> List[Dict]:
-    materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
-    rollouts_jsonl_fpath = resolve_input_path(config.rollouts_jsonl_fpath)
-    payloads = [
+@dataclass
+class CacheKeysByStatus:
+    successful_keys: set[tuple[int, int]]
+    terminal_keys: set[tuple[int, int]]
+    maxed_out_keys: set[tuple[int, int]]
+
+
+def _parse_output_line_key(line: bytes) -> tuple[int, int]:
+    result_str = line.strip()
+    result = orjson.loads(result_str)
+    return result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)
+
+
+# to do: OutputPaths to OutputFPaths
+def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
+    if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
+        print("Skipping resume_from_cache because cache paths don't exist!")
+        return CacheKeysByStatus(
+            successful_keys=set(),
+            terminal_keys=set(),
+            maxed_out_keys=set(),
+        )
+    # Successes (and any legacy '-failed' rows written by pre-fix Gym
+    # builds) live in the main jsonl. They short-circuit dispatch.
+    successful_keys: set[tuple[int, int]] = set()
+    if output_fpaths.output.exists():
+        with output_fpaths.output.open("rb") as f:
+            successful_keys = {_parse_output_line_key(line) for line in f}
+
+    # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
+    # per key + flag terminal rows so chain-hop 2 retries the right ones.
+    attempts_by_key: Counter = Counter()
+    terminal_keys: set = set()
+    if output_fpaths.failures.exists():
+        with output_fpaths.failures.open("rb") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fr = orjson.loads(line)
+                if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
+                    continue
+                k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                attempts_by_key[k] += 1
+                if fr.get(NG_TERMINAL_KEY):
+                    terminal_keys.add(k)
+
+    max_attempts = _get_max_rollout_attempts()
+    maxed_out_keys = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+    return CacheKeysByStatus(
+        successful_keys=successful_keys,
+        terminal_keys=terminal_keys,
+        maxed_out_keys=maxed_out_keys,
+    )
+
+
+def _drop_cache_from_payloads(payloads: List[Dict], cache: CacheKeysByStatus) -> Iterator[Dict]:
+    for payload in payloads:
+        key = (payload[TASK_INDEX_KEY_NAME], payload[ROLLOUT_INDEX_KEY_NAME])
+        if key in cache.successful_keys:
+            continue
+        if key in cache.terminal_keys:
+            continue
+        if key in cache.maxed_out_keys:
+            continue
+        yield payload
+
+
+def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], filtered_payloads: List[Dict]) -> None:
+    print(
+        f"""Resumed from cache. Found:
+- {len(all_payloads)} total rows to be re-verified
+- {len(cache.successful_keys)} rows already done (in main jsonl)
+- {len(cache.terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(cache.maxed_out_keys)} hit max_attempts → not retried
+- {len(filtered_payloads)} rows that still need to be run"""
+    )
+
+
+def _prepare_payloads(
+    materialized_inputs_jsonl_fpath: Path,
+    rollouts_jsonl_fpath: Path,
+    output_fpaths: OutputPaths,
+    resume_from_cache: bool,
+    limit: Optional[int] = None,
+) -> List[Dict]:
+    all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=config.limit
+            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit
         )
     ]
-    return payloads
+    if resume_from_cache:
+        cache = _load_cache_keys_by_status(output_fpaths)
+        payloads = list(_drop_cache_from_payloads(all_payloads, cache))
+        summarize_cache_usage(cache, all_payloads, payloads)
+        return payloads
+    else:
+        return all_payloads
+
+
+# ---------------------------------------------------------------------------
+# Reverify mode helpers
+# Used by RolloutReverificationHelper to decide if reverification is safe
+# ---------------------------------------------------------------------------
 
 
 async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[str, str]) -> List[str]:
@@ -268,8 +380,8 @@ async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[
     return sorted(unsupported)
 
 
-async def _guard_reverify_mode(payloads: List[Dict], force: bool) -> Optional[str]:
-    """Check reverify_mode for every RS referenced by payloads before reverification starts.
+async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[str]:
+    """Check reverify_mode for every RS in the config before reverification starts.
 
     Returns a warning string when force=True and at least one RS is UNSUPPORTED (caller must
     print it and apply the unsafe_ output prefix).
@@ -278,12 +390,10 @@ async def _guard_reverify_mode(payloads: List[Dict], force: bool) -> Optional[st
     """
     server_client = _setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    agent_names = {p[AGENT_REF_KEY_NAME]["name"] for p in payloads}
-    rs_subset = {name: agent_to_rs[name] for name in agent_names}
-    unsupported_rs = await _check_reverify_mode(server_client, rs_subset)
+    unsupported_rs = await _check_reverify_mode(server_client, agent_to_rs)
     if not unsupported_rs:
         return None
-    if not force:
+    if not config.force:
         raise ConfigError(
             f"Resource server(s) {unsupported_rs} have reverify_mode=UNSUPPORTED. "
             "Rewards computed by reverification may be incorrect. "
@@ -383,20 +493,26 @@ async def _call_aggregate_metrics(
 
 class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        output_fpath = Path(config.output_jsonl_fpath)
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
-
-        payloads_to_reverify = _prepare_payloads_from_config(config)
-
-        force_warning = await _guard_reverify_mode(payloads_to_reverify, config.force)
+        force_warning = await _guard_reverify_mode(config)
         if force_warning:
-            output_fpath = output_fpath.with_name("unsafe_" + output_fpath.name)
             print(force_warning)
+            output_name_prefix = "unsafe_"
+        else:
+            output_name_prefix = ""
 
-        failures_fpath = failures_path_for(output_fpath)
+        output_fpaths = _prepare_output_fpaths(output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache)
+        materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
+        rollouts_jsonl_fpath = resolve_input_path(
+            config.rollouts_jsonl_fpath
+        )  # rollouts are inputs for the verification
 
-        for fpath in (output_fpath, failures_fpath):
-            _guard_output_file(fpath, config.overwrite)
+        payloads_to_reverify = _prepare_payloads(
+            materialized_inputs_jsonl_fpath,
+            rollouts_jsonl_fpath,
+            output_fpaths,
+            config.resume_from_cache,
+            config.limit,
+        )
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
@@ -404,8 +520,8 @@ class RolloutReverificationHelper(BaseModel):
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
-        results_file = output_fpath.open("ab")
-        failures_file = failures_fpath.open("ab")
+        results_file = output_fpaths.output.open("ab")
+        failures_file = output_fpaths.failures.open("ab")
         rows: List[Dict] = []
         results: List[Dict] = []
         result_strs: List[List[str]] = []
@@ -475,10 +591,10 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(results, rows, output_fpaths.output)
 
         print(f"""Finished rollout collection! View results at:
-        Re-verified rollouts: {output_fpath}
+        Re-verified rollouts: {output_fpaths.output}
         Aggregate metrics: {aggregate_metrics_fpath}""")
         if force_warning:
             print(force_warning)
