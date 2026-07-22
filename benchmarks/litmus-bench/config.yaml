@@ -2,6 +2,10 @@
 config_paths:
   - resources_servers/litmus_agent/configs/litmus_agent.yaml
 
+# Long reasoning traces are common on this benchmark.
+responses_create_params:
+  max_output_tokens: 131072
+
 # Keep the generic environment isolated from this fixed benchmark configuration.
 litmus_bench_benchmark_resources_server:
   _inherit_from: litmus_agent

@@ -151,6 +151,7 @@ def test_benchmark_config_is_discoverable_and_isolated() -> None:
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
     assert "litmus_agent" not in resolved
     assert "litmus_agent_agent" not in resolved
+    assert resolved.responses_create_params.max_output_tokens == 131072
 
     resource = resolved.litmus_bench_benchmark_resources_server.resources_servers.litmus_agent
     agent = resolved.litmus_bench_benchmark_agent.responses_api_agents.simple_agent

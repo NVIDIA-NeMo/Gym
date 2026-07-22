@@ -31,7 +31,10 @@ gym eval run \
 ```
 
 The benchmark config uses five rollouts per question. Override `--num-repeats`
-only when intentionally changing the evaluation protocol.
+only when intentionally changing the evaluation protocol. It sets
+`max_output_tokens` to 131,072 as an upper bound for long reasoning traces; the
+effective generation budget is also limited by the model context window minus
+the prompt. Use `--max-output-tokens` to select a smaller budget for a run.
 
 ## License
 
