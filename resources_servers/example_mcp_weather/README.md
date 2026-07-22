@@ -1,9 +1,12 @@
 # Example MCP Weather
 
-A minimal **Gym-owned MCP Resources Server**: it mounts a Streamable-HTTP MCP endpoint at `/mcp` on the
-same FastAPI app as `/seed_session` and `/verify`. The `get_weather` MCP tool records its calls against the
-per-rollout Gym session (resolved from a hidden `X-NeMo-Gym-Session-Token`), and `/verify` rewards a rollout
-only if the tool was used **in that same session** and the final answer repeats the returned sentence.
+A minimal example of serving a Resources Server's tools over the **Model Context Protocol (MCP)**.
+The server is a plain `SimpleResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
+no MCP imports, no decorators. Setting `expose_tools_over_mcp: true` in its YAML config serves that
+same route over a Streamable-HTTP MCP endpoint at `/mcp` on the same FastAPI app as `/seed_session`
+and `/verify`. Tool calls record against the per-rollout Gym session (resolved from a signed
+`X-NeMo-Gym-Session-Token`), and `/verify` rewards a rollout only if the tool was used **in that same
+session** and the final answer repeats the returned sentence.
 
 This is the runnable companion to the [MCP Resources Server tutorial](https://github.com/NVIDIA-NeMo/Gym/tree/main/fern/versions/latest/pages/environment-tutorials/mcp-resources-server.mdx).
 
@@ -33,13 +36,16 @@ s = requests.Session()
 meta = s.post("http://127.0.0.1:<port>/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).json()["mcp"]
 token = meta["headers"]["X-NeMo-Gym-Session-Token"]
 
-# call the MCP tool over the mounted /mcp route, carrying the per-rollout token
+# call the tool over the auto-exposed /mcp endpoint, carrying the per-rollout token
 s.post(
     f"http://127.0.0.1:<port>{meta['url_path']}",
     headers={"Accept": "application/json, text/event-stream", "X-NeMo-Gym-Session-Token": token},
     json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
           "params": {"name": "get_weather", "arguments": {"city": "Paris"}}},
 )
+
+# the same tool is still a plain HTTP route (the cookie carries the session here)
+s.post("http://127.0.0.1:<port>/get_weather", json={"city": "Paris"})
 
 # verify in the same session -> reward 1.0
 print(s.post("http://127.0.0.1:<port>/verify", json={
