@@ -488,7 +488,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     return tools
 
 
-def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]:
+def _validate_tools(server: Any, selected: Optional[list[MCPTool]]) -> dict[str, MCPTool]:
     """Validate the final tool list from ``mcp_tools()``: legal name, not reserved, unique, dispatchable."""
     tools: dict[str, MCPTool] = {}
     for tool in selected or []:
