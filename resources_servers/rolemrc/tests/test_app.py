@@ -275,13 +275,17 @@ class TestJudgeVerify:
         assert result.reward == approx(0.0)
         assert result.n_aspects == 1
 
-    async def test_judge_call_failure_counts_as_zero(self) -> None:
+    async def test_judge_call_failure_routed_to_sidecar(self) -> None:
         server, mock = self._server()
         mock.post = AsyncMock(side_effect=RuntimeError("judge down"))
 
         result = await server.verify(self._request("role_related_mrc_answer_no_narration"))
-        assert result.reward == approx(0.0)
-        assert result.judge_errors == ["knowledge_range"]
+        data = result.model_dump()
+        assert data["reward"] == approx(0.0)
+        assert data["judge_errors"] == ["knowledge_range"]
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "knowledge_range" in data["_ng_failure_judge_error"]
 
     async def test_reasoning_model_think_tags_stripped_before_scoring(self) -> None:
         # If the judge is a reasoning model, <think> blocks may contain numbers

@@ -26,12 +26,13 @@ import json
 import logging
 import re
 import sys
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -40,7 +41,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.judge import judge_failure
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+
+
+# Per-request collector for judge transport failures. A ContextVar is shared by
+# reference across the asyncio.gather child tasks a verify() spawns, so any judge
+# call that fails is recorded here and the row is routed to the failures sidecar
+# instead of being silently scored via the fallback string.
+_JUDGE_ERRORS: ContextVar[Optional[List[str]]] = ContextVar("verifif_judge_errors", default=None)
 
 
 # Handle imports for both direct execution and module import
@@ -195,6 +204,8 @@ class ValidationResult(BaseModel):
 
 class TuringVIFVerifyResponse(BaseVerifyResponse):
     """Response from the verify endpoint."""
+
+    model_config = ConfigDict(extra="allow")
 
     follow_all_instructions: bool
     follow_instruction_list: List[bool]
@@ -436,6 +447,9 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             return out
         except Exception as e:
             logger.warning("Judge LLM call failed: %s", type(e).__name__, exc_info=False)
+            errs = _JUDGE_ERRORS.get()
+            if errs is not None:
+                errs.append(f"{type(e).__name__}: {e}")
             return fallback
 
     async def _validate_custom_llm_judge_async(self, response: str, question_text: str) -> Tuple[bool, str]:
@@ -745,6 +759,10 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             TuringVIFVerifyResponse with reward and validation details
         """
         final_response_text = _extract_text_from_response(body.response)
+        # Collect any judge transport failures raised during this request (see
+        # _JUDGE_ERRORS); a non-empty list routes the row to the failures sidecar.
+        judge_errors: List[str] = []
+        _JUDGE_ERRORS.set(judge_errors)
 
         is_following_list: List[bool] = []
         validation_results: List[ValidationResult] = []
@@ -910,13 +928,19 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         scores = [1.0 if v else 0.0 for v in is_following_list]
         reward = self._aggregate_scores(scores)
 
-        return TuringVIFVerifyResponse(
+        response = TuringVIFVerifyResponse(
             **body.model_dump(),
             reward=reward,
             follow_all_instructions=follow_all_instructions,
             follow_instruction_list=is_following_list,
             validation_results=validation_results,
         )
+        # A judge transport failure means at least one instruction could not be
+        # scored: route the row to the failures sidecar instead of trusting a
+        # reward computed from the fallback verdict.
+        if judge_errors:
+            return judge_failure(response, "; ".join(judge_errors))
+        return response
 
 
 if __name__ == "__main__":

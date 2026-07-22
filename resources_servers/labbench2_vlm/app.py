@@ -40,6 +40,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -166,15 +167,30 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         is_protocol = tag.startswith("protocolqa2")
         reference_passage = str(meta.get("reference_passage", ""))
 
-        is_equal, evaluation = await self._judge(
-            question=question,
-            expected_answer=ideal,
-            generated_answer=generated,
-            prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
-            include_reference_passage=is_protocol,
-            reference_passage=reference_passage,
+        # A failed judge call (auth, rate limit, timeout, endpoint error) is a distinct
+        # outcome, not a wrong answer: carry the model's output and route the row to the
+        # failures sidecar so it stays out of the accuracy denominator.
+        judge_out, judge_error = await run_judge(
+            self._judge(
+                question=question,
+                expected_answer=ideal,
+                generated_answer=generated,
+                prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
+                include_reference_passage=is_protocol,
+                reference_passage=reference_passage,
+            )
         )
+        if judge_error is not None:
+            return judge_failure(
+                LabbenchVLMVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    judge_evaluations=[],
+                ),
+                judge_error,
+            )
 
+        is_equal, evaluation = judge_out
         reward = 1.0 if is_equal else 0.0
         return LabbenchVLMVerifyResponse(
             **body.model_dump(),

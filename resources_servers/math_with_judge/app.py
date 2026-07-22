@@ -24,7 +24,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, PositiveFloat, PositiveInt
+from pydantic import BaseModel, ConfigDict, PositiveFloat, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -66,6 +67,8 @@ class JudgeEvaluation(BaseModel):
 
 
 class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     expected_answer: str
     extracted_answer: Optional[str]
     library_reward: float
@@ -184,12 +187,25 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        # A judge transport failure (auth, rate limit, timeout, endpoint error)
+        # is a distinct outcome, not a wrong answer. The library verifier never
+        # raises (it returns 0.0 on failure), so an exception here is the judge.
+        # Route the row to the failures sidecar instead of silently scoring 0.0.
+        result, judge_error = await run_judge(
+            self._verify_answer(body.question, body.expected_answer, combined_response)
+        )
+        if judge_error is not None:
+            return judge_failure(
+                LibraryJudgeMathVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_answer=None,
+                    library_reward=0.0,
+                    judge_evaluations=None,
+                ),
+                judge_error,
+            )
+        reward, extracted_answer, library_reward, judge_evaluations = result
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,

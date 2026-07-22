@@ -44,6 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -299,6 +300,21 @@ class AbstentionServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    async def _call_judge(self, judge_prompt: str) -> str:
+        msgs: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        response_obj = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
+        return extract_text_from_response(judge_response)
+
     async def verify(self, body: AbstentionVerifyRequest) -> AbstentionVerifyResponse:
         policy_output = extract_text_from_response(body.response)
 
@@ -321,19 +337,22 @@ class AbstentionServer(SimpleResourcesServer):
                 predicted_answer=extracted,
             )
 
-            msgs: List[NeMoGymEasyInputMessage] = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            request_params.input = msgs
+            judge_text, judge_error = await run_judge(self._call_judge(judge_prompt))
 
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-            judge_text = extract_text_from_response(judge_response)
+            # A failed or empty judge call is a distinct outcome, not a wrong answer:
+            # carry the model's output and route the row to the failures sidecar.
+            if judge_error is not None or not judge_text:
+                return judge_failure(
+                    AbstentionVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        extracted_answer=extracted,
+                        ground_truth=ground_truth,
+                        verdict=None,
+                        judge_output=judge_text or "",
+                    ),
+                    judge_error,
+                )
 
             grade = parse_judge_grade(judge_text)
             if grade == "A":

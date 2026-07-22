@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 
 from nemo_gym.base_resources_server import (
@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -118,6 +119,8 @@ class TavilySearchMetrics(BaseModel):
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+    model_config = ConfigDict(extra="allow")
+
     num_tool_calls: int
     metrics: TavilySearchMetrics
 
@@ -400,16 +403,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ground_truth = body.ground_truth
         last_assistant_response = body.response.output_text
 
+        judge_error = None
         if self.config.use_judge:
-            judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
+            judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        return TavilySearchVerifyResponse(
+        response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
+        # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct
+        # outcome, not a wrong answer: route it to the failures sidecar.
+        if judge_error is not None:
+            return judge_failure(response, judge_error)
+        return response
 
     ###### UTILITY FUNCTIONS ######
 
@@ -488,7 +499,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains.append(prop["value"])
         return exclude_domains
 
-    async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
+    async def _verify_answer_with_judge(
+        self, question: str, ground_truth: str, response: str
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -529,9 +542,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 judge_response=judge_response,
             )
 
-        judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
+        result, judge_error = await run_judge(_get_judge_response(question, ground_truth, response))
+        if judge_error is not None:
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), judge_error
+        judge_create_params, judge_response = result
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
-        return judge_evaluation
+        return judge_evaluation, None
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
         """Verify answer by checking if ground_truth (as regex) matches in response."""

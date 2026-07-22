@@ -49,6 +49,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -267,6 +268,34 @@ class InverseIFServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: InverseIFVerifyRequest) -> InverseIFVerifyResponse:
+        """Verify a model response, routing judge-call failures to the failures sidecar.
+
+        A failed judge call (auth, rate limit, timeout, endpoint error) is a distinct
+        outcome, not a wrong answer: carry the model's output and route the row to the
+        sidecar so it stays out of the accuracy denominator.
+        """
+        result, judge_error = await run_judge(self._verify(body))
+        if judge_error is not None:
+            payload = body.model_dump()
+            for key in ("prompt", "rubric", "reference_response", "judge_prompt_template", "judge_system_prompt"):
+                payload.pop(key, None)
+            return judge_failure(
+                InverseIFVerifyResponse(
+                    **payload,
+                    reward=0.0,
+                    prompt=body.prompt or "",
+                    generated_response=_extract_text_from_response(body.response, exclude_thinking=True),
+                    reference_response=body.reference_response or "",
+                    rubric_evaluations=[],
+                    aggregation_mode=self.config.aggregation_mode.value,
+                    num_passed=0,
+                    num_total=0,
+                ),
+                judge_error,
+            )
+        return result
+
+    async def _verify(self, body: InverseIFVerifyRequest) -> InverseIFVerifyResponse:
         """Verify a model response against per-criterion rubric using the LLM judge."""
 
         # Extract the generated response (excluding thinking blocks)

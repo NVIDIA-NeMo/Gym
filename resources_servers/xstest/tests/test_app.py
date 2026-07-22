@@ -292,6 +292,18 @@ class TestJudgeIntegration:
         assert result.reward == 0.0
         assert result.judge_evaluations[0].verdict_label == "judge_parsing_error"
 
+    async def test_verify_judge_failure_routed_to_sidecar(self) -> None:
+        # A judge transport failure is a distinct outcome, not a wrong answer:
+        # reward 0.0, model output carried, and the row flagged for the sidecar.
+        server, mock = _make_server()
+        mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        data = (await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))).model_dump()
+        assert data["reward"] == 0.0
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
+        assert data["response"] is not None
+
 
 # ============================================================
 # WildGuard judge integration tests (mocked)

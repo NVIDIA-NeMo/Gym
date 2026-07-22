@@ -350,6 +350,24 @@ class TestTextToSqlResourcesServerVerify:
         assert response.judge_passed is True
         assert len(response.judge_evaluations) == 2
 
+    @pytest.mark.asyncio
+    async def test_verify_judge_failure_routed_to_sidecar(self, resources_server: TextToSqlResourcesServer):
+        # A judge CALL that errors is a distinct outcome, not a wrong answer:
+        # reward 0.0, the model's answer carried, and the row flagged for the
+        # failures sidecar instead of contaminating accuracy.
+        request = self._create_verify_request(
+            model_output="```sql\nSELECT * FROM users;\n```",
+            sql="SELECT * FROM users;",
+        )
+        resources_server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        data = (await resources_server.verify(request)).model_dump()
+        assert data["reward"] == 0.0
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
+        assert data["response"] is not None
+
     def test_verify_missing_sql_field(self):
         """Test that Pydantic raises ValidationError when sql field is missing."""
         from pydantic import ValidationError

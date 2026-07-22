@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
@@ -41,6 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -199,6 +200,8 @@ class TavilySearchMetrics(BaseModel):
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+    model_config = ConfigDict(extra="allow")
+
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics
@@ -1116,8 +1119,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
 
+        judge_error = None
         if self.config.use_judge:
-            judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
+            judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
 
@@ -1139,6 +1145,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self.config.workspace == "per_session":
             self._cleanup_workspace(request.session[SESSION_ID_KEY])
 
+        # A judge that never produced a usable score (repeated call errors or
+        # unparseable verdicts) is a distinct outcome, not a wrong answer: route
+        # it to the failures sidecar.
+        if judge_error is not None:
+            return judge_failure(verify_response, judge_error)
         return verify_response
 
     ###### UTILITY FUNCTIONS ######
@@ -1180,7 +1191,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains.append(prop["value"])
         return exclude_domains
 
-    async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
+    async def _call_judge(
+        self, judge_create_params: NeMoGymResponseCreateParamsNonStreaming
+    ) -> tuple[NeMoGymResponse, str]:
+        http_response = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=judge_create_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await http_response.json())
+        return judge_response, judge_response.output[-1].content[-1].text
+
+    async def _verify_answer_with_judge(
+        self, question: str, ground_truth: str, response: str
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
@@ -1194,62 +1218,64 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ]
 
         judge_response = None
+        last_error: Optional[str] = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
             judge_call_start = time()
-            try:
-                # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
-                # re-sample at 1.0 (which already varies the output — no need to escalate from 0.0).
-                temp = 1.0
-                judge_create_params.temperature = temp
-
+            # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
+            # re-sample at 1.0 (which already varies the output — no need to escalate from 0.0).
+            judge_create_params.temperature = 1.0
+            print(
+                f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp=1.0]",
+                flush=True,
+            )
+            # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct outcome,
+            # not a wrong answer: record it instead of crashing the sample.
+            result, last_error = await run_judge(self._call_judge(judge_create_params))
+            if last_error is not None:
+                sleep_s = min(2**attempt, 30)
                 print(
-                    f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp={temp}]",
+                    f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error={last_error[:200]} backoff_s={sleep_s}]",
                     flush=True,
                 )
-                http_response = await self.server_client.post(
-                    server_name=self.config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=judge_create_params,
-                )
-                judge_response = NeMoGymResponse.model_validate(await http_response.json())
-                text = judge_response.output[-1].content[-1].text
+                await sleep(sleep_s)
+                continue
 
-                is_correct, extracted, parsed_ok = self._parse_judge(text)
-                if parsed_ok:
-                    print(
-                        f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
-                        flush=True,
-                    )
-                    return JudgeEvaluation(
+            judge_response, text = result
+            is_correct, extracted, parsed_ok = self._parse_judge(text)
+            if parsed_ok:
+                print(
+                    f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
+                    flush=True,
+                )
+                return (
+                    JudgeEvaluation(
                         judge_response_create_params=judge_create_params,
                         reasoning=text,
                         extracted_final_answer=extracted,
                         reward=1.0 if is_correct else 0.0,
                         judge_response=judge_response,
-                    )
-                print(
-                    f"[judge_call attempt={attempt + 1} status=parse_error duration_s={time() - judge_call_start:.2f} raw_output={text[:200]!r}]",
-                    flush=True,
+                    ),
+                    None,
                 )
-
-            except Exception as e:
-                sleep_s = min(2**attempt, 30)
-                print(
-                    f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error_type={type(e).__name__} error={str(e)[:200]} backoff_s={sleep_s}]",
-                    flush=True,
-                )
-                await sleep(sleep_s)
+            print(
+                f"[judge_call attempt={attempt + 1} status=parse_error duration_s={time() - judge_call_start:.2f} raw_output={text[:200]!r}]",
+                flush=True,
+            )
+            last_error = f"unparseable judge verdict: {text[:200]!r}"
 
         print(
             f"[judge_exhausted max_attempts={self.JUDGE_MAX_ATTEMPTS} had_response={judge_response is not None}]",
             flush=True,
         )
-        return JudgeEvaluation(
-            judge_response_create_params=judge_create_params,
-            reasoning="",
-            extracted_final_answer="",
-            reward=0.0,
-            judge_response=judge_response,
+        return (
+            JudgeEvaluation(
+                judge_response_create_params=judge_create_params,
+                reasoning="",
+                extracted_final_answer="",
+                reward=0.0,
+                judge_response=judge_response,
+            ),
+            last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts",
         )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:

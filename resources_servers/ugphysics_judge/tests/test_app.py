@@ -177,6 +177,30 @@ class TestServer:
         # Judge model never called.
         assert not server.server_client.post.called
 
+    async def test_verify_judge_failure_routed_to_sidecar(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+        model_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> None:
+        """Symbolic miss → judge invoked → judge call errors → routed to failures sidecar."""
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
+        request = UGPhysicsJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=NeMoGymResponse(**_make_response("gen", _msg("Wrong: \\boxed{3}"))),
+            question="What is 1+1?",
+            expected_answer="2",
+            solution="1+1=2",
+            subject="QuantumMechanics",
+        )
+        data = (await server.verify(request)).model_dump()
+        assert data["reward"] == approx(0.0)
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
+        assert data["response"] is not None
+
     async def test_verify_symbolic_miss_invokes_judge_true(
         self,
         config: UGPhysicsJudgeResourcesServerConfig,

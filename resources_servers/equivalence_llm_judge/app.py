@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -137,6 +138,8 @@ class JudgeEvaluation(BaseModel):
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
@@ -400,6 +403,23 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         return self._make_response(body, expected, reward, [first_eval, second_eval])
 
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
+        # A judge call that errors (auth, rate limit, timeout, endpoint error) is
+        # a distinct outcome, not a wrong answer: carry the model's output and
+        # route the row to the failures sidecar instead of silently scoring 0.0.
+        result, judge_error = await run_judge(self._verify(body))
+        if judge_error is not None:
+            return judge_failure(
+                LLMJudgeVerifyResponse(
+                    **body.model_dump(exclude={"expected_answer"}),
+                    reward=0.0,
+                    expected_answer=_extract_expected_answer(body) or "",
+                    judge_evaluations=[],
+                ),
+                judge_error,
+            )
+        return result
+
+    async def _verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:

@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -205,6 +206,10 @@ class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
     problem: str = ""
 
 
+class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
 class IncorrectGroupCoordinator(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -225,13 +230,21 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
         default_factory=lambda: defaultdict(IncorrectGroupCoordinator)
     )
 
-    async def verify(self, body: ProofWithJudgeVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: ProofWithJudgeVerifyRequest) -> ProofWithJudgeVerifyResponse:
         problem = getattr(body, "problem", "") or (body.model_dump().get("problem") or "")
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
             reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
         else:
-            reward, details = await self._judge_single(problem, full_response)
+            # A judge call that errors (auth, rate limit, timeout, HTTP error,
+            # malformed response) is a distinct outcome, not a wrong answer:
+            # route it to the failures sidecar instead of scoring the proof as
+            # incorrect. Only the judge HTTP path in `_judge_single` raises;
+            # format/parse failures return a normal (reward, details) tuple.
+            result, judge_error = await run_judge(self._judge_single(problem, full_response))
+            if judge_error is not None:
+                return judge_failure(ProofWithJudgeVerifyResponse(**body.model_dump(), reward=0.0), judge_error)
+            reward, details = result
         reward, details = await self._maybe_zero_incorrect_group_reward(
             problem=problem, reward=reward, details=details
         )
@@ -243,7 +256,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofWithJudgeVerifyResponse(**body.model_dump(), reward=reward)
 
     async def _append_log_jsonl(
         self,

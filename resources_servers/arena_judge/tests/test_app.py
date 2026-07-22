@@ -322,6 +322,32 @@ class TestArenaJudgeServer:
         assert result.invalid_base_gen is True
 
     @pytest.mark.asyncio
+    async def test_verify_judge_failure_routed_to_sidecar(self, config: ArenaJudgeConfig) -> None:
+        # A judge CALL that errors is a distinct outcome, not a wrong answer:
+        # reward 0.0, the model's answer carried, and the row flagged for the
+        # failures sidecar instead of contaminating the Arena-Elo denominator.
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = ArenaJudgeServer(config=config, server_client=server_mock)
+
+        data = (
+            await server.verify(
+                ArenaJudgeVerifyRequest(
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                    response=_make_response("ok"),
+                    question="q",
+                    baseline_answer="b",
+                    category="hard_prompt",
+                )
+            )
+        ).model_dump()
+        assert data["reward"] == approx(0.0)
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
+        assert data["response"] is not None
+
+    @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         self._mock_judge_sequence(server_mock, ["[[A>B]]", "[[B>A]]"])

@@ -1208,7 +1208,7 @@ class TestVerify:
 
     @pytest.mark.asyncio
     async def test_verify_judge_call_failure(self, tmp_path) -> None:
-        """Judge HTTP call failure → reward 0.0, no crash."""
+        """Judge HTTP call failure → routed to the failures sidecar, not scored 0.0."""
         server = self._create_server_with_judge(tmp_path)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
 
@@ -1216,8 +1216,11 @@ class TestVerify:
             self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(self._mock_request(), req)
-        assert res.reward == 0.0
+        res = (await server.verify(self._mock_request(), req)).model_dump()
+        assert res["reward"] == 0.0
+        assert res["_ng_failure_class"] == "judge_failed"
+        assert res["_ng_failure_judge_failed"] is True
+        assert "judge unavailable" in res["_ng_failure_judge_error"]
 
     @pytest.mark.asyncio
     async def test_verify_curly_braces_in_content(self, tmp_path) -> None:

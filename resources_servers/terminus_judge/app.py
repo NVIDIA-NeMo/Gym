@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -224,6 +225,8 @@ class JudgeEvaluation(BaseModel):
 
 
 class TerminusJudgeVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     uuid: Optional[str | int] = None
     expected_answer: str
     model_output: str
@@ -431,9 +434,17 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
             # Step 2: LLM judge evaluation (if needed and enabled)
             if need_judge:
-                first_equal, first_eval = await self._generate_judge_evaluation(
-                    expected_answer=expected, generated_answer=text
+                # A failed judge CALL (auth, rate limit, timeout, HTTP error) is
+                # a distinct outcome, not a wrong answer — carry the model's
+                # output and route the row to the failures sidecar so it stays
+                # out of the accuracy denominator.
+                first, judge_error = await run_judge(
+                    self._generate_judge_evaluation(expected_answer=expected, generated_answer=text)
                 )
+                if judge_error is not None:
+                    reward = 0.0
+                    return judge_failure(_build_response(expected_str=expected, model_output_str=text), judge_error)
+                first_equal, first_eval = first
                 judge_evaluations.append(first_eval)
                 logger.info(
                     f"terminus_judge verify | uuid={body.uuid} "
@@ -447,9 +458,15 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     reward = 0.0
                 elif first_equal:
                     if self.config.check_twice_swap:
-                        second_equal, second_eval = await self._generate_judge_evaluation(
-                            expected_answer=text, generated_answer=expected
+                        second, judge_error = await run_judge(
+                            self._generate_judge_evaluation(expected_answer=text, generated_answer=expected)
                         )
+                        if judge_error is not None:
+                            reward = 0.0
+                            return judge_failure(
+                                _build_response(expected_str=expected, model_output_str=text), judge_error
+                            )
+                        second_equal, second_eval = second
                         judge_evaluations.append(second_eval)
                         logger.info(
                             f"terminus_judge verify | uuid={body.uuid} "

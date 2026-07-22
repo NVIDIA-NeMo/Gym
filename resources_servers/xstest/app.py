@@ -36,6 +36,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -65,9 +66,12 @@ class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: Optional[NeMoGymResponse] = None
     verdict_label: Optional[str] = None
+    error: Optional[str] = None
 
 
 class XSTestVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     label: str
     prompt_type: str
     is_refusal: bool
@@ -204,6 +208,7 @@ class XSTestResourcesServer(SimpleResourcesServer):
             )
 
         judge_evaluations: Optional[list[JudgeEvaluation]] = None
+        judge_error: Optional[str] = None
 
         if not cleaned_text:
             # Empty generation — not a judge error, just a bad model output
@@ -215,12 +220,15 @@ class XSTestResourcesServer(SimpleResourcesServer):
             judge_evaluations = [evaluation]
             if judge_result is None:
                 # Judge failed — do not silently fall back to string matching.
-                # Report the error clearly so operators can fix the judge setup.
+                # A transport/HTTP failure (evaluation.error set) routes the row to
+                # the failures sidecar; an unparseable-but-received verdict keeps
+                # reward=0.0 without flagging a judge failure.
                 logger.error(
                     "Judge failed to classify response (verdict_label=%s). "
                     "Assigning reward=0.0. Check that the judge model server is running and reachable.",
                     evaluation.verdict_label,
                 )
+                judge_error = evaluation.error
                 is_refusal = False
                 reward = 0.0
             else:
@@ -229,7 +237,7 @@ class XSTestResourcesServer(SimpleResourcesServer):
 
         payload = body.model_dump()
         payload.pop("verifier_metadata", None)
-        return XSTestVerifyResponse(
+        response = XSTestVerifyResponse(
             **payload,
             reward=reward,
             label=label,
@@ -238,6 +246,18 @@ class XSTestResourcesServer(SimpleResourcesServer):
             cleaned_response=cleaned_text,
             judge_evaluations=judge_evaluations,
         )
+        if judge_error is not None:
+            return judge_failure(response, judge_error)
+        return response
+
+    async def _post_judge(self, responses_create_params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        async with self._judge_semaphore:
+            http_response = await self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+            )
+            return NeMoGymResponse.model_validate(await get_response_json(http_response))
 
     async def _classify_with_judge(self, *, question: str, response: str) -> tuple[Optional[bool], JudgeEvaluation]:
         """Call the judge model to classify a response as compliance or refusal."""
@@ -249,19 +269,14 @@ class XSTestResourcesServer(SimpleResourcesServer):
             NeMoGymEasyInputMessage(role="user", content=user_prompt),
         ]
 
-        async with self._judge_semaphore:
-            try:
-                http_response = await self.server_client.post(
-                    server_name=cfg.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(http_response))
-            except Exception as e:
-                logger.error("Judge HTTP POST error: %s %s", type(e).__name__, e)
-                return None, JudgeEvaluation(
-                    responses_create_params=responses_create_params, verdict_label="judge_error"
-                )
+        judge_response, judge_error = await run_judge(self._post_judge(responses_create_params))
+        if judge_error is not None:
+            logger.error("Judge HTTP POST error: %s", judge_error)
+            return None, JudgeEvaluation(
+                responses_create_params=responses_create_params,
+                verdict_label="judge_error",
+                error=judge_error,
+            )
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,

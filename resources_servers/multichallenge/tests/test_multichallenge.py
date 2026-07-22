@@ -133,3 +133,69 @@ class TestAggregation:
         # Test ANY (first passes)
         config.aggregation_mode = AggregationMode.ANY
         assert server._aggregate_scores(evaluations) == 1.0
+
+
+class TestJudgeFailure:
+    """A failed judge CALL is routed to the failures sidecar, not scored 0."""
+
+    @pytest.mark.asyncio
+    async def test_verify_judge_failure_routed_to_sidecar(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.config_types import ModelServerRef
+        from nemo_gym.openai_utils import (
+            NeMoGymResponse,
+            NeMoGymResponseCreateParamsNonStreaming,
+            NeMoGymResponseOutputMessage,
+            NeMoGymResponseOutputText,
+        )
+        from nemo_gym.server_utils import ServerClient
+        from resources_servers.multichallenge.app import (
+            MultiChallengeConfig,
+            MultiChallengeServer,
+            MultiChallengeVerifyRequest,
+        )
+
+        config = MultiChallengeConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="test"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = MultiChallengeServer(config=config, server_client=server_mock)
+
+        response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="policy_model",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg",
+                    content=[NeMoGymResponseOutputText(annotations=[], text="answer", type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        request = MultiChallengeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            context="context",
+            rubric=[{"question": "q", "pass_criteria": "YES"}],
+        )
+
+        data = (await server.verify(request)).model_dump()
+        assert data["reward"] == pytest.approx(0.0)
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
+        assert data["response"] is not None

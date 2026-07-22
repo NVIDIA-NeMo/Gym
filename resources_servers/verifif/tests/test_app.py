@@ -16,11 +16,12 @@
 """Unit tests for the VerifIF Resource Server."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from nemo_gym.base_resources_server import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.verifif.app import (
+    LLMJudgeItem,
     TuringVIFResourcesServer,
     TuringVIFResourcesServerConfig,
     TuringVIFVerifyRequest,
@@ -118,6 +119,25 @@ class TestTuringVIFApp:
             name="",
         )
         TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_judge_transport_failure_routed_to_sidecar(self) -> None:
+        """A judge call that errors is routed to the failures sidecar, not scored
+        via the fallback verdict."""
+        server = self._create_server()
+        server._judge_llm_api_call_async = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        request = self._create_real_request(
+            instructions=[],
+            response_content="A polite answer.",
+            llm_judge=[
+                LLMJudgeItem(uid=1, content="Is the response polite?", source="user", is_misalignment_check=False)
+            ],
+        )
+
+        data = asyncio.run(server.verify(request)).model_dump()
+        assert data["reward"] == 0.0
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in data["_ng_failure_judge_error"]
 
     def test_validator_imports(self) -> None:
         """Test that VIF validators can be imported."""

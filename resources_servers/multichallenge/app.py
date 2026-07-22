@@ -44,6 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -259,27 +260,35 @@ class MultiChallengeServer(SimpleResourcesServer):
         if not rubric and body.metadata and "rubric" in body.metadata:
             rubric = body.metadata["rubric"]
 
-        # Evaluate each rubric item
-        if self.config.parallel_evaluation and len(rubric) > 1:
-            import asyncio
+        # A failed judge CALL on any rubric item (auth, rate limit, timeout,
+        # endpoint error) is a distinct outcome, not a wrong answer. Carry the
+        # model's final output (via body) and route the row to the failures
+        # sidecar so it stays out of the accuracy denominator.
+        payload = body.model_dump()
+        payload.pop("context", None)
+        payload.pop("rubric", None)
 
-            evaluations = await asyncio.gather(
-                *[self._evaluate_rubric_item(item, context, generated_response) for item in rubric]
+        evaluations, judge_error = await run_judge(self._evaluate_rubric(rubric, context, generated_response))
+        if judge_error is not None:
+            return judge_failure(
+                MultiChallengeVerifyResponse(
+                    **payload,
+                    reward=0.0,
+                    context=context,
+                    generated_response=generated_response,
+                    rubric_evaluations=[],
+                    aggregation_mode=self.config.aggregation_mode.value,
+                    num_passed=0,
+                    num_total=0,
+                ),
+                judge_error,
             )
-        else:
-            evaluations = []
-            for item in rubric:
-                eval_result = await self._evaluate_rubric_item(item, context, generated_response)
-                evaluations.append(eval_result)
 
         # Aggregate scores
         reward = self._aggregate_scores(evaluations)
         num_passed = sum(1 for e in evaluations if e.score >= 0.99)
 
         # Build response
-        payload = body.model_dump()
-        payload.pop("context", None)
-        payload.pop("rubric", None)
         return MultiChallengeVerifyResponse(
             **payload,
             reward=reward,
@@ -290,6 +299,16 @@ class MultiChallengeServer(SimpleResourcesServer):
             num_passed=num_passed,
             num_total=len(evaluations),
         )
+
+    async def _evaluate_rubric(self, rubric: list, context: str, response: str) -> List[RubricEvaluation]:
+        """Evaluate every rubric item, in parallel when enabled."""
+        if self.config.parallel_evaluation and len(rubric) > 1:
+            import asyncio
+
+            return list(
+                await asyncio.gather(*[self._evaluate_rubric_item(item, context, response) for item in rubric])
+            )
+        return [await self._evaluate_rubric_item(item, context, response) for item in rubric]
 
     async def _evaluate_rubric_item(self, item: dict, context: str, response: str) -> RubricEvaluation:
         """Evaluate a single rubric item using the LLM judge."""

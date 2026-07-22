@@ -53,6 +53,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field
 
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -192,12 +193,30 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 assistant_responses.append(content_item.text)
         combined_response = "".join(assistant_responses)
 
-        reward, extracted_answer, library_reward, judge_evaluations, verdict = await self._verify_answer(
-            question=body.question,
-            expected_answer=body.expected_answer,
-            generated_answer=combined_response,
-            solution=body.solution,
+        # A judge transport failure is a distinct outcome, not a wrong answer.
+        # The library verifier never raises (returns 0.0), so an exception here
+        # is the judge call: route the row to the failures sidecar.
+        result, judge_error = await run_judge(
+            self._verify_answer(
+                question=body.question,
+                expected_answer=body.expected_answer,
+                generated_answer=combined_response,
+                solution=body.solution,
+            )
         )
+        if judge_error is not None:
+            return judge_failure(
+                UGPhysicsJudgeVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_answer=None,
+                    library_reward=0.0,
+                    judge_evaluations=None,
+                    extracted_verdict=None,
+                ),
+                judge_error,
+            )
+        reward, extracted_answer, library_reward, judge_evaluations, verdict = result
         return UGPhysicsJudgeVerifyResponse(
             **body.model_dump(),
             reward=reward,

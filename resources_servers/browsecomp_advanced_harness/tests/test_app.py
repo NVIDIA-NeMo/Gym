@@ -14,7 +14,7 @@
 # limitations under the License.
 import os
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pytest import approx, fixture
 
@@ -248,6 +248,27 @@ class TestApp:
 
         assert res.reward == approx(1.0)
         assert res.extracted_final_answer == "Paris"
+
+    async def test_verify_judge_failure_routed_to_sidecar(self, config: TavilySearchResourcesServerConfig) -> None:
+        """A failed judge call is routed to the failures sidecar, not scored 0.0."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+        server.JUDGE_MAX_ATTEMPTS = 1
+
+        req = TavilySearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("The capital of France is Paris."),
+            ground_truth="Paris",
+            question="What is the capital of France?",
+        )
+        with patch("resources_servers.browsecomp_advanced_harness.app.sleep", new=AsyncMock()):
+            res = (await server.verify(self._create_dummy_request(), req)).model_dump()
+
+        assert res["reward"] == approx(0.0)
+        assert res["_ng_failure_class"] == "judge_failed"
+        assert res["_ng_failure_judge_failed"] is True
+        assert "judge timeout" in res["_ng_failure_judge_error"]
 
     async def test_verify_incorrect_answer(self, config: TavilySearchResourcesServerConfig) -> None:
         server_client = MagicMock(spec=ServerClient)

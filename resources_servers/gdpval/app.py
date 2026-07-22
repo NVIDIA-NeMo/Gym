@@ -41,7 +41,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.judge import judge_failure, run_judge
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -251,6 +252,8 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
@@ -360,7 +363,21 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
-            return await self._verify_comparison(body)
+            # A judge call that fails for every reference (timeout, upstream 5xx,
+            # oversize payload) is a distinct outcome, not a wrong answer: route
+            # it to the failures sidecar instead of crashing the sample.
+            result, judge_error = await run_judge(self._verify_comparison(body))
+            if judge_error is not None:
+                return judge_failure(
+                    GDPValVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        verify_mode="comparison",
+                        judge_response={"error": "judge_failed"},
+                    ),
+                    judge_error,
+                )
+            return result
 
         return await self._verify_rubric(body)
 
@@ -454,13 +471,18 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
-        return GDPValVerifyResponse(
+        # A None judge result means the judge output was empty or unusable — a
+        # distinct judge failure, not a legitimately low score.
+        response = GDPValVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
             invalid_judge_response=(judge_result is None),
         )
+        if judge_result is None:
+            return judge_failure(response, "empty or unusable judge response")
+        return response
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
         from resources_servers.gdpval.preconvert import preconvert_dir_async

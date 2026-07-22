@@ -61,6 +61,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -150,6 +151,8 @@ class JudgeEvaluation(BaseModel):
 class OverRefusalDetectionVerifyResponse(BaseVerifyResponse):
     """Response from the over-refusal detection verification."""
 
+    model_config = ConfigDict(extra="allow")
+
     safe_prompt: Optional[str] = None
     model_response_text: str = ""
     complied: bool = False  # True if model responded helpfully
@@ -227,6 +230,23 @@ class OverRefusalDetectionResourcesServer(SimpleResourcesServer):
             safe_prompt=safe_prompt,
             model_response=response_for_judge,
         )
+
+        # A judge call failure (auth, rate limit, timeout, HTTP/endpoint error) is a
+        # distinct outcome, not an "unclear" verdict: carry the model's output and
+        # route the row to the failures sidecar instead of scoring reward_if_unclear.
+        if judge_eval is not None and judge_eval.error:
+            base_data = body.model_dump()
+            base_data.pop("safe_prompt", None)
+            return judge_failure(
+                OverRefusalDetectionVerifyResponse(
+                    **base_data,
+                    reward=0.0,
+                    safe_prompt=safe_prompt,
+                    model_response_text=model_response,
+                    judge_evaluation=judge_eval,
+                ),
+                judge_eval.error,
+            )
 
         # Step 4: Determine reward (INVERTED from jailbreak detection)
         # Here, we WANT the model to comply (respond helpfully)
