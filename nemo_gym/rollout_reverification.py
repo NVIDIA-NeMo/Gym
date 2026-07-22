@@ -37,7 +37,12 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for, resolve_input_path
-from nemo_gym.rollout_collection import _get_max_rollout_attempts
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    _get_max_rollout_attempts,
+)
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
@@ -47,11 +52,6 @@ from nemo_gym.server_utils import (
     raise_for_status,
     set_global_aiohttp_client,
 )
-
-
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-NG_TERMINAL_KEY = "_ng_failure_terminal"
 
 
 @dataclass
@@ -70,9 +70,9 @@ class InputRolloutPair:
 def _agent_to_rs_mapping_from_agent_blocks(
     global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
-    mapping = {}
-    for name in global_conflict_dict:
-        block = global_conflict_dict[name]
+    mapping: Dict[str, str] = {}
+    for raw_name, block in global_conflict_dict.items():
+        name = str(raw_name)
         if isinstance(block, (dict, DictConfig)) and "responses_api_agents" in block:
             impl = next(iter(block["responses_api_agents"].values()))
             rs = (impl.get("resources_server") or {}).get("name")
@@ -87,10 +87,9 @@ def _agent_to_rs_mapping_from_resources_only_config(
     # The rollout rows still carry agent names that were never started, so fall back to the
     # single resources server for EVERY requested key.
     resources_server_names = [
-        name
-        for name in global_conflict_dict
-        if isinstance(global_conflict_dict[name], (dict, DictConfig))
-        and "resources_servers" in global_conflict_dict[name]
+        str(name)
+        for name, block in global_conflict_dict.items()
+        if isinstance(block, (dict, DictConfig)) and "resources_servers" in block
     ]
     if len(resources_server_names) == 1:
         only = resources_server_names[0]
