@@ -38,6 +38,7 @@ See README.md for design + findings (skill patch, gateway, parity).
 import asyncio
 import glob
 import json
+import logging
 import shutil
 import tarfile
 import textwrap
@@ -46,7 +47,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -67,7 +68,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from responses_api_agents.openclaw_agent.observability import build_openclaw_observations
+
+
+LOG = logging.getLogger(__name__)
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -150,6 +156,10 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
     grading_notes: str
     status: str
     raw_rollout: dict  # transcript archive location + compact metadata
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class PinchBenchAgent(SimpleResponsesAPIAgent):
@@ -662,6 +672,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
+        observations: Optional[AgentObservationBundle] = None
+        observe = self.rollout_id_from_run(body) is not None
         try:
             async with self._sem:
                 await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
@@ -684,6 +696,22 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             elif failure_class == "timeout_exceeded":
                 routing[NG_TERMINAL_KEY] = True
         finally:
+            if observe:
+                try:
+                    observations = build_openclaw_observations(
+                        run_id,
+                        response.output,
+                        transcript_available=any(
+                            isinstance(event, dict) and event.get("type") == "message" for event in transcript_events
+                        ),
+                        source="pinchbench",
+                    )
+                except Exception:
+                    LOG.exception("failed to build PinchBench observations")
+                    observations = AgentObservationBundle(
+                        source="pinchbench",
+                        gaps=[ObservationGap(code="observation_capture_failed", source="pinchbench")],
+                    )
             shutil.rmtree(out_dir, ignore_errors=True)
 
         return PinchBenchVerifyResponse(
@@ -700,6 +728,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "archived_to": archive_path,
                 "run_id": run_id,
             },
+            **({"ng_agent_observations": observations.model_dump(mode="json")} if observations is not None else {}),
             **routing,
         )
 

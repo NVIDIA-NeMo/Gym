@@ -391,6 +391,7 @@ class ModelCallRecord(BaseModel):
 
     # Unique server-generated identity for each persisted call.
     model_call_id: Optional[str] = None
+    response_id: Optional[str] = None
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -441,6 +442,7 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
     return ModelCallRecord(
         model_call_id=exchange.get("model_call_id"),
+        response_id=response.get("id") if isinstance(response.get("id"), str) else None,
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         dialect=exchange.get("dialect"),
@@ -664,11 +666,14 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
+    response_id: Optional[str] = None
     role = "assistant"
     finish_reason: Optional[str] = None
     saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
+        if isinstance(chunk.get("id"), str):
+            response_id = chunk["id"]
         if chunk.get("usage"):
             usage = chunk["usage"]
         for choice in chunk.get("choices") or []:
@@ -707,6 +712,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
+    if response_id is not None:
+        result["id"] = response_id
     if usage:
         result["usage"] = usage
     return result

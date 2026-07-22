@@ -135,6 +135,7 @@ def test_build_model_call_record_from_exchange():
         "latency_ms": 18.4,
         "request": {"input": "hi"},
         "response": {
+            "id": "resp-1",
             "model": "m",
             "usage": {
                 "input_tokens": 10,
@@ -152,6 +153,7 @@ def test_build_model_call_record_from_exchange():
     }
     rec = build_model_call_record(exchange, call_index=3)
     assert rec.model_call_id == "call-1"
+    assert rec.response_id == "resp-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
     assert rec.dialect == "responses"
@@ -161,8 +163,10 @@ def test_build_model_call_record_from_exchange():
     assert rec.reasoning_content == "thinking..."
     assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
     assert rec.latency_total_ms == 18.4
+    assert build_model_call_record({"response": {"id": 123}}, call_index=0).response_id is None
     assert {
         "model_call_id",
+        "response_id",
         "call_index",
         "model_ref",
         "dialect",
@@ -840,6 +844,7 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     assert len(calls) == 1
     call = calls[0]
     assert call.model_call_id
+    assert call.response_id == "msg_1"
     assert call.model_ref is not None and call.model_ref.name == "srv"
     assert call.started_at is not None and call.completed_at is not None
     assert call.started_at <= call.completed_at
@@ -856,7 +861,11 @@ def test_reconstruct_chat_sse():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 
     chunks = [
-        {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
+        {
+            "id": "chatcmpl-1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}],
+        },
         {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
         {
             "choices": [
@@ -882,6 +891,7 @@ def test_reconstruct_chat_sse():
     raw = (b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n").replace(b"\n", b"\r\n")
     resp = _reconstruct_streamed_response(raw, "chat")
     msg = resp["choices"][0]["message"]
+    assert resp["id"] == "chatcmpl-1"
     assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
     assert msg["tool_calls"][0]["function"] == {"name": "f", "arguments": '{"a":1}'}
     assert resp["usage"]["total_tokens"] == 8
@@ -963,7 +973,12 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
             "responses",
             "A",
             {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-            {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]},
+            {
+                "id": "resp-A",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+                ],
+            },
         ),
     )
 
@@ -976,6 +991,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert capture["metrics"]["num_calls"] == 1
     attached_call = capture["calls"][0]
     assert attached_call["model_call_id"] == "call-A"
+    assert attached_call["response_id"] == "resp-A"
     assert attached_call["model_ref"] == {"type": "responses_api_models", "name": "A"}
     assert attached_call["started_at"] == 100.0 and attached_call["completed_at"] == 100.01
     assert attached_call["tokens_in"] == 3

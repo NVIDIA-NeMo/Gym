@@ -16,7 +16,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
@@ -31,6 +31,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
     OpenClawAgentConfig,
+    OpenClawAgentRunRequest,
     ResourcesServerRef,
     _decode_last_json_dict_suffix,
     _extract_instruction,
@@ -38,6 +39,17 @@ from responses_api_agents.openclaw_agent.app import (
     parse_openclaw_output,
     parse_openclaw_session,
 )
+
+
+class _FakeResponse:
+    ok = True
+
+    def __init__(self, payload: dict, cookies: dict | None = None) -> None:
+        self.payload = payload
+        self.cookies = cookies or {}
+
+    async def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
 
 
 def _config(**kwargs) -> OpenClawAgentConfig:
@@ -258,6 +270,84 @@ class TestBuildOpenclawConfig:
         assert env["NVIDIA_API_KEY"] == "k"
         assert env["HOME"] == "/tmp/h"
         assert "EMPTY" not in env
+
+
+class TestObservability:
+    def test_run_returns_observations_when_enabled(self) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        session = "\n".join(
+            [
+                json.dumps({"type": "session", "id": "session-1"}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                    }
+                ),
+            ]
+        )
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            observation_collector("session-1")
+            return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model"
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return _FakeResponse({}, {"session": "1"})
+            return _FakeResponse(json | {"reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = OpenClawAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            result = asyncio.run(agent.run(request, body))
+
+        observations = result.ng_agent_observations
+        assert observations is not None
+        assert observations.invocations[0].invocation_id == "session-1"
+        assert observations.invocations[0].conversation
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
+
+    def test_observation_failure_does_not_change_response(self) -> None:
+        agent = _make_agent()
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            if observation_collector is not None:
+                observation_collector("session-1")
+            return (
+                [
+                    NeMoGymResponseOutputMessage(
+                        id="msg-1",
+                        content=[{"type": "output_text", "text": "done", "annotations": []}],
+                    )
+                ],
+                {"input_tokens": 1, "output_tokens": 1},
+                "model",
+            )
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            baseline = asyncio.run(agent.responses(MagicMock(), body))
+        with (
+            patch.object(agent, "_run_openclaw", run_openclaw),
+            patch(
+                "responses_api_agents.openclaw_agent.app.build_openclaw_observations",
+                side_effect=RuntimeError("observer failed"),
+            ),
+        ):
+            episode = asyncio.run(agent.responses_with_observations(None, body))
+
+        assert episode.response.output == baseline.output
+        assert episode.response.usage == baseline.usage
+        assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
 
 
 class TestDeepMerge:

@@ -43,6 +43,7 @@ from responses_api_agents.swe_agents.app import (
     SweBenchDatasetProcessor,
     SWEBenchMetrics,
     SweBenchMultilingualDatasetProcessor,
+    SWEBenchRunRequest,
     SWEBenchVerifyResponse,
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
@@ -340,6 +341,7 @@ class TestSWEBenchWrapperInstanceConfig:
             assert config.resolved_agent_cls == "CodeActAgent"
             assert config.resolved_diversify_tool_names is False
             assert config.resolved_camel_case_tool_names is False
+            assert "rollout_id" not in config.model_dump()
 
 
 class TestSWEBenchMetrics:
@@ -1075,6 +1077,14 @@ class TestOpenCodeHarnessProcessor:
             assert config.problem_info["instance_id"] in script
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
+
+    def test_get_run_command_prefixes_observed_rollout(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir, rollout_id="7-2")
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+
+            script = self._read_agent_script(config)
+            assert "NEMO_GYM_MODEL_SERVER_BASE_URL=http://test-host:12345/ng-rollout/7-2" in script
 
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2379,6 +2389,7 @@ class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        wrapper.server_client.global_config_dict = {"observability_enabled": True}
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -2396,10 +2407,10 @@ class TestSWEBenchWrapperRun:
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
-
-            body = BaseRunRequest(
+        with patch.object(
+            SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response
+        ) as responses_mock:
+            body = SWEBenchRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                     model="test-model",
                     input=[],
@@ -2411,12 +2422,15 @@ class TestSWEBenchWrapperRun:
                         "split": "test",
                         "instance_dict": "{}",
                     },
-                )
+                ),
+                _ng_task_index=7,
+                _ng_rollout_index=2,
             )
 
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert responses_mock.await_args.args[1] == "7-2"
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
@@ -2438,10 +2452,8 @@ class TestSWEBenchWrapperRun:
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
-
-            body = BaseRunRequest(
+        with patch.object(SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response):
+            body = SWEBenchRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                     model="test-model",
                     input=[],

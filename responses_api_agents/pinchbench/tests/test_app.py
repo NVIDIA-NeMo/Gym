@@ -30,6 +30,7 @@ from responses_api_agents.pinchbench.app import (
     NG_TERMINAL_KEY,
     PinchBenchAgent,
     PinchBenchAgentConfig,
+    PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
 )
@@ -334,8 +335,108 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     resp = await agent.run(body=_run_body())
     dumped = resp.model_dump()
     assert dumped["reward"] == 1.0
+    assert "ng_agent_observations" not in dumped
     for key in (NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY):
         assert key not in dumped
+
+
+@pytest.mark.asyncio
+async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    async def run_in_sandbox(task_id, out_dir):
+        transcript_dir = out_dir / "0001_transcripts"
+        transcript_dir.mkdir(parents=True)
+        (transcript_dir / f"{task_id}.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "session-1"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "done"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+        )
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda *args: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": "task_x"},
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+    result = await agent.run(body=body)
+
+    observations = result.ng_agent_observations
+    assert observations is not None
+    assert observations.source == "pinchbench"
+    assert observations.invocations[0].invocation_id == result.raw_rollout["run_id"]
+    assert observations.invocations[0].conversation
+
+
+@pytest.mark.asyncio
+async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    async def run_in_sandbox(task_id, out_dir):
+        return None
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda *args: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    monkeypatch.setattr(
+        "responses_api_agents.pinchbench.app.build_openclaw_observations",
+        MagicMock(side_effect=RuntimeError("observer failed")),
+    )
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": "task_x"},
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+    result = await agent.run(body=body)
+
+    assert result.reward == 1.0
+    assert result.status == "success"
+    assert result.response.output[0].content[0].text == ""
+    observations = result.ng_agent_observations
+    assert observations is not None
+    assert observations.source == "pinchbench"
+    assert [gap.code for gap in observations.gaps] == ["observation_capture_failed"]
 
 
 def test_classify_task_failure_mapping():

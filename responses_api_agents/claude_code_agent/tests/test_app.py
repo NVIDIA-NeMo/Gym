@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,6 +42,7 @@ from responses_api_agents.claude_code_agent.app import (
     _extract_instruction,
     parse_stream_json,
 )
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -260,26 +262,22 @@ def _gym_response(text: str = "done") -> dict:
     }
 
 
+def _seed_and_verify_post():
+    async def _post(server_name, url_path, json=None, cookies=None, **kw):
+        if url_path == "/verify":
+            return _FakeHttpResp(
+                {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
+            )
+        return _FakeHttpResp({})
+
+    return AsyncMock(side_effect=_post)
+
+
 class TestRunForwardsSkillsPath:
-    """run() reads skills_ref off the request's model_extra (extra='allow') and forwards its path
-    directly to _create_response/_run_claude_code."""
-
-    def _seed_and_verify_post(self):
-        async def _post(server_name, url_path, json=None, cookies=None, **kw):
-            if url_path == "/verify":
-                return _FakeHttpResp(
-                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
-                )
-            return _FakeHttpResp({})
-
-        return AsyncMock(side_effect=_post)
-
     def _run(self, agent: ClaudeCodeAgent, body: ClaudeCodeAgentRunRequest, run_claude_code: AsyncMock):
-        agent.server_client.post = self._seed_and_verify_post()
+        agent.server_client.post = _seed_and_verify_post()
         req = MagicMock()
         req.cookies = {}
-        # Stub the CLI invocation; _create_response still runs for real, so we exercise the full
-        # run() -> _create_response -> _run_claude_code argument threading.
         with patch.object(
             ClaudeCodeAgent,
             "_run_claude_code",
@@ -306,9 +304,56 @@ class TestRunForwardsSkillsPath:
         run_claude_code = AsyncMock(return_value=("", "claude-sonnet-4-6"))
         body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
-        self._run(agent, body, run_claude_code)
+        result = self._run(agent, body, run_claude_code)
 
         assert run_claude_code.call_args.kwargs["skills_path"] is None
+        assert "ng_agent_observations" not in result.model_dump(mode="json")
+
+
+class TestObservability:
+    def test_run_returns_observations_when_enabled(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        agent.server_client.post = _seed_and_verify_post()
+
+        async def run_claude_code(*args, observation_collector=None, **kwargs):
+            transcript = tmp_path / "projects" / "session.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "session-1",
+                        "timestamp": "2026-07-22T10:00:00Z",
+                        "uuid": "event-1",
+                        "message": {
+                            "role": "assistant",
+                            "id": "msg-1",
+                            "content": [{"type": "text", "text": "done"}],
+                        },
+                    }
+                )
+            )
+            observation_collector(tmp_path)
+            return _event("assistant", message={"content": [{"type": "text", "text": "done"}]}), "model"
+
+        request = MagicMock()
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+        with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
+            result = asyncio.run(agent.run(request, body))
+
+        observations = result.ng_agent_observations
+        assert observations is not None
+        assert observations.invocations[0].invocation_id == "session-1"
+        assert observations.invocations[0].model_calls[0].response_id == "msg-1"
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
 
 
 class TestRunClaudeCode:
@@ -421,6 +466,53 @@ class TestRunClaudeCode:
         assert stdout == ""
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
+
+    def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        event_loop_thread = threading.get_ident()
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+            transcript = config_dir / "projects" / "run.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "session-1",
+                        "timestamp": "2026-07-22T10:00:00Z",
+                        "uuid": "event-1",
+                        "message": {
+                            "role": "assistant",
+                            "id": "msg-1",
+                            "content": [{"type": "text", "text": "done"}],
+                        },
+                    }
+                )
+            )
+            captured["config_dir"] = config_dir
+            return FakeProc()
+
+        def collect(config_dir: Path) -> None:
+            captured["collector_thread"] = threading.get_ident()
+            captured["observations"] = extract_claude_code_observations(config_dir)
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hello", observation_collector=collect))
+
+        assert captured["observations"].invocations[0].invocation_id == "session-1"
+        assert captured["collector_thread"] != event_loop_thread
+        assert not captured["config_dir"].exists()
 
 
 class TestRolloutMCPConfig:

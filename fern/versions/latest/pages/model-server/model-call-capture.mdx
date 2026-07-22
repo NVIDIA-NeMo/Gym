@@ -77,9 +77,10 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
-contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
-`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
-calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
+contains a unique server-generated `model_call_id`, the protocol `response_id` when present, typed
+`model_ref`, wall-clock `started_at` and `completed_at`, a `call_index`, API dialect, token and cache
+usage, latency, error details, tool calls, reasoning content, and the captured request and response.
+`started_at` is recorded immediately
 before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
 returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
 trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
@@ -112,6 +113,35 @@ for that exact rollout-attempt id, including a kill-shaped attempt being redispa
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.
+
+## Agent observations
+
+Supported Agent Servers may also attach `ng_agent_observations` when observability is enabled. It
+contains agent invocations, tool-call intervals, explicit context-compaction events, and gaps for
+facts the integration could not observe. An invocation's `conversation` is the ordered, normalized
+set of conversation items supported by that producer. Unsupported or unavailable evidence is
+reported in `gaps` instead of being guessed; `agent_transcript_unavailable` means any available
+items came from a fallback output rather than a harness transcript.
+
+Agent observations and model-call capture are separate evidence. Join an invocation's model-call
+references by `model_call_id`, or by the exact `(model_ref, response_id)` pair when the harness sees
+the protocol response ID. Do not infer ownership from timestamps, text, or list position. The full
+model request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
+
+Tool timestamps are UTC Unix seconds when the source provides wall-clock time. `duration_ms` is the
+measured interval, and `timing_source` distinguishes an executor measurement from an artifact-derived
+interval. A missing capability is represented in `gaps`, not approximated.
+
+Model-visible tool calls and results remain in `AgentInvocation.conversation` as `function_call` and
+`function_call_output` items. Execution timing and outcome, when observable, live in
+`ToolCallObservation` and join through `(invocation_id, tool_call_id)`.
+
+Producer coverage is integration-specific. Claude Code exports transcript-derived hierarchy,
+model-call references, tool intervals, and compaction markers. Hermes exports hierarchy, executor
+tool timing, and compaction markers, but not exact model-call ownership. OpenClaw and PinchBench
+expose normalized response items and report gaps for hierarchy, timing, compaction, and model-call
+ownership. Those items duplicate response output and can make rollout records substantially larger.
+Observation payloads are retained in rollout records and excluded from aggregate-metrics requests.
 
 ## Limitations
 

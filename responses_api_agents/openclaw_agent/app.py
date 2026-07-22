@@ -23,7 +23,7 @@ import shutil
 from asyncio import Semaphore
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import Request
@@ -48,7 +48,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.openclaw_agent.observability import build_openclaw_observations
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
@@ -245,6 +247,10 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class OpenClawAgent(SimpleResponsesAPIAgent):
@@ -332,7 +338,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         return Path(session_file) if isinstance(session_file, str) and session_file else None
 
     async def _run_openclaw(
-        self, instruction: str, system_prompt: Optional[str]
+        self,
+        instruction: str,
+        system_prompt: Optional[str],
+        observation_collector: Optional[Callable[[str], None]] = None,
     ) -> tuple[list[Any], dict[str, int], str]:
         """setup and run agent. returns (output_items, usage, model_name)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
@@ -383,17 +392,23 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             output_items: list[Any] = []
             session_path = self._session_file(envelope)
             if session_path and session_path.is_file():
-                output_items = parse_openclaw_session(session_path.read_text(errors="replace"))
+                session_text = session_path.read_text(errors="replace")
+                output_items = parse_openclaw_session(session_text)
+                if output_items and observation_collector is not None:
+                    try:
+                        observation_collector(session_path.stem)
+                    except Exception:
+                        LOG.exception("failed to record OpenClaw session identity")
             if not output_items:
                 output_items = fallback_items
             return output_items, usage, self.config.model
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def responses(
+    async def _create_response(
         self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        observation_collector: Optional[Callable[[str], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -404,7 +419,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
         try:
-            output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
+            output_items, usage, model_name = await self._run_openclaw(
+                user_message,
+                system_prompt,
+                observation_collector=observation_collector,
+            )
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
             output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
@@ -442,6 +461,39 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             ),
         )
 
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        return await self._create_response(body)
+
+    async def responses_with_observations(
+        self,
+        request: Optional[Request],
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> AgentEpisode:
+        session_id: Optional[str] = None
+
+        def collect(value: str) -> None:
+            nonlocal session_id
+            session_id = value
+
+        response = await self._create_response(body, observation_collector=collect)
+        try:
+            observations = build_openclaw_observations(
+                session_id or response.id,
+                response.output,
+                transcript_available=session_id is not None,
+            )
+        except Exception:
+            LOG.exception("failed to build OpenClaw observations")
+            observations = AgentObservationBundle(
+                source="openclaw",
+                gaps=[ObservationGap(code="observation_capture_failed", source="openclaw")],
+            )
+        return AgentEpisode(response=response, observations=observations)
+
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
@@ -455,20 +507,29 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            rollout_id = self.rollout_id_from_run(body)
+            if rollout_id is not None:
+                episode = await self.responses_with_observations(request, body.responses_create_params)
+                agent_resp, observations = episode.response, episode.observations
+                agent_resp_json = agent_resp.model_dump(mode="json")
+            else:
+                agent_resp = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path="/v1/responses",
+                    json=body.responses_create_params,
+                    cookies=cookies,
+                )
+                await raise_for_status(agent_resp)
+                cookies = agent_resp.cookies
+                agent_resp_json = await get_response_json(agent_resp)
+                observations = None
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump()
+                | {"response": agent_resp_json}
+                | ({"rollout_id": rollout_id} if rollout_id is not None else {}),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
@@ -483,9 +544,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return OpenClawAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return OpenClawAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

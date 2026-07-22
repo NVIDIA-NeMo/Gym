@@ -62,7 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -212,6 +212,7 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
+    rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
@@ -299,6 +300,10 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+
+
+class SWEBenchRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
 
 
 ########################################
@@ -1953,7 +1958,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
+            model_server_base_url = apply_rollout_prefix(
+                f"http://{model_server_cfg.host}:{model_server_cfg.port}", self.config.rollout_id
+            )
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
             )
@@ -3374,7 +3381,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return json.dumps(chat_messages)
 
     def _setup_params(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
@@ -3448,6 +3455,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
+            rollout_id=rollout_id,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -3522,7 +3530,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return params, dataset_processor
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(body)
+        return await self._responses(body)
+
+    async def _responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
+        params, dataset_processor = self._setup_params(body, rollout_id)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3668,12 +3681,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata=metadata,
         )
 
-    async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
+    async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
 
-            response = await self.responses(body.responses_create_params)
+            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
