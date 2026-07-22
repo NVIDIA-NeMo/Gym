@@ -24,6 +24,7 @@ dependencies = [
     # repair. Use an archive because uv recursively initializes git
     # submodules, while optional SurferH submodules are not needed here.
     "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/31b76bf1c4d4e589238b314caa91470afc52651e.tar.gz",
+    "numkong==7.7.0",
     "docker==7.1.0",
     # Needed by OSWorld's mm_agents.pointer implementation.
     "anthropic",

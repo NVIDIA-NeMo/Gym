@@ -59,6 +59,7 @@ from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NA
 LOG = logging.getLogger("nemo_gym.osworld_agent")
 
 POINTER_PARALLEL_DISABLED_SENTINEL = "__nemo_gym_parallel_tools_disabled__"
+POINTER_ANTHROPIC_VALIDATION_SENTINEL = "__nemo_gym_anthropic_key_deferred__"
 
 _OSWORLD_LOG_CONTEXT_FIELDS = (
     "run_id",
@@ -206,13 +207,27 @@ def _validate_runner_runtime(config: "OSWorldAgentConfig") -> Optional[str]:
         agent_class_path=config.agent_class_path,
         agent_kwargs=config.agent_kwargs,
     )
-    if runner_spec.kind == "pointer_agent" and not os.environ.get("PARALLEL_API_KEY"):
+    is_pointer = runner_spec.kind == "pointer_agent"
+    if is_pointer and not os.environ.get("PARALLEL_API_KEY"):
         # Pointer constructs its optional Parallel client while importing the
         # module. Match the rollout runtime's no-web-tools mode when no real
         # credential is configured.
         os.environ["PARALLEL_API_KEY"] = POINTER_PARALLEL_DISABLED_SENTINEL
-    if runner_spec.agent_class_path:
-        load_attr(runner_spec.agent_class_path)
+    defer_anthropic_key = (
+        is_pointer
+        and bool(runner_spec.agent_kwargs.get("use_policy_endpoint", True))
+        and not os.environ.get("ANTHROPIC_API_KEY")
+    )
+    if defer_anthropic_key:
+        # Pointer validates this variable while importing, before Gym resolves
+        # the per-rollout policy credential.
+        os.environ["ANTHROPIC_API_KEY"] = POINTER_ANTHROPIC_VALIDATION_SENTINEL
+    try:
+        if runner_spec.agent_class_path:
+            load_attr(runner_spec.agent_class_path)
+    finally:
+        if defer_anthropic_key and os.environ.get("ANTHROPIC_API_KEY") == POINTER_ANTHROPIC_VALIDATION_SENTINEL:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
     return runner_spec.agent_class_path
 
 
@@ -809,20 +824,11 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
             remote_resources = self.config.resources_server is not None
             proxy_config_file = os.environ.get("PROXY_CONFIG_FILE") or self.config.proxy_config_file
-            if not requires_proxy or remote_resources:
+            if not requires_proxy or not enable_proxy or remote_resources:
                 # A remote Resources Server owns its proxy configuration; do
                 # not leak a control-plane path into the environment plane.
                 proxy_config_file = None
-            if requires_proxy and not enable_proxy:
-                return _empty_response(
-                    body,
-                    error=("ProxyRequiredButDisabled: task requires a proxy, but OSWORLD_ENABLE_PROXY is disabled"),
-                    termination_reason="proxy_required_but_disabled",
-                    proxy_required=True,
-                    proxy_enabled=False,
-                    proxy_configured=bool(proxy_config_file),
-                )
-            if requires_proxy and not remote_resources:
+            if requires_proxy and enable_proxy and not remote_resources:
                 try:
                     proxy_config_file = inspect_proxy_config_file(proxy_config_file).path
                 except ValueError as exc:

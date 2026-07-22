@@ -43,6 +43,7 @@ from responses_api_agents.osworld_agent.runner_registry import load_attr, resolv
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
 
 SANDBOX_DESKTOP_ENV_CLASS = "responses_api_agents.osworld_agent.sandbox_desktop_env.SandboxDesktopEnv"
+SANDBOX_POINTER_DESKTOP_ENV_CLASS = "responses_api_agents.osworld_agent.sandbox_desktop_env.SandboxPointerDesktopEnv"
 
 # Sentinel actions OSWorld recognises in step().
 _TERMINAL_ACTIONS = {"DONE", "FAIL"}
@@ -1583,12 +1584,7 @@ def run_osworld_task(
     if use_remote_resources and effective_vm_path:
         raise ValueError("vm_path is only valid for local OSWorld providers")
     proxy_info = None
-    if requires_proxy and not enable_proxy:
-        return proxy_precondition_failure(
-            "proxy_required_but_disabled",
-            "ProxyRequiredButDisabled: task requires a proxy, but proxy support is disabled",
-        )
-    if requires_proxy and not use_remote_resources:
+    if requires_proxy and enable_proxy and not use_remote_resources:
         try:
             proxy_info = inspect_proxy_config_file(proxy_config_file)
         except ValueError as exc:
@@ -1628,12 +1624,16 @@ def run_osworld_task(
         env_cls = RemoteDesktopEnv
     else:
         if use_gym_sandbox:
-            if env_class_path is None and runner_spec.env_class_path != "desktop_env.desktop_env.DesktopEnv":
+            sandbox_env_class = {
+                "desktop_env.desktop_env.DesktopEnv": SANDBOX_DESKTOP_ENV_CLASS,
+                "desktop_env.desktop_env_pointer.DesktopEnv": SANDBOX_POINTER_DESKTOP_ENV_CLASS,
+            }.get(runner_spec.env_class_path)
+            if sandbox_env_class is None and env_class_path is None:
                 raise ValueError(
                     "This runner uses a specialized DesktopEnv; set an explicit Gym Sandbox-compatible "
                     "env_class_path before enabling sandbox_provider"
                 )
-            env_cls = load_attr(env_class_path or SANDBOX_DESKTOP_ENV_CLASS)
+            env_cls = load_attr(sandbox_env_class or runner_spec.env_class_path)
         else:
             env_cls = load_attr(runner_spec.env_class_path)
         _patch_setup_execute_contract()

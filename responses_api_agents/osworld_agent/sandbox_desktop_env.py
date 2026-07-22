@@ -10,7 +10,9 @@ from collections.abc import Mapping
 from typing import Any
 
 import desktop_env.desktop_env as desktop_env_module
+import desktop_env.desktop_env_pointer as desktop_env_pointer_module
 from desktop_env.desktop_env import DesktopEnv
+from desktop_env.desktop_env_pointer import DesktopEnv as PointerDesktopEnv
 from desktop_env.providers.docker.manager import DockerVMManager
 
 from responses_api_agents.osworld_agent.sandbox_provider import GymSandboxDesktopProvider
@@ -19,7 +21,7 @@ from responses_api_agents.osworld_agent.sandbox_provider import GymSandboxDeskto
 _FACTORY_LOCK = threading.RLock()
 
 
-class SandboxDesktopEnv(DesktopEnv):
+class _SandboxProviderInjectionMixin:
     """DesktopEnv whose OSWorld provider contract is fulfilled by Gym Sandbox.
 
     The pinned OSWorld constructor imports its provider factory directly. A
@@ -27,6 +29,8 @@ class SandboxDesktopEnv(DesktopEnv):
     downstream controller/evaluator behavior while substituting only the
     manager/provider pair. The original factory is restored on every path.
     """
+
+    _desktop_env_module: Any
 
     def __init__(
         self,
@@ -54,7 +58,7 @@ class SandboxDesktopEnv(DesktopEnv):
             )
         kwargs["provider_name"] = "docker"
 
-        original_factory = desktop_env_module.create_vm_manager_and_provider
+        original_factory = self._desktop_env_module.create_vm_manager_and_provider
 
         def sandbox_factory(
             provider_name: str,
@@ -68,7 +72,7 @@ class SandboxDesktopEnv(DesktopEnv):
             return manager, provider
 
         with _FACTORY_LOCK:
-            desktop_env_module.create_vm_manager_and_provider = sandbox_factory
+            self._desktop_env_module.create_vm_manager_and_provider = sandbox_factory
             try:
                 super().__init__(*args, **kwargs)
             except BaseException:
@@ -78,4 +82,12 @@ class SandboxDesktopEnv(DesktopEnv):
                     provider.stop_emulator(str(kwargs.get("path_to_vm") or ""))
                 raise
             finally:
-                desktop_env_module.create_vm_manager_and_provider = original_factory
+                self._desktop_env_module.create_vm_manager_and_provider = original_factory
+
+
+class SandboxDesktopEnv(_SandboxProviderInjectionMixin, DesktopEnv):
+    _desktop_env_module = desktop_env_module
+
+
+class SandboxPointerDesktopEnv(_SandboxProviderInjectionMixin, PointerDesktopEnv):
+    _desktop_env_module = desktop_env_pointer_module

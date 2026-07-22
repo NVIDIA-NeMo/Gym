@@ -220,6 +220,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
             return FakeEnv
         if import_path == "fake.FakePointerEnv":
             return FakePointerEnv
+        if import_path == osworld_client.SANDBOX_POINTER_DESKTOP_ENV_CLASS:
+            return FakePointerEnv
         if import_path == "fake.FakeSetupScoreZeroEnv":
             return FakeSetupScoreZeroEnv
         if import_path == "fake.FakePromptAgent":
@@ -358,6 +360,31 @@ def test_gym_sandbox_backend_is_passed_as_plain_env_configuration(monkeypatch) -
     assert kwargs["sandbox_ready_poll_s"] == 0.25
 
 
+def test_pointer_gym_sandbox_uses_pointer_environment(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-sandbox", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: pytest.fail("pointer_agent must not use model_fn"),
+        runner_name="pointer_agent",
+        agent_class_path="fake.FakePointerAgent",
+        sandbox_provider_config={"docker": {}},
+        sandbox_spec={"image": "docker://osworld@sha256:fixed"},
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    env = FakeEnv.instances[0]
+    assert isinstance(env, FakePointerEnv)
+    assert env.kwargs["sandbox_provider"] == {"docker": {}}
+    assert FakePointerAgent.instances[0].kwargs["env"] is env
+
+
 def test_explicit_vm_path_is_shared_by_native_and_sandbox_backends(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -398,21 +425,22 @@ def test_gym_sandbox_and_remote_resources_are_mutually_exclusive(monkeypatch) ->
         )
 
 
-def test_proxy_required_task_is_masked_without_starting_an_environment(monkeypatch) -> None:
+def test_proxy_required_task_runs_directly_when_proxy_is_disabled(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
     result = osworld_client.run_osworld_task(
         {"id": "proxy-disabled", "instruction": "Open the website.", "proxy": True},
-        model_fn=lambda *_args: pytest.fail("model must not run"),
+        model_fn=lambda *_args: "```DONE```",
         env_class_path="fake.FakeEnv",
         enable_proxy=False,
+        sleep_after_execution=0,
+        task_timeout=10,
     )
 
-    assert result.reward == 0.0
-    assert result.mask_sample is True
-    assert result.termination_reason == "proxy_required_but_disabled"
-    assert "ProxyRequiredButDisabled" in (result.error or "")
-    assert FakeEnv.instances == []
+    assert result.reward == 1.0
+    assert result.mask_sample is False
+    assert FakeEnv.instances[0].kwargs["enable_proxy"] is False
+    assert FakeEnv.instances[0].task_config["proxy"] is True
 
 
 def test_proxy_required_task_passes_enablement_and_config_to_osworld(monkeypatch, tmp_path: Path) -> None:
