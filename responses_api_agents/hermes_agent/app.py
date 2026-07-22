@@ -29,11 +29,7 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -45,7 +41,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -60,6 +58,15 @@ def _trajectory_to_output_items(messages, n_input):
         if isinstance(content, list):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
+            reasoning_text = item.get("reasoning") or ""
+            if reasoning_text:
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rsn-{len(output_items)}",
+                        summary=[NeMoGymSummary(type="summary_text", text=reasoning_text)],
+                        type="reasoning",
+                    )
+                )
             output_items.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=f"msg-{len(output_items)}",
@@ -183,6 +190,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
     # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
     active_agents: set = None
+    interrupted_agents: set = None
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -198,6 +206,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _dispatch():
             for ag in list(self.active_agents):
+                self.interrupted_agents.add(id(ag))
                 if hasattr(ag, "interrupt"):
                     ag.interrupt("timeout")
 
@@ -239,6 +248,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
+        self.interrupted_agents = set()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
@@ -354,12 +364,47 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        # The agent ran out of turns / blew its context window if run_conversation reports it did
+        # not complete (api_call_count >= max_iterations). Mark the response incomplete so a
+        # downstream consumer (e.g. anyswe) can mask an accidental pass instead of scoring it 1.0.
+        agent_completed = bool(result.get("completed", True))
+
+        # Expose harness run outcome fields for diagnosability
+        was_interrupted = bool(result.get("interrupted")) or id(agent) in self.interrupted_agents
+        self.interrupted_agents.discard(id(agent))
+
+        harness_error = result.get("error")
+        metadata: dict[str, str] = {
+            "interrupted": "true" if was_interrupted else "false",
+            # `failed` = the underlying run flagged an API/provider failure (bad response shape,
+            # rate limit, unrecoverable truncation) — the clean signal for an infra failure vs a
+            # legitimate stop. `partial` = the response was truncated at the output-token limit.
+            "failed": "true" if result.get("failed") else "false",
+            "partial": "true" if result.get("partial") else "false",
+        }
+        # Turn count is `api_calls` in the result dict (present on every return).
+        if isinstance(result.get("api_calls"), int):
+            metadata["turns"] = str(result["api_calls"])
+        if harness_error:
+            metadata["hermes_error"] = str(harness_error)[:2000]
+
+        # Populate the structured error field too. `code` must be one of OpenAI's Literals, so we
+        # use the generic "server_error"; the real text lives in `message`.
+        response_error = None
+        if harness_error:
+            from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
+
+            response_error = ResponseError(code="server_error", message=str(harness_error)[:2000])
+
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
             object="response",
             output=output_items,
+            status="completed" if agent_completed else "incomplete",
+            error=response_error,
+            metadata=metadata,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
