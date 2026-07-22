@@ -360,9 +360,9 @@ def test_optional_body_model_bind_route_refuses_with_reason():
     async def opt_body(body: Optional[EchoBody] = None):
         pass
 
-    binding, reasons, _ = bind_route(_stub_route(opt_body))
-    assert binding is None
-    assert any("union/optional body param" in r for r in reasons), reasons
+    bound = bind_route(_stub_route(opt_body))
+    assert bound.binding is None
+    assert any("union/optional body param" in r for r in bound.reasons), bound.reasons
 
 
 def test_parameterized_dict_body_dispatches():
@@ -725,18 +725,18 @@ def test_bind_route_refusal_reasons():
         "unsupported required param": bare_required,
     }
     for expected, endpoint in cases.items():
-        binding, reasons, _ = bind_route(_stub_route(endpoint))
-        assert binding is None, expected
-        assert any(expected in reason for reason in reasons), (expected, reasons)
+        bound = bind_route(_stub_route(endpoint))
+        assert bound.binding is None, expected
+        assert any(expected in reason for reason in bound.reasons), (expected, bound.reasons)
 
 
 def test_bind_route_refuses_defaulted_query_param():
     async def handler(body: EchoBody, limit: int = 5):
         pass
 
-    binding, reasons, _ = bind_route(_stub_route(handler))
-    assert binding is None
-    assert any("defaulted query param" in r for r in reasons), reasons
+    bound = bind_route(_stub_route(handler))
+    assert bound.binding is None
+    assert any("defaulted query param" in r for r in bound.reasons), bound.reasons
 
 
 def test_silently_wrong_shapes_are_classified_not_degraded():
@@ -746,10 +746,10 @@ def test_silently_wrong_shapes_are_classified_not_degraded():
     app = server.setup_webserver()
     routes = {r.path: r for r in app.routes if isinstance(r, APIRoute)}
 
-    filt, _, _ = bind_route(routes["/filtered"])
+    filt = bind_route(routes["/filtered"]).binding
     assert filt is not None and filt.return_model is PublicView
 
-    sync, _, _ = bind_route(routes["/sync_tool"])
+    sync = bind_route(routes["/sync_tool"]).binding
     assert sync is not None and sync.is_coroutine is False
 
 
@@ -773,9 +773,9 @@ def test_bind_route_honors_factory_signature_over_annotations():
     )
     app.post("/factory")(handler)
     route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == "/factory")
-    binding, reasons, _ = bind_route(route)
-    assert binding is not None, reasons
-    assert binding.body_model is EchoBody
+    bound = bind_route(route)
+    assert bound.binding is not None, bound.reasons
+    assert bound.binding.body_model is EchoBody
 
 
 # ==================================================================================================
