@@ -1,5 +1,5 @@
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
-# For licensing see accompanying LICENSE file.
+# Originally Apple MIT License
 #
 # SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
