@@ -1,7 +1,8 @@
 #!/bin/bash
 
 command='
-  gym --version
+    source .venv/bin/activate
+    gym --version
 '
 sbatch \
     --nodes=2 \
