@@ -107,6 +107,80 @@ silently matches zero rows.
 - **Watch syslog growth** on vLLM hosts (~GB/day observed); vacuum journals and
   truncate before multi-day runs.
 
+## Phase 4 addendum: deployment shape for GRPO training (measured sizing)
+
+Sizing for full-parameter GRPO of Nemotron 3 Nano 30B-A3B against this
+environment, via the documented NeMo Gym → NeMo RL path. Three budgets decide
+the shape.
+
+**Trainer memory.** Optimizer state is per-parameter, not per-active-parameter:
+BF16 weights 60 GB + BF16 grads 60 GB + fp32 Adam ~360 GB ≈ **480 GB static**,
+sharded across the node, before activations and the colocated vLLM engine.
+
+**Train-sequence length (measured).** GRPO trains on the full concatenated
+trajectory. Exact final-turn sequence lengths (`len(prompt_token_ids) +
+len(generation_token_ids)` from the v3 rollouts): min 10.2k / median 20.2k /
+p90 36.0k / max 65.7k. Extended to the full 192-task mixed band via a
+calibrated chars-per-token estimate (4.00), taking each task's **longest**
+trajectory over the sweep's 5 passes (conservative):
+
+| Sequence cap | Mixed-band tasks kept |
+|---:|---:|
+| 16k | 23/192 (12%) |
+| 24k | 67/192 (35%) |
+| 32k | 121/192 (63%) |
+| 48k | 171/192 (89%) |
+| **64k** | **181/192 (94%)** |
+
+The band's median worst-case (28.8k) sits right at the 32k boundary, so an
+80 GB-class cap makes much of the curriculum flicker in and out; a ~200k tail
+(max 213k) is not worth keeping at any cap.
+
+**Rollout wall-clock.** The workload is environment-bound multi-turn generation:
+measured 160 rollouts / 22 min at c=32 on 4×H100 FP8; training generation runs
+the live policy in BF16 (≈½ the per-GPU throughput). A step of 32 prompts × k=8
+= 256 rollouts ≈ 25 min generation on 8 GPUs (serve DP=2 × TP=4 — two engine
+replicas beat TP=8 at this request mix) + 5–10 min training → **~30–35 min/step,
+~45 steps/day colocated**.
+
+**Shape ranking** (proof-point strength, descending):
+
+1. **8× B300 (288 GB), single node, colocated** — 2.3 TB total vs 480 GB
+   static: memory ceases to be a design constraint. Train at a 96–128k cap,
+   keeping the full 64k curriculum plus part of the long tail (11 tasks sit
+   between 64k and 213k), with generous KV headroom for higher generation
+   concurrency during the rollout phase. Same Blackwell day-0 smoke tests as
+   B200 below.
+2. **8× B200 (192 GB), single node, colocated** — 1.54 TB total vs 480 GB
+   static; train at a 64k cap and keep 94% of the curriculum; Blackwell BF16
+   throughput cuts step time to ~20 min. Day-0 smoke tests: Mamba-hybrid
+   training kernels on sm_100 in the NeMo RL container, and one full
+   train → weight-refit → generate cycle.
+3. **8× H200 (141 GB), single node, colocated** — comfortable at a 48k cap
+   (89% of curriculum).
+4. **2× 8× H100, disaggregated** (generation node + trainer node) — full 640 GB
+   for the trainer; per-step weight refit moves ~60 GB cross-node, so use
+   InfiniBand-class interconnect.
+5. **8× H100, single node** — fits at a 32k cap with aggressive activation
+   checkpointing, forfeiting ~37% of the mixed band; expect OOM-tuning time.
+6. **LoRA fallback (4–8× H100)** — optimizer state collapses; also the escape
+   hatch if full-FT of the hybrid Mamba/MoE arch hits framework issues.
+
+**Node layout.** Trainer sharded across all GPUs; vLLM generation DP=2×TP=4 BF16
+with sleep/wake colocation; head server + resources server + MCP fleet on the
+same node's CPUs (whole environment peaked at 18/124 cores in the PERF.md
+sweep). Run 2–3 MCP replicas per gym via `gym_url_pools` and script a fleet
+recreate every ~15–20 steps (fd budget, PARITY.md §6). Reward is pure SQL — no
+judge model, no extra GPU. 256 GB+ RAM; ~1 TB NVMe scratch (BF16 checkpoints are
+60 GB each); `RAY_TMPDIR` and HF cache on the big mount.
+
+**Proof-point run sketch** (~1 week): k=5 × 649 baseline eval (doubles as
+curriculum screening for the policy model) → train on ~⅔ of the in-cap mixed
+band, hold out ⅓ + full split → 100–200 GRPO steps, temp 0.6, strict fractional
+reward as training signal with held-out *binary* success as the honest metric →
+final mean@5 bookend. Pre-registered success: held-out band +≥10pp, full-split
+macro +≥2pp at mean@5 (resolvable: mean@5 noise is ±0.7 pp, PARITY.md §4–5).
+
 Raw artifacts: `results/rl_pilot/` on the collection host (`rollouts_v2.jsonl`,
 `rollouts_t0_control.jsonl`, `pilot_tasks_v3.jsonl`, `rollouts_v3.jsonl` +
 aggregate metrics).
