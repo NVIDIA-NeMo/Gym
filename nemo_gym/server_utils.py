@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import secrets
 import socket
 import sys
 import time
@@ -528,9 +529,29 @@ class SimpleServer(BaseServer):
         pass
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # This value is used as the session-cookie name, in error messages,
+        # and as a profiling-directory identifier. It is intentionally stable
+        # and human-readable. It MUST NOT be used as a cryptographic signing
+        # key — both components (class name + config name) are public, so any
+        # client can reconstruct it and forge session cookies. For the signing
+        # secret, use get_session_secret_key() instead.
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret_key(self) -> str:
+        # Per-process random signing secret for SessionMiddleware and MCP
+        # session tokens. The previous default reused get_session_middleware_key()
+        # (a predictable string of public class/config names) as the signing
+        # secret, which let any client forge session cookies and MCP tokens
+        # offline — breaking rollout isolation (a resources server holds
+        # session_state for all concurrent rollouts keyed by session_id) and
+        # defeating the per-rollout MCP tool allow-list.
+        # Override this to provide a deployment-wide stable secret (needed for
+        # multi-process deployments where all workers must agree on the key).
+        cached = getattr(self, "_session_secret_key", None)
+        if cached is None:
+            cached = secrets.token_hex(32)
+            self._session_secret_key = cached
+        return cached
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -552,7 +573,10 @@ class SimpleServer(BaseServer):
             return response
 
         session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        session_secret_key = self.get_session_secret_key()
+        app.add_middleware(
+            SessionMiddleware, secret_key=session_secret_key, session_cookie=session_middleware_key
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
