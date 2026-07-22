@@ -30,7 +30,7 @@ EOF
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
 sbatch \
     --nodes=2 \
-    --account=nemotron_n4_post \
+    --account=nemotron_evals_research \
     --partition=batch \
     --gres=gpu:4 \
     --time=04:00:00 \
