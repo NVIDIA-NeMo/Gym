@@ -26,6 +26,10 @@ command=$(cat <<EOF
         > "vllm_$(date +%Y%m%d_%H%M%S).log" 2>&1
 EOF
 )
+command=$(cat <<EOF
+    echo "hello"
+EOF
+)
 
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
 sbatch \
