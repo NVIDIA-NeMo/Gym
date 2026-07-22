@@ -23,9 +23,8 @@ Paired with ``config_n3_128k.yaml``. Requires HF auth for the gated
 NVIDIA repo (``HF_TOKEN`` env or ``huggingface-cli login``).
 """
 
-from pathlib import Path
-
 import os
+from pathlib import Path
 
 from benchmarks.mrcr.prepare import prepare as _prepare
 
@@ -34,7 +33,9 @@ TOKENIZER_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"  # pragma: allo
 MAX_CONTEXT_TOKENS = 131072
 OUTPUT_FPATH = Path(__file__).parent / "data" / "mrcr_n3_128k_benchmark.jsonl"
 # Which n_needles buckets to keep (MRCR ships 2, 4, 8). Default all; override e.g. MRCR_N_NEEDLES=8.
-N_NEEDLES = tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (2, 4, 8)
+N_NEEDLES = (
+    tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (2, 4, 8)
+)
 
 
 def prepare() -> Path:

@@ -37,7 +37,9 @@ TOKENIZER_NAME = "deepseek-ai/DeepSeek-V4-Pro"
 MAX_CONTEXT_TOKENS = 1048576
 OUTPUT_FPATH = Path(__file__).parent / "data" / "mrcr_dsv4_1m_benchmark.jsonl"
 # Which n_needles buckets to keep (MRCR ships 2, 4, 8). Default 8-needle only; override e.g. MRCR_N_NEEDLES=2,4,8.
-N_NEEDLES = tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (8,)
+N_NEEDLES = (
+    tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (8,)
+)
 
 
 def prepare() -> Path:

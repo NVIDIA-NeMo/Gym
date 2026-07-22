@@ -32,7 +32,9 @@ TOKENIZER_NAME = os.environ.get("GEMMA4_TOKENIZER", "google/gemma-4-31B-it")
 MAX_CONTEXT_TOKENS = 131072
 OUTPUT_FPATH = Path(__file__).parent / "data" / "mrcr_gemma4_128k_benchmark.jsonl"
 # Which n_needles buckets to keep (MRCR ships 2, 4, 8). Default 8-needle only; override e.g. MRCR_N_NEEDLES=2,4,8.
-N_NEEDLES = tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (8,)
+N_NEEDLES = (
+    tuple(int(x) for x in os.environ["MRCR_N_NEEDLES"].split(",")) if os.environ.get("MRCR_N_NEEDLES") else (8,)
+)
 
 
 def prepare() -> Path:
