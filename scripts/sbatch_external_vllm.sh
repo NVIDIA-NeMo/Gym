@@ -1,6 +1,6 @@
 #!/bin/bash
 
-command="
+command=$(cat <<EOF
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
     vllm serve $MODEL \
         --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
@@ -24,7 +24,9 @@ command="
         --moe-backend triton \
         --max-num-batched-tokens 32768 \
         > "vllm_$(date +%Y%m%d_%H%M%S).log" 2>&1
-"
+EOF
+)
+
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
 sbatch \
     --nodes=2 \
