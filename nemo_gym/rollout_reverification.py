@@ -28,7 +28,7 @@ from tqdm.asyncio import tqdm
 from wandb import Table
 
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -44,20 +44,81 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
 )
 from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
-    is_global_aiohttp_client_setup,
     raise_for_status,
-    set_global_aiohttp_client,
+    setup_server_client,
 )
+
+
+class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
+    materialized_inputs_jsonl_fpath: str = Field(
+        description="The file path of the materialized inputs as output by `gym eval run`."
+    )
+    rollouts_jsonl_fpath: str = Field(
+        description="The file path of the rollouts to re-verify, as output by `gym eval run`."
+    )
+    output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
+    force: bool = Field(
+        default=False,
+        description=(
+            "Re-verify even against servers whose reverify_mode is UNSUPPORTED (rewards may be "
+            "incorrect); output filenames are prefixed with `unsafe_`."
+        ),
+    )
+    disable_aggregation: bool = Field(
+        default=False,
+        description=(
+            "Skip the post-reverification aggregate-metrics computation and file write. "
+            "Used when sharding rollouts across multiple jobs that will be aggregated together "
+            "afterward by `gym eval aggregate`."
+        ),
+    )
+    num_samples_in_parallel: Optional[int] = Field(
+        default=None, ge=1, description="Maximum number of samples to re-verify in parallel (omit for unbounded)."
+    )
+    limit: Optional[int] = Field(
+        default=None, ge=1, description="Maximum number of examples to re-verify (omit for no limit)."
+    )
+    upload_rollouts_to_wandb: bool = Field(
+        default=True,
+        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "If the output file already exists, delete it and start fresh. "
+            "By default, an existing output file raises an error to prevent accidental appending or overwriting."
+        ),
+    )
+    resume_from_cache: bool = Field(
+        default=False,
+        description=(
+            "Resume reverification from a partially-completed output file. "
+            "Rows already present in the output file (or flagged terminal/maxed-out in the failures sidecar) "
+            "are skipped; only the remaining rows are re-verified and appended."
+        ),
+    )
 
 
 @dataclass
 class InputRolloutPair:
-    input: Dict[str, Any]
-    rollout: Dict[str, Any]
+    input: Dict[str, Any]  # from materialized inputs
+    rollout: Dict[str, Any]  # from rollouts
+
+
+@dataclass
+class OutputPaths:
+    output: Path
+    failures: Path
+
+
+@dataclass
+class CacheKeysByStatus:
+    successful_keys: set[tuple[int, int]]
+    terminal_keys: set[tuple[int, int]]
+    maxed_out_keys: set[tuple[int, int]]
 
 
 # ---------------------------------------------------------------------------
@@ -111,56 +172,9 @@ def _build_agent_to_resources_server_mapping(
     return _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict)
 
 
-class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
-    materialized_inputs_jsonl_fpath: str = Field(
-        description="The file path of the materialized inputs as output by `gym eval run`."
-    )
-    rollouts_jsonl_fpath: str = Field(
-        description="The file path of the rollouts to re-verify, as output by `gym eval run`."
-    )
-    output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
-    force: bool = Field(
-        default=False,
-        description=(
-            "Re-verify even against servers whose reverify_mode is UNSUPPORTED (rewards may be "
-            "incorrect); output filenames are prefixed with `unsafe_`."
-        ),
-    )
-    disable_aggregation: bool = Field(
-        default=False,
-        description=(
-            "Skip the post-reverification aggregate-metrics computation and file write. "
-            "Used when sharding rollouts across multiple jobs that will be aggregated together "
-            "afterward by `gym eval aggregate`."
-        ),
-    )
-    num_samples_in_parallel: Optional[int] = Field(
-        default=None, ge=1, description="Maximum number of samples to re-verify in parallel (omit for unbounded)."
-    )
-    limit: Optional[int] = Field(
-        default=None, ge=1, description="Maximum number of examples to re-verify (omit for no limit)."
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
-    )
-    overwrite: bool = Field(
-        default=False,
-        description=(
-            "If the output file already exists, delete it and start fresh. "
-            "By default, an existing output file raises an error to prevent accidental appending or overwriting."
-        ),
-    )
-    resume_from_cache: bool = Field(
-        default=False,
-        description=(
-            "Resume reverification from a partially-completed output file. "
-            "Rows already present in the output file (or flagged terminal/maxed-out in the failures sidecar) "
-            "are skipped; only the remaining rows are re-verified and appended."
-        ),
-    )
-
-
+# ---------------------------------------------------------------------------
+# Function used to summarize the debug information for a failed verification
+# ---------------------------------------------------------------------------
 def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: str) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
@@ -172,96 +186,10 @@ def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: st
     return {k: v for k, v in summary.items() if v is not None}
 
 
-def _setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":  # pragma: no cover
-    server_client = ServerClient.load_from_global_config(head_server_config)
-    if not is_global_aiohttp_client_setup():
-        set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
-    return server_client
-
-
-def _yield_inputs_and_rollouts_paired(
-    materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
-) -> "Iterator[InputRolloutPair]":
-    inputs_by_key = {}
-    with open(materialized_inputs_jsonl_fpath) as m_f:
-        for line in m_f:
-            r = orjson.loads(line)
-            inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
-    with open(rollouts_jsonl_fpath) as r_f:
-        for i, line in tqdm(enumerate(r_f), desc="Reading rollouts"):  # never holds the whole file
-            if limit is not None and i >= limit:
-                break
-            rollout_row = orjson.loads(line)
-            input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
-            if input_row is None:
-                raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
-            yield InputRolloutPair(input=input_row, rollout=rollout_row)
-
-
-def _run_verification_payloads(
-    payloads: List[Dict],
-    semaphore: Semaphore | nullcontext[None] | None = None,
-) -> Iterator[Future]:  # pragma: no cover
-    semaphore = semaphore or nullcontext[None]()
-    server_client = _setup_server_client()
-    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-
-    async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-        async with semaphore:
-            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
-            res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
-            try:
-                await raise_for_status(
-                    res
-                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
-            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
-            except Exception:
-                if is_global_aiohttp_client_request_debug_enabled():
-                    print(
-                        "[rollout_reverification] /verify failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
-                        flush=True,
-                    )
-                raise
-            return row, await get_response_json(res)
-
-    return tqdm.as_completed(
-        map(_post_subroutine, payloads),
-        desc="Collecting reverification results",
-        miniters=10,
-        total=len(payloads),
-        maxinterval=60,
-    )
-
-
-@dataclass
-class OutputPaths:
-    output: Path
-    failures: Path
-
-
-def _prepare_output_fpaths(output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool) -> OutputPaths:
-    output_fpath = Path(output_jsonl_fpath)
-    output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
-    failures_fpath = failures_path_for(output_fpath)
-    if not resume_from_cache:
-        for fpath in (output_fpath, failures_fpath):
-            if fpath.exists():
-                fpath.unlink()
-                print(f"Deleted existing output file: '{fpath}'")
-    return OutputPaths(output=output_fpath, failures=failures_fpath)
-
-
-def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
-
-
-@dataclass
-class CacheKeysByStatus:
-    successful_keys: set[tuple[int, int]]
-    terminal_keys: set[tuple[int, int]]
-    maxed_out_keys: set[tuple[int, int]]
+# ---------------------------------------------------------------------------
+# Functions used to deal with the cache - partially completed output file and
+# the failures sidecar file
+# ---------------------------------------------------------------------------
 
 
 def _parse_output_line_key(line: bytes) -> tuple[int, int]:
@@ -336,6 +264,37 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
     )
 
 
+# ---------------------------------------------------------------------------
+# Functions used by the main RolloutReverificationHelper in the reverification process:
+# Yielding InputRolloutPair objects to be re-verified
+# Preparing the payloads from them (by skipping rows that are already in the cache and some formatting)
+# And running the verification requests in parallel
+# ---------------------------------------------------------------------------
+
+
+def _yield_inputs_and_rollouts_paired(
+    materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
+) -> "Iterator[InputRolloutPair]":
+    inputs_by_key = {}
+    with open(materialized_inputs_jsonl_fpath) as m_f:
+        for line in m_f:
+            r = orjson.loads(line)
+            inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
+    with open(rollouts_jsonl_fpath) as r_f:
+        for i, line in tqdm(enumerate(r_f), desc="Reading rollouts"):  # never holds the whole file
+            if limit is not None and i >= limit:
+                break
+            rollout_row = orjson.loads(line)
+            input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
+            if input_row is None:
+                raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
+            yield InputRolloutPair(input=input_row, rollout=rollout_row)
+
+
+def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+    return pair.input | {"response": pair.rollout["response"]}
+
+
 def _prepare_payloads(
     materialized_inputs_jsonl_fpath: Path,
     rollouts_jsonl_fpath: Path,
@@ -356,6 +315,43 @@ def _prepare_payloads(
         return payloads
     else:
         return all_payloads
+
+
+def _run_verification_payloads(
+    payloads: List[Dict],
+    semaphore: Semaphore | nullcontext[None] | None = None,
+) -> Iterator[Future]:  # pragma: no cover
+    semaphore = semaphore or nullcontext[None]()
+    server_client = setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+
+    async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+        async with semaphore:
+            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+            res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
+            try:
+                await raise_for_status(
+                    res
+                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
+            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
+            except Exception:
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print(
+                        "[rollout_reverification] /verify failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
+                        flush=True,
+                    )
+                raise
+            return row, await get_response_json(res)
+
+    return tqdm.as_completed(
+        map(_post_subroutine, payloads),
+        desc="Collecting reverification results",
+        miniters=10,
+        total=len(payloads),
+        maxinterval=60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +383,7 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     Raises ConfigError when force=False and at least one RS is UNSUPPORTED.
     Returns None when all RS are STATELESS.
     """
-    server_client = _setup_server_client()
+    server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
     unsupported_rs = await _check_reverify_mode(server_client, agent_to_rs)
     if not unsupported_rs:
@@ -405,6 +401,11 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     )
 
 
+# ---------------------------------------------------------------------------
+# Function used to compute the aggregate metrics after the reverification process
+# Very similar to the rollout collection code, but we need to send the request to
+# resources servers instead of the agent server, since the second one might not be started
+# ---------------------------------------------------------------------------
 async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
@@ -418,7 +419,7 @@ async def _call_aggregate_metrics(
     if not results:
         return None
 
-    server_client = _setup_server_client()
+    server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
     # Group results by agent name
     agent_results: Dict[str, List[Dict]] = {}
@@ -488,6 +489,24 @@ async def _call_aggregate_metrics(
     metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
+
+
+# ---------------------------------------------------------------------------
+# Function used to name, initialize or clean up the output paths for the reverification process
+# ---------------------------------------------------------------------------
+
+
+def _prepare_output_fpaths(output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool) -> OutputPaths:
+    output_fpath = Path(output_jsonl_fpath)
+    output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
+    output_fpath.mkdir(parents=True, exist_ok=True)
+    failures_fpath = failures_path_for(output_fpath)
+    if not resume_from_cache:
+        for fpath in (output_fpath, failures_fpath):
+            if fpath.exists():
+                fpath.unlink()
+                print(f"Deleted existing output file: '{fpath}'")
+    return OutputPaths(output=output_fpath, failures=failures_fpath)
 
 
 class RolloutReverificationHelper(BaseModel):
