@@ -32,6 +32,6 @@ sbatch \
     --partition=batch \
     --gres=gpu:4 \
     --time=04:00:00 \
-    --job-name=nemotron_3_ultra-evals-$USER \
+    --job-name=vllm-$USER \
     --exclusive \
     scripts/sbatch_base.sh bash -lc $command
