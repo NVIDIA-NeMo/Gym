@@ -55,6 +55,12 @@ class InstructionFollowingRunRequest(BaseRunRequest):
         vm_grading = vm.get("grading_mode")
         if vm_grading is not None:
             self.grading_mode = vm_grading
+        if self.instruction_id_list is None:
+            raise ValueError("instruction_id_list is required (provide at top level or in verifier_metadata)")
+        if self.kwargs is None:
+            raise ValueError("kwargs is required (provide at top level or in verifier_metadata)")
+        if self.prompt is None:
+            raise ValueError("prompt is required (provide at top level or in verifier_metadata)")
         return self
 
 
@@ -72,6 +78,7 @@ class InstructionFollowingVerifyResponse(BaseVerifyResponse):
         "binary",
         "fraction",
     ] = "binary"
+    verifier_metadata: Optional[Dict[str, Any]] = None
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):

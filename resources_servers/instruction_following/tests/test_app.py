@@ -15,6 +15,9 @@
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+from pydantic import ValidationError
+
 from nemo_gym.base_resources_server import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.instruction_following.app import (
@@ -29,6 +32,40 @@ class TestApp:
         """Helper to create server instance."""
         config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         return InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _create_request_via_verifier_metadata(
+        self, instruction_ids, prompt, kwargs, response_content, request_id=1, grading_mode="binary"
+    ):
+        """Helper to create request using the benchmark verifier_metadata format."""
+        response = NeMoGymResponse(
+            id=f"resp_test_{request_id}",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": f"msg_test_{request_id}",
+                    "content": [{"annotations": [], "text": response_content, "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        return InstructionFollowingVerifyRequest(
+            id=request_id,
+            responses_create_params={"input": [{"role": "user", "content": prompt}]},
+            response=response,
+            verifier_metadata={
+                "prompt": prompt,
+                "instruction_id_list": instruction_ids,
+                "kwargs": kwargs,
+                "grading_mode": grading_mode,
+            },
+        )
 
     def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1, grading_mode=None):
         """Helper to create real request with NeMoGymResponse."""
@@ -202,3 +239,76 @@ class TestApp:
             grading_mode="fraction",
         )
         self._run_verify_test(real_request, False, 0.5, [True, False])
+
+    def test_verifier_metadata_path(self):
+        """Benchmark format: fields supplied via verifier_metadata are resolved correctly."""
+        real_request = self._create_request_via_verifier_metadata(
+            instruction_ids=["detectable_format:title"],
+            prompt="Write the entire response with a title.",
+            kwargs=[{}],
+            response_content="<<My Title>>\n\nThis is the content of my response.",
+        )
+        self._run_verify_test(real_request, True, 1.0, [True])
+
+    def test_verifier_metadata_preserved_in_response(self):
+        """verifier_metadata from the request should appear in the verify response."""
+        vm = {
+            "prompt": "Write the entire response with a title.",
+            "instruction_id_list": ["detectable_format:title"],
+            "kwargs": [{}],
+            "grading_mode": "binary",
+        }
+        real_request = self._create_request_via_verifier_metadata(
+            instruction_ids=vm["instruction_id_list"],
+            prompt=vm["prompt"],
+            kwargs=vm["kwargs"],
+            response_content="<<My Title>>\n\nContent here.",
+        )
+        server = self._create_server()
+        result = asyncio.run(server.verify(real_request))
+        assert result.verifier_metadata == vm
+
+    def test_missing_instruction_id_list_raises(self):
+        """Omitting instruction_id_list (neither top-level nor in verifier_metadata) should raise."""
+        with pytest.raises(ValidationError):
+            InstructionFollowingVerifyRequest(
+                id=1,
+                responses_create_params={"input": []},
+                response=NeMoGymResponse(
+                    id="r", created_at=0.0, model="m", object="response",
+                    output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+                ),
+                prompt="some prompt",
+                kwargs=[{}],
+                # instruction_id_list intentionally omitted
+            )
+
+    def test_missing_kwargs_raises(self):
+        """Omitting kwargs (neither top-level nor in verifier_metadata) should raise."""
+        with pytest.raises(ValidationError):
+            InstructionFollowingVerifyRequest(
+                id=1,
+                responses_create_params={"input": []},
+                response=NeMoGymResponse(
+                    id="r", created_at=0.0, model="m", object="response",
+                    output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+                ),
+                prompt="some prompt",
+                instruction_id_list=["detectable_format:title"],
+                # kwargs intentionally omitted
+            )
+
+    def test_missing_prompt_raises(self):
+        """Omitting prompt (neither top-level nor in verifier_metadata) should raise."""
+        with pytest.raises(ValidationError):
+            InstructionFollowingVerifyRequest(
+                id=1,
+                responses_create_params={"input": []},
+                response=NeMoGymResponse(
+                    id="r", created_at=0.0, model="m", object="response",
+                    output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+                ),
+                instruction_id_list=["detectable_format:title"],
+                kwargs=[{}],
+                # prompt intentionally omitted
+            )
