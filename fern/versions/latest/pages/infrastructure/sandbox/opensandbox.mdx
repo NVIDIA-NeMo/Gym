@@ -135,6 +135,67 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 The provider also normalizes metadata values for backend labels by replacing unsupported characters and truncating values to the provider limit.
 
+## Job Attribution
+
+The provider merges `nemo-gym.nvidia.com/team`, `nemo-gym.nvidia.com/user`,
+`nemo-gym.nvidia.com/workload`, and `nemo-gym.nvidia.com/run` keys into each sandbox's
+metadata when they can be resolved. OpenSandbox propagates sandbox metadata as Kubernetes
+labels on the sandbox resources, so running sandboxes are attributable both through the
+OpenSandbox list API metadata filter and directly at the cluster level:
+
+```bash
+kubectl get pods -l nemo-gym.nvidia.com/team=my-team
+```
+
+Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
+`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` environment variables, then Slurm job environment
+variables (`SLURM_JOB_ACCOUNT` / `SLURM_JOB_USER` / `SLURM_JOB_NAME`). `user` additionally
+falls back to the OS login name (`root` is ignored — containers run as root by default, so
+it would attribute the image, not a person), and `workload` to `NEMO_GYM_CONFIG_PATH`, the
+server instance name the gym CLI sets on every server process it spawns. Fields that cannot
+be resolved are omitted. Explicit `sandbox_spec.metadata` and `default_metadata` keys always
+take precedence over attribution keys.
+
+`run` identifies one launch of the creating process: `NEMO_GYM_RUN_ID` if set, else an id
+generated per process. The resolved attribution is logged once at the first sandbox create —
+note the `run` value from the logs to list or clean up exactly that run's sandboxes (for
+example after killing a run partway through), which `team` / `user` / `workload` cannot do
+when the same user launches the same workload twice:
+
+```bash
+kubectl delete batchsandboxes -l nemo-gym.nvidia.com/run=<run-id>
+```
+
+```yaml
+sandbox:
+  opensandbox:
+    attribution:
+      enabled: true                       # set false to disable automatic attribution
+      key_prefix: nemo-gym.nvidia.com/    # label-key namespace; "" for bare team/user/workload/run keys
+      # team: my-team                     # override auto-detection
+      # user: my-user
+      # workload: my-benchmark
+      # run: my-run-id
+```
+
+### Attribution in Kubernetes deployments
+
+When the gym servers themselves run in Kubernetes (for example a driver pod launching an
+eval), none of the automatic sources resolve: there are no Slurm variables, and the
+container's OS login is typically `root`, which is ignored. Set the `NEMO_GYM_*` variables
+on the pod spec — either directly or via the downward API from labels the pod already
+carries:
+
+```yaml
+env:
+  - name: NEMO_GYM_TEAM
+    value: my-team
+  - name: NEMO_GYM_USER
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.labels['owner']
+```
+
 ## Lifecycle
 
 The provider creates one OpenSandbox sandbox per Gym sandbox:
