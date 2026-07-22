@@ -538,23 +538,23 @@ _BOXED_RE = re.compile(r"BOXED\[(A|B|TIE)\]")
 _BOXED_TO_RESPONSE = {"A": A_WIN_RESPONSE, "B": B_WIN_RESPONSE, "TIE": TIE_RESPONSE}
 
 
-def parse_judgement(response_text: str) -> str:
+def parse_judgement(response_text: str) -> Optional[str]:
     """Extract the judge's verdict (``BOXED[A|B|TIE]``) from its response.
 
     Uses the **last** boxed token so a verbose/reasoning judge that writes e.g.
     ``"not BOXED[A]; the answer is BOXED[B]"`` is scored on its conclusion rather
     than the first token mentioned (the old first-substring match scored A here).
-    When no boxed verdict is present the response is mis-formatted; we log it and
-    fall back to a TIE so the failure is visible rather than silently pulling the
-    win rate toward 0.5.
+    When no boxed verdict is present the response is mis-formatted; return
+    ``None`` so the caller can exclude it from the ELO calculation. Treating an
+    invalid response as a tie would award the eval model half a win.
     """
     matches = _BOXED_RE.findall(response_text or "")
     if not matches:
         LOGGER.warning(
-            "judge response has no BOXED[A|B|TIE] verdict; scoring as TIE. head=%r",
+            "judge response has no BOXED[A|B|TIE] verdict; dropping vote. head=%r",
             (response_text or "")[:200],
         )
-        return TIE_RESPONSE
+        return None
     return _BOXED_TO_RESPONSE[matches[-1]]
 
 
@@ -628,11 +628,16 @@ def run_trials(
     historical single-judge loop. Pass *rng* (a seeded ``random.Random``) for
     reproducible judge selection.
 
+    Invalid responses without a boxed verdict are excluded rather than scored
+    as ties. If every response is invalid, the matchup fails so its caller can
+    retry or drop it explicitly.
+
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
-    ``tie_count``, ``task_count``, ``per_judge`` (per-member a/b/tie/trial
-    counts keyed by judge name), and ``trial_judges`` (the judge name that graded
-    each trial, ordered by trial index — always present so the grader of every
-    match is documented).
+    ``tie_count``, ``task_count`` (valid votes only), ``invalid_count``,
+    ``per_judge`` (per-member a/b/tie/valid/invalid counts keyed by judge name),
+    and ``trial_judges`` (the judge name that graded each attempted trial,
+    ordered by trial index — always present so the grader of every match is
+    documented).
 
     When ``return_raw_responses`` is True, the dict also carries
     ``raw_responses`` (per-trial judge completion strings, same ordering as
@@ -645,6 +650,7 @@ def run_trials(
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
+    invalid_count = 0
     raw_responses: list[str] = []
     trial_judges: list[str] = []
     per_judge: dict[str, dict] = {}
@@ -668,15 +674,27 @@ def run_trials(
         if return_raw_responses:
             raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
-        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
         # Per-judge tally (same A=submission_a / B=submission_b convention as the
         # global counts) so the panel's per-member balance is auditable.
-        jc = per_judge.setdefault(judge.name, {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0})
+        jc = per_judge.setdefault(
+            judge.name,
+            {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0, "invalid_count": 0},
+        )
+        if judgement is None:
+            invalid_count += 1
+            jc["invalid_count"] += 1
+            continue
+
+        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
         jc["win_count_a"], jc["win_count_b"], jc["tie_count"] = tally_result(
             judgement, swapped, jc["win_count_a"], jc["win_count_b"], jc["tie_count"]
         )
         jc["trials"] += 1
+
+    valid_count = win_count_a + win_count_b + tie_count
+    if valid_count == 0:
+        raise ValueError(f"All {num_trials} pairwise judge responses were invalid")
 
     if win_count_a > win_count_b:
         winner = A_WIN_RESPONSE
@@ -690,7 +708,8 @@ def run_trials(
         "win_count_a": win_count_a,
         "win_count_b": win_count_b,
         "tie_count": tie_count,
-        "task_count": num_trials,
+        "task_count": valid_count,
+        "invalid_count": invalid_count,
         "per_judge": per_judge,
         # Always recorded (just judge names, ordered by trial) so every match's
         # per-trial grader is documented even when raw responses aren't kept.

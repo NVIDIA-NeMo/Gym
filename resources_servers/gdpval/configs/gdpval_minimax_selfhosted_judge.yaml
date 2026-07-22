@@ -21,26 +21,18 @@
 #   gdpval_minimax_local_judge.yaml + the standalone local_vllm_model config, but
 #   it does NOT currently start on GB200.)
 #
-# STEP 1 — serve MiniMax-M3 yourself from the vendor container (on your GPU
-# node(s)):
-#   IFACE_NAME=<fabric-nic>   # e.g. the NIC ib/eth used for multi-node NCCL
-#   HEAD_IP=<this-node-ip>
-#   docker run --gpus all --privileged --ipc=host -p 8000:8000 \
-#     -v ~/.cache/huggingface:/root/.cache/huggingface \
-#     -e GLOO_SOCKET_IFNAME=$IFACE_NAME -e NCCL_SOCKET_IFNAME=$IFACE_NAME \
-#     vllm/vllm-openai:minimax-m3 MiniMaxAI/MiniMax-M3 \
-#     --block-size 128 -cc.pass_config.fuse_allreduce_rms=False \
-#     --tensor-parallel-size 8 --nnodes 2 --node-rank 0 --master-addr $HEAD_IP \
-#     --tool-call-parser minimax_m3 --enable-auto-tool_choice \
-#     --reasoning-parser minimax_m3
-#   (On Slurm without Docker, convert the image with enroot/pyxis and run the
-#   same args via `srun --container-image=...`. Confirm it is up:
-#   `curl -s http://$HEAD_IP:8000/v1/models`.)
+# STEP 1 — serve MiniMax-M3 yourself from the vendor container. NVIDIA users
+# should use the internal serving workflow maintained separately from Gym. Use
+# one single-node TP=4 instance, or independent single-node TP=4 replicas for
+# data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
+# cross-node MXFP8 all-reduce path can produce garbage logits despite a clean
+# startup. Confirm the endpoint from the gym host:
+#   curl -s http://<judge-host>:5000/v1/models
 #
 # STEP 2 — run GDPVal with gym pointing at your endpoint. Chain this overlay
 # AFTER the benchmark config and export the endpoint:
 #
-#   export MINIMAX_BASE_URL=http://$HEAD_IP:8000/v1   # your server's /v1 route
+#   export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
 #   gym eval run --benchmark gdpval --model-type vllm_model \
 #     --config resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml \
 #     --split benchmark --output results/gdpval_minimax_judge.jsonl

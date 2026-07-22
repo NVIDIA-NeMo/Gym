@@ -320,26 +320,25 @@ Two pieces make this work:
 
 ### Run it
 
-First serve MiniMax-M3 yourself on your GPU node(s) using the provided sbatch
-scripts, which pin the **validated single-node topology**. Do NOT serve TP=8
-across nodes: the cross-node MXFP8 all-reduce path on this container produces
-*garbage logits that still start cleanly* (see the header of
-`serve_minimax_multimodal_1node.sh`).
+First serve MiniMax-M3 yourself on your GPU node(s). NVIDIA users should use
+the internal serving workflow, which is maintained separately from Gym. Use a
+**single-node TP=4** instance, or independent single-node TP=4 replicas for
+data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
+cross-node MXFP8 all-reduce path on this container produces *garbage logits
+that still start cleanly*.
 
 ```bash
-# 1 GB200 node (TP=4) — simplest:
-sbatch resources_servers/gdpval/serve_minimax_multimodal_1node.sh
-# or 2 nodes (TP=4 x DP=2) for ~2x judge throughput:
-sbatch resources_servers/gdpval/serve_minimax_multimodal_dp2.sh
-# Verify (from the gym host): curl -s http://<node-ip>:5000/v1/models
+# Verify the self-hosted endpoint from the gym host:
+curl -s http://<judge-host>:5000/v1/models
 ```
 
-Then point gym at the endpoint the script wrote (note port **5000** and the
-served-model name):
+Then point gym at that endpoint (the port and served-model name must match your
+deployment):
 
 ```bash
-export MINIMAX_BASE_URL=$(. ${OUTPUT_DIR}/server_info/minimax-m3.env; echo "$SERVER_URL")
-export MINIMAX_MODEL=minimax-m3   # must match the server's --served-model-name
+export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
+export MINIMAX_MODEL=minimax-m3
+export MINIMAX_API_KEY=unused
 
 gym eval run \
     --model-type vllm_model \
