@@ -14,6 +14,8 @@ head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
 RAY_HEAD_NODE_IP=$head_node_ip:6379
 echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 
+echo "Check nemo-gym-slurm-logs for the slurm log."
+
 # Start Ray cluster using symmetric_run.py on all nodes.
 # Symmetric run will automatically start Ray on all nodes and run the script ONLY the head node.
 # The '--' separator is used to separate Ray arguments and the entrypoint command.
