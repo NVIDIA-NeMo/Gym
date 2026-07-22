@@ -1,7 +1,6 @@
 #!/bin/bash
 
 command='
-    source .venv/bin/activate
     gym --version
 '
 sbatch \
