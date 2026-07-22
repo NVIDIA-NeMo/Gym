@@ -11,4 +11,4 @@ sbatch \
     --time=04:00:00 \
     --job-name=nemotron_3_ultra-evals-$USER \
     --exclusive \
-    scripts/sbatch_base.sh bash -lc $command
+    scripts/sbatch_base.sh bash -lc "$command"
