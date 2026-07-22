@@ -84,6 +84,11 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    # Set by agent servers when the rollout's reward is unreliable (e.g. agent or
+    # eval timeout, OOM-killed container, failed trace capture). Trainers must
+    # exclude the sample from the gradient (NeMo RL zeroes its loss multiplier)
+    # rather than train on a garbage reward.
+    mask_sample: bool = False
 
 
 class BaseSeedSessionRequest(BaseModel):
