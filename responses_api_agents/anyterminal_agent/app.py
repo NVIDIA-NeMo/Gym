@@ -16,6 +16,8 @@ import hashlib
 import json
 import shutil
 import sys
+import tarfile
+import tempfile
 import time
 import uuid
 from asyncio import Semaphore
@@ -100,6 +102,7 @@ class TerminalBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     agent_timed_out: bool = False
     container_timed_out: bool = False
+    sandbox_failed: bool = False
     mask_sample: bool = False
 
     ray_queue_time: Optional[float] = None
@@ -115,14 +118,25 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
-    """Serialize config without secrets — redact secret-looking agent_kwargs."""
+    """Serialize config without secrets."""
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    "***"
+                    if any(secret in key.lower() for secret in ("api_key", "secret", "password", "token"))
+                    else redact(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
     d = json.loads(params.model_dump_json())
     d.pop("agent_command_str", None)
-    d["agent_kwargs"] = {
-        k: ("***" if any(s in k.lower() for s in ("api_key", "secret", "password", "token")) else v)
-        for k, v in (d.get("agent_kwargs") or {}).items()
-    }
-    return json.dumps(d, indent=indent)
+    return json.dumps(redact(d), indent=indent)
 
 
 ### Agent runner template
@@ -265,8 +279,10 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     # Docker network for the agent container. "host" lets the in-container agent reach a
     # model server on host loopback; None uses the docker default (e.g. for a remote server).
     docker_network: Optional[str] = "host"
+    sandbox_model_base_url: Optional[str] = None
     tb_agent_timeout: int = 1800
     tb_eval_timeout: int = 300
+    tb_sandbox_ttl: int = 7200
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
     # in-container agent harness
     concurrency: int = 256
@@ -284,6 +300,7 @@ class AnyTerminalServerConfig(BaseModel):
     model_name: str = ""
     nemo_gym_root: Path
     agent_deps_dir: Path
+    agent_deps_archive: Optional[Path] = None
 
 
 class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig):
@@ -326,11 +343,8 @@ def _apt_root_sandbox(cfg: AnyTerminalInstanceConfig) -> str:
 def _build_provider(params: AnyTerminalInstanceConfig):
     """Build a sandbox provider with the per-instance mounts the run needs.
 
-    The deps prefix, the NeMo Gym tree, the run dir, and the verifier dir are bind-mounted at
-    fixed paths the agent runner and test.sh expect. For apptainer the mounts are applied as
-    ``--bind`` (via ``exec.default_binds``); ``--writable-tmpfs`` makes the task's working
-    directory editable (the apptainer provider swaps it for a disk-backed overlay), and
-    ``--no-mount home`` keeps host dotfiles/caches out of the run.
+    Docker and Apptainer bind the local runtime directories at the paths expected by the
+    agent runner. Other providers use the sandbox file API in RunTerminalAgent.
     """
     name = next(iter(params.sandbox_provider), "docker")
     if name == "apptainer":
@@ -350,7 +364,7 @@ def _build_provider(params: AnyTerminalInstanceConfig):
             "--cleanenv",
             "--pid",
             "--no-mount",
-            "tmp,bind-paths",
+            "tmp",
         ]
         appt["exec"] = exec_cfg
 
@@ -390,6 +404,64 @@ class RunTerminalAgent(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: AnyTerminalInstanceConfig
+
+    @staticmethod
+    def _uses_bind_mounts(cfg: AnyTerminalInstanceConfig) -> bool:
+        return next(iter(cfg.sandbox_provider), "docker") in {"apptainer", "docker"}
+
+    @staticmethod
+    def _archive(source: Path) -> Path:
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temporary:
+            archive = Path(temporary.name)
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname=".")
+        return archive
+
+    async def _stage_remote_runtime(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
+        result = await sandbox.exec(
+            "mkdir -p /agent_deps_mount /trajectories_mount /logs/verifier",
+            timeout_s=30,
+            user="root",
+        )
+        if result.return_code != 0:
+            raise RuntimeError(result.stderr or "failed to create sandbox runtime directories")
+        await sandbox.upload(cfg.persistent_dir / "instruction.txt", "/trajectories_mount/instruction.txt")
+        await sandbox.upload(cfg.persistent_dir / "agent_runner.py", "/trajectories_mount/agent_runner.py")
+        if cfg.agent_deps_archive is None:
+            raise RuntimeError("remote sandbox requires an agent runtime archive")
+        await sandbox.upload(cfg.agent_deps_archive, "/tmp/anyterminal-agent-deps.tar.gz")
+        result = await sandbox.exec(
+            "tar -xzf /tmp/anyterminal-agent-deps.tar.gz -C /agent_deps_mount",
+            timeout_s=900,
+            user="root",
+        )
+        if result.return_code != 0:
+            raise RuntimeError(result.stderr or "failed to extract agent runtime")
+
+    async def _stage_remote_tests(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
+        archive = await asyncio.to_thread(self._archive, cfg.persistent_dir / "staging" / "tests")
+        try:
+            await sandbox.upload(archive, "/tmp/anyterminal-tests.tar.gz")
+            result = await sandbox.exec(
+                "mkdir -p /trajectories_mount/staging/tests && "
+                "tar -xzf /tmp/anyterminal-tests.tar.gz -C /trajectories_mount/staging/tests",
+                timeout_s=300,
+                user="root",
+            )
+            if result.return_code != 0:
+                raise RuntimeError(result.stderr or "failed to stage verifier tests")
+        finally:
+            archive.unlink(missing_ok=True)
+
+    async def _collect_remote_outputs(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
+        for remote, local in (
+            ("/trajectories_mount/response.json", cfg.persistent_dir / "response.json"),
+            ("/logs/verifier/reward.txt", cfg.verifier_dir / "reward.txt"),
+            ("/logs/verifier/test-stdout.txt", cfg.verifier_dir / "test-stdout.txt"),
+        ):
+            exists = await sandbox.exec(f"test -f {remote}", timeout_s=30, user="root")
+            if exists.return_code == 0:
+                await sandbox.download(remote, local)
 
     def _agent_env(self, cfg: AnyTerminalInstanceConfig) -> Dict[str, str]:
         sampling = {
@@ -448,19 +520,36 @@ class RunTerminalAgent(BaseModel):
         t0 = time.time()
 
         sandbox = AsyncSandbox(
-            _build_provider(cfg), SandboxSpec(image=cfg.container, workdir=cfg.problem_info.get("workdir"))
+            _build_provider(cfg),
+            SandboxSpec(
+                image=cfg.container.removeprefix("docker://") if not self._uses_bind_mounts(cfg) else cfg.container,
+                ttl_s=cfg.tb_sandbox_ttl,
+                workdir=cfg.problem_info.get("workdir"),
+            ),
         )
         agent_timed_out = container_timed_out = False
+        sandbox_failed = False
         agent_run_time = eval_run_time = None
         try:
             await sandbox.start()
+            if not self._uses_bind_mounts(cfg):
+                await self._stage_remote_runtime(sandbox, cfg)
             agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
             await self._stage_tests(cfg)
+            if not self._uses_bind_mounts(cfg):
+                await self._stage_remote_tests(sandbox, cfg)
             eval_run_time, container_timed_out = await self._run_eval(sandbox, cfg)
+            if not self._uses_bind_mounts(cfg):
+                await self._collect_remote_outputs(sandbox, cfg)
         except Exception as e:
+            sandbox_failed = True
             print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
         finally:
-            await sandbox.stop()
+            try:
+                await sandbox.stop()
+            except Exception as e:
+                sandbox_failed = True
+                print(f"[{cfg.task_name}] sandbox cleanup failed: {e}", flush=True)
             shutil.rmtree(cfg.persistent_dir / "staging", ignore_errors=True)
 
         total_run_time = time.time() - t0
@@ -478,7 +567,8 @@ class RunTerminalAgent(BaseModel):
             resolved=resolved,
             agent_timed_out=agent_timed_out,
             container_timed_out=container_timed_out,
-            mask_sample=bool(container_timed_out or agent_timed_out),
+            sandbox_failed=sandbox_failed,
+            mask_sample=bool(container_timed_out or agent_timed_out or sandbox_failed),
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
             total_run_time=total_run_time,
@@ -510,19 +600,28 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         self._sem = Semaphore(self.config.concurrency)
 
-        model_url = ""
+        model_url = self.config.sandbox_model_base_url or ""
         if self.config.model_server is not None:
             model_cfg = get_first_server_config_dict(
                 self.server_client.global_config_dict, self.config.model_server.name
             )
-            model_url = self.server_client._build_server_base_url(model_cfg)
+            if not model_url:
+                model_url = self.server_client._build_server_base_url(model_cfg)
 
         # Real model identifier the policy server serves, set via +policy_model_name=... at run time.
         model_name = str(self.server_client.global_config_dict.get("policy_model_name") or "")
 
-        agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
         workspace = Path(__file__).parent
-
+        agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
+        agent_deps_archive = None
+        if next(iter(self.config.sandbox_provider), "docker") not in {"apptainer", "docker"}:
+            agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
+            sentinel = agent_deps_dir / ".installed"
+            if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
+                temporary = agent_deps_archive.with_suffix(".tmp")
+                with tarfile.open(temporary, "w:gz") as archive:
+                    archive.add(agent_deps_dir, arcname=".")
+                temporary.replace(agent_deps_archive)
         results_dir = workspace / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
         base_results_dir = self.config.results_dir
@@ -540,6 +639,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             model_name=model_name,
             nemo_gym_root=PARENT_DIR,
             agent_deps_dir=agent_deps_dir,
+            agent_deps_archive=agent_deps_archive,
         )
         super().model_post_init(context)
 
@@ -643,7 +743,12 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         await _run_remote.options(**self._ray_resource_opts(params)).remote(params.model_dump())
 
         persisted = TerminalBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
-        mask_sample = bool(persisted.container_timed_out or persisted.agent_timed_out)
+        mask_sample = bool(
+            persisted.mask_sample
+            or persisted.container_timed_out
+            or persisted.agent_timed_out
+            or persisted.sandbox_failed
+        )
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
 
         response_path = params.persistent_dir / "response.json"

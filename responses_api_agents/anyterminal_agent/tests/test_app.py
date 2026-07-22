@@ -302,6 +302,14 @@ class TestSafeConfigJson:
         for key in ("my_secret", "auth_token", "password"):
             assert result["agent_kwargs"][key] == "***"
 
+    def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {"connection": {"api_key": "secret"}}},
+        )
+        result = json.loads(_safe_config_json(cfg))
+        assert result["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == "***"
+
     def test_agent_command_str_excluded(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, agent_command_str="/agent_deps_mount/bin/python ...")
         assert "agent_command_str" not in json.loads(_safe_config_json(cfg))
@@ -367,6 +375,7 @@ class TestBuildProvider:
         start_args = provider._create_config.extra_start_args
         assert "--writable-tmpfs" in start_args
         assert "--no-mount" in start_args and "home" in start_args
+        assert "tmp,bind-paths" not in provider._exec_config.extra_exec_args
 
     def test_docker_provider_selected(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"docker": {}})
@@ -566,7 +575,40 @@ class TestProcessSingleDatapoint:
             result = await RunTerminalAgent(config=cfg).process_single_datapoint()
 
         assert result is False
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["sandbox_failed"] is True
+        assert metrics["mask_sample"] is True
         sandbox.stop.assert_awaited_once()
+
+    async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
+        archive = tmp_path / "deps.tar.gz"
+        archive.write_bytes(b"deps")
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            agent_deps_archive=archive,
+        )
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            upload=AsyncMock(),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with (
+                patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock()),
+                patch.object(RunTerminalAgent, "_stage_remote_tests", new=AsyncMock()) as stage_tests,
+                patch.object(RunTerminalAgent, "_collect_remote_outputs", new=AsyncMock()) as collect,
+            ):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        uploaded = {call.args[1] for call in sandbox.upload.await_args_list}
+        assert "/trajectories_mount/instruction.txt" in uploaded
+        assert "/trajectories_mount/agent_runner.py" in uploaded
+        assert "/tmp/anyterminal-agent-deps.tar.gz" in uploaded
+        stage_tests.assert_awaited_once()
+        collect.assert_awaited_once()
 
     async def test_stops_sandbox_even_on_eval_timeout(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
