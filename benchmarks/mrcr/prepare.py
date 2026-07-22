@@ -43,7 +43,7 @@ directly::
 import argparse
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import tiktoken
 from datasets import load_dataset
@@ -56,6 +56,7 @@ DEFAULT_OUTPUT_FPATH = DATA_DIR / "mrcr_benchmark.jsonl"
 
 DEFAULT_TOKENIZER_NAME = "o200k_base"
 DEFAULT_MAX_CONTEXT_TOKENS: Optional[int] = None  # no filter by default
+DEFAULT_N_NEEDLES: tuple[int, ...] = (2, 4, 8)  # keep all needle-count buckets by default
 
 
 def _build_token_counter(tokenizer_name: str) -> Callable[[str], int]:
@@ -87,17 +88,24 @@ def prepare(
     tokenizer_name: str = DEFAULT_TOKENIZER_NAME,
     max_context_tokens: Optional[int] = DEFAULT_MAX_CONTEXT_TOKENS,
     output_fpath: Path = DEFAULT_OUTPUT_FPATH,
+    n_needles: Optional[Sequence[int]] = DEFAULT_N_NEEDLES,
 ) -> Path:
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset("openai/mrcr", split="train")
     count_one = _build_token_counter(tokenizer_name)
+    needle_set = set(n_needles) if n_needles is not None else None
 
     kept = 0
     skipped_tokens = 0
+    skipped_needles = 0
     with output_fpath.open("w", encoding="utf-8") as fout:
         for entry in tqdm(dataset, desc="Preparing MRCR"):
+            # Drop off-needle samples first (cheap) before the expensive tokenization.
+            if needle_set is not None and entry["n_needles"] not in needle_set:
+                skipped_needles += 1
+                continue
             messages = json.loads(entry["prompt"])
             n_tokens = _count_message_tokens(messages, count_one)
             if max_context_tokens is not None and n_tokens > max_context_tokens:
@@ -115,9 +123,11 @@ def prepare(
             kept += 1
 
     cap_str = "none" if max_context_tokens is None else str(max_context_tokens)
+    needle_str = "all" if needle_set is None else ",".join(map(str, sorted(needle_set)))
     print(
         f"Wrote {kept} samples to {output_fpath} "
-        f"(tokenizer={tokenizer_name}, cap={cap_str}; dropped {skipped_tokens} over cap)"
+        f"(tokenizer={tokenizer_name}, cap={cap_str}, n_needles={needle_str}; "
+        f"dropped {skipped_tokens} over cap, {skipped_needles} off-needle)"
     )
     return output_fpath
 
@@ -150,10 +160,26 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_FPATH,
         help=f"Output JSONL path. Default: {DEFAULT_OUTPUT_FPATH}",
     )
+    parser.add_argument(
+        "--n_needles",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_N_NEEDLES),
+        help=(
+            "Which n_needles buckets to keep (MRCR ships 2, 4, 8). "
+            "e.g. '--n_needles 8' for the 8-needle subset only. "
+            f"Default: {' '.join(map(str, DEFAULT_N_NEEDLES))} (all)."
+        ),
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     cap = args.max_context_tokens if (args.max_context_tokens is None or args.max_context_tokens >= 0) else None
-    prepare(tokenizer_name=args.tokenizer_name, max_context_tokens=cap, output_fpath=args.output_fpath)
+    prepare(
+        tokenizer_name=args.tokenizer_name,
+        max_context_tokens=cap,
+        output_fpath=args.output_fpath,
+        n_needles=args.n_needles,
+    )
