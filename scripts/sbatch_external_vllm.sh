@@ -9,7 +9,7 @@ command=$(cat <<EOF
         --gpu-memory-utilization 0.85 \
         --distributed-executor-backend ray \
         --data-parallel-backend ray \
-        --data-parallel-size 2 \
+        --data-parallel-size 4 \
         --data-parallel-size-local 1 \
         --tensor-parallel-size 4 \
         --trust-remote-code \
@@ -38,4 +38,4 @@ sbatch \
     --time=04:00:00 \
     --job-name=vllm-$USER \
     --exclusive \
-    scripts/sbatch_base.sh
+    scripts/sbatch_base.sh bash "$command"
