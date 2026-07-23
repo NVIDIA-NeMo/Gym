@@ -41,17 +41,18 @@ fi
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
-  bash -lc '
-    echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
-    cd $SLURM_SUBMIT_DIR
-    source .venv/bin/activate
+    --container-name=container-on-node \
+    bash -lc '
+        echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
+        cd $SLURM_SUBMIT_DIR
+        source .venv/bin/activate
 
-    ray symmetric-run \
-      --address "'"$RAY_HEAD_NODE_IP"'" \
-      --min-nodes "'"$SLURM_JOB_NUM_NODES"'" \
-      --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
-      --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
-      -- "$@"
-  ' bash "${command[@]}"
+        ray symmetric-run \
+        --address "'"$RAY_HEAD_NODE_IP"'" \
+        --min-nodes "'"$SLURM_JOB_NUM_NODES"'" \
+        --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
+        --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
+        -- "$@"
+    ' bash "${command[@]}"
 
 # TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
