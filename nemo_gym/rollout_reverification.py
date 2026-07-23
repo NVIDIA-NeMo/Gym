@@ -376,14 +376,14 @@ def _run_verification_payloads(
 async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[str, str]) -> List[str]:
     """Query GET /reverify_mode on each unique resource server referenced by agent_to_rs.
 
-    Returns a sorted list of RS names that reported ReverifyMode.UNSUPPORTED.
+    Returns a sorted list of RS names that reported ReverifyMode.UNSUPPORTED or ReverifyMode.UNKNOWN.
     """
     unsupported: List[str] = []
     for rs_name in set(agent_to_rs.values()):
         res = await server_client.get(server_name=rs_name, url_path="/reverify_mode")
         await raise_for_status(res)
         mode = ReverifyMode(await get_response_json(res))
-        if mode == ReverifyMode.UNSUPPORTED:
+        if mode in (ReverifyMode.UNSUPPORTED, ReverifyMode.UNKNOWN):
             unsupported.append(rs_name)
     return sorted(unsupported)
 
@@ -391,24 +391,24 @@ async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[
 async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[str]:
     """Check reverify_mode for every RS in the config before reverification starts.
 
-    Returns a warning string when force=True and at least one RS is UNSUPPORTED (caller must
+    Returns a warning string when force=True and at least one RS is UNSUPPORTED or UNKNOWN (caller must
     print it and apply the unsafe_ output prefix).
-    Raises ConfigError when force=False and at least one RS is UNSUPPORTED.
+    Raises ConfigError when force=False and at least one RS is UNSUPPORTED or UNKNOWN.
     Returns None when all RS are STATELESS.
     """
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    unsupported_rs = await _check_reverify_mode(server_client, agent_to_rs)
-    if not unsupported_rs:
+    non_stateless_rs = await _check_reverify_mode(server_client, agent_to_rs)
+    if not non_stateless_rs:
         return None
     if not config.force:
         raise ConfigError(
-            f"Resource server(s) {unsupported_rs} have reverify_mode=UNSUPPORTED. "
+            f"Resource server(s) {non_stateless_rs} have reverify_mode=UNSUPPORTED or UNKNOWN. "
             "Rewards computed by reverification may be incorrect. "
             "Pass ++force=true to override (output will be prefixed with 'unsafe_')."
         )
     return (
-        f"WARNING: resource server(s) {unsupported_rs} have reverify_mode=UNSUPPORTED. "
+        f"WARNING: resource server(s) {non_stateless_rs} have reverify_mode=UNSUPPORTED or UNKNOWN. "
         "Rewards computed by reverification may be incorrect. "
         "Output is prefixed with 'unsafe_'."
     )

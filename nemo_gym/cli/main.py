@@ -568,6 +568,11 @@ COMMANDS = {
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
+            ),
         ),
     ),
     "eval aggregate": Command(

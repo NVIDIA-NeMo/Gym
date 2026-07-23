@@ -69,13 +69,14 @@ RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metric
 class ReverifyMode(str, Enum):
     STATELESS = "stateless"
     UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
     # The mode of reverification (for gym eval reverify) of this server.
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
 
 class BaseResourcesServer(BaseServer):
