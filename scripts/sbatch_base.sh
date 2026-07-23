@@ -32,7 +32,7 @@ srun --no-container-mount-home \
     --container-workdir=$SLURM_SUBMIT_DIR \
     --nodes=1 \
     --ntasks=1 \
-    -w "$head_node_ip" \
+    -w "$head_node_hostname" \
     --jobid $SLURM_JOB_ID \
     --pty bash
 EOF
