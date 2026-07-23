@@ -1,9 +1,6 @@
 #!/bin/bash
 
 command=$(cat <<EOF
-which pip
-which vllm
-
 pip install ray==2.55.1
 
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
@@ -25,7 +22,7 @@ vllm serve $MODEL \
     --kv-cache-dtype fp8 \
     -cc.pass_config.fuse_allreduce_rms=False \
     --mamba-ssm-cache-dtype float32 \
-    --model-loader-extra-config '{\"enable_multithread_load\": true, \"num_threads\": 96}' \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --moe-backend triton \
     --max-num-batched-tokens 32768
 EOF
