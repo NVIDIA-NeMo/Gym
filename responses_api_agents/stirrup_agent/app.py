@@ -1223,14 +1223,17 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # ``task_<id>/`` even though the marker was written beneath
                 # ``task_<id>/repeat_<n>/``. It also breaks a new repeat whenever
                 # a sibling repeat directory already exists.
-                if not repeat_dir.is_dir() and task_root.is_dir():
+                if (
+                    (self.config.judge_only or self.config.rerun_incomplete)
+                    and not repeat_dir.is_dir()
+                    and task_root.is_dir()
+                ):
                     has_flat_legacy_artifacts = any(
                         not (entry.is_dir() and entry.name.startswith("repeat_"))
                         for entry in task_root.iterdir()
                     )
                     if has_flat_legacy_artifacts:
                         deliverables_dir = str(task_root)
-                
 
             # Per-request opt-in to judge an already-cached deliverable instead of
             # re-running the policy. Unlike server-wide judge_only, it falls back

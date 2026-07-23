@@ -208,9 +208,7 @@ class TestComparisonImagesAndText:
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
         section = build_file_section(str(tmp_path), media_mode="images_and_text", audio_capable=True)
-        assert any(
-            b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in section
-        )
+        assert any(b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in section)
         assert not any("not readable by this judge" in b.get("text", "") for b in section)
 
     def test_get_file_image_text_blocks_oversize_marker(self, tmp_path) -> None:
@@ -252,7 +250,9 @@ class TestRubricImagesAndText:
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", audio_capable=False)
+        blocks = convert_deliverables_to_content_blocks(
+            str(tmp_path), media_mode="images_and_text", audio_capable=False
+        )
         assert blocks == []
 
     def test_convert_deliverables_audio_passthrough_when_av_capable(self, tmp_path) -> None:
@@ -260,17 +260,19 @@ class TestRubricImagesAndText:
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", audio_capable=True)
-        assert any(
-            b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in blocks
+        blocks = convert_deliverables_to_content_blocks(
+            str(tmp_path), media_mode="images_and_text", audio_capable=True
         )
+        assert any(b.get("type") == "input_audio" and b.get("input_audio", {}).get("format") == "mp3" for b in blocks)
 
     def test_convert_deliverables_video_passthrough_when_av_capable(self, tmp_path) -> None:
         # Self-hosted vLLM judge -> video_url data URL.
         from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
-        blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="images_and_text", video_capable=True)
+        blocks = convert_deliverables_to_content_blocks(
+            str(tmp_path), media_mode="images_and_text", video_capable=True
+        )
         assert any(
             b.get("type") == "video_url" and b.get("video_url", {}).get("url", "").startswith("data:video/mp4;base64,")
             for b in blocks
@@ -310,8 +312,7 @@ class TestRubricImagesAndText:
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
         blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="native_pdf", video_capable=True)
         assert any(
-            b.get("type") == "image_url"
-            and b.get("image_url", {}).get("url", "").startswith("data:video/mp4;base64,")
+            b.get("type") == "image_url" and b.get("image_url", {}).get("url", "").startswith("data:video/mp4;base64,")
             for b in blocks
         )
         assert not any(b.get("type") in ("video_url", "input_audio") for b in blocks)

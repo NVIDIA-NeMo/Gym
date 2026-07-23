@@ -715,6 +715,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         total_wins = 0
         total_losses = 0
         total_ties = 0
+        total_invalid = 0
         # Per-reference-model vote tallies + a flat list of every (ref × repeat)
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
@@ -788,15 +789,19 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     ref_wins += result["win_count_b"]
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
+                    total_invalid += result.get("invalid_count", 0)
                     ref_judged_repeats += 1
                     # Fold per-judge counts into eval-perspective panel totals
                     # (B=eval, A=ref) so the per-member balance is auditable.
                     for jname, jc in (result.get("per_judge") or {}).items():
-                        agg = per_judge_totals.setdefault(jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0})
+                        agg = per_judge_totals.setdefault(
+                            jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0, "invalid_count": 0}
+                        )
                         agg["wins"] += jc.get("win_count_b", 0)
                         agg["losses"] += jc.get("win_count_a", 0)
                         agg["ties"] += jc.get("tie_count", 0)
                         agg["trials"] += jc.get("trials", 0)
+                        agg["invalid_count"] += jc.get("invalid_count", 0)
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
                 # Only record references that produced at least one valid matchup;
@@ -843,6 +848,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 "total_losses": total_losses,
                 "total_ties": total_ties,
                 "total_judged": total_judged,
+                "total_invalid": total_invalid,
                 "reference_count": len(per_reference),
                 # Back-compat: total matchups across all references × repeats.
                 "ref_repeat_count": len(per_ref_results),

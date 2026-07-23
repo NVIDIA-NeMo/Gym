@@ -104,6 +104,7 @@ gdpval_judge_model_local:
 gdpval_resources_server:
   resources_servers:
     gdpval:
+      verified: false
       # Repoint the judge from the default remote `gdpval_judge_model` proxy to
       # the local vLLM engine defined above.
       judge_model_server:

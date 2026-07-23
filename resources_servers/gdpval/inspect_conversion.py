@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import os
 import sys
 from pathlib import Path
 
@@ -164,9 +163,9 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from resources_servers.gdpval.comparison import (  # noqa: E402
+        IGNORE_FILES,
         build_file_section,
         get_file_image_text_blocks,
-        IGNORE_FILES,
     )
 
     in_path = Path(args.input).expanduser().resolve()

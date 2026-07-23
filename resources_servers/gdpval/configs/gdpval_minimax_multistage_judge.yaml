@@ -58,6 +58,7 @@ gdpval_judge_model:
 gdpval_resources_server:
   resources_servers:
     gdpval:
+      verified: false
       reward_mode: comparison
       # Reference models the anchored Bradley-Terry MLE ELO is fit against. The
       # multi-stage driver picks the `num_models` nearest anchors per stage.

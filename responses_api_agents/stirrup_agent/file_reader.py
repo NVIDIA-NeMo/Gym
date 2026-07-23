@@ -420,14 +420,12 @@ def convert_deliverables_to_content_blocks(
                 # (images_and_text) need the standard video_url / input_audio types,
                 # which vLLM routes to the media tower.
                 is_video = ext in VIDEO_EXTS
-                if (video_capable if is_video else audio_capable):
+                if video_capable if is_video else audio_capable:
                     mime = MIME_TYPES.get(ext, "application/octet-stream")
                     data = fpath.read_bytes()
                     file_type = "VIDEO" if is_video else "AUDIO"
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
-                    blocks.append(
-                        _av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text)
-                    )
+                    blocks.append(_av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text))
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from resources_servers.gdpval.comparison import Judge, run_trials
+from resources_servers.gdpval.comparison import B_WIN_RESPONSE, TIE_RESPONSE, Judge, parse_judgement, run_trials
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_contains_audio_video,
@@ -211,6 +211,27 @@ def _judge_returning(name: str, verdict: str) -> Judge:
     return Judge(name=name, client=client, model=f"model-{name}")
 
 
+def _judge_returning_sequence(name: str, verdicts: list[str]) -> Judge:
+    """A Judge whose sync OpenAI client returns each response in order."""
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        MagicMock(choices=[MagicMock(message=MagicMock(content=verdict))]) for verdict in verdicts
+    ]
+    return Judge(name=name, client=client, model=f"model-{name}")
+
+
+class TestParseJudgement:
+    def test_last_boxed_verdict_wins(self) -> None:
+        assert parse_judgement("not BOXED[A]; final answer BOXED[B]") == B_WIN_RESPONSE
+
+    @pytest.mark.parametrize("response", ["", "A wins", "BOXED[C]"])
+    def test_missing_valid_verdict_is_invalid(self, response: str) -> None:
+        assert parse_judgement(response) is None
+
+    def test_explicit_tie_is_valid(self) -> None:
+        assert parse_judgement("Final answer: BOXED[TIE]") == TIE_RESPONSE
+
+
 class TestRunTrialsPanel:
     def test_requires_non_empty_panel(self) -> None:
         with pytest.raises(ValueError):
@@ -249,3 +270,36 @@ class TestRunTrialsPanel:
         assert result["trial_judges"] == ["solo"] * 4
         assert result["per_judge"]["solo"]["trials"] == 4
         assert result["tie_count"] == 4
+
+    def test_invalid_response_is_excluded_from_counts(self) -> None:
+        panel = [_judge_returning_sequence("solo", ["BOXED[B]", "malformed", "BOXED[B]"])]
+        result = run_trials(
+            judges=panel,
+            task_prompt="p",
+            refs=[],
+            submission_a=[],
+            submission_b=[],
+            num_trials=3,
+            return_raw_responses=True,
+        )
+
+        assert result["winner"] == B_WIN_RESPONSE
+        assert result["win_count_b"] == 2
+        assert result["tie_count"] == 0
+        assert result["task_count"] == 2
+        assert result["invalid_count"] == 1
+        assert result["per_judge"]["solo"]["trials"] == 2
+        assert result["per_judge"]["solo"]["invalid_count"] == 1
+        assert len(result["raw_responses"]) == 3
+
+    def test_all_invalid_responses_fail_matchup(self) -> None:
+        panel = [_judge_returning("solo", "malformed")]
+        with pytest.raises(ValueError, match="All 2 pairwise judge responses were invalid"):
+            run_trials(
+                judges=panel,
+                task_prompt="p",
+                refs=[],
+                submission_a=[],
+                submission_b=[],
+                num_trials=2,
+            )

@@ -600,9 +600,22 @@ class TestApp:
                 "win_count_b": 2,
                 "tie_count": 0,
                 "task_count": 2,
+                "invalid_count": 1,
                 "per_judge": {
-                    "gpt-5.5": {"win_count_a": 0, "win_count_b": 1, "tie_count": 0, "trials": 1},
-                    "gemini-3.1-pro": {"win_count_a": 0, "win_count_b": 1, "tie_count": 0, "trials": 1},
+                    "gpt-5.5": {
+                        "win_count_a": 0,
+                        "win_count_b": 1,
+                        "tie_count": 0,
+                        "trials": 1,
+                        "invalid_count": 1,
+                    },
+                    "gemini-3.1-pro": {
+                        "win_count_a": 0,
+                        "win_count_b": 1,
+                        "tie_count": 0,
+                        "trials": 1,
+                        "invalid_count": 0,
+                    },
                 },
                 "trial_judges": ["gpt-5.5", "gemini-3.1-pro"],
             }
@@ -624,8 +637,15 @@ class TestApp:
         # Panel summary + pooled per-judge tally (over 2 ref repeats).
         assert [m["name"] for m in resp.judge_response["judge_panel"]] == ["gpt-5.5", "gemini-3.1-pro"]
         per_judge = resp.judge_response["per_judge"]
-        assert per_judge["gpt-5.5"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2}
-        assert per_judge["gemini-3.1-pro"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2}
+        assert per_judge["gpt-5.5"] == {"wins": 2, "losses": 0, "ties": 0, "trials": 2, "invalid_count": 2}
+        assert per_judge["gemini-3.1-pro"] == {
+            "wins": 2,
+            "losses": 0,
+            "ties": 0,
+            "trials": 2,
+            "invalid_count": 0,
+        }
+        assert resp.judge_response["total_invalid"] == 2
         assert resp.total_wins == 4
         assert resp.reward == 1.0
         assert resp.judge_response["av_routed"] is False

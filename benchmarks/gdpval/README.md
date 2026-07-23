@@ -320,27 +320,25 @@ Two pieces make this work:
 
 ### Run it
 
-First serve MiniMax-M3 yourself from the container on your GPU node(s) (the
-vendor GB200 command, TP=8 across two nodes):
+First serve MiniMax-M3 yourself on your GPU node(s). NVIDIA users should use
+the internal serving workflow, which is maintained separately from Gym. Use a
+**single-node TP=4** instance, or independent single-node TP=4 replicas for
+data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
+cross-node MXFP8 all-reduce path on this container produces *garbage logits
+that still start cleanly*.
 
 ```bash
-IFACE_NAME=<fabric-nic>; HEAD_IP=<this-node-ip>
-docker run --gpus all --privileged --ipc=host -p 8000:8000 \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -e GLOO_SOCKET_IFNAME=$IFACE_NAME -e NCCL_SOCKET_IFNAME=$IFACE_NAME \
-    vllm/vllm-openai:minimax-m3 MiniMaxAI/MiniMax-M3 \
-    --block-size 128 -cc.pass_config.fuse_allreduce_rms=False \
-    --tensor-parallel-size 8 --nnodes 2 --node-rank 0 --master-addr $HEAD_IP \
-    --tool-call-parser minimax_m3 --enable-auto-tool_choice \
-    --reasoning-parser minimax_m3
-# On Slurm without Docker, convert with enroot/pyxis and run the same args via
-# `srun --container-image=...`. Verify: curl -s http://$HEAD_IP:8000/v1/models
+# Verify the self-hosted endpoint from the gym host:
+curl -s http://<judge-host>:5000/v1/models
 ```
 
-Then point gym at your endpoint:
+Then point gym at that endpoint (the port and served-model name must match your
+deployment):
 
 ```bash
-export MINIMAX_BASE_URL=http://$HEAD_IP:8000/v1   # your server's /v1 route
+export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
+export MINIMAX_MODEL=minimax-m3
+export MINIMAX_API_KEY=unused
 
 gym eval run \
     --model-type vllm_model \

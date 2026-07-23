@@ -520,7 +520,7 @@ def _stratified_counts(available: dict[str, int], requested_total: int) -> dict[
 
     remainders = sorted(
         BUCKETS,
-        key=lambda bucket: (raw_targets[bucket] - int(raw_targets[bucket])),
+        key=lambda bucket: raw_targets[bucket] - int(raw_targets[bucket]),
         reverse=True,
     )
 
