@@ -30,7 +30,6 @@ code.
 """
 
 from nemo_gym.token_id_capture.builder import (
-    BuildNotes,
     BuildOutput,
     Chain,
     assert_prefix_contiguity,
@@ -42,6 +41,7 @@ from nemo_gym.token_id_capture.builder import (
 )
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.consumer import (
+    clear_token_captures_for_rollouts,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
@@ -56,10 +56,8 @@ from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     TokenEntry,
     compute_digest,
-    cumulative_tokens,
     encode_token_ids,
     extract_token_fields,
-    stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
     CaptureContext,
@@ -71,14 +69,14 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore, validate_rollout_
 
 
 __all__ = [
+    "BuildOutput",
+    "Chain",
     "TokenIdCaptureConfig",
     "TokenEntry",
     "TOKEN_FIELDS",
     "extract_token_fields",
     "compute_digest",
     "encode_token_ids",
-    "cumulative_tokens",
-    "stamp_lineage",
     "TokenCaptureStore",
     "validate_rollout_id",
     "TokenSink",
@@ -95,10 +93,8 @@ __all__ = [
     "project_main_chain_response",
     "run_builder",
     "assert_prefix_contiguity",
-    "Chain",
-    "BuildNotes",
-    "BuildOutput",
     "trajectories_for_rollout",
+    "clear_token_captures_for_rollouts",
     "trajectories_from_source",
     "token_id_capture_dirs_from_config",
 ]
