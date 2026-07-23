@@ -18,7 +18,7 @@ A failed judge call is a distinct outcome, not a wrong answer. Resources servers
 ``await run_judge(<judge call>)``; ``judge_failsafe`` wraps every verify endpoint
 so a JudgeError becomes a row tagged ``_ng_failure_class="judge_failed"``, which
 rollout_collection routes to ``<output>_failures.jsonl`` — excluded from the
-metric, retryable on resume.
+file-based re-aggregation (``gym eval aggregate``), and retryable on resume.
 
 Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser

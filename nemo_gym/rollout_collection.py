@@ -559,8 +559,10 @@ class RolloutCollectionHelper(BaseModel):
                 # naturally re-dispatches; per-task timeout bounds wallclock.
                 pass
             elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
+                # Non-kill_shaped failure → sidecar. The file-based re-aggregation
+                # (`gym eval aggregate`) reads only the main jsonl and so excludes
+                # it. (The default in-memory single-pass aggregation below does not
+                # yet filter these rows — see _call_aggregate_metrics.)
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
