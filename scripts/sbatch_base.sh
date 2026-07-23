@@ -52,4 +52,5 @@ srun --no-container-mount-home \
     --jobid $SLURM_JOB_ID \
     --pty bash
 EOF
+echo "No arguments were provided to this script. Run 'slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
 fi
