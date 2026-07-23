@@ -542,8 +542,9 @@ class TestRolloutCollection:
     ) -> None:
         clear_captures = MagicMock()
         merge_capture = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "aggregate", merge_capture)
+
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -589,6 +590,8 @@ class TestRolloutCollection:
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
         empty_global_config.assert_called_once_with()
+
+        # Test that no model calls are captured
         clear_captures.assert_not_called()
         merge_capture.assert_not_called()
 
@@ -660,55 +663,43 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
-    @pytest.mark.parametrize("resume_from_cache", [False, True])
-    async def test_run_from_config_replaces_stale_capture_before_dispatch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
+    async def test_run_from_config_uses_global_capture_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        from nemo_gym.base_responses_api_model import CaptureStore
-
         capture_dir = tmp_path / "captures"
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "get_global_config_dict",
-            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        get_global_config_dict = MagicMock(
+            return_value={
+                "should_capture_model_calls": True,
+                "model_call_capture_dir": str(capture_dir),
+            }
         )
+        clear_captures = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
 
-        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
-        row = {**source_row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         input_fpath = tmp_path / "input.jsonl"
-        output_fpath = tmp_path / "output.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}}) + "\n"
+        )
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_fpath),
-            output_jsonl_fpath=str(output_fpath),
-            resume_from_cache=resume_from_cache,
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=True,
         )
-        if resume_from_cache:
-            output_fpath.touch()
-            config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
-        else:
-            input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
-
-        store = CaptureStore(capture_dir)
-        store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
 
         class Helper(RolloutCollectionHelper):
             def run_examples(self, examples, *args, **kwargs):
-                [example] = examples
-                assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
-                assert store.read("0-0") == []
-                store.record(
-                    "0-0",
-                    {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
-                )
                 future = Future()
-                future.set_result((example, {"response": {"usage": {}}}))
+                future.set_result((examples[0], {"response": {"usage": {}}}))
                 return [future]
 
         results = await Helper().run_from_config(config)
 
-        assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
-        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+        clear_captures.assert_called_once()
+        assert "Clearing previously captured model calls" in capsys.readouterr().out
+
+        assert len(results) == 1
+        assert "ng_model_call_capture" in results[0]
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

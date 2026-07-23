@@ -19,6 +19,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 
 
@@ -37,5 +38,28 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        agent = TestSimpleResponsesAPIAgent(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=dict())
+        )
         agent.setup_webserver()
+
+    def test_resolve_model_call_path(self):
+        mock_agent = MagicMock()
+        mock_agent._capture_config.should_capture_model_calls = True
+
+        with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+            mock_agent, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}
+        )
+        assert with_id == "http://my-test-url/v1"
+
+        with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+            mock_agent,
+            base_url_or_path="http://my-test-url/v1",
+            body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4},
+        )
+        assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
+
+        with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
+            mock_agent, base_url_or_path="/v1/responses", body={TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 4}
+        )
+        assert with_id == "/v1/responses/ng-rollout/2-4"

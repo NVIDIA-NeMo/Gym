@@ -17,7 +17,7 @@ Configure capture once at the top level of Gym's global config. The setting appl
 `SimpleResponsesAPIModel` in the run:
 
 ```yaml
-observability_enabled: true
+should_capture_model_calls: true
 model_call_capture_dir: /data/model-calls
 
 policy_model:
@@ -28,7 +28,7 @@ policy_model:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
+| `should_capture_model_calls` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
 
 Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
@@ -42,6 +42,7 @@ the rollout prefix before routing.
 
 Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
 
+# TODO @bxyu-nvidia: Update this
 Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
 prefixes a downstream call from the run request's task/rollout indices (only when
 `observability_enabled` is true — otherwise URLs stay unprefixed), and
