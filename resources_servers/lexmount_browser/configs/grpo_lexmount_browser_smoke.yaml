@@ -1,0 +1,262 @@
+# GRPO single-GPU SMOKE config for the lexmount_browser environment.
+#
+# Run from a NeMo-RL checkout (NeMo Gym mounted at 3rdparty/Gym-workspace/Gym),
+# the same entry the tutorial uses:
+#
+#   uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
+#       --config=3rdparty/Gym-workspace/Gym/resources_servers/lexmount_browser/configs/grpo_lexmount_browser_smoke.yaml
+#
+# GOAL: prove the training signal wires up end-to-end on ONE GPU in a few steps —
+# NOT to reproduce the headline result. The headline recipe is SXH's 0721 run:
+# Qwen3-8B, 2x8 Ascend 910B, 8 tasks/step x 8 rollouts = 64 rollouts/step, 60
+# steps, lr 5e-6 constant, context 40960 — reference reward mean rose from
+# ~0.105 (first 10 steps) to ~0.289 (last 10 steps) on the cloud (Lexmount) arm.
+# Every value below is annotated with whether it is the validated value or a
+# smoke-scaled deviation, so a reviewer can restore the full recipe by reversing
+# the deviations.
+#
+# The in-PR verify() is RULE-BASED (final_url / url_contains / dom_contains /
+# answer_equals). The 0721 result was produced with a trajectory-level LLM judge;
+# rule reward here is a runnable placeholder, not the validated reward. See the
+# README "Reward" section.
+
+grpo:
+  max_num_epochs: 4                       # validated: 4 epochs in the 0721 run
+  num_prompts_per_step: 4                 # SMOKE: 4 (validated: 8 tasks/step). Scaled down to fit 1 GPU.
+  num_generations_per_prompt: 8           # validated: 8 rollouts/task (GRPO group size KEPT at 8)
+  max_rollout_turns: 10                   # validated: 10 assistant turns (0721 40K/10-turn recovery run)
+  max_num_steps: 8                        # SMOKE: 8 steps (validated: 60 steps; reward 0.10 -> 0.29 over 60)
+  normalize_rewards: true                 # validated GRPO setting
+  use_leave_one_out_baseline: true        # validated GRPO setting
+  val_period: 4
+  val_at_start: true
+  val_at_end: false
+  overlong_filtering: true                # validated: data.filter_overlong_prompts=True in the 0721 launch
+  advantage_clip_low: null
+  advantage_clip_high: null
+  max_val_samples: null
+  val_batch_size: null
+  seed: 42
+  use_dynamic_sampling: false
+  dynamic_sampling_max_gen_batches: 10
+  batch_multiplier: 1
+  reward_shaping:
+    enabled: false
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1
+    max_response_length: ${policy.max_total_sequence_length}
+  adv_estimator:
+    name: "grpo"                          # validated: algorithm.adv_estimator=grpo
+    normalize_rewards: ${grpo.normalize_rewards}
+    use_leave_one_out_baseline: ${grpo.use_leave_one_out_baseline}
+    minus_baseline: true
+  reward_scaling:
+    enabled: false
+    source_min: 0.0
+    source_max: 1.0
+    target_min: 0.0
+    target_max: 1.0
+  skip_reference_policy_logprobs_calculation: true
+  seq_logprob_error_threshold: null
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+  async_grpo:
+    enabled: false
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: false
+    recompute_kv_cache_after_weight_updates: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.001      # validated: kl_loss_coef=0.001 (low_var_kl) in the 0721 launch
+  reference_policy_kl_type: "low_var_kl"  # validated: kl_loss_type=low_var_kl
+  kl_input_clamp_value: 20.0
+  kl_output_clamp_value: 10.0
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.2
+  ratio_clip_c: null
+  use_on_policy_kl_approximation: false
+  truncated_importance_sampling_ratio: null
+  use_importance_sampling_correction: false
+  token_level_loss: true
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "results/grpo_lexmount_browser_smoke"
+  metric_name: "val:accuracy"
+  higher_is_better: true
+  keep_top_k: 1                           # SMOKE: keep 1 (validated run saved every 20 steps, keep more)
+  save_period: 4
+  checkpoint_must_save_by: null
+  save_optimizer: true
+
+policy:
+  # SMOKE model: small, tool-calling-capable, single-GPU-friendly.
+  # Validated model was Qwen3-8B (full-param FSDP on 910B). Qwen3 tool-call
+  # format is unchanged, so the environment wiring is exercised identically.
+  model_name: "Qwen/Qwen3-4B"
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs: null
+  hf_config_overrides: {}
+  train_global_batch_size: ${mul:${grpo.num_prompts_per_step}, ${grpo.num_generations_per_prompt}}
+  train_micro_batch_size: 1               # validated: ppo_micro_batch_size_per_gpu=1
+  logprob_batch_size: 1
+  generation_batch_size: 32
+  max_total_sequence_length: 16384        # SMOKE: 16384 (validated: 40960 context / 36864 response). Trimmed to fit 1 GPU.
+  precision: "bfloat16"                   # validated: bf16
+  logprob_chunk_size: null
+
+  dtensor_cfg:
+    _v2: false
+    enabled: true                         # SMOKE: DTensor FSDP on 1 GPU (validated: full-param FSDP, ulysses sp=4 on 8-NPU nodes)
+    cpu_offload: true                     # validated: fsdp param_offload=True / optimizer_offload=True
+    sequence_parallel: false              # SMOKE: sp=1 on a single GPU (validated: ulysses_sequence_parallel_size=4)
+    activation_checkpointing: true        # validated: enable_gradient_checkpointing=True
+    tensor_parallel_size: 1               # SMOKE: 1 (validated: rollout tp=4 across the 8-NPU node)
+    context_parallel_size: 1
+    custom_parallel_plan: null
+    clear_cache_every_n_steps: null
+
+  megatron_cfg:
+    enabled: false                        # SMOKE: use DTensor path for a small model on 1 GPU; flip to megatron for scale-out
+    checkpoint:
+      async_save: true
+
+  draft:
+    enabled: false
+    model_name: null
+    loss_weight: 0.1
+    num_layers: null
+    aux_layer_indices: null
+
+  dynamic_batching:
+    enabled: true                         # validated: use_dynamic_bsz=True
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.logprob_batch_size}}
+    sequence_length_round: 64
+
+  sequence_packing:
+    enabled: false
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.logprob_batch_size}}
+    algorithm: "modified_first_fit_decreasing"
+    sequence_length_round: 64
+
+  make_sequence_length_divisible_by: 1
+  max_grad_norm: 1.0                       # validated: clip_grad=1.0
+  offload_optimizer_for_logprob: false
+
+  optimizer:
+    name: "torch.optim.AdamW"             # validated: Adam family, lr 5e-6
+    kwargs:
+      lr: 5.0e-6                           # validated: lr=5e-6 (constant)
+      weight_decay: 0.01
+      betas: [0.9, 0.999]
+      eps: 1e-8
+
+  scheduler:
+    - name: "torch.optim.lr_scheduler.ConstantLR"   # validated: constant LR
+      kwargs:
+        factor: 1.0
+        total_iters: 10000000000
+    - milestones: []
+
+  generation:
+    backend: "vllm"
+    max_new_tokens: ${policy.max_total_sequence_length}
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg:
+      async_engine: true                  # validated: rollout.mode=async
+      precision: ${policy.precision}
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      expert_parallel_size: 1
+      gpu_memory_utilization: 0.6          # SMOKE: leave headroom on 1 GPU (validated: 0.30 with dedicated rollout NPUs)
+      max_model_len: ${policy.max_total_sequence_length}
+      enforce_eager: false
+      use_deep_gemm: false
+      num_last_layers_in_bf16: 0
+      num_first_layers_in_bf16: 0
+      kv_cache_dtype: "auto"
+      expose_http_server: true
+      skip_tokenizer_init: false
+      http_server_serving_chat_kwargs:
+        # The browser env exposes 5 tools; Qwen3 emits hermes-style tool calls.
+        enable_auto_tools: true
+        tool_parser: hermes
+    vllm_kwargs: {}
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  use_multiple_dataloader: false
+  # SMOKE data: the 5 committed example tasks (bundled offline site). For real
+  # tasks, convert WebVoyager with scripts/convert_webvoyager.py and prepare via
+  # `ng_prepare_data`. The 0721 run trained on the cleaned 168-task WebVoyager
+  # subset (see README "Data").
+  train:
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/lexmount_browser/data/example.jsonl
+  validation:
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/lexmount_browser/data/example.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: "nemo_gym"
+    prompt_file: null
+    system_prompt_file: null
+    processor: "nemo_gym_data_processor"
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  nemo_gym:
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml   # Required, must be *_for_training
+    - resources_servers/lexmount_browser/configs/lexmount_browser.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: false
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: false       # smoke: non-thinking for a compact context budget
+    lexmount_browser_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 12                    # tool-calling steps/rollout (>= the 10 assistant turns above)
+
+logger:
+  log_dir: "logs/grpo-lexmount-browser-smoke"
+  num_val_samples_to_print: 0
+  wandb_enabled: false                     # smoke: off by default; flip on with your project
+  tensorboard_enabled: true
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: "grpo-lexmount-browser"
+    name: "qwen3-4b-lexmount-browser-smoke"
+    log_nemo_gym_full_result_tables: false
+  tensorboard: {}
+  mlflow:
+    experiment_name: "grpo-lexmount-browser"
+    run_name: "qwen3-4b-lexmount-browser-smoke"
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+
+cluster:
+  gpus_per_node: 1                         # SMOKE: 1 GPU (validated: 2 nodes x 8 Ascend 910B)
+  num_nodes: 1
