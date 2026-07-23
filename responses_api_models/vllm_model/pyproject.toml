@@ -19,10 +19,6 @@ version = "0.2.0rc0"
 requires-python = ">=3.12"
 dependencies = [
     "nemo-gym[dev]",
-    # Used by the SGLang engine path (VLLMModelConfig.engine == "sglang") to render the
-    # chat template + tokenize prompts locally. Pinned to match the version the SWE recipe
-    # was validated with; relax/adjust as upstream dependency policy requires.
-    "transformers==5.3.0",
 ]
 
 [build-system]
