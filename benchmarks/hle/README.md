@@ -31,6 +31,36 @@ gym eval prepare --benchmark hle
 Downloads `cais/hle`, filters to text-only questions, and writes
 `benchmarks/hle/data/hle_benchmark.jsonl`.
 
+### Vision (multimodal) subset
+
+HLE's image questions are exposed as a separate benchmark, `hle_vision`
+(`benchmarks/hle_vision/`):
+
+```bash
+gym eval prepare --benchmark hle_vision
+```
+
+This downloads the full `cais/hle` split (text + image questions) and writes
+`benchmarks/hle/data/hle_benchmark_vision.jsonl`. Unlike the text-only file,
+these rows are **fully materialized** — the prompt template is baked into
+`responses_create_params.input`, and image questions carry an `input_image`
+block (base64 data URI). Because the input is pre-populated, this dataset uses
+`prompt_config: null` (input and `prompt_config` are mutually exclusive).
+
+The `include_vision` flag lives on `benchmarks/hle/prepare.py`; the `hle_vision`
+benchmark is a thin wrapper that calls `prepare(include_vision=True)`. Running
+the text-only prepare directly with the flag also works:
+
+```bash
+python benchmarks/hle/prepare.py --include-vision
+```
+
+Evaluating `hle_vision` requires a vision-capable policy model:
+
+```bash
+gym env start --model-type vllm_model --benchmark hle_vision
+```
+
 ## Running servers
 
 ```bash
@@ -41,6 +71,10 @@ gym env start \
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
 `env.yaml` (or passed as CLI overrides).
+
+For the vision variant use `--benchmark hle_vision` (agent
+`hle_vision_equivalence_llm_judge_simple_agent`) with a vision-capable policy
+model.
 
 ## Collect rollouts
 

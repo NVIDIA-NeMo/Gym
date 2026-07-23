@@ -231,6 +231,18 @@ def _extract_question_text(
             c = getattr(m, "content", None)
             if isinstance(c, str):
                 last_text = c
+            elif isinstance(c, list):
+                # Multimodal user turns (e.g. vision rows) carry a content list;
+                # join the text blocks so the judge still sees the question.
+                texts: list[str] = []
+                for block in c:
+                    t = getattr(block, "text", None)
+                    if t is None and isinstance(block, dict):
+                        t = block.get("text")
+                    if isinstance(t, str):
+                        texts.append(t)
+                if texts:
+                    last_text = "\n".join(texts)
     text = (last_text or "").strip()
     if not text:
         return text

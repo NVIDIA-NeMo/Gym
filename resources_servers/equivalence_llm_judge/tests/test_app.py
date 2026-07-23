@@ -31,6 +31,7 @@ from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
+    _extract_question_text,
 )
 
 
@@ -382,3 +383,25 @@ class TestApp:
         assert len(res.judge_evaluations) == 1
         # Verify only one judge call (no second pass due to length threshold)
         assert server_mock.post.call_count == 1
+
+    def test_extract_question_text_multimodal(self) -> None:
+        """Vision rows carry a multimodal content list; text blocks are joined for the judge."""
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe the figure."},
+                        {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "high"},
+                    ],
+                }
+            ]
+        )
+        assert _extract_question_text(params, None) == "Describe the figure."
+
+    def test_extract_question_text_plain_string(self) -> None:
+        """Text-only user turns (string content) are returned as-is."""
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "What is 2+2?"}]
+        )
+        assert _extract_question_text(params, None) == "What is 2+2?"
