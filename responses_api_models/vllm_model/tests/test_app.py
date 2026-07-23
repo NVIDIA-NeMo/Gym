@@ -3856,3 +3856,87 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+class TestInlinePromptTokenIds:
+    """Recovery of prompt/generation token IDs when return_token_id_information is on:
+    prefer the engine's inline IDs, fall back to /tokenize when they are absent."""
+
+    def _server(self) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=True,
+            uses_reasoning_parser=False,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def _chat_completion(self, *, inline: bool) -> dict:
+        choice: dict = {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "hi", "tool_calls": []},
+            "logprobs": {
+                "content": [
+                    {"token": "token_id:10", "logprob": -0.1},
+                    {"token": "token_id:20", "logprob": -0.2},
+                ]
+            },
+        }
+        chat: dict = {
+            "id": "chtcmpl-123",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [choice],
+        }
+        if inline:
+            chat["prompt_token_ids"] = [1, 2, 3]
+            choice["token_ids"] = [10, 20]
+        return chat
+
+    def _responses_request(self) -> dict:
+        return NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")],
+        ).model_dump(exclude_unset=True, mode="json")
+
+    def test_prefers_inline_and_skips_tokenize(self) -> None:
+        server = self._server()
+        app = server.setup_webserver()
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=self._chat_completion(inline=True))
+        mock_client.create_tokenize = AsyncMock()
+        server._clients = [mock_client]
+
+        response = TestClient(app).post("/v1/responses", json=self._responses_request())
+        assert response.status_code == 200
+
+        last = response.json()["output"][-1]
+        assert last["prompt_token_ids"] == [1, 2, 3]
+        assert last["generation_token_ids"] == [10, 20]
+        assert last["generation_log_probs"] == [-0.1, -0.2]
+        # Inline IDs were present, so no second /tokenize round-trip.
+        mock_client.create_tokenize.assert_not_called()
+
+    def test_falls_back_to_tokenize_without_inline(self) -> None:
+        server = self._server()
+        app = server.setup_webserver()
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=self._chat_completion(inline=False))
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [1, 2, 3]})
+        server._clients = [mock_client]
+
+        response = TestClient(app).post("/v1/responses", json=self._responses_request())
+        assert response.status_code == 200
+
+        last = response.json()["output"][-1]
+        # prompt_token_ids recovered via /tokenize; generation IDs from token_id:NNN logprobs.
+        assert last["prompt_token_ids"] == [1, 2, 3]
+        assert last["generation_token_ids"] == [10, 20]
+        assert last["generation_log_probs"] == [-0.1, -0.2]
+        mock_client.create_tokenize.assert_called_once()
