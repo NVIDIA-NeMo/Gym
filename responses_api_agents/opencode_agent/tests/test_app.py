@@ -20,18 +20,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ToolCallObservation,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
+    OpenCodeAgentRunRequest,
     _extract_instruction,
+    _parse_opencode_session,
     parse_opencode_session,
 )
 
@@ -47,6 +56,18 @@ def _config(**kwargs) -> OpenCodeAgentConfig:
     )
 
 
+def _invocations(bundle: AgentObservationBundle) -> list[AgentInvocation]:
+    return [record for record in bundle.records if isinstance(record, AgentInvocation)]
+
+
+def _tool_calls(bundle: AgentObservationBundle) -> list[ToolCallObservation]:
+    return [record for record in bundle.records if isinstance(record, ToolCallObservation)]
+
+
+def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObservation]:
+    return [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
+
+
 def _make_agent(**kwargs) -> OpenCodeAgent:
     with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
         agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
@@ -54,20 +75,30 @@ def _make_agent(**kwargs) -> OpenCodeAgent:
     return agent
 
 
-def _session_db(tmp_path, messages) -> Path:
-    """Build a minimal opencode sqlite db. messages is a list of (role, [part_dicts])."""
+def _session_db(tmp_path, messages, sessions=None) -> Path:
+    """Build the subset of OpenCode's v1.17.11 artifact used by the adapter."""
     import sqlite3
 
     db = tmp_path / "opencode.db"
     con = sqlite3.connect(db)
-    con.execute("create table message (id text, data text, time_created integer)")
-    con.execute("create table part (id text, message_id text, data text, time_created integer)")
+    sessions = sessions or [("root", None)]
+    con.execute("create table session (id text, parent_id text, time_created integer)")
+    con.execute("create table message (id text, session_id text, data text, time_created integer)")
+    con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+    for index, (session_id, parent_id) in enumerate(sessions):
+        con.execute("insert into session values (?,?,?)", (session_id, parent_id, index))
     t = 0
-    for mi, (role, parts) in enumerate(messages):
+    for mi, entry in enumerate(messages):
+        session_id, role_or_message, parts = ("root", *entry) if len(entry) == 2 else entry
         mid = f"m{mi}"
-        con.execute("insert into message values (?,?,?)", (mid, json.dumps({"role": role}), mi))
+        message = (
+            {"role": role_or_message, "time": {"created": mi, "completed": mi + 1}}
+            if isinstance(role_or_message, str)
+            else role_or_message
+        )
+        con.execute("insert into message values (?,?,?,?)", (mid, session_id, json.dumps(message), mi))
         for p in parts:
-            con.execute("insert into part values (?,?,?,?)", (f"p{t}", mid, json.dumps(p), t))
+            con.execute("insert into part values (?,?,?,?,?)", (f"p{t}", mid, session_id, json.dumps(p), t))
             t += 1
     con.commit()
     con.close()
@@ -137,7 +168,12 @@ class TestParseOpencodeSession:
                             "type": "tool",
                             "callID": "c1",
                             "tool": "bash",
-                            "state": {"input": {"command": "echo 6"}, "output": "6\n"},
+                            "state": {
+                                "status": "completed",
+                                "input": {"command": "echo 6"},
+                                "output": "6\n",
+                                "time": {"start": 1000, "end": 1200},
+                            },
                         },
                         {"type": "text", "text": "answer is 6"},
                     ],
@@ -162,12 +198,110 @@ class TestParseOpencodeSession:
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
 
+    def test_preserves_tree_parallel_tools_compaction_and_reasoning(self, tmp_path) -> None:
+        db = _session_db(
+            tmp_path,
+            [
+                ("root", "user", [{"type": "text", "text": "solve"}]),
+                (
+                    "root",
+                    "assistant",
+                    [
+                        {
+                            "type": "tool",
+                            "callID": "task-1",
+                            "tool": "task",
+                            "state": {
+                                "status": "completed",
+                                "input": {"prompt": "inspect"},
+                                "output": "done",
+                                "metadata": {"sessionId": "child"},
+                                "time": {"start": 1000, "end": 3000},
+                            },
+                        },
+                        {
+                            "type": "tool",
+                            "callID": "bash-1",
+                            "tool": "bash",
+                            "state": {
+                                "status": "completed",
+                                "input": {"command": "pwd"},
+                                "output": "/workspace",
+                                "time": {"start": 1200, "end": 1600},
+                            },
+                        },
+                    ],
+                ),
+                ("child", "user", [{"type": "text", "text": "inspect"}]),
+                ("child", "assistant", [{"type": "reasoning", "text": "checking files"}]),
+                (
+                    "child",
+                    "user",
+                    [{"type": "compaction", "auto": True, "overflow": True, "tail_start_id": "m2"}],
+                ),
+                (
+                    "child",
+                    {
+                        "role": "assistant",
+                        "summary": True,
+                        "parentID": "m4",
+                        "time": {"created": 5, "completed": 6},
+                    },
+                    [{"type": "text", "text": "condensed context"}],
+                ),
+            ],
+            sessions=[("root", None), ("child", "root")],
+        )
 
-class TestDeepMerge:
-    def test_nested_merge(self) -> None:
-        base = {"a": {"b": 1, "c": 2}}
-        OpenCodeAgent._deep_merge(base, {"a": {"c": 3, "d": 4}})
-        assert base == {"a": {"b": 1, "c": 3, "d": 4}}
+        bundle = _parse_opencode_session(db, "fallback")
+
+        root, child = _invocations(bundle)
+        assert child.parent_invocation_id == root.invocation_id
+        assert child.spawned_by_tool_call_id == "task-1"
+        assert any(item.type == "reasoning" for item in child.conversation)
+        assert {tool.tool_call_id: tool.duration_ms for tool in _tool_calls(bundle)} == {
+            "task-1": 2000,
+            "bash-1": 400,
+        }
+        compaction = _compactions(bundle)[0]
+        assert compaction.trigger == "overflow"
+        assert compaction.summary == "condensed context"
+        assert compaction.first_kept_item_id == "m2"
+        assert "compaction_model_call_boundary_unavailable" in {gap.code for gap in bundle.gaps}
+
+    def test_reports_invalid_timing_and_unresolved_tree_edges(self, tmp_path) -> None:
+        db = _session_db(
+            tmp_path,
+            [
+                (
+                    "root",
+                    "assistant",
+                    [
+                        {
+                            "type": "tool",
+                            "callID": call_id,
+                            "tool": "task",
+                            "state": {
+                                "status": "completed",
+                                "metadata": {"sessionId": "child"},
+                                "time": {"start": 2000, "end": 1000},
+                            },
+                        }
+                        for call_id in ("task-1", "task-2")
+                    ],
+                )
+            ],
+            sessions=[("root", None), ("child", "missing-parent")],
+        )
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert all(tool.started_at is None and tool.completed_at is None for tool in _tool_calls(bundle))
+        assert {gap.code for gap in bundle.gaps} >= {
+            "tool_timing_unavailable",
+            "subagent_parent_unavailable",
+            "subagent_spawn_ambiguous",
+        }
 
 
 class TestEnv:
@@ -179,6 +313,134 @@ class TestEnv:
         assert env["XDG_DATA_HOME"] == "/tmp/data"
         assert env["FOO"] == "bar"
         assert "EMPTY" not in env
+
+
+class TestRolloutObservability:
+    def test_routes_model_server_without_mutating_config(self, tmp_path: Path) -> None:
+        opencode_config = {"provider": {"openai": {"options": {"baseURL": "https://api.openai.com/v1"}}}}
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            opencode_config=opencode_config,
+            env={"OPENAI_BASE_URL": "https://wrong.invalid/v1"},
+        )
+
+        with patch.object(OpenCodeAgent, "resolve_model_base_url", return_value="http://policy/ng-rollout/1-2/v1"):
+            agent._write_opencode_config(tmp_path, "1-2")
+            env = agent._env(str(tmp_path), "1-2")
+
+        written = json.loads((tmp_path / "opencode.json").read_text())
+        assert written["provider"]["openai"]["options"]["baseURL"] == "http://policy/ng-rollout/1-2/v1"
+        assert env["OPENAI_BASE_URL"] == "http://policy/ng-rollout/1-2/v1"
+        assert agent.config.opencode_config == opencode_config
+
+    def test_response_propagates_rollout_and_artifact_reports_exact_tool_timing(self, tmp_path: Path) -> None:
+        db = _session_db(
+            tmp_path,
+            [
+                (
+                    "assistant",
+                    [
+                        {
+                            "type": "tool",
+                            "callID": "c1",
+                            "tool": "bash",
+                            "state": {
+                                "status": "completed",
+                                "input": {},
+                                "output": "ok",
+                                "time": {"start": 1000, "end": 1250},
+                            },
+                        }
+                    ],
+                )
+            ],
+        )
+        items, usage = parse_opencode_session(db)
+        observations = _parse_opencode_session(db, "1-2")
+        agent = _make_agent()
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
+        request = MagicMock()
+        request.path_params = {"rollout_id": "1-2"}
+
+        response = asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+        assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
+        assert response.output
+        tool_call = _tool_calls(observations)[0]
+        assert tool_call.status == "completed"
+        assert tool_call.duration_ms == 250
+        assert tool_call.timing_source == "artifact"
+        assert {gap.code for gap in observations.gaps} == {"model_call_ownership_unavailable"}
+
+    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
+        _, usage = parse_opencode_session(tmp_path / "missing.db")
+        observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
+        agent = _make_agent()
+        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
+
+        episode = asyncio.run(
+            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), rollout_id="1-2")
+        )
+
+        assert episode.response.output
+        assert _invocations(episode.observations)[0].conversation == [
+            NeMoGymEasyInputMessage(role="user", content="solve")
+        ]
+        assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+
+    def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
+        items, usage = parse_opencode_session(db)
+        observations = _parse_opencode_session(db, "1-2")
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
+
+        class Response:
+            ok = True
+            cookies = {}
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def read(self):
+                return json.dumps(self.payload).encode()
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                return Response(response.model_dump(mode="json"))
+            return Response(json | {"reward": 1.0}) if url_path == "/verify" else Response({})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock(cookies={})
+        body = OpenCodeAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+
+        result = asyncio.run(agent.run(request, body))
+
+        assert result.ng_agent_observations is not None
+        assert _invocations(result.ng_agent_observations)[0].conversation
+        assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
+
+    def test_public_observation_boundary_collects_without_a_request(self) -> None:
+        agent = _make_agent()
+        observations = AgentObservationBundle(source="opencode")
+        agent._run_opencode = AsyncMock(
+            return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", observations)
+        )
+
+        episode = asyncio.run(
+            agent.responses_with_observations(None, NeMoGymResponseCreateParamsNonStreaming(input="solve"))
+        )
+
+        assert episode.observations is observations
+        assert agent._run_opencode.await_args.kwargs["collect_observations"] is True
 
 
 class TestRepoDir:
@@ -195,6 +457,7 @@ class TestRepoDir:
         process = MagicMock(returncode=0)
         process.communicate = AsyncMock(return_value=(b"", b""))
         agent = _make_agent(repo_dir=str(repo_dir))
+        scored = [NeMoGymResponseOutputMessage(id="scored", content=[])]
 
         with (
             patch.object(agent, "_workspace_root", return_value=workspace),
@@ -202,9 +465,22 @@ class TestRepoDir:
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
                 AsyncMock(return_value=process),
             ),
+            patch(
+                "responses_api_agents.opencode_agent.app.parse_opencode_session",
+                return_value=(scored, {"input_tokens": 1, "output_tokens": 2}),
+            ),
+            patch(
+                "responses_api_agents.opencode_agent.app._parse_opencode_session",
+                side_effect=ValueError("invalid observation artifact"),
+            ),
         ):
-            await agent._run_opencode("fix the issue", None)
+            output, usage, _, observations = await agent._run_opencode(
+                "fix the issue", None, collect_observations=True
+            )
 
+        assert output == scored
+        assert usage == {"input_tokens": 1, "output_tokens": 2}
+        assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()
 
