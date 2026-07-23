@@ -1,6 +1,9 @@
 #!/bin/bash
 
 command=$(cat <<EOF
+which pip
+which vllm
+
 pip install ray==2.55.1
 
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
