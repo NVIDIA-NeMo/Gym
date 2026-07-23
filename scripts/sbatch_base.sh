@@ -44,6 +44,8 @@ fi
 
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
+# We set the container here on the srun because container support is not universal across sbatch.
+# We name all instances of this container on our nodes as `container-on-node`, referenced in the interactive script above.
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
