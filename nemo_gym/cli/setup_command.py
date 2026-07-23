@@ -25,7 +25,6 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
-    NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
@@ -200,9 +199,6 @@ def run_command(
         log_path = Path(log_dir) / f"{safe_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
-        suppress_stdout_server_names = global_config_dict.get(NEMO_GYM_LOG_SUPPRESS_STDOUT_SERVER_NAMES_KEY_NAME, [])
-        if server_name in suppress_stdout_server_names:
-            command += " >/dev/null"
 
     redirect_stdout = stdout
     redirect_stderr = stderr

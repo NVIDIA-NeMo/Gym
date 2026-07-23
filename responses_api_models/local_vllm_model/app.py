@@ -54,10 +54,6 @@ class LocalVLLMModelConfig(VLLMModelConfig):
 
     ray_worker_py_executable: str = sys.executable
 
-    # Launch independent vLLM servers and expose them as one round-robin model.
-    # Each replica still uses vllm_serve_kwargs.data_parallel_size internally.
-    num_replicas: int = Field(default=1, ge=1)
-
     show_vllm_engine_stats: bool = False
     debug: bool = False
 
@@ -80,7 +76,6 @@ class LocalVLLMModel(VLLMModel):
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor
-    _local_vllm_model_actors: List[LocalVLLMModelActor]
 
     def setup_webserver(self):
         print("Starting vLLM server. This will take a few minutes...")
@@ -167,12 +162,7 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
-    def _select_vllm_server_head_node(
-        self,
-        server_args: Namespace,
-        env_vars: Dict[str, str],
-        replica_idx: int = 0,
-    ) -> PlacementGroup:
+    def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
         """
         Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
         1. We estimate the size of a single placement group vLLM will make using TP * PP
@@ -190,11 +180,8 @@ Environment variables: {env_vars_to_print}""")
         device_bundle = [{device_str: 1.0}]
         world_size = server_args.pipeline_parallel_size * server_args.tensor_parallel_size
         bundles = device_bundle * world_size + [{"CPU": 1.0}]
-        placement_group_name = f"{self.config.name}_dp_rank_0"
-        if self.config.num_replicas > 1:
-            placement_group_name = f"{self.config.name}_replica_{replica_idx}_dp_rank_0"
         head_node_placement_group = ray.util.placement_group(
-            name=placement_group_name,
+            name=f"{self.config.name}_dp_rank_0",
             strategy=placement_strategy,
             bundles=bundles,
         )
@@ -214,60 +201,34 @@ Environment variables: {env_vars_to_print}""")
 Total Ray cluster resources: {cluster_resources()}""")
 
         server_args, env_vars = self._configure_vllm_serve()
-        if self.config.num_replicas > 1:
-            assert server_args.data_parallel_size == 1, (
-                "Independent LocalVLLMModel replicas require vllm_serve_kwargs.data_parallel_size=1."
-            )
+        head_node_placement_group = self._select_vllm_server_head_node(server_args, env_vars)
 
         pythonpath = str(Path(__file__).parent.parent.parent)
         if self.config.debug:
             print(f"Using PYTHONPATH={pythonpath}")
 
-        self._local_vllm_model_actors = []
-        base_url_refs = []
-        selected_ports = []
-        for replica_idx in range(self.config.num_replicas):
-            replica_server_args = Namespace(**vars(server_args))
-            if replica_idx > 0:
-                disallowed_ports = list(get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
-                replica_server_args.port = find_open_port(disallowed_ports=disallowed_ports + selected_ports)
-            selected_ports.append(replica_server_args.port)
+        self._local_vllm_model_actor = LocalVLLMModelActor.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=head_node_placement_group,
+            ),
+            runtime_env=dict(
+                py_executable=self.config.ray_worker_py_executable,
+                env_vars={
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    "PYTHONPATH": pythonpath,
+                    **env_vars,
+                },
+            ),
+        ).remote(
+            head_node_placement_group=head_node_placement_group,
+            server_args=server_args,
+            env_vars=env_vars,
+            server_name=self.config.name,
+            debug=self.config.debug,
+            show_vllm_engine_stats=self.config.show_vllm_engine_stats,
+        )
 
-            head_node_placement_group = self._select_vllm_server_head_node(
-                replica_server_args,
-                env_vars,
-                replica_idx=replica_idx,
-            )
-            server_name = self.config.name
-            if self.config.num_replicas > 1:
-                server_name = f"{self.config.name}_replica_{replica_idx}"
-
-            actor = LocalVLLMModelActor.options(
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=head_node_placement_group,
-                ),
-                runtime_env=dict(
-                    py_executable=self.config.ray_worker_py_executable,
-                    env_vars={
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "PYTHONPATH": pythonpath,
-                        **env_vars,
-                    },
-                ),
-            ).remote(
-                head_node_placement_group=head_node_placement_group,
-                server_args=replica_server_args,
-                env_vars=env_vars,
-                server_name=server_name,
-                debug=self.config.debug,
-                show_vllm_engine_stats=self.config.show_vllm_engine_stats,
-            )
-            self._local_vllm_model_actors.append(actor)
-            base_url_refs.append(actor.base_url.remote())
-
-        # Retain the singular attribute for callers that inspect a one-replica model.
-        self._local_vllm_model_actor = self._local_vllm_model_actors[0]
-        self.config.base_url = ray.get(base_url_refs)
+        self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
 
         # Reset clients after base_url config
         self._post_init()
@@ -276,30 +237,16 @@ Total Ray cluster resources: {cluster_resources()}""")
 
     def await_server_ready(self) -> None:
         poll_count = 0
-        pending_replica_indices = set(range(len(self._local_vllm_model_actors)))
-        while pending_replica_indices:
-            replica_indices = sorted(pending_replica_indices)
-            is_alive_results = ray.get(
-                [self._local_vllm_model_actors[idx].is_alive.remote() for idx in replica_indices]
-            )
+        while True:
+            is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
+            assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
-            for replica_idx, is_alive in zip(replica_indices, is_alive_results):
-                assert is_alive, (
-                    f"{self.config.name} LocalVLLMModel replica {replica_idx} spinup failed, see the error logs above!"
-                )
-
-                try:
-                    requests.get(url=f"{self.config.base_url[replica_idx]}/models")
-                    pending_replica_indices.remove(replica_idx)
-                except ConnectionError:
-                    pass
-
-            if pending_replica_indices:
+            try:
+                requests.get(url=f"{self.config.base_url[0]}/models")
+                return
+            except ConnectionError:
                 if poll_count % 10 == 0:  # Print every 30s
-                    print(
-                        f"Waiting for {self.config.name} LocalVLLMModel replicas "
-                        f"{sorted(pending_replica_indices)} to spinup..."
-                    )
+                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
                 poll_count += 1
                 sleep(3)

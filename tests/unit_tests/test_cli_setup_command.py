@@ -491,29 +491,3 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
-
-    def test_tee_logs_can_suppress_server_stdout(self, monkeypatch: MonkeyPatch) -> None:
-        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-
-        get_global_config_dict_mock.return_value = {
-            "uv_cache_dir": "default uv cache dir",
-            "nemo_gym_log_dir": "/tmp/gym_logs",
-            "nemo_gym_log_suppress_stdout_server_names": ["simulator_model"],
-        }
-
-        run_command(
-            command="my command",
-            working_dir_path=Path("/my path"),
-            server_name="simulator_model",
-        )
-
-        expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/simulator_model.log >/dev/null",
-            executable="/bin/bash",
-            shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
-            stdout="stdout",
-            stderr="stderr",
-        )
-        actual_args = Popen_mock.call_args
-        assert expected_args == actual_args
