@@ -24,12 +24,9 @@ if (( $# == 0 )); then
     command=(sleep infinity)
     mkdir -p slurm-attach
     cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
-srun --no-container-mount-home \
-    -A $SLURM_JOB_ACCOUNT \
+srun -A $SLURM_JOB_ACCOUNT \
     -p $SLURM_JOB_PARTITION \
     --overlap \
-    --container-name=ray-head \
-    --container-workdir=$SLURM_SUBMIT_DIR \
     --nodes=1 \
     --ntasks=1 \
     -w "$head_node_hostname" \
