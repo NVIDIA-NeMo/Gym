@@ -42,10 +42,16 @@ from uuid import uuid4
 
 import orjson
 from fastapi import Body, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.chat_streaming import (
+    sanitize_streaming_chat_body,
+    synthesize_chat_completion_sse,
+    validate_streaming_chat_params,
+)
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -88,7 +94,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         install_model_call_capture(app, capture_config, model_server_name=self.config.name)
 
-        app.post("/v1/chat/completions")(self.chat_completions)
+        app.post("/v1/chat/completions")(self.chat_completions_dispatch)
 
         app.post("/v1/responses")(self.responses)
 
@@ -109,6 +115,44 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
+
+    async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
+        """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
+
+        A plain JSON request validates strictly against
+        ``NeMoGymChatCompletionCreateParamsNonStreaming`` and delegates to this server's own
+        ``chat_completions()``, preserving the historical non-streaming behavior (including the
+        standard 422 shape). When the client requests ``stream: true`` (blackbox
+        Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
+        first sanitized from the streaming wire dialect (drop ``stream``/``stream_options``; see
+        ``nemo_gym.chat_streaming``), delegated to the same ``chat_completions()``, and the
+        complete response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream.
+        """
+        if not body.get("stream"):
+            params = _validate_chat_params(body)
+            return await self._invoke_chat_completions(request, params)
+
+        cleaned, include_usage = sanitize_streaming_chat_body(body)
+        try:
+            params = validate_streaming_chat_params(cleaned)
+        except ValidationError as exc:
+            raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+        completion = await self._invoke_chat_completions(request, params)
+        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+        return StreamingResponse(
+            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            media_type="text/event-stream",
+        )
+
+    async def _invoke_chat_completions(
+        self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        # chat_completions() signatures vary across servers: some take a leading `request`, some
+        # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
+        # all of them.
+        if "request" in inspect.signature(self.chat_completions).parameters:
+            return await self.chat_completions(request=request, body=params)
+        return await self.chat_completions(body=params)
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -139,6 +183,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if "request" in inspect.signature(self.responses).parameters:
             return await self.responses(request=request, body=params)
         return await self.responses(body=params)
+
+
+def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+    """Validate a /v1/chat/completions body dict, surfacing failures as FastAPI's standard 422."""
+    try:
+        return NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+    except ValidationError as exc:
+        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
 
 # --- Capture configuration + rollout-keyed storage ---
