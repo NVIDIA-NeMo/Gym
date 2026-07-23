@@ -20,6 +20,7 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 # The --min-nodes argument ensures all nodes join before running the script.
 
 if (( $# == 0 )); then
+    # If there are no arguments provided, then we just block forever so the Ray cluster stays up.
     args="sleep infinity"
 else
     args="$@"
