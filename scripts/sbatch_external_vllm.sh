@@ -32,7 +32,7 @@ sbatch \
     --account=nemotron_evals_research \
     --partition=batch \
     --gres=gpu:4 \
-    --time=00:15:00 \
+    --time=04:00:00 \
     --job-name=vllm-$USER \
     --exclusive \
-    scripts/sbatch_base.sh bash -lc "$command"
+    scripts/sbatch_base.sh
