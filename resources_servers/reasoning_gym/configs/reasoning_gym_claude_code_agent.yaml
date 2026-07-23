@@ -14,6 +14,9 @@ reasoning_gym_claude_code_agent:
       resources_server:
         type: resources_servers
         name: reasoning_gym
+      # External harness: returned output carries no token ids, so opt into token capture so this
+      # agent's model calls are correlated, captured, and rebuilt into a token-bearing response.
+      token_id_capture: true
       concurrency: 32
       model: ${anthropic_model_name}
       anthropic_api_key: ${anthropic_api_key}
