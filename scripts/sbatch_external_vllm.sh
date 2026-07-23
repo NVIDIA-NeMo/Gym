@@ -26,10 +26,10 @@ command=$(cat <<EOF
 EOF
 )
 
-CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
 sbatch \
     --nodes=2 \
     --account=nemotron_evals_research \
+    --container-image=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
     --container-name=container-on-node \
     --partition=batch \
     --gres=gpu:4 \
