@@ -31,7 +31,7 @@ EOF
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
 sbatch \
-    --nodes=2 \
+    --nodes=4 \
     --account=nemotron_evals_research \
     --partition=batch \
     --gres=gpu:4 \
