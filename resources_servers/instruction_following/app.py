@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import model_validator
@@ -33,7 +33,28 @@ class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
 
 class InstructionFollowingRunRequest(BaseRunRequest):
     id: int
-    verifier_metadata: Dict[str, Any]
+    verifier_metadata: Dict[str, Any] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_metadata(cls, data: Any) -> Any:
+        """Backward compatibility for rows that store verifier fields at the top level.
+
+        Older datasets (e.g. blends already published to HuggingFace) keep
+        instruction_id_list/prompt/kwargs/grading_mode at the top level rather than under
+        verifier_metadata. Copy any such field into verifier_metadata when it isn't already
+        present there, so both the legacy and the current format verify without re-preprocessing.
+        Explicit verifier_metadata values take precedence over top-level ones.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        metadata = dict(data.get("verifier_metadata") or {})
+        for field in ("instruction_id_list", "prompt", "kwargs", "grading_mode"):
+            if field not in metadata and field in data:
+                metadata[field] = data[field]
+        data["verifier_metadata"] = metadata
+        return data
 
     @model_validator(mode="after")
     def _validate_verifier_metadata(self) -> "InstructionFollowingRunRequest":

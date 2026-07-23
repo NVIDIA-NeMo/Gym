@@ -33,7 +33,9 @@ class TestApp:
         config = InstructionFollowingResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         return InstructionFollowingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    def _create_real_request(self, instruction_ids, prompt, kwargs, response_content, request_id=1, grading_mode="binary"):
+    def _create_real_request(
+        self, instruction_ids, prompt, kwargs, response_content, request_id=1, grading_mode="binary"
+    ):
         """Helper to create real request with NeMoGymResponse."""
         response = NeMoGymResponse(
             id=f"resp_test_{request_id}",
@@ -200,7 +202,6 @@ class TestApp:
             response_content="<<My Great Title>>\n\n with a comma here, okay.",
             request_id=300,
             grading_mode="fraction",
-
         )
         self._run_verify_test(real_request, False, 0.5, [True, False])
 
@@ -211,8 +212,85 @@ class TestApp:
                 id=1,
                 responses_create_params={"input": []},
                 response=NeMoGymResponse(
-                    id="r", created_at=0.0, model="m", object="response",
-                    output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+                    id="r",
+                    created_at=0.0,
+                    model="m",
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    tools=[],
                 ),
                 verifier_metadata={"prompt": "some prompt"},  # missing instruction_id_list and kwargs
             )
+
+    def _make_response(self, response_content, request_id=1):
+        """Helper to build a NeMoGymResponse carrying a single assistant text output."""
+        return NeMoGymResponse(
+            id=f"resp_test_{request_id}",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": f"msg_test_{request_id}",
+                    "content": [{"annotations": [], "text": response_content, "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+    def test_legacy_top_level_format(self):
+        """Backward compat: rows with verifier fields at the top level (no verifier_metadata)
+        should still parse and verify, matching published HF blends."""
+        request = InstructionFollowingVerifyRequest(
+            id=1,
+            instruction_id_list=["detectable_format:title"],
+            prompt="Write the entire response with a title.",
+            kwargs=[{}],
+            responses_create_params={"input": [{"role": "user", "content": "prompt"}]},
+            response=self._make_response("<<My Title>>\n\nThis is the content of my response."),
+        )
+        # Legacy top-level fields are migrated into verifier_metadata.
+        assert request.verifier_metadata["instruction_id_list"] == ["detectable_format:title"]
+        assert request.verifier_metadata["kwargs"] == [{}]
+        self._run_verify_test(request, True, 1.0, [True])
+
+    def test_legacy_grading_mode_migrated(self):
+        """Backward compat: a top-level grading_mode is migrated into verifier_metadata."""
+        request = InstructionFollowingVerifyRequest(
+            id=1,
+            instruction_id_list=["detectable_format:title", "punctuation:no_comma"],
+            prompt="Write a response with a title and no commas.",
+            kwargs=[{}, {}],
+            grading_mode="fraction",
+            responses_create_params={"input": [{"role": "user", "content": "prompt"}]},
+            response=self._make_response("<<My Great Title>>\n\n with a comma here, okay."),
+        )
+        assert request.verifier_metadata["grading_mode"] == "fraction"
+        self._run_verify_test(request, False, 0.5, [True, False])
+
+    def test_explicit_verifier_metadata_takes_precedence(self):
+        """When both top-level fields and verifier_metadata are present, verifier_metadata wins
+        and the request parses without error."""
+        request = InstructionFollowingVerifyRequest(
+            id=1,
+            # Legacy top-level fields point at a different instruction; they must be ignored.
+            instruction_id_list=["punctuation:no_comma"],
+            prompt="stale top-level prompt",
+            kwargs=[{}],
+            responses_create_params={"input": [{"role": "user", "content": "prompt"}]},
+            response=self._make_response("<<My Title>>\n\nThis is the content of my response."),
+            verifier_metadata={
+                "instruction_id_list": ["detectable_format:title"],
+                "prompt": "Write the entire response with a title.",
+                "kwargs": [{}],
+            },
+        )
+        assert request.verifier_metadata["instruction_id_list"] == ["detectable_format:title"]
+        self._run_verify_test(request, True, 1.0, [True])
