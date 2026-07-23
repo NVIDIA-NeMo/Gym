@@ -19,6 +19,11 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 # The '--' separator is used to separate Ray arguments and the entrypoint command.
 # The --min-nodes argument ensures all nodes join before running the script.
 
+if (( $# == 0 )); then
+    args="sleep infinity"
+else
+    args="$@"
+fi
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
@@ -33,7 +38,7 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
       --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
       --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
       -- "$@"
-  ' bash "$@"
+  ' bash "$args"
 
 # TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
 
