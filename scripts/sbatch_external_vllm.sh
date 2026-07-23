@@ -25,7 +25,7 @@ vllm serve $MODEL \
     --load-format instanttensor \
     --moe-backend triton \
     --max-num-batched-tokens 32768 \
-    --host \$(hostname) \
+    --host \$(hostname -I | awk '{print \$1}') \
     --port 8000
 EOF
 )
