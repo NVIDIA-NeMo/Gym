@@ -68,6 +68,7 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=None,
         description="Path for caching ticker mappings and filing metadata. Defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set. Relative paths are resolved from cwd.",
     )
+    use_cache: bool = Field(default=False, description="Keep False to always fetch fresh filings (used for eval).")
     user_agent: str = Field(
         default="Gym-SEC-Search/1.0 (research@nvidia.com)", description="User-Agent header for SEC.gov requests"
     )
@@ -110,9 +111,11 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         "'binary': only [[2]] → 1.0, else 0.0. "
         "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0.",
     )
-    retrieval_max_output_tokens: int = Field(
-        default=8192,
-        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models.",
+    retrieval_max_output_tokens: Optional[int] = Field(
+        default=None,
+        description="Max output tokens for retrieve_information LLM calls. Increase for thinking models. "
+        "Set to null/None to leave it unset so the retrieval call inherits the full generation budget "
+        "(used for eval); set an integer to cap it (used for training).",
     )
     retrieval_model_context_length: int = Field(
         default=131072,
@@ -210,7 +213,16 @@ class FinanceAgentSearchResponse(BaseModel):
 class RetrieveInformationRequest(BaseModel):
     """Request model for retrieve_information tool."""
 
-    prompt: str = Field(description="Prompt with {{key_name}} placeholders for stored documents.")
+    prompt: str = Field(
+        description=(
+            "An LLM prompt applied to your saved documents. You MUST include at least "
+            "one data-storage key using the exact double-brace format {{key_name}} -- "
+            "for example: 'Summarize this 10-K filing: {{company_10k}}'. The full text "
+            "stored under each key replaces its {{key_name}} placeholder before the "
+            "prompt is sent. If you do not use this exact {{key_name}} format, the tool "
+            "will fail."
+        )
+    )
     input_character_ranges: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Optional list of character ranges: [{'key': 'doc', 'start': 0, 'end': 100000}]"
     )
@@ -349,12 +361,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             if not self._cache_dir.is_absolute():
                 self._cache_dir = Path.cwd() / self._cache_dir
                 logger.info("Resolved relative cache_dir to %s", self._cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._filings_metadata_dir = self._cache_dir / "filings_metadata"
-        self._filings_metadata_dir.mkdir(exist_ok=True)
         self._filings_dir = self._cache_dir / "filings"
-        self._filings_dir.mkdir(exist_ok=True)
         self._tickers_file = self._cache_dir / "tickers.json"
+        # Only materialize the on-disk cache when caching is enabled. With
+        # use_cache=False every request fetches live and no dirs are created.
+        if self.config.use_cache:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._filings_metadata_dir.mkdir(exist_ok=True)
+            self._filings_dir.mkdir(exist_ok=True)
 
         self._rate_limiter = RateLimiter(max_requests=self.config.requests_per_second, window_seconds=1.0)
 
@@ -535,7 +550,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         raw = None
 
-        if self._tickers_file.exists():
+        if self.config.use_cache and self._tickers_file.exists():
             try:
                 with open(self._tickers_file, "r") as f:
                     raw = json.load(f)
@@ -550,8 +565,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         data = resp.read().decode("utf-8")
                     raw = json.loads(data)
-                    with open(self._tickers_file, "w") as f:
-                        json.dump(raw, f)
+                    if self.config.use_cache:
+                        with open(self._tickers_file, "w") as f:
+                            json.dump(raw, f)
                     break
                 except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
                     wait = 2**attempt
@@ -646,7 +662,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 return self._filings_cache[cik_padded]
 
             cache_path = self._get_company_cache_path(cik)
-            if cache_path.exists():
+            if self.config.use_cache and cache_path.exists():
                 with open(cache_path, "r") as f:
                     filings = json.load(f)
                 self._filings_cache[cik_padded] = filings
@@ -675,7 +691,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse supplementary file %s for CIK %s", filename, cik)
 
-                if filings:
+                if filings and self.config.use_cache:
                     self._atomic_write(cache_path, json.dumps(filings))
                 self._filings_cache[cik_padded] = filings
                 return filings
@@ -742,33 +758,38 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # ========================================================================
 
     def _parse_sec_url(self, url: str) -> Optional[Dict[str, str]]:
-        """Parse SEC URL to extract CIK and accession number."""
-        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{filename}
-        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/"
+        """Parse SEC URL to extract CIK, accession number, and document filename."""
+        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{document}
+        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)"
         match = re.search(pattern, url)
         if match:
             cik = match.group(1).zfill(10)
             acc_nodash = match.group(2)
+            document = match.group(3).strip("/")
             # Convert to formatted accession: 0001234567-12-123456
             if len(acc_nodash) == 18:
                 accession = f"{acc_nodash[:10]}-{acc_nodash[10:12]}-{acc_nodash[12:]}"
             else:
                 accession = acc_nodash
-            return {"cik": cik, "accession_number": accession}
+            return {"cik": cik, "accession_number": accession, "document": document}
         return None
 
     def _url_to_filing_path(self, url: str) -> Optional[Path]:
         """Convert a SEC EDGAR URL to its local cache file path.
 
+        Keyed by (CIK, accession, document): distinct documents under one accession
+        (e.g. edgar_search sub-documents/exhibits) map to distinct cache files.
         Returns None if the URL doesn't match the expected SEC format.
         """
         parts = self._parse_sec_url(url)
         if not parts:
             return None
-        cik, accession_number = parts["cik"], parts["accession_number"]
-        cik_padded = str(cik).zfill(10)
-        acc_nodash = accession_number.replace("-", "")
-        return self._filings_dir / cik_padded / f"{acc_nodash}.txt"
+        cik_padded = str(parts["cik"]).zfill(10)
+        acc_nodash = parts["accession_number"].replace("-", "")
+        # Flatten the document path into one safe filename; fall back to "index"
+        # when the URL stops at the accession directory (no document component).
+        safe_doc = re.sub(r"[^A-Za-z0-9._-]", "_", parts.get("document", "")) or "index"
+        return self._filings_dir / cik_padded / acc_nodash / f"{safe_doc}.txt"
 
     # ========================================================================
     # sec_filing_search Endpoint
@@ -882,12 +903,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Invalid SEC URL format: {url}")
 
         text_content = None
-        if file_path.exists():
+        if self.config.use_cache and file_path.exists():
             text_content = file_path.read_text(encoding="utf-8")
 
         if text_content is None and self.config.sec_dump_path:
             text_content = await self._lookup_dump(url)
-            if text_content:
+            if text_content and self.config.use_cache:
                 self._atomic_write(file_path, text_content)
 
         if text_content is None:
@@ -900,7 +921,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             text_content = await asyncio.get_running_loop().run_in_executor(
                 None, self._parse_html_to_text, html_content
             )
-            self._atomic_write(file_path, text_content)
+            if self.config.use_cache:
+                self._atomic_write(file_path, text_content)
 
         if not text_content:
             raise ValueError("Filing content was empty after parsing.")
@@ -1024,6 +1046,16 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 json=retrieval_params,
             )
 
+            # Surface HTTP-level failures (e.g. 4xx context-overflow from vLLM)
+            # explicitly rather than letting them fall through to the vague
+            # "no output" branch.  Body is capped to avoid polluting agent
+            # context with multi-KB error bodies (e.g. vLLM HTML pages).
+            if not llm_response.ok:
+                body_text = (await llm_response.text())[:500]
+                return RetrieveInformationResponse(
+                    results=f"ERROR: Retrieval LLM HTTP {llm_response.status}: {body_text}"
+                )
+
             llm_response_json = await get_response_json(llm_response)
             llm_response_obj = NeMoGymResponse.model_validate(llm_response_json)
 
@@ -1035,7 +1067,24 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             result_text += getattr(content_item, "text", "")
 
             if not result_text:
-                return RetrieveInformationResponse(results="ERROR: Retrieval LLM returned no output.")
+                # Include any diagnostic the server returned so the agent can
+                # see why output was empty (e.g. incomplete_details.reason ==
+                # "max_output_tokens" or content_filter).  Bare "no output"
+                # masks these.
+                diagnostic_parts: List[str] = []
+                incomplete_details = getattr(llm_response_obj, "incomplete_details", None)
+                if incomplete_details is not None:
+                    reason = getattr(incomplete_details, "reason", None)
+                    if reason:
+                        diagnostic_parts.append(f"incomplete_details.reason={reason}")
+                status = getattr(llm_response_obj, "status", None)
+                if status:
+                    diagnostic_parts.append(f"status={status}")
+                error_field = getattr(llm_response_obj, "error", None)
+                if error_field is not None:
+                    diagnostic_parts.append(f"error={error_field}")
+                diagnostic = (" (" + ", ".join(diagnostic_parts) + ")") if diagnostic_parts else ""
+                return RetrieveInformationResponse(results=f"ERROR: Retrieval LLM returned no output.{diagnostic}")
 
             return RetrieveInformationResponse(results=result_text)
 

@@ -37,6 +37,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body,
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import apply_rollout_prefix
 
 
 def _read_task_meta(task_dir: Path) -> dict:
@@ -176,8 +177,10 @@ config = {agent_cfg_class}(
 agent = {agent_class}(config=config, server_client=_mock_client)
 
 if MODEL_URL:
+    _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
+    if hasattr(agent, "resolve_model_base_url"):
+        object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
     if hasattr(agent, "_resolve_model_base_url"):
-        _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
         agent._resolve_model_base_url = lambda: _v1
     if hasattr(agent, "_resolve_base_url"):
         agent._resolve_base_url = lambda: MODEL_URL
@@ -273,6 +276,10 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
     # in-container agent harness
     concurrency: int = 256
+
+
+class AnyTerminalRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
 
 
 class AnyTerminalServerConfig(BaseModel):
@@ -570,7 +577,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
     # Per-instance setup
 
-    def _setup_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> AnyTerminalInstanceConfig:
+    def _setup_params(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> AnyTerminalInstanceConfig:
         problem_info = dict(body.metadata or {})
         task_name = problem_info.get("task_name", problem_info.get("instance_id", "unknown"))
 
@@ -594,9 +603,13 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
 
+        server_config = self._server.model_dump()
+        if rollout_id and server_config["model_server_url"]:
+            server_config["model_server_url"] = apply_rollout_prefix(server_config["model_server_url"], rollout_id)
+
         params = AnyTerminalInstanceConfig(
             **{**self.config.model_dump(), **config_overrides},
-            **self._server.model_dump(),
+            **server_config,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -615,8 +628,10 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
     # Request handlers
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params = self._setup_params(body)
+    async def _responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
+        params = self._setup_params(body, rollout_id)
         (params.persistent_dir / "params.json").write_text(_safe_config_json(params, indent=2))
         try:
             return await self._inner_responses(params)
@@ -625,6 +640,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             tb_path.write_text(format_exc())
             print(f"[{params.task_name}] exception: see {tb_path}", file=sys.stderr)
             raise
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        return await self._responses(body)
 
     @staticmethod
     def _ray_resource_opts(params: AnyTerminalInstanceConfig) -> dict:
@@ -685,11 +703,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             },
         )
 
-    async def run(self, body: BaseRunRequest) -> AnyTerminalVerifyResponse:
+    async def run(self, body: AnyTerminalRunRequest) -> AnyTerminalVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
-            response = await self.responses(body.responses_create_params)
+            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
 
             meta, response.metadata = response.metadata, None
             metrics = TerminalBenchMetrics.model_validate_json(meta["metrics"])
