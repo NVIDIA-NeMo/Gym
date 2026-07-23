@@ -844,6 +844,12 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
 
+def is_global_config_dict_set() -> bool:
+    """True if the process-wide config dict is already loaded. Lets callers consult it without
+    triggering a parse (parsing reads CLI args and may sys.exit in non-CLI processes)."""
+    return _GLOBAL_CONFIG_DICT is not None
+
+
 def set_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,

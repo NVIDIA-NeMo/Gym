@@ -126,7 +126,9 @@ rollout artifacts are unaffected, and per-task/per-agent metrics remain availabl
 `gym eval profile`.
 
 In metrics artifacts your agent is identified by its URL: `agent_ref` is `{"url": "..."}`, and
-`--num-repeats` in dict form uses the URL as its key.
+`num_repeats` in dict form uses the URL as its key. Note that Hydra's command-line override
+grammar cannot express URL dict keys — put a URL-keyed `num_repeats` in a YAML config file
+passed via `--config` instead of on the command line.
 
 ## Concurrency
 

@@ -1278,9 +1278,10 @@ class TestAgentUrlPreprocess:
 
 
 class _FakeAiohttpResponse:
-    def __init__(self, status: int, content: bytes):
+    def __init__(self, status: int, content: bytes, headers: dict | None = None):
         self.status = status
         self._content = content
+        self.headers = headers or {}
 
     @property
     def ok(self) -> bool:
@@ -2040,3 +2041,380 @@ class TestOwedFixes:
 
         await NoServerClientHelper().run_from_config(config)
         assert "WARNING:" not in capsys.readouterr().out
+
+
+class TestFreshEyesFixes:
+    """Pins for the fresh-agent DA round: 3xx handling, userinfo, type gates, retry classes,
+    config-aware concurrency cap, sidecar lifecycle, resume guards, and dispatch precedence."""
+
+    async def test_3xx_becomes_failure_row_with_location(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = _FakeAiohttpResponse(301, b"<html>moved</html>", headers={"Location": "https://h:9443/run"})
+        _mock_global_client(monkeypatch, AsyncMock(return_value=response))
+
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
+
+        assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
+        assert "HTTP 301" in result["error"] and "redirect to https://h:9443/run" in result["error"]
+
+    async def test_aggregate_3xx_skips(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _mock_global_client(monkeypatch, AsyncMock(return_value=_FakeAiohttpResponse(302, b"")))
+        result = await _post_external_aggregate_metrics(
+            "http://localhost:9000", AggregateMetricsRequest(verify_responses=[])
+        )
+        assert result is None
+        assert "HTTP 302" in capsys.readouterr().out
+
+    async def test_aggregate_malformed_200_body_skips(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _mock_global_client(monkeypatch, AsyncMock(return_value=_FakeAiohttpResponse(200, b"<html>gateway</html>")))
+        result = await _post_external_aggregate_metrics(
+            "http://localhost:9000", AggregateMetricsRequest(verify_responses=[])
+        )
+        assert result is None
+        assert "Skipping aggregate metrics" in capsys.readouterr().out
+
+    def test_agent_url_userinfo_rejected_without_echoing_secret(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            RolloutCollectionConfig(
+                agent_url="http://alice:hunter2@host:9000",
+                input_jsonl_fpath="in.jsonl",
+                output_jsonl_fpath="out.jsonl",
+            )
+        message = str(excinfo.value)
+        assert "must not embed credentials" in message
+        assert "hunter2" not in message
+
+    @pytest.mark.parametrize(
+        "bad_result, expected_fragment",
+        [
+            ({"reward": 1.0, "response": None}, "invalid types"),
+            ({"reward": 1.0, "response": "trace text"}, "invalid types"),
+            ({"reward": None, "response": {}}, "invalid types"),
+            ({"reward": "high", "response": {}}, "invalid types"),
+        ],
+        ids=["response-null", "response-str", "reward-null", "reward-str"],
+    )
+    async def test_wrong_typed_success_becomes_failure_row(
+        self, monkeypatch: pytest.MonkeyPatch, bad_result: dict, expected_fragment: str
+    ) -> None:
+        _mock_global_client(monkeypatch, AsyncMock(return_value=_FakeAiohttpResponse(200, orjson.dumps(bad_result))))
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
+        assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
+        assert expected_fragment in result["error"]
+
+    async def test_client_os_error_retried_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from aiohttp import ClientOSError
+
+        request_mock = AsyncMock(side_effect=ClientOSError("Connection reset by peer"))
+        client = _mock_global_client(monkeypatch, request_mock)
+
+        result = await _post_external_agent_run(deepcopy(_URL_ROW), timeout_secs=5.0)
+
+        assert client.request.call_count == 3
+        assert result[NG_FAILURE_CLASS_KEY] == EXTERNAL_AGENT_FAILURE_CLASS
+
+    async def test_no_persist_response_dropped_without_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from fastapi import FastAPI, Request
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run(request: Request):
+            row = await request.json()
+            if row.get("x") == "kill":
+                return {"_ng_no_persist": True, "_ng_failure_class": "kill_shaped"}
+            return {"reward": 1.0, "response": {"usage": {}}}
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+
+        input_fpath = tmp_path / "input.jsonl"
+        rows = [
+            {"responses_create_params": {"input": []}, "x": "ok"},
+            {"responses_create_params": {"input": []}, "x": "kill"},
+        ]
+        input_fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        # no-persist rows: absent from BOTH files (absence is the resume signal), counted in summary
+        assert len([json.loads(line) for line in (tmp_path / "rollouts.jsonl").open()]) == 1
+        assert (tmp_path / "rollouts_failures.jsonl").read_bytes() == b""
+        out = capsys.readouterr().out
+        assert "1 were dropped without a record" in out
+
+    async def test_cap_uses_run_config_override_pre_init(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from fastapi import FastAPI
+        from omegaconf import DictConfig
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run():
+            return {"reward": 1.0, "response": {"usage": {}}}
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_global_config_dict_set", lambda: True)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: DictConfig({"global_aiohttp_connector_limit_per_host": 16}),
+        )
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+            num_samples_in_parallel=100,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        out = capsys.readouterr().out
+        # The run-config override (16), not the class default (1024), bounds the run —
+        # asserting the EFFECTIVE concurrency line, not just the cap notice.
+        assert "Capping concurrency at 16" in out
+        assert "Querying with 16 concurrent requests" in out
+
+    async def test_cap_reads_live_connector_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nemo_gym.rollout_collection import _effective_per_host_connection_limit
+
+        class FakeConnector:
+            limit_per_host = 7
+
+        class FakeClient:
+            connector = FakeConnector()
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_global_aiohttp_client_setup", lambda: True)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: FakeClient())
+        assert _effective_per_host_connection_limit() == 7
+
+        FakeConnector.limit_per_host = 0  # aiohttp uses 0 to mean unlimited
+        assert _effective_per_host_connection_limit() is None
+
+    async def test_fresh_run_clears_stale_failures_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi import FastAPI
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run():
+            return {"reward": 1.0, "response": {"usage": {}}}
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+
+        # Stale sidecar from an earlier, unrelated fresh run: 3 attempts for key (0, 0)
+        stale = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "external_agent_error"}
+        (tmp_path / "rollouts_failures.jsonl").write_text((json.dumps(stale) + "\n") * 3)
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        # The fresh run cleared the stale attempts; a later resume must not see them.
+        assert (tmp_path / "rollouts_failures.jsonl").read_bytes() == b""
+
+    async def test_resume_guard_covers_completed_url_rows(self, tmp_path: Path) -> None:
+        # All url rows COMPLETED, none pending: aggregation would still POST to the frozen
+        # URL, so resuming without +agent_url must error.
+        output_fpath = tmp_path / "rollouts.jsonl"
+        row = {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"url": "http://old-host:1111"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+        done = dict(row, response={"usage": {}}, reward=1.0)
+        output_fpath.write_text(json.dumps(done) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "unused.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=True,
+            upload_rollouts_to_wandb=False,
+        )
+        with config.materialized_jsonl_fpath.open("wb") as f:
+            f.write(orjson.dumps(row) + b"\n")
+
+        with pytest.raises(ValueError, match=r"\+agent_url was not provided"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+    async def test_both_key_ref_dispatches_to_named_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Name-first everywhere: a both-key ref must take the NAMED path, matching
+        # row_agent_key/canonical_agent_ref/aggregation precedence.
+        url_client = _mock_global_client(monkeypatch, AsyncMock())
+
+        named_response = MagicMock()
+        named_response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=named_response)
+
+        async def ok_raise_for_status(_response):
+            return None
+
+        async def named_response_json(_response):
+            return {"reward": 0.5}
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", ok_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", named_response_json)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent", "url": "http://sneaky:1"},
+                "responses_create_params": {"input": []},
+            }
+        ]
+        for future in MockHelper().run_examples(rows):
+            row, result = await future
+
+        assert result == {"reward": 0.5}
+        assert mock_server_client.post.call_args.kwargs["server_name"] == "my_agent"
+        url_client.request.assert_not_called()
+
+    def test_row_error_messages_use_real_row_position(self, tmp_path: Path) -> None:
+        rows = [
+            {"responses_create_params": {"input": []}},
+            {"responses_create_params": {"input": []}},
+            {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"url": "http://other-host:1234"}},
+        ]
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_url="http://localhost:9000",
+        )
+        with pytest.raises(ValueError, match="Row 2 carries agent_ref.url"):
+            RolloutCollectionHelper()._preprocess_rows_from_config(config)
+
+    def test_num_repeats_url_key_with_trailing_slash_matches(self, tmp_path: Path) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_url="http://localhost:9000",
+            num_repeats={"http://localhost:9000/": 3},
+        )
+        processed = RolloutCollectionHelper()._preprocess_rows_from_config(config)
+        assert len(processed) == 3
+
+    def test_failure_log_sampling_head_then_interval(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from nemo_gym.rollout_collection import _external_agent_failure_result
+
+        nemo_gym.rollout_collection._NUM_EXTERNAL_AGENT_FAILURES = 0
+        for _ in range(7):
+            _external_agent_failure_result("http://h:1/run", "boom")
+        out = capsys.readouterr().out
+        assert "failure #5" in out
+        assert "failure #6" not in out and "failure #7" not in out
+
+
+class TestExternalFailureResumeContract:
+    """End-to-end pin for 'recorded in the failures sidecar and retried on resume'."""
+
+    def _agent(self, monkeypatch: pytest.MonkeyPatch, behavior: dict):
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run(request: Request):
+            body = behavior["response"]
+            if isinstance(body, int):
+                return JSONResponse(status_code=body, content={"detail": "boom"})
+            return body
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_EXTERNAL_AGENT_RETRY_SLEEP_SECS", 0)
+
+    def _config(self, tmp_path: Path, resume: bool) -> RolloutCollectionConfig:
+        input_fpath = tmp_path / "input.jsonl"
+        if not input_fpath.exists():
+            input_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+            resume_from_cache=resume,
+        )
+
+    async def test_failed_row_is_retried_on_resume_and_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        behavior = {"response": 500}
+        self._agent(monkeypatch, behavior)
+
+        # Run 1: the row fails → sidecar attempt 1, main jsonl empty
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=False))
+        assert not (tmp_path / "rollouts.jsonl").read_bytes()
+        assert len((tmp_path / "rollouts_failures.jsonl").read_text().splitlines()) == 1
+
+        # Run 2 (resume): agent recovered → the SAME row is re-dispatched and succeeds
+        behavior["response"] = {"reward": 1.0, "response": {"usage": {}}}
+        results = await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=True))
+        assert len(results) == 1 and results[0]["reward"] == 1.0
+        assert len((tmp_path / "rollouts.jsonl").read_text().splitlines()) == 1
+
+    async def test_attempt_cap_gates_after_max_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        behavior = {"response": 500}
+        self._agent(monkeypatch, behavior)
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=False))
+        for _ in range(2):
+            await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=True))
+        assert len((tmp_path / "rollouts_failures.jsonl").read_text().splitlines()) == 3
+
+        # Attempt cap (default 3) reached: resume dispatches nothing even though the agent recovered
+        behavior["response"] = {"reward": 1.0, "response": {"usage": {}}}
+        capsys.readouterr()
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=True))
+        out = capsys.readouterr().out
+        assert "1 hit max_attempts=3" in out
+        assert not (tmp_path / "rollouts.jsonl").read_bytes()
+
+    async def test_agent_terminal_flag_is_never_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        behavior = {"response": {NG_FAILURE_CLASS_KEY: "task_impossible", "_ng_failure_terminal": True}}
+        self._agent(monkeypatch, behavior)
+
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=False))
+        behavior["response"] = {"reward": 1.0, "response": {"usage": {}}}
+        capsys.readouterr()
+        await RolloutCollectionHelper().run_from_config(self._config(tmp_path, resume=True))
+        out = capsys.readouterr().out
+        assert "1 sidecar-terminal" in out
+        assert not (tmp_path / "rollouts.jsonl").read_bytes()

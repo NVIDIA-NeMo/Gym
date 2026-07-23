@@ -27,9 +27,9 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import orjson
-from aiohttp import ClientConnectorError, ClientTimeout, ServerDisconnectedError
+from aiohttp import ClientOSError, ClientTimeout, ServerDisconnectedError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -43,7 +43,9 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     canonical_agent_ref,
+    get_global_config_dict,
     get_wandb_run,
+    is_global_config_dict_set,
     row_agent_key,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -51,6 +53,7 @@ from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_global_aiohttp_client,
+    get_nemo_gym_fastapi_num_workers,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
@@ -134,12 +137,9 @@ _EXTERNAL_AGENT_RETRY_SLEEP_SECS = 0.5
 # Aggregate metrics is a best-effort, post-collection call; keep its bound fixed.
 _EXTERNAL_AGGREGATE_TIMEOUT_SECS = 600.0
 _DEFAULT_AGENT_RUN_TIMEOUT_SECS = 1800.0
-# The per-host limit the shared client will carry once lazily initialized. Returned by
-# _effective_per_host_connection_limit() before the client exists — the NORMAL case for CLI
-# runs, since run_from_config's concurrency-cap check runs before the first request creates
-# the client — and when a live client's connector cannot be inspected. Derived from the
-# config model so it cannot drift from the default; a per-run override of
-# global_aiohttp_connector_limit_per_host is not visible before initialization.
+# Last-resort per-host limit, used by _effective_per_host_connection_limit() only when
+# neither the live client nor the run's global config can be consulted. Derived from the
+# config model so it cannot drift from the default.
 _FALLBACK_PER_HOST_CONNECTION_LIMIT = GlobalAIOHTTPAsyncClientConfig().global_aiohttp_connector_limit_per_host
 
 # Log every external /run failure for the first few, then sample: a down agent at high
@@ -163,12 +163,25 @@ def _normalize_agent_url(url: str) -> str:
             f"agent_url must not carry a query string or fragment, got {url!r}. "
             "Pass auth material via your agent's own configuration instead."
         )
+    # user:pass@ credentials would be stamped into agent_ref on every artifact row and into
+    # wandb metric labels. The error deliberately does not echo the URL (it holds the secret).
+    if parsed.username or parsed.password:
+        raise ValueError(
+            "agent_url must not embed credentials (user:pass@host). "
+            "Pass auth material via your agent's own configuration instead."
+        )
     return normalized
+
+
+def _is_external_url_ref(agent_ref: Any) -> bool:
+    """True if this ref dispatches by URL. Name-first, matching row_agent_key: a ref carrying
+    both keys is a named agent."""
+    return isinstance(agent_ref, dict) and bool(agent_ref.get("url")) and not agent_ref.get("name")
 
 
 def _rows_need_named_dispatch(rows: List[Dict]) -> bool:
     """True if any row resolves to a named agent server (requiring a ServerClient/head server)."""
-    return any(not ((row.get(AGENT_REF_KEY_NAME) or {}).get("url")) for row in rows)
+    return any(not _is_external_url_ref(row.get(AGENT_REF_KEY_NAME)) for row in rows)
 
 
 def _effective_per_host_connection_limit() -> Optional[int]:
@@ -176,15 +189,26 @@ def _effective_per_host_connection_limit() -> Optional[int]:
 
     Every request to a single agent_url competes for the same per-host connection pool,
     and time spent waiting for a connection counts against the request's timeout. Never
-    initializes the client; before initialization, returns the config default.
+    initializes the client; before it exists (the normal CLI case — this check runs before
+    the first request), the limit the client WILL carry is computed from the run's global
+    config, mirroring set_global_aiohttp_client's construction.
     """
-    if not is_global_aiohttp_client_setup():
+    if is_global_aiohttp_client_setup():
+        try:
+            limit = int(get_global_aiohttp_client().connector.limit_per_host)
+        except Exception:
+            return _FALLBACK_PER_HOST_CONNECTION_LIMIT
+        return limit if limit > 0 else None  # aiohttp uses 0 to mean unlimited
+    # Only consult the config if it is already loaded — get_global_config_dict() would
+    # otherwise trigger a CLI parse (and sys.exit) in non-CLI processes.
+    if not is_global_config_dict_set():
         return _FALLBACK_PER_HOST_CONNECTION_LIMIT
     try:
-        limit = int(get_global_aiohttp_client().connector.limit_per_host)
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(get_global_config_dict())
+        limit = cfg.global_aiohttp_connector_limit_per_host // get_nemo_gym_fastapi_num_workers()
     except Exception:
         return _FALLBACK_PER_HOST_CONNECTION_LIMIT
-    return limit if limit > 0 else None  # aiohttp uses 0 to mean unlimited
+    return limit if limit > 0 else None
 
 
 def _external_agent_failure_result(run_url: str, error: str) -> Dict[str, Any]:
@@ -215,7 +239,10 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
                 "POST", run_url, data=data, headers=headers, timeout=timeout, allow_redirects=False
             )
             break
-        except (ClientConnectorError, ServerDisconnectedError) as e:
+        except (ClientOSError, ServerDisconnectedError) as e:
+            # ClientOSError covers connection-refused (ClientConnectorError subclasses it) and
+            # mid-send resets (ECONNRESET) — the repo's documented steady-state noise at high
+            # concurrency; ServerDisconnectedError covers keepalive-reuse races.
             last_connect_error = e
             if num_try < _EXTERNAL_AGENT_MAX_TRIES:
                 await asyncio.sleep(_EXTERNAL_AGENT_RETRY_SLEEP_SECS)
@@ -241,9 +268,15 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
         content = await response.read()
     except Exception as e:
         return _external_agent_failure_result(run_url, f"reading the response body failed: {type(e).__name__}: {e}")
-    if not response.ok:
+    # aiohttp's response.ok is `status < 400`, so 3xx must be rejected explicitly — redirects
+    # are not followed (a followed redirect would silently turn the POST into a body-less GET).
+    if not response.ok or response.status >= 300:
+        location = response.headers.get("Location", "")
         return _external_agent_failure_result(
-            run_url, f"HTTP {response.status}: {content[:500].decode(errors='replace')}"
+            run_url,
+            f"HTTP {response.status}"
+            + (f" (redirect to {location}; fix agent_url to point at the final address)" if location else "")
+            + f": {content[:500].decode(errors='replace')}",
         )
     try:
         result = orjson.loads(content)
@@ -264,6 +297,15 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
                 f"/run response is missing required key(s) {missing_keys}; external agents must return "
                 "a verify-response-shaped object with at least 'reward' (float) and 'response' (the "
                 "Responses API response object)",
+            )
+        # Presence is not enough: "response": null or a non-dict passes `in` but crashes
+        # profiling/aggregation later, and a null reward corrupts metrics.
+        if not isinstance(result["response"], dict) or not isinstance(result["reward"], (int, float)):
+            return _external_agent_failure_result(
+                run_url,
+                f"/run response has invalid types: 'reward' must be a number "
+                f"(got {type(result['reward']).__name__}) and 'response' a JSON object "
+                f"(got {type(result['response']).__name__})",
             )
     return result
 
@@ -295,7 +337,8 @@ async def _post_external_aggregate_metrics(
                 f"(HTTP {response.status}); skipping aggregate metrics for it."
             )
             return None
-        if not response.ok:
+        # response.ok is `status < 400`; 3xx (redirects are not followed) must also skip.
+        if not response.ok or response.status >= 300:
             print(
                 f"Skipping aggregate metrics for external agent {agent_url}: "
                 f"HTTP {response.status}: {content[:500].decode(errors='replace')}"
@@ -386,6 +429,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         +num_samples_in_parallel=10
     ```
     """
+
+    # Validation errors must not echo raw input: agent_url may carry credentials the
+    # user was told not to embed, and the error itself would print them to the terminal.
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     agent_name: Optional[str] = Field(
         default=None,
@@ -525,7 +572,13 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Repeating rows {fixed_num_repeats} times (in a pattern of abc to aabbcc)!")
         else:
             fixed_num_repeats = None
-            per_agent_repeats = {k: v for k, v in config.num_repeats.items() if k != "_default"}
+            # URL keys get the same strip/rstrip("/") normalization as agent_url and row refs,
+            # so the exact string a user passed to +agent_url always matches its dict entry.
+            per_agent_repeats = {
+                (k.strip().rstrip("/") if isinstance(k, str) and k.startswith(("http://", "https://")) else k): v
+                for k, v in config.num_repeats.items()
+                if k != "_default"
+            }
             default_repeats = config.num_repeats.get("_default")
             print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
         agents_seen: set[str] = set()
@@ -574,7 +627,9 @@ class RolloutCollectionHelper(BaseModel):
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
-        for row_idx, row_str, row in raw_rows:
+        # The first tuple element is the limit counter (all zeros when no limit is set) —
+        # data_row_idx is the row's real position for error messages.
+        for data_row_idx, (_, row_str, row) in enumerate(raw_rows):
             # Resolve the agent identity. Missing agent_ref is a hard error reported in
             # bulk after the loop; skip the row immediately so the rest of the
             # body can assume agent_key is non-None.
@@ -588,7 +643,7 @@ class RolloutCollectionHelper(BaseModel):
             if row_url is not None:
                 if agent_ref.get("name"):
                     raise ValueError(
-                        f"Row {row_idx} agent_ref carries both 'name' and 'url' ({agent_ref!r}); "
+                        f"Row {data_row_idx} agent_ref carries both 'name' and 'url' ({agent_ref!r}); "
                         "an agent ref must be exactly one of the two."
                     )
                 # A dataset must not be able to route rows (and their answer keys) to an
@@ -596,7 +651,7 @@ class RolloutCollectionHelper(BaseModel):
                 normalized_row_url = _normalize_agent_url(str(row_url))
                 if normalized_row_url != config.agent_url:
                     raise ValueError(
-                        f"Row {row_idx} carries agent_ref.url={row_url!r}, which does not match the "
+                        f"Row {data_row_idx} carries agent_ref.url={row_url!r}, which does not match the "
                         f"configured +agent_url ({config.agent_url!r}). Row-level agent URLs are only "
                         "honored when they match the configured agent_url."
                     )
@@ -604,7 +659,7 @@ class RolloutCollectionHelper(BaseModel):
 
             agent_key = row_agent_key(row)
             if agent_key is None:
-                row_idxs_missing_agent_ref.append(row_idx)
+                row_idxs_missing_agent_ref.append(data_row_idx)
                 continue
             agents_seen.add(agent_key)
 
@@ -775,18 +830,18 @@ class RolloutCollectionHelper(BaseModel):
                     )
             else:
                 # Fresh runs validate every row URL against +agent_url; resume applies the same
-                # rule. These rows carry verifier_metadata, so they are never dispatched to a
-                # URL the user did not re-confirm.
+                # rule. Completed rows count too: even with nothing left to dispatch,
+                # aggregation would POST result payloads to the frozen URL.
                 frozen_urls = sorted(
                     {
                         agent_ref["url"]
-                        for row in input_rows
+                        for row in [*input_rows, *rows]
                         if isinstance(agent_ref := (row.get(AGENT_REF_KEY_NAME) or {}), dict) and agent_ref.get("url")
                     }
                 )
                 if frozen_urls:
                     raise ValueError(
-                        f"Resuming with pending external-agent rows frozen to {frozen_urls}, but +agent_url "
+                        f"Resuming with external-agent rows frozen to {frozen_urls}, but +agent_url "
                         "was not provided. Pass +agent_url=<url> to confirm where these rows (including "
                         "their verifier_metadata) should be dispatched."
                     )
@@ -813,13 +868,18 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            # A stale sidecar from a previous fresh run would pre-consume resume retry
+            # attempts for this run's task/rollout keys.
+            _failures_path_for(output_fpath).unlink(missing_ok=True)
 
         num_concurrent_samples = config.num_samples_in_parallel
 
         # Every request to a single agent_url shares one per-host connection pool, and time
         # spent waiting for a connection counts against agent_run_timeout_secs — dispatching
         # beyond the pool limit converts queue wait into spurious timeouts.
-        has_url_rows = any((row.get(AGENT_REF_KEY_NAME) or {}).get("url") for row in input_rows)
+        # NOTE: the semaphore below gates ALL rows, so in a mixed named+url run the cap also
+        # bounds named-agent dispatch — a deliberate, conservative simplification.
+        has_url_rows = any(_is_external_url_ref(row.get(AGENT_REF_KEY_NAME)) for row in input_rows)
         if has_url_rows:
             per_host_limit = _effective_per_host_connection_limit()
             if per_host_limit is not None and (num_concurrent_samples or per_host_limit + 1) > per_host_limit:
@@ -845,6 +905,8 @@ class RolloutCollectionHelper(BaseModel):
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(map(row_agent_key, input_rows))
+        global _NUM_EXTERNAL_AGENT_FAILURES
+        _NUM_EXTERNAL_AGENT_FAILURES = 0
         num_failures_this_run = 0
         num_no_persist_this_run = 0
         results_file = output_fpath.open("ab")
@@ -1065,7 +1127,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                if (row.get(AGENT_REF_KEY_NAME) or {}).get("url"):
+                if _is_external_url_ref(row.get(AGENT_REF_KEY_NAME)):
                     return row, await _post_external_agent_run(row, agent_run_timeout_secs)
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
