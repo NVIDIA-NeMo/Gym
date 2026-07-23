@@ -58,6 +58,9 @@ streaming_tool_call_event_driven_snapshot_toggle_patch="$script_dir/../patches/s
 streaming_tool_call_snapshot_query_bool_patch="$script_dir/../patches/streaming_tool_call_snapshot_query_bool.patch"
 streaming_tool_call_prefill_start_priority_patch="$script_dir/../patches/streaming_tool_call_prefill_start_priority.patch"
 streaming_tool_call_first_prefill_page_patch="$script_dir/../patches/streaming_tool_call_first_prefill_page.patch"
+streaming_tool_call_single_admission_finalization_patch="$script_dir/../patches/streaming_tool_call_single_admission_finalization.patch"
+streaming_tool_call_deferred_finalization_patch="$script_dir/../patches/streaming_tool_call_deferred_finalization.patch"
+streaming_tool_call_completion_gate_metrics_patch="$script_dir/../patches/streaming_tool_call_completion_gate_metrics.patch"
 
 cd $setup_dir
 
@@ -203,6 +206,12 @@ git apply --check "$streaming_tool_call_prefill_start_priority_patch"
 git apply "$streaming_tool_call_prefill_start_priority_patch"
 git apply --check "$streaming_tool_call_first_prefill_page_patch"
 git apply "$streaming_tool_call_first_prefill_page_patch"
+git apply --check "$streaming_tool_call_single_admission_finalization_patch"
+git apply "$streaming_tool_call_single_admission_finalization_patch"
+git apply --check "$streaming_tool_call_deferred_finalization_patch"
+git apply "$streaming_tool_call_deferred_finalization_patch"
+git apply --check "$streaming_tool_call_completion_gate_metrics_patch"
+git apply "$streaming_tool_call_completion_gate_metrics_patch"
 
 # Build OpenHands
 echo "Building OpenHands (this may take 5-10 minutes)..."

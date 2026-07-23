@@ -1,0 +1,33 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -691,6 +691,11 @@ class NemoGymClient:
+             "streaming_tool_call_deferred_final_inflight_promotions": int(
+                 metrics.get(
+                     "prefill_same_request_inflight_promotions", 0
+                 )
+             ),
++            "streaming_tool_call_deferred_final_incomplete_fallbacks": int(
++                metrics.get(
++                    "prefill_same_request_incomplete_fallbacks", 0
++                )
++            ),
+         }
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -567,8 +567,9 @@ def test_deferred_final_metrics_do_not_claim_prefill_before_model_use(
+             "prefill_prefix_matched": True,
+             "prefill_failures": 0,
+             "prefill_completed_chunks": 1,
+             "prefill_same_request_session_sealed": 1,
+             "prefill_same_request_inflight_promotions": 1,
++            "prefill_same_request_incomplete_fallbacks": 1,
+         }
+     )
+ 
+@@ -584,3 +585,4 @@ def test_deferred_final_metrics_do_not_claim_prefill_before_model_use(
+     assert metrics["streaming_tool_call_deferred_final_requests"] == 1
+     assert metrics["streaming_tool_call_deferred_final_same_request_seals"] == 1
+     assert metrics["streaming_tool_call_deferred_final_inflight_promotions"] == 1
++    assert metrics["streaming_tool_call_deferred_final_incomplete_fallbacks"] == 1

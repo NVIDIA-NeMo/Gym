@@ -360,14 +360,10 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prefill_effective_requests: Optional[int] = None
     streaming_tool_call_prefill_background_scheduled_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_scheduled_tokens: Optional[int] = None
-    streaming_tool_call_prefill_background_scheduled_cache_fill_tokens: Optional[
-        int
-    ] = None
+    streaming_tool_call_prefill_background_scheduled_cache_fill_tokens: Optional[int] = None
     streaming_tool_call_prefill_background_completed_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_completed_tokens: Optional[int] = None
-    streaming_tool_call_prefill_background_completed_cache_fill_tokens: Optional[
-        int
-    ] = None
+    streaming_tool_call_prefill_background_completed_cache_fill_tokens: Optional[int] = None
     streaming_tool_call_prefill_background_completed_dummy_tokens: Optional[int] = None
     streaming_tool_call_prefill_background_effective_chunks: Optional[int] = None
     streaming_tool_call_prefill_background_dynamic_tokens: Optional[int] = None
@@ -378,6 +374,11 @@ class SWEBenchMetrics(BaseModel):
     streaming_tool_call_prefill_background_enqueue_seconds: Optional[float] = None
     streaming_tool_call_prefill_background_completion_seconds: Optional[float] = None
     streaming_tool_call_deferred_prefill_admissions: Optional[int] = None
+    streaming_tool_call_deferred_final_requests: Optional[int] = None
+    streaming_tool_call_deferred_final_seconds: Optional[float] = None
+    streaming_tool_call_deferred_final_same_request_seals: Optional[int] = None
+    streaming_tool_call_deferred_final_inflight_promotions: Optional[int] = None
+    streaming_tool_call_deferred_final_incomplete_fallbacks: Optional[int] = None
     streaming_tool_call_final_prefix_tokenizations: Optional[int] = None
     streaming_tool_call_prefill_race_attempts: Optional[int] = None
     streaming_tool_call_prefill_race_prefill_first: Optional[int] = None
@@ -1385,28 +1386,25 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         event_driven_snapshot_toggle_patch_path = (
             self.parent_dir / "patches" / "streaming_tool_call_event_driven_snapshot_toggle.patch"
         )
-        snapshot_query_bool_patch_path = (
-            self.parent_dir / "patches" / "streaming_tool_call_snapshot_query_bool.patch"
-        )
+        snapshot_query_bool_patch_path = self.parent_dir / "patches" / "streaming_tool_call_snapshot_query_bool.patch"
         prefill_start_priority_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_prefill_start_priority.patch"
+            self.parent_dir / "patches" / "streaming_tool_call_prefill_start_priority.patch"
         )
-        first_prefill_page_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_first_prefill_page.patch"
-        )
+        first_prefill_page_patch_path = self.parent_dir / "patches" / "streaming_tool_call_first_prefill_page.patch"
         first_prefill_page_legacy_marker_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_first_prefill_page_legacy_marker.patch"
+            self.parent_dir / "patches" / "streaming_tool_call_first_prefill_page_legacy_marker.patch"
         )
         first_prefill_page_cache_fill_upgrade_patch_path = (
-            self.parent_dir
-            / "patches"
-            / "streaming_tool_call_first_prefill_page_cache_fill_upgrade.patch"
+            self.parent_dir / "patches" / "streaming_tool_call_first_prefill_page_cache_fill_upgrade.patch"
+        )
+        single_admission_finalization_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_single_admission_finalization.patch"
+        )
+        deferred_finalization_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_deferred_finalization.patch"
+        )
+        completion_gate_metrics_patch_path = (
+            self.parent_dir / "patches" / "streaming_tool_call_completion_gate_metrics.patch"
         )
 
         def is_applied(patch_path: Path) -> bool:
@@ -1435,7 +1433,16 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # Each incremental patch depends on the previous one. Check the most
         # recent patch first so cached compatible checkouts are upgraded in
         # place without rebuilding their venvs.
+        if is_applied(completion_gate_metrics_patch_path):
+            return
+        if is_applied(deferred_finalization_patch_path):
+            apply_patch(completion_gate_metrics_patch_path)
+            return
+        if is_applied(single_admission_finalization_patch_path):
+            apply_patch(deferred_finalization_patch_path)
+            return
         if is_applied(first_prefill_page_patch_path):
+            apply_patch(single_admission_finalization_patch_path)
             return
         if is_applied(first_prefill_page_legacy_marker_patch_path):
             apply_patch(first_prefill_page_cache_fill_upgrade_patch_path)
@@ -1557,6 +1564,9 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         apply_patch(snapshot_query_bool_patch_path)
         apply_patch(prefill_start_priority_patch_path)
         apply_patch(first_prefill_page_patch_path)
+        apply_patch(single_admission_finalization_patch_path)
+        apply_patch(deferred_finalization_patch_path)
+        apply_patch(completion_gate_metrics_patch_path)
 
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -2699,6 +2709,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "streaming_tool_call_prefill_background_enqueue_seconds": 0.0,
                     "streaming_tool_call_prefill_background_completion_seconds": 0.0,
                     "streaming_tool_call_deferred_prefill_admissions": 0,
+                    "streaming_tool_call_deferred_final_requests": 0,
+                    "streaming_tool_call_deferred_final_seconds": 0.0,
+                    "streaming_tool_call_deferred_final_same_request_seals": 0,
+                    "streaming_tool_call_deferred_final_inflight_promotions": 0,
+                    "streaming_tool_call_deferred_final_incomplete_fallbacks": 0,
                     "streaming_tool_call_final_prefix_tokenizations": 0,
                     "streaming_tool_call_prefill_race_attempts": 0,
                     "streaming_tool_call_prefill_race_prefill_first": 0,
@@ -2910,9 +2925,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if trajectory_input or not metrics.agent_timed_out:
                 responses_create_params["input"] = trajectory_input
             elif not responses_create_params["input"]:
-                problem_statement = body.responses_create_params.metadata.get(
-                    "problem_statement"
-                )
+                problem_statement = body.responses_create_params.metadata.get("problem_statement")
                 if problem_statement:
                     responses_create_params["input"] = [
                         {
@@ -2921,9 +2934,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                             "type": "message",
                         }
                     ]
-            responses_create_params["tools"] = (
-                [t.model_dump() for t in response.tools] if response.tools else []
-            )
+            responses_create_params["tools"] = [t.model_dump() for t in response.tools] if response.tools else []
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,

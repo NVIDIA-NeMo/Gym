@@ -2257,6 +2257,246 @@ class TestApp:
         }
         assert "required_full_prompt_token_ids" not in (mock_client.create_chat_completion.await_args_list[1].kwargs)
 
+    @mark.parametrize(
+        (
+            "session_sealed",
+            "prefill_failures",
+            "incomplete_fallbacks",
+            "expected_same_request",
+        ),
+        [(1, 0, 0, True), (0, 1, 0, False), (0, 0, 1, False)],
+    )
+    def test_streaming_prompt_reuse_defers_finalization_into_chat_request(
+        self,
+        monkeypatch: MonkeyPatch,
+        session_sealed: int,
+        prefill_failures: int,
+        incomplete_fallbacks: int,
+        expected_same_request: bool,
+    ):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize_compact = AsyncMock()
+        deferred_metrics = {
+            "completed": True,
+            "prompt_token_ids": [1, 2, 3, 4],
+            "token_count": 4,
+            "prefill_failures": prefill_failures,
+            "prefill_prefix_matched": bool(session_sealed),
+            "prefill_same_request_session_sealed": session_sealed,
+            "prefill_same_request_submitted_tokens": 3 * session_sealed,
+            "prefill_same_request_inflight_tokens": 2 * session_sealed,
+            "prefill_same_request_inflight_promotions": session_sealed,
+            "prefill_same_request_incomplete_fallbacks": incomplete_fallbacks,
+            "prefill_seconds": 0.002,
+            "server_render_seconds": 0.003,
+            "server_incremental_tokenizer_seconds": 0.004,
+            "server_request_handler_seconds": 0.009,
+        }
+        chat_result = {
+            "id": "chtcmpl-deferred",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "done"},
+                }
+            ],
+            "streaming_tool_call_deferred_final_metrics": deferred_metrics,
+        }
+        if expected_same_request:
+            chat_result["streaming_tool_call_same_request_status"] = "used"
+        mock_client.create_chat_completion = AsyncMock(return_value=chat_result)
+        mock_client.abort_incremental_tokenize = AsyncMock()
+        server._clients = [mock_client]
+        server._store_streaming_tool_call_tokenization_context(
+            session_id="session",
+            client=mock_client,
+            tokenize_body={
+                "model": "dummy_model",
+                "messages": [
+                    {"role": "assistant", "content": "tool call"},
+                    {
+                        "role": "tool",
+                        "content": "partial",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+            },
+            max_contexts=8,
+            context_ttl_seconds=60,
+        )
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "assistant", "content": "tool call"},
+                    {
+                        "role": "tool",
+                        "content": "final output",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+                "streaming_prompt_reuse_id": "session",
+                "streaming_prompt_reuse_deferred_final_sequence_no": 1,
+            },
+        )
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["streaming_prompt_reuse_status"] == "matched"
+        assert response_json["streaming_prompt_reuse_match_kind"] == "exact"
+        assert response_json["streaming_tool_call_deferred_final_metrics"]["prefill_failures"] == prefill_failures
+        assert (
+            response_json["streaming_tool_call_deferred_final_metrics"]["prefill_same_request_incomplete_fallbacks"]
+            == incomplete_fallbacks
+        )
+        mock_client.create_incremental_tokenize_compact.assert_not_awaited()
+        chat_kwargs = mock_client.create_chat_completion.await_args.kwargs
+        assert "required_full_prompt_token_ids" not in chat_kwargs
+        assert chat_kwargs["streaming_tool_call_session_id"] == "session"
+        assert chat_kwargs["streaming_tool_call_deferred_final_sequence_no"] == 1
+        assert mock_client.abort_incremental_tokenize.await_count == 0
+
+    def test_streaming_prompt_fused_deferred_finalization_fails_open(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-deferred-fallback",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+                "streaming_tool_call_deferred_final_metrics": {
+                    "completed": False,
+                    "request_seconds": 0.001,
+                    "prefill_failures": 1,
+                },
+            }
+        )
+        mock_client.abort_incremental_tokenize = AsyncMock()
+        server._clients = [mock_client]
+        server._store_streaming_tool_call_tokenization_context(
+            session_id="session",
+            client=mock_client,
+            tokenize_body={
+                "model": "dummy_model",
+                "messages": [
+                    {"role": "assistant", "content": "tool call"},
+                    {
+                        "role": "tool",
+                        "content": "partial",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+            },
+            max_contexts=8,
+            context_ttl_seconds=60,
+        )
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "assistant", "content": "tool call"},
+                    {
+                        "role": "tool",
+                        "content": "final output",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+                "streaming_prompt_reuse_id": "session",
+                "streaming_prompt_reuse_deferred_final_sequence_no": 1,
+            },
+        )
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["streaming_prompt_reuse_status"] == "missing"
+        assert response_json["streaming_prompt_reuse_match_kind"] is None
+        assert not response_json["streaming_tool_call_deferred_final_metrics"]["completed"]
+        chat_kwargs = mock_client.create_chat_completion.await_args.kwargs
+        assert chat_kwargs["streaming_tool_call_session_id"] == "session"
+        assert chat_kwargs["streaming_tool_call_deferred_final_sequence_no"] == 1
+        mock_client.abort_incremental_tokenize.assert_not_awaited()
+
+    def test_streaming_prompt_deferred_finalization_fails_open_on_prompt_change(self, monkeypatch: MonkeyPatch):
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_incremental_tokenize_compact = AsyncMock()
+        mock_client.abort_incremental_tokenize = AsyncMock(return_value={})
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chtcmpl-deferred-fallback",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            }
+        )
+        server._clients = [mock_client]
+        server._store_streaming_tool_call_tokenization_context(
+            session_id="session",
+            client=mock_client,
+            tokenize_body={
+                "model": "dummy_model",
+                "messages": [
+                    {"role": "assistant", "content": "original tool call"},
+                    {
+                        "role": "tool",
+                        "content": "partial",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+            },
+            max_contexts=8,
+            context_ttl_seconds=60,
+        )
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "assistant", "content": "changed tool call"},
+                    {
+                        "role": "tool",
+                        "content": "final output",
+                        "tool_call_id": "call_1",
+                    },
+                ],
+                "streaming_prompt_reuse_id": "session",
+                "streaming_prompt_reuse_deferred_final_sequence_no": 1,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["streaming_prompt_reuse_status"] == "mismatch"
+        assert mock_client.create_incremental_tokenize_compact.await_count == 0
+        assert mock_client.abort_incremental_tokenize.await_count == 1
+        chat_kwargs = mock_client.create_chat_completion.await_args.kwargs
+        assert "required_full_prompt_token_ids" not in chat_kwargs
+        assert "streaming_tool_call_session_id" not in chat_kwargs
+
     def test_streaming_prompt_canonicalization_keeps_latest_logging_token_fields(self):
         body = {
             "model": "model",

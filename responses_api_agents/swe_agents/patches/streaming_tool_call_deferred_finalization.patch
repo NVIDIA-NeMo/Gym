@@ -1,0 +1,422 @@
+diff --git a/openhands/agenthub/nemo_gym_client.py b/openhands/agenthub/nemo_gym_client.py
+--- a/openhands/agenthub/nemo_gym_client.py
++++ b/openhands/agenthub/nemo_gym_client.py
+@@ -69,6 +69,9 @@ class NemoGymClient:
+         self._pending_streaming_prompt_reuse_id: str | None = None
+         self._pending_streaming_prompt_reuse_prefill_tokens = 0
+         self._pending_streaming_prompt_reuse_prefill_attempted = False
++        self._pending_streaming_prompt_reuse_deferred_final_sequence_no: (
++            int | None
++        ) = None
+ 
+     async def model_call(
+         self,
+@@ -116,11 +119,19 @@ class NemoGymClient:
+         streaming_prompt_reuse_prefill_attempted = (
+             self._pending_streaming_prompt_reuse_prefill_attempted
+         )
++        deferred_final_sequence_no = (
++            self._pending_streaming_prompt_reuse_deferred_final_sequence_no
++        )
+         self._pending_streaming_prompt_reuse_id = None
+         self._pending_streaming_prompt_reuse_prefill_tokens = 0
+         self._pending_streaming_prompt_reuse_prefill_attempted = False
++        self._pending_streaming_prompt_reuse_deferred_final_sequence_no = None
+         if streaming_prompt_reuse_id is not None:
+             params["streaming_prompt_reuse_id"] = streaming_prompt_reuse_id
++        if deferred_final_sequence_no is not None:
++            params[
++                "streaming_prompt_reuse_deferred_final_sequence_no"
++            ] = deferred_final_sequence_no
+ 
+         fields_to_remove = [
+             "prompt_token_ids",
+@@ -162,6 +173,9 @@ class NemoGymClient:
+         streaming_tool_call_same_request_status = model_response_json.pop(
+             "streaming_tool_call_same_request_status", None
+         )
++        deferred_final_metrics = model_response_json.pop(
++            "streaming_tool_call_deferred_final_metrics", None
++        )
+         latency = time.perf_counter() - latency_start
+         self.llm.metrics.add_response_latency(
+             latency, model_response_json.get("id", "unknown")
+@@ -187,6 +201,10 @@ class NemoGymClient:
+                 ),
+                 required_prefix_tokens=required_prefix_tokens,
+             )
++        if deferred_final_metrics is not None:
++            self._update_deferred_streaming_tool_call_final_metrics(
++                deferred_final_metrics
++            )
+ 
+         response: ModelResponse = ModelResponse.model_validate(model_response_json)
+ 
+@@ -217,10 +235,16 @@ class NemoGymClient:
+         *,
+         prefill_reused_tokens: int = 0,
+         prefill_attempted: bool = False,
++        deferred_final_sequence_no: int | None = None,
+     ) -> None:
+         """Attach an exact, one-shot tokenized prompt to the next model call."""
+         if prefill_reused_tokens < 0:
+             raise ValueError("prefill reused tokens must be non-negative")
++        if (
++            deferred_final_sequence_no is not None
++            and deferred_final_sequence_no <= 0
++        ):
++            raise ValueError("deferred final sequence number must be positive")
+         self._pending_streaming_prompt_reuse_id = reuse_id
+         self._pending_streaming_prompt_reuse_prefill_tokens = (
+             prefill_reused_tokens
+@@ -228,6 +252,9 @@ class NemoGymClient:
+         self._pending_streaming_prompt_reuse_prefill_attempted = (
+             prefill_attempted or prefill_reused_tokens > 0
+         )
++        self._pending_streaming_prompt_reuse_deferred_final_sequence_no = (
++            deferred_final_sequence_no
++        )
+ 
+     def _register_streaming_tool_call_context(
+         self,
+@@ -514,5 +541,18 @@ class NemoGymClient:
+             existing_dict[status_metric] = (
+                 existing_dict.get(status_metric, 0) + 1
+             )
++            if used_same_request:
++                # A successful same-request decode is the authoritative signal
++                # that the speculative prefill was actually consumed.  In the
++                # fused path, the decode commonly promotes an in-flight cache
++                # fill before a standalone dummy request can complete, so
++                # `prefill_completed_chunks` alone undercounts valid prefills.
++                for metric_name in (
++                    "streaming_tool_call_valid_prefill_actions",
++                    "streaming_tool_call_valid_final_only_prefill_actions",
++                ):
++                    existing_dict[metric_name] = (
++                        existing_dict.get(metric_name, 0) + 1
++                    )
+             model_call_outcome = "used" if used_same_request else "fallback"
+             model_call_prefix = (
+@@ -569,3 +609,95 @@ class NemoGymClient:
+ 
+         with open(metrics_fpath, "w") as f:
+             json.dump(existing_dict, f)
++
++    @staticmethod
++    def _update_deferred_streaming_tool_call_final_metrics(
++        metrics: dict,
++    ) -> None:
++        """Merge final-tokenization work coalesced into the next model call."""
++        metrics_fpath = os.environ["NEMO_GYM_METRICS_FPATH"]
++        with open(metrics_fpath) as f:
++            existing_dict = json.loads(f.read())
++
++        request_seconds = float(metrics.get("request_seconds", 0.0))
++        prefill_failures = int(metrics.get("prefill_failures", 0))
++        prefill_completed_chunks = int(
++            metrics.get("prefill_completed_chunks", 0)
++        )
++        additive_updates = {
++            "streaming_tool_call_incremental_tokenizer_requests": 1,
++            "streaming_tool_call_incremental_tokenizer_tokens": int(
++                metrics.get("token_count", 0)
++            ),
++            "streaming_tool_call_incremental_tokenizer_seconds": (
++                request_seconds
++            ),
++            "streaming_tool_call_incremental_tokenizer_final_seconds": (
++                request_seconds
++            ),
++            "streaming_tool_call_overhead_seconds": request_seconds,
++            "streaming_tool_call_final_only_prefill_failures": (
++                prefill_failures
++            ),
++            "streaming_tool_call_final_only_prefill_seconds": float(
++                metrics.get("prefill_seconds", 0.0)
++            ),
++            "streaming_tool_call_prefix_matches": int(
++                metrics.get("prefill_prefix_matched", False)
++            ),
++            "streaming_tool_call_prefill_committed_tokens": int(
++                metrics.get("prefill_committed_tokens", 0)
++            ),
++            "streaming_tool_call_prefill_requests": prefill_completed_chunks,
++            "streaming_tool_call_prefill_tokens": int(
++                metrics.get("prefill_background_completed_tokens", 0)
++            ),
++            "streaming_tool_call_completed_chunks": prefill_completed_chunks,
++            "streaming_tool_call_dummy_tokens": int(
++                metrics.get("prefill_dummy_tokens", 0)
++            ),
++            "streaming_tool_call_prefill_background_completed_chunks": int(
++                metrics.get("prefill_background_completed_chunks", 0)
++            ),
++            "streaming_tool_call_prefill_background_completed_tokens": int(
++                metrics.get("prefill_background_completed_tokens", 0)
++            ),
++            "streaming_tool_call_prefill_background_cancelled_chunks": int(
++                metrics.get("prefill_background_cancelled_chunks", 0)
++            ),
++            "streaming_tool_call_prefill_background_cancelled_tokens": int(
++                metrics.get("prefill_background_cancelled_tokens", 0)
++            ),
++            "streaming_tool_call_prefill_background_failed_chunks": int(
++                metrics.get("prefill_background_failed_chunks", 0)
++            ),
++            "streaming_tool_call_prefill_background_failed_tokens": int(
++                metrics.get("prefill_background_failed_tokens", 0)
++            ),
++            "streaming_tool_call_server_render_seconds": float(
++                metrics.get("server_render_seconds", 0.0)
++            ),
++            "streaming_tool_call_server_incremental_tokenizer_seconds": float(
++                metrics.get("server_incremental_tokenizer_seconds", 0.0)
++            ),
++            "streaming_tool_call_server_request_handler_seconds": float(
++                metrics.get("server_request_handler_seconds", 0.0)
++            ),
++            "streaming_tool_call_deferred_final_requests": 1,
++            "streaming_tool_call_deferred_final_seconds": request_seconds,
++            "streaming_tool_call_deferred_final_same_request_seals": int(
++                metrics.get("prefill_same_request_session_sealed", 0)
++            ),
++            "streaming_tool_call_deferred_final_inflight_promotions": int(
++                metrics.get(
++                    "prefill_same_request_inflight_promotions", 0
++                )
++            ),
++        }
++        for metric_name, value in additive_updates.items():
++            existing_dict[metric_name] = (
++                existing_dict.get(metric_name, 0) + value
++            )
++
++        with open(metrics_fpath, "w") as f:
++            json.dump(existing_dict, f)
+diff --git a/openhands/runtime/impl/local/local_runtime.py b/openhands/runtime/impl/local/local_runtime.py
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -632,6 +632,12 @@ class LocalRuntime(ActionExecutionClient):
+         stop_after_first_prefill_page = prefill_after_admission and bool(
+             context.config["stop_after_first_prefill_page"]
+         )
++        defer_finalization_to_model_call = (
++            stop_after_first_prefill_page
++            and bool(
++                context.config.get("defer_finalization_to_model_call", False)
++            )
++        )
+         final_only_prefill_completion_grace_seconds = (
+             float(
+                 context.config[
+@@ -1809,23 +1815,35 @@ class LocalRuntime(ActionExecutionClient):
+                     observation,
+                     context.client.llm.config.max_message_chars,
+                 )
+-                final_tokenize_result = await tokenize_snapshot(
+-                    final_tool_output, final=True
+-                )
++                if defer_finalization_to_model_call and session_started:
++                    reuse_id = session_id
++                    deferred_final_sequence_no = sequence_no
++                else:
++                    final_tokenize_result = await tokenize_snapshot(
++                        final_tool_output, final=True
++                    )
++                    reuse_id = final_tokenize_result["reuse_id"]
++                    deferred_final_sequence_no = None
+                 incremental_started = True
+-                context.client.register_streaming_prompt_reuse(
+-                    final_tokenize_result["reuse_id"],
+-                    prefill_reused_tokens=(
++                reuse_kwargs = {
++                    "prefill_reused_tokens": (
+                         final_only_prefill_reused_tokens
+                         if has_valid_final_only_prefill()
+                         else 0
+                     ),
+-                    prefill_attempted=bool(
++                    "prefill_attempted": bool(
+                         background_prefill_metrics[
+                             "streaming_tool_call_prefill_background_scheduled_chunks"
+                         ]
+                         or has_valid_final_only_prefill()
+                     ),
++                }
++                if deferred_final_sequence_no is not None:
++                    reuse_kwargs["deferred_final_sequence_no"] = (
++                        deferred_final_sequence_no
++                    )
++                context.client.register_streaming_prompt_reuse(
++                    reuse_id, **reuse_kwargs
+                 )
+                 metrics = snapshot_metrics()
+                 metrics.update(streaming_timing_metrics())
+diff --git a/tests/unit/agenthub/test_nemo_gym_client_streaming.py b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+--- a/tests/unit/agenthub/test_nemo_gym_client_streaming.py
++++ b/tests/unit/agenthub/test_nemo_gym_client_streaming.py
+@@ -352,10 +352,12 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     client._pending_streaming_prompt_reuse_id = None
+     client._pending_streaming_prompt_reuse_prefill_tokens = 0
+     client._pending_streaming_prompt_reuse_prefill_attempted = False
++    client._pending_streaming_prompt_reuse_deferred_final_sequence_no = None
+     client.llm = MagicMock()
+     client.llm._nemo_gym_llm_kwargs = {}
+     client._log_completion = MagicMock()
+     client._update_streaming_prompt_reuse_metrics = MagicMock()
++    client._update_deferred_streaming_tool_call_final_metrics = MagicMock()
+     monkeypatch.setattr(client_module, "raise_for_status", AsyncMock())
+     monkeypatch.setattr(
+         client_module,
+@@ -376,6 +378,10 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+                 "streaming_prompt_reuse_status": "matched",
+                 "streaming_prompt_reuse_match_kind": "token_equivalent",
+                 "streaming_tool_call_same_request_status": "used",
++                "streaming_tool_call_deferred_final_metrics": {
++                    "request_seconds": 0.02,
++                    "prefill_failures": 0,
++                },
+                 "usage": {
+                     "prompt_tokens": 100,
+                     "completion_tokens": 5,
+@@ -396,16 +402,29 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+     }
+ 
+     client.register_streaming_prompt_reuse(
+-        "reuse", prefill_reused_tokens=64, prefill_attempted=True
++        "reuse",
++        prefill_reused_tokens=64,
++        prefill_attempted=True,
++        deferred_final_sequence_no=1,
+     )
+     with patch.object(client_module.time, "perf_counter", side_effect=(10.0, 12.0)):
+         await client._post_completion([message])
+ 
+     request = client.ng_server_client.post.await_args.kwargs
+     assert request["json"]["streaming_prompt_reuse_id"] == "reuse"
++    assert (
++        request["json"][
++            "streaming_prompt_reuse_deferred_final_sequence_no"
++        ]
++        == 1
++    )
+     assert client._pending_streaming_prompt_reuse_id is None
+     assert client._pending_streaming_prompt_reuse_prefill_tokens == 0
+     assert client._pending_streaming_prompt_reuse_prefill_attempted is False
++    assert (
++        client._pending_streaming_prompt_reuse_deferred_final_sequence_no
++        is None
++    )
+     client._update_streaming_prompt_reuse_metrics.assert_called_once_with(
+         "matched",
+         "token_equivalent",
+@@ -418,6 +437,9 @@ async def test_next_model_call_consumes_streaming_prompt_reuse(monkeypatch):
+         cached_prompt_tokens=80,
+         required_prefix_tokens=6,
+     )
++    client._update_deferred_streaming_tool_call_final_metrics.assert_called_once_with(
++        {"request_seconds": 0.02, "prefill_failures": 0}
++    )
+ 
+ 
+ @pytest.mark.parametrize(
+@@ -517,3 +536,48 @@ def test_streaming_same_request_model_call_attribution(
+     assert metrics[
+         f"streaming_tool_call_same_request_{outcome}_model_call_seconds"
+     ] == 2.5
++    expected_valid_prefills = int(same_request_status == "used")
++    assert (
++        metrics.get("streaming_tool_call_valid_prefill_actions", 0)
++        == expected_valid_prefills
++    )
++    assert (
++        metrics.get(
++            "streaming_tool_call_valid_final_only_prefill_actions", 0
++        )
++        == expected_valid_prefills
++    )
++
++
++def test_deferred_final_metrics_do_not_claim_prefill_before_model_use(
++    monkeypatch,
++    tmp_path,
++):
++    metrics_path = tmp_path / "metrics.json"
++    metrics_path.write_text("{}")
++    monkeypatch.setenv("NEMO_GYM_METRICS_FPATH", str(metrics_path))
++
++    NemoGymClient._update_deferred_streaming_tool_call_final_metrics(
++        {
++            "completed": True,
++            "request_seconds": 0.02,
++            "token_count": 128,
++            "prefill_prefix_matched": True,
++            "prefill_failures": 0,
++            "prefill_completed_chunks": 1,
++            "prefill_same_request_session_sealed": 1,
++            "prefill_same_request_inflight_promotions": 1,
++        }
++    )
++
++    metrics = orjson.loads(metrics_path.read_bytes())
++    assert metrics.get("streaming_tool_call_valid_prefill_actions", 0) == 0
++    assert (
++        metrics.get(
++            "streaming_tool_call_valid_final_only_prefill_actions", 0
++        )
++        == 0
++    )
++    assert metrics["streaming_tool_call_deferred_final_requests"] == 1
++    assert metrics["streaming_tool_call_deferred_final_same_request_seals"] == 1
++    assert metrics["streaming_tool_call_deferred_final_inflight_promotions"] == 1
+diff --git a/tests/unit/runtime/impl/test_local_runtime.py b/tests/unit/runtime/impl/test_local_runtime.py
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1405,6 +1405,7 @@ class TestLocalRuntime:
+                 "final_only_prefill": True,
+                 "prefill_after_admission": True,
+                 "stop_after_first_prefill_page": True,
++                "defer_finalization_to_model_call": True,
+                 "final_only_prefill_completion_grace_seconds": 0.0,
+                 "min_chunk_chars": 256,
+                 "initial_chunk_chars": 128,
+@@ -1446,17 +1447,13 @@ class TestLocalRuntime:
+         assert response is post_response
+         assert streaming_http_session.get.call_count == 1
+         requests = streaming_client.streaming_tool_call_request.await_args_list
+-        assert [request.kwargs["sequence_no"] for request in requests] == [0, 1]
+-        assert [request.kwargs["final"] for request in requests] == [False, True]
++        assert [request.kwargs["sequence_no"] for request in requests] == [0]
++        assert [request.kwargs["final"] for request in requests] == [False]
+         assert requests[0].kwargs["tool_output"] == streamed_content
+-        assert " done" in requests[1].kwargs["tool_output"]
+         assert requests[0].kwargs["prefill"] is True
+         assert requests[0].kwargs["prefill_continuation"] is True
+-        # Stopping snapshot polling must not abandon the admitted live vLLM
+-        # request. The final tokenizer request seals it for the next model call.
+-        assert requests[1].kwargs["prefill"] is True
+-        assert requests[1].kwargs["prefill_continuation"] is True
+-        assert requests[1].kwargs["finalize_from_required_prefix"] is False
++        # The exact final tokenization and live-request seal are coalesced into
++        # the next model call instead of adding a second tool-path HTTP request.
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_prefill_first_page_stops"] == 1
+         assert metrics[
+@@ -1467,12 +1464,13 @@ class TestLocalRuntime:
+         ] == 13
+         assert metrics[
+             "streaming_tool_call_prefill_background_completed_cache_fill_tokens"
+-        ] == 13
+-        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
++        ] == 0
++        assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 1
+         streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
+             "runtime-session:response:call",
+-            prefill_reused_tokens=13,
++            prefill_reused_tokens=0,
+             prefill_attempted=True,
++            deferred_final_sequence_no=1,
+         )
+         streaming_http_session.close.assert_awaited_once()
+ 

@@ -1,0 +1,48 @@
+--- a/openhands/runtime/impl/local/local_runtime.py
++++ b/openhands/runtime/impl/local/local_runtime.py
+@@ -940,7 +940,17 @@
+             assert streaming_http_session is not None
+             request_prefill = final_only_prefill and (
+                 (sequence_no == 0 and not final)
+-                or (prefill_after_admission and prefill_session_active)
++                or (
++                    prefill_after_admission
++                    and (
++                        prefill_session_active
++                        or (
++                            final
++                            and session_started
++                            and final_only_prefill_failures == 0
++                        )
++                    )
++                )
+             )
+             prefill_from_required_prefix = bool(
+                 prefill_after_admission
+--- a/tests/unit/runtime/impl/test_local_runtime.py
++++ b/tests/unit/runtime/impl/test_local_runtime.py
+@@ -1439,6 +1448,13 @@
+         assert [request.kwargs["final"] for request in requests] == [False, True]
+         assert requests[0].kwargs["tool_output"] == streamed_content
+         assert " done" in requests[1].kwargs["tool_output"]
++        assert requests[0].kwargs["prefill"] is True
++        assert requests[0].kwargs["prefill_continuation"] is True
++        # Stopping snapshot polling must not abandon the admitted live vLLM
++        # request. The final tokenizer request seals it for the next model call.
++        assert requests[1].kwargs["prefill"] is True
++        assert requests[1].kwargs["prefill_continuation"] is True
++        assert requests[1].kwargs["finalize_from_required_prefix"] is False
+         metrics = update_metrics.call_args_list[-1].args[0]
+         assert metrics["streaming_tool_call_prefill_first_page_stops"] == 1
+         assert metrics[
+@@ -1454,5 +1470,10 @@
+         ] == 13
+         assert metrics["streaming_tool_call_incremental_tokenizer_requests"] == 2
++        streaming_client.register_streaming_prompt_reuse.assert_called_once_with(
++            "runtime-session:response:call",
++            prefill_reused_tokens=13,
++            prefill_attempted=True,
++        )
+         streaming_http_session.close.assert_awaited_once()
+ 
+     @pytest.mark.asyncio

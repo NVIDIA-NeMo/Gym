@@ -22,14 +22,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 import responses_api_agents.swe_agents.app as swe_app
-from nemo_gym.config_types import ModelServerRef, OmegaConf
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -54,6 +47,13 @@ from responses_api_agents.swe_agents.app import (
     runner_ray_remote,
     update_metrics,
 )
+
+from nemo_gym.config_types import ModelServerRef, OmegaConf
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_utils import ServerClient
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
@@ -452,14 +452,8 @@ class TestSWEBenchVerifyResponse:
         assert "patch_exists" in fields
         assert "instance_config" in fields
         assert "streaming_tool_call_prefill_first_page_stops" in fields
-        assert (
-            "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens"
-            in fields
-        )
-        assert (
-            "streaming_tool_call_prefill_background_completed_cache_fill_tokens"
-            in fields
-        )
+        assert "streaming_tool_call_prefill_background_scheduled_cache_fill_tokens" in fields
+        assert "streaming_tool_call_prefill_background_completed_cache_fill_tokens" in fields
 
 
 ########################################
@@ -1020,13 +1014,7 @@ class TestOpenHandsHarnessProcessor:
         def patch_command_result(command: list[str], **_kwargs) -> MagicMock:
             is_reverse_check = command[2:4] == ["--reverse", "--check"]
             patch_name = Path(command[-1]).name
-            return MagicMock(
-                returncode=(
-                    0
-                    if not is_reverse_check or patch_name in applied_patch_names
-                    else 1
-                )
-            )
+            return MagicMock(returncode=(0 if not is_reverse_check or patch_name in applied_patch_names else 1))
 
         with patch.object(
             swe_app,
@@ -1039,11 +1027,7 @@ class TestOpenHandsHarnessProcessor:
 
     @staticmethod
     def _last_applied_patch(commands: list[list[str]]) -> str:
-        apply_commands = [
-            command
-            for command in commands
-            if len(command) == 3 and command[:2] == ["git", "apply"]
-        ]
+        apply_commands = [command for command in commands if len(command) == 3 and command[:2] == ["git", "apply"]]
         return Path(apply_commands[-1][-1]).name
 
     def test_cached_cancellable_patch_gets_effective_prefill_upgrade(self) -> None:
@@ -1055,9 +1039,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_cancellable_long_poll.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_effective_prefill.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_effective_prefill.patch")
 
     def test_cached_deferred_abort_patch_gets_same_request_metrics_upgrade(
         self,
@@ -1070,9 +1052,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_deferred_abort.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_same_request_metrics.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_same_request_metrics.patch")
 
     def test_cached_same_request_patch_gets_event_driven_snapshot_upgrade(
         self,
@@ -1085,9 +1065,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_same_request_metrics.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_event_driven_snapshot.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_event_driven_snapshot.patch")
 
     def test_cached_event_driven_snapshot_gets_toggle_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1098,9 +1076,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_event_driven_snapshot.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_event_driven_snapshot_toggle.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_event_driven_snapshot_toggle.patch")
 
     def test_cached_snapshot_toggle_gets_query_bool_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1111,9 +1087,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_event_driven_snapshot_toggle.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_snapshot_query_bool.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_snapshot_query_bool.patch")
 
     def test_cached_snapshot_query_bool_gets_prefill_start_priority_upgrade(
         self,
@@ -1126,9 +1100,7 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_snapshot_query_bool.patch"},
             )
-            assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_prefill_start_priority.patch"
-            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_prefill_start_priority.patch")
 
     def test_cached_prefill_start_priority_gets_first_page_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1139,8 +1111,47 @@ class TestOpenHandsHarnessProcessor:
                 Path(tmpdir),
                 {"streaming_tool_call_prefill_start_priority.patch"},
             )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_first_prefill_page.patch")
+
+    def test_cached_first_page_gets_single_admission_finalization_upgrade(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_first_prefill_page.patch"},
+            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_single_admission_finalization.patch")
+
+    def test_cached_single_admission_gets_deferred_finalization_upgrade(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_single_admission_finalization.patch"},
+            )
+            assert self._last_applied_patch(commands) == ("streaming_tool_call_deferred_finalization.patch")
+
+    def test_cached_deferred_finalization_gets_completion_gate_metrics_upgrade(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            processor = OpenHandsHarnessProcessor(config=config)
+            commands = self._apply_from_patch_state(
+                processor,
+                Path(tmpdir),
+                {"streaming_tool_call_deferred_finalization.patch"},
+            )
             assert self._last_applied_patch(commands) == (
-                "streaming_tool_call_first_prefill_page.patch"
+                "streaming_tool_call_completion_gate_metrics.patch"
             )
 
     def test_cached_legacy_first_page_gets_cache_fill_upgrade(self) -> None:
@@ -1202,11 +1213,12 @@ class TestOpenHandsHarnessProcessor:
                 "streaming_tool_call_snapshot_query_bool.patch",
                 "streaming_tool_call_prefill_start_priority.patch",
                 "streaming_tool_call_first_prefill_page.patch",
+                "streaming_tool_call_single_admission_finalization.patch",
+                "streaming_tool_call_deferred_finalization.patch",
+                "streaming_tool_call_completion_gate_metrics.patch",
             ]
             applied_patch_names = [
-                Path(command[-1]).name
-                for command in commands
-                if len(command) == 3 and command[:2] == ["git", "apply"]
+                Path(command[-1]).name for command in commands if len(command) == 3 and command[:2] == ["git", "apply"]
             ]
             assert applied_patch_names == expected_applied_patches
 
@@ -2306,9 +2318,7 @@ class TestSWEBenchWrapperResponses:
 
 class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
-    async def test_run_timeout_preserves_nonempty_original_input(
-        self, monkeypatch
-    ) -> None:
+    async def test_run_timeout_preserves_nonempty_original_input(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
 
         mock_response = NeMoGymResponse(
@@ -2329,9 +2339,7 @@ class TestSWEBenchWrapperRun:
                         "agent_timed_out": True,
                     }
                 ),
-                "instance_config": _make_instance_config(
-                    tempfile.mkdtemp(), mask_sample=True
-                ).model_dump_json(),
+                "instance_config": _make_instance_config(tempfile.mkdtemp(), mask_sample=True).model_dump_json(),
             },
         )
 
@@ -2343,9 +2351,7 @@ class TestSWEBenchWrapperRun:
         ):
             from nemo_gym.base_resources_server import BaseRunRequest
 
-            original_input = [
-                {"role": "user", "content": "Fix the bug", "type": "message"}
-            ]
+            original_input = [{"role": "user", "content": "Fix the bug", "type": "message"}]
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                     model="test-model",
@@ -2369,9 +2375,7 @@ class TestSWEBenchWrapperRun:
         assert result.responses_create_params.input[0].content == "Fix the bug"
 
     @pytest.mark.asyncio
-    async def test_run_timeout_uses_problem_statement_when_original_input_empty(
-        self, monkeypatch
-    ) -> None:
+    async def test_run_timeout_uses_problem_statement_when_original_input_empty(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
 
         mock_response = NeMoGymResponse(
@@ -2392,9 +2396,7 @@ class TestSWEBenchWrapperRun:
                         "agent_timed_out": True,
                     }
                 ),
-                "instance_config": _make_instance_config(
-                    tempfile.mkdtemp(), mask_sample=True
-                ).model_dump_json(),
+                "instance_config": _make_instance_config(tempfile.mkdtemp(), mask_sample=True).model_dump_json(),
             },
         )
 
@@ -2426,10 +2428,7 @@ class TestSWEBenchWrapperRun:
         assert result.agent_timed_out is True
         assert result.reward == 0.0
         assert len(result.responses_create_params.input) == 1
-        assert (
-            result.responses_create_params.input[0].content
-            == "Fix the bug before timeout"
-        )
+        assert result.responses_create_params.input[0].content == "Fix the bug before timeout"
 
     @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:

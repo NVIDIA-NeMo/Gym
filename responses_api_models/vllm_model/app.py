@@ -934,13 +934,66 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
         streaming_prompt_reuse_id = body_dict.pop("streaming_prompt_reuse_id", None)
+        deferred_final_sequence_no = body_dict.pop("streaming_prompt_reuse_deferred_final_sequence_no", None)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
         streaming_prompt_reuse_status = None
         streaming_prompt_reuse_match_kind = None
         reused_prompt_token_ids = None
-        if streaming_prompt_reuse_id is not None:
+        deferred_final_metrics = None
+        deferred_finalization_forwarded = False
+        if deferred_final_sequence_no is not None:
+            assert streaming_prompt_reuse_id is not None
+            tokenize_body_dict = self._streaming_prompt_tokenize_body(body_dict)
+            try:
+                context = self._get_streaming_tool_call_tokenization_context(
+                    session_id=streaming_prompt_reuse_id,
+                    client=client,
+                )
+                messages = tokenize_body_dict.get("messages") or []
+                if not messages or messages[-1].get("role") != "tool":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="deferred finalization requires a trailing tool message",
+                    )
+                final_tool_output = messages[-1].get("content")
+                if not isinstance(final_tool_output, str):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="deferred finalization requires text tool output",
+                    )
+                reconstructed_tokenize_body = self._replace_streaming_tool_output(
+                    context.tokenize_body,
+                    final_tool_output,
+                )
+                if self._streaming_prompt_comparison_body(
+                    reconstructed_tokenize_body
+                ) != self._streaming_prompt_comparison_body(tokenize_body_dict):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=("deferred finalization context does not match the authoritative model prompt"),
+                    )
+            except Exception as error:
+                print(
+                    "Deferred streaming-tool finalization failed open: "
+                    f"session_id={streaming_prompt_reuse_id}, error={error}",
+                    flush=True,
+                )
+                streaming_prompt_reuse_status = "mismatch" if isinstance(error, HTTPException) else "missing"
+                self._streaming_tool_call_tokenization_contexts.pop(streaming_prompt_reuse_id, None)
+                try:
+                    await client.abort_incremental_tokenize(session_id=streaming_prompt_reuse_id)
+                except Exception:
+                    pass
+            else:
+                self._streaming_tool_call_tokenization_contexts.pop(streaming_prompt_reuse_id, None)
+                streaming_prompt_reuse_status = "matched"
+                streaming_prompt_reuse_match_kind = "exact"
+                body_dict["streaming_tool_call_session_id"] = streaming_prompt_reuse_id
+                body_dict["streaming_tool_call_deferred_final_sequence_no"] = deferred_final_sequence_no
+                deferred_finalization_forwarded = True
+        elif streaming_prompt_reuse_id is not None:
             tokenize_body_dict = self._streaming_prompt_tokenize_body(body_dict)
             comparison_body_dict = self._streaming_prompt_comparison_body(tokenize_body_dict)
             (
@@ -1018,6 +1071,28 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
             else:
                 raise e
+
+        returned_deferred_final_metrics = chat_completion_dict.pop("streaming_tool_call_deferred_final_metrics", None)
+        if returned_deferred_final_metrics is not None:
+            reused_prompt_token_ids = returned_deferred_final_metrics.pop("prompt_token_ids", None)
+            deferred_final_metrics = returned_deferred_final_metrics
+            if not returned_deferred_final_metrics.get("completed", True):
+                streaming_prompt_reuse_status = "missing"
+                streaming_prompt_reuse_match_kind = None
+            elif reused_prompt_token_ids is None:
+                print(
+                    "Fused deferred streaming-tool finalization returned no prompt tokens",
+                    flush=True,
+                )
+                streaming_prompt_reuse_status = "missing"
+                streaming_prompt_reuse_match_kind = None
+        elif deferred_finalization_forwarded:
+            print(
+                "Fused deferred streaming-tool finalization returned no metrics",
+                flush=True,
+            )
+            streaming_prompt_reuse_status = "missing"
+            streaming_prompt_reuse_match_kind = None
 
         choice_dict = chat_completion_dict["choices"][0]
         streaming_tool_call_same_request_status = chat_completion_dict.pop(
@@ -1109,6 +1184,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict["streaming_prompt_reuse_match_kind"] = streaming_prompt_reuse_match_kind
         if streaming_tool_call_same_request_status is not None:
             chat_completion_dict["streaming_tool_call_same_request_status"] = streaming_tool_call_same_request_status
+        if deferred_final_metrics is not None:
+            chat_completion_dict["streaming_tool_call_deferred_final_metrics"] = deferred_final_metrics
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

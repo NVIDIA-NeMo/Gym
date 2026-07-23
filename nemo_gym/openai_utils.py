@@ -80,7 +80,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -334,6 +334,34 @@ class NeMoGymChoice(Choice):
     message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
 
 
+class NeMoGymStreamingToolCallDeferredFinalMetrics(BaseModel):
+    completed: bool = True
+    request_seconds: float = 0.0
+    token_count: int = 0
+    prefill_seconds: float = 0.0
+    prefill_prefix_matched: bool = False
+    prefill_failures: int = 0
+    prefill_committed_tokens: int = 0
+    prefill_completed_chunks: int = 0
+    prefill_dummy_tokens: int = 0
+    prefill_background_scheduled_chunks: int = 0
+    prefill_background_scheduled_tokens: int = 0
+    prefill_background_completed_chunks: int = 0
+    prefill_background_completed_tokens: int = 0
+    prefill_background_cancelled_chunks: int = 0
+    prefill_background_cancelled_tokens: int = 0
+    prefill_background_failed_chunks: int = 0
+    prefill_background_failed_tokens: int = 0
+    prefill_same_request_session_sealed: int = 0
+    prefill_same_request_submitted_tokens: int = 0
+    prefill_same_request_inflight_tokens: int = 0
+    prefill_same_request_inflight_promotions: int = 0
+    prefill_same_request_incomplete_fallbacks: int = 0
+    server_render_seconds: float = 0.0
+    server_incremental_tokenizer_seconds: float = 0.0
+    server_request_handler_seconds: float = 0.0
+
+
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
     streaming_prompt_reuse_status: Optional[Literal["matched", "mismatch", "missing"]] = None
@@ -347,6 +375,7 @@ class NeMoGymChatCompletion(ChatCompletion):
             "fallback_error",
         ]
     ] = None
+    streaming_tool_call_deferred_final_metrics: Optional[NeMoGymStreamingToolCallDeferredFinalMetrics] = None
 
 
 ########################################
@@ -465,6 +494,16 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
     streaming_prompt_reuse_id: Optional[str] = None
+    streaming_prompt_reuse_deferred_final_sequence_no: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_deferred_streaming_prompt_finalization(self):
+        if (
+            self.streaming_prompt_reuse_deferred_final_sequence_no is not None
+            and self.streaming_prompt_reuse_id is None
+        ):
+            raise ValueError("deferred streaming prompt finalization requires a reuse ID")
+        return self
 
     # Disallow deprecated args
     # function_call: FunctionCall
