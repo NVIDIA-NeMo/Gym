@@ -22,9 +22,24 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 if (( $# == 0 )); then
     # If there are no arguments provided, then we just block forever so the Ray cluster stays up.
     args="sleep infinity"
+    cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
+srun --no-container-mount-home \
+    -A $SLURM_JOB_ACCOUNT \
+    -p $SLURM_JOB_PARTITION \
+    --overlap \
+    --container-name=ray-head \
+    --container-workdir=$SLURM_SUBMIT_DIR \
+    --nodes=1 \
+    --ntasks=1 \
+    -w "$head_node_ip" \
+    --jobid $SLURM_JOB_ID \
+    --pty bash
+EOF
+    echo "No arguments were provided to this script. Run 'slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
 else
     args="$@"
 fi
+
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
@@ -42,21 +57,3 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
   ' bash "$args"
 
 # TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
-
-
-if (( $# == 0 )); then
-cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
-srun --no-container-mount-home \
-    -A $SLURM_JOB_ACCOUNT \
-    -p $SLURM_JOB_PARTITION \
-    --overlap \
-    --container-name=ray-head \
-    --container-workdir=$SLURM_SUBMIT_DIR \
-    --nodes=1 \
-    --ntasks=1 \
-    -w "$head_node_ip" \
-    --jobid $SLURM_JOB_ID \
-    --pty bash
-EOF
-echo "No arguments were provided to this script. Run 'slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
-fi
