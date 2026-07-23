@@ -13,36 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CVDP agent — one class, two flavors selected by ``config.simple_agent``.
-
-- **simple** (``simple_agent: true``): no harness, no sandbox. The model itself is asked to
-  produce the RTL/code (optionally with resources-server tool calls); ``/verify`` grades
-  whatever the model emitted. Fast; used by the non-agentic CVDP dataset.
-- **agentic** (``simple_agent: false``): a coding harness (Claude, Hermes, ...) is booted
-  inside an EDA-sim sandbox so it can edit files on disk and self-test with the in-container
-  EDA tools; the produced HDL files are harvested and graded through the same ``/verify``.
-  The harness is config-selected (``agent_server_module``/``class``/``config_class``), built
-  on the provider-neutral sandbox API so the backend is config, not code.
-"""
+"""CVDP simple and sandboxed-harness agent."""
 
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import os
 import shlex
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
-from subprocess import Popen
-from time import time
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -65,19 +52,18 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 
-# guest entrypoint injected into the sandbox and run as ``python agent_runner.py``.
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
-
-
-# ----------------------------
-# Agentic-flavor host helpers
-# ----------------------------
 
 
 def agent_key(agent_server_module: str) -> str:
@@ -87,12 +73,7 @@ def agent_key(agent_server_module: str) -> str:
 
 
 def load_runner_source() -> str:
-    """return the guest entrypoint script (``sandbox_entrypoint.py``) verbatim.
-
-    it is a plain module rather than a templated string, so it is diffable and syntax-checked
-    with the rest of the package. it reads the agent module/class from ``NV_AGENT_*`` env vars
-    set by the caller, so no per-agent rendering is needed.
-    """
+    """Return the guest entrypoint source."""
     return _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
 
 
@@ -102,13 +83,34 @@ def deps_recipe_key(*paths: Path) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
-def harvest(workdir: Path, globs: list[str], *, seeded: dict[str, str] | None = None) -> dict[str, str]:
-    """collect files the agent produced under workdir that match any glob.
+def deps_build_env(deps_dir: Path) -> dict[str, str]:
+    """Give dependency installers private state outside the archived runtime."""
+    build_dir = deps_dir.parent / f".{deps_dir.name}-build"
+    cache_dir = build_dir / "cache"
+    temp_dir = build_dir / "tmp"
+    home_dir = build_dir / "home"
+    for path in (cache_dir, temp_dir, home_dir):
+        path.mkdir(parents=True, exist_ok=True)
 
-    returns {relative_posix_path: text_content}. files identical to a seeded input are skipped
-    so unchanged context files are not reported as produced. unreadable or binary files are
-    skipped. point it at e.g. ["rtl/**/*.sv", "rtl/**/*.v"].
-    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "DEPS_DIR": str(deps_dir),
+            "NEMO_GYM_ROOT": str(PARENT_DIR),
+            "HOME": str(home_dir),
+            "PYTHONPATH": "",
+            "PIP_CACHE_DIR": str(cache_dir / "pip"),
+            "NPM_CONFIG_CACHE": str(cache_dir / "npm"),
+            "UV_CACHE_DIR": str(cache_dir / "uv"),
+            "XDG_CACHE_HOME": str(cache_dir),
+            "TMPDIR": str(temp_dir),
+        }
+    )
+    return env
+
+
+def harvest(workdir: Path, globs: list[str], *, seeded: dict[str, str] | None = None) -> dict[str, str]:
+    """Collect changed text files under workdir that match any glob."""
     workdir = Path(workdir)
     seeded = seeded or {}
     produced: dict[str, str] = {}
@@ -150,14 +152,8 @@ def _safe_rel(rel: str) -> bool:
     return ".." not in parts
 
 
-# ----------------------------
-# Config + request/response schemas
-# ----------------------------
-
-
 class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
-    """Config for the CVDP agent. ``simple_agent`` picks the flavor; the fields below it are
-    grouped by the flavor that reads them (the other flavor ignores them)."""
+    """Configuration for simple or agentic CVDP execution."""
 
     # flavor selector: simple (model emits code directly) vs agentic (harness in a sandbox).
     simple_agent: bool = False
@@ -177,27 +173,17 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     timeout: int = 1800
 
-    # which gym agent to boot in the sandbox (the whole any-harness surface)
     agent_server_module: str = "responses_api_agents.claude_code_agent.app"
     agent_server_class: str = "ClaudeCodeAgent"
     agent_config_class: str = "ClaudeCodeAgentConfig"
-    agent_kwargs: Dict[str, Any] = {}
+    agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
-    # sandbox wiring (provider-neutral). sandbox_provider is a single-key provider config,
-    # e.g. {"apptainer": {...}} or {"opensandbox": {...}}. sandbox_spec carries extra spec
-    # fields (provider_options, ttl_s, ...) merged onto the per-task spec.
-    # image may be a bare docker ref (e.g. "nvidia/cvdp-sim:v1.0.0"), an explicit .sif path, or
-    # a docker:// / oras:// uri. A bare docker ref is resolved to a cached .sif on the host (same
-    # convention as the cvdp verifier's harness), so one image value works for agent + verifier.
     image: str = "nvidia/cvdp-sim:v1.0.0"
-    sif_cache_dir: str = ""  # defaults to ~/.cache/nemo-gym/sif (matches the cvdp harness cache)
-    sandbox_provider: Dict[str, Any] = {"apptainer": {}}
-    sandbox_spec: Dict[str, Any] = {}
+    sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"apptainer": {}})
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     container_workdir: str = "/code"
     harvest_globs: list[str] = _DEFAULT_HARVEST_GLOBS
-    # how nemo_gym + the agent deps prefix reach the sandbox: "bind" (zero-copy, apptainer/local)
-    # or "baked" (already in the image, e.g. opensandbox)
-    deps_provision: str = "bind"
+    deps_provision: Literal["archive", "baked"] = "archive"
 
 
 class CVDPAgentRunRequest(BaseRunRequest):
@@ -215,7 +201,7 @@ class CVDPAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CVDPAgent(SimpleResponsesAPIAgent):
-    """CVDP agent for both flavors; ``run()`` dispatches on ``config.simple_agent``."""
+    """CVDP agent for simple and agentic execution."""
 
     config: CVDPAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -223,26 +209,32 @@ class CVDPAgent(SimpleResponsesAPIAgent):
     # agentic-flavor runtime state (unused in the simple flavor)
     sem: Any = None
     _deps_dir: Any = None
+    _deps_archive: Any = None
     _image: Any = None
+    _sandbox_provider: Any = None
+    _sandbox_metadata: Any = None
     _setup_lock: Any = None
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
         self.sem = asyncio.Semaphore(self.config.concurrency)
         self._deps_dir = None
+        self._deps_archive = None
         self._image = None
-        # serialize one-time host setup (deps prefix + image pull) so concurrent
-        # requests don't race into the same deps dir / sif cache on first run.
+        self._sandbox_provider = resolve_provider_config(
+            self.config.sandbox_provider,
+            getattr(self.server_client, "global_config_dict", None),
+        )
+        self._sandbox_metadata = resolve_provider_metadata(
+            self.config.sandbox_provider,
+            getattr(self.server_client, "global_config_dict", None),
+        )
         self._setup_lock = asyncio.Lock()
 
     async def run(self, request: Request, body: CVDPAgentRunRequest):
         if self.config.simple_agent:
             return await self._run_simple(request, body)
         return await self._run_agentic(request, body)
-
-    # ----------------------------
-    # Simple flavor
-    # ----------------------------
 
     async def responses(
         self,
@@ -406,12 +398,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     continue
                 raise
 
-    # ----------------------------
-    # Agentic flavor
-    # ----------------------------
-
     def _provision_deps(self) -> Path:
-        """install the configured agent's deps prefix once, mounted at /agent_deps_mount."""
+        """Install the configured agent's portable dependency prefix once."""
         key = agent_key(self.config.agent_server_module)
         scripts_dir = Path(__file__).parent / "setup_scripts"
         deps_dir = Path(__file__).parent / "deps" / key
@@ -425,51 +413,39 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if not script.exists():
             raise RuntimeError(f"no setup script for {key!r} at {script}")
         deps_dir.mkdir(parents=True, exist_ok=True)
-        proc = Popen(f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True)
-        assert proc.wait() == 0, f"agent deps setup failed ({script})"
+        subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir), check=True)
         sentinel.write_text(recipe)
         return deps_dir
 
     def _resolve_image(self) -> str:
-        """Map config.image to something the provider can start directly.
+        """Validate and normalize the configured image reference."""
+        image = self.config.image.strip()
+        is_apptainer = "apptainer" in self._sandbox_provider
+        if image.endswith(".sif") or image.startswith(("/", ".")):
+            if not is_apptainer:
+                raise ValueError("local or .sif images require the Apptainer sandbox provider")
+            return image
+        if "://" in image and not image.startswith("docker://"):
+            if not is_apptainer:
+                raise ValueError(f"image URI {image!r} is not portable. Use a bare OCI image reference")
+            return image
+        return image.removeprefix("docker://")
 
-        An explicit .sif path or a fully-qualified uri (docker://, oras://, ...) is used as-is.
-        A bare docker ref is converted to a cached .sif under sif_cache_dir, pulling it on first
-        use. This mirrors the cvdp verifier's harness cache (same safe-name scheme), so the same
-        ``nvidia/cvdp-sim:v1.0.0`` value resolves to the identical .sif on both sides and never
-        triggers a docker.io pull at apptainer ``instance start`` time.
-        """
-        img = self.config.image
-        if img.endswith(".sif") or img.startswith(("/", ".")) or "://" in img:
-            return img
-        cache = self.config.sif_cache_dir or os.path.join(Path.home(), ".cache", "nemo-gym", "sif")
-        os.makedirs(cache, exist_ok=True)
-        sif_path = os.path.join(cache, img.replace("/", "_").replace(":", "_") + ".sif")
-        if os.path.exists(sif_path):
-            return sif_path
-        # Hold an exclusive file lock so concurrent rollouts (even across processes, since
-        # the agent and verifier share this cache dir) don't pull the same image at once.
-        lock_path = sif_path + ".lock"
-        with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            if os.path.exists(sif_path):
-                return sif_path
-            tmp = sif_path + ".pulling"
-            proc = subprocess.run(
-                ["apptainer", "pull", "--force", tmp, f"docker://{img}"],
-                capture_output=True,
-                text=True,
-            )
-            if proc.returncode != 0:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-                raise RuntimeError(f"apptainer pull failed for {img} (exit {proc.returncode}): {proc.stderr}")
-            os.rename(tmp, sif_path)
-        return sif_path
+    def _archive_deps(self, deps_dir: Path) -> Path:
+        """Package the portable harness runtime once."""
+        sentinel = deps_dir / ".installed"
+        recipe = sentinel.read_text().strip()
+        archive = deps_dir.parent / f".{deps_dir.name}-{recipe[:16]}.tar.gz"
+        if archive.exists() and archive.stat().st_mtime >= sentinel.stat().st_mtime:
+            return archive
+        temporary = archive.with_suffix(".tmp")
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as tar:
+            for child in sorted(deps_dir.iterdir()):
+                tar.add(child, arcname=child.name)
+        temporary.replace(archive)
+        return archive
 
     def _model_url(self) -> str:
-        # no Gym model server -> empty URL; the runner then leaves the harness on its own
-        # endpoint (e.g. claude_code's anthropic_base_url from agent_kwargs).
         if not self.config.model_server:
             return ""
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
@@ -478,7 +454,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
     def _seed_files(
         self, workdir: str, context_files: Dict[str, str], harness_files: Optional[dict]
     ) -> Dict[str, str]:
-        """context files to upload into the workspace, skipping harness-like or unsafe paths."""
+        """Select safe context files for the workspace."""
         forbidden = set(harness_files or {})
         out: Dict[str, str] = {}
         for rel, content in (context_files or {}).items():
@@ -487,17 +463,12 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             out[f"{workdir.rstrip('/')}/{rel}"] = content
         return out
 
-    def _build_spec(
-        self, body: BaseRunRequest, instruction: str, deps_dir: Path, files: Dict[str, str], image: str
-    ) -> SandboxSpec:
+    def _build_spec(self, body: BaseRunRequest, instruction: str, files: Dict[str, str], image: str) -> SandboxSpec:
         wd = self.config.container_workdir
         extra = dict(self.config.sandbox_spec)
-        binds = list((extra.pop("provider_options", {}) or {}).get("binds", []))
-        if self.config.deps_provision == "bind":
-            binds += [f"{PARENT_DIR}:/nemo_gym_mount:ro", f"{deps_dir}:/agent_deps_mount:ro"]
-        provider_options = {**(self.config.sandbox_spec.get("provider_options", {})), "binds": binds}
-        # runner and instruction live under the workdir mount, not a separate /trajectories_mount,
-        # because the provider-neutral spec.files upload only delivers paths under the mount point
+        provider_options = dict(extra.pop("provider_options", {}) or {})
+        metadata = dict(self._sandbox_metadata)
+        metadata.update(extra.pop("metadata", {}) or {})
         traj = self._traj_dir()
         return SandboxSpec(
             image=image,
@@ -506,24 +477,64 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 "NV_MODEL_URL": self._model_url(),
                 "NV_MODEL_NAME": body.responses_create_params.model or "model",
                 "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
+                "NV_AGENT_HOME": f"{wd.rstrip('/')}/.home",
                 "NV_SYSTEM_PROMPT": self.config.system_prompt or "",
                 "NV_TRAJ_DIR": traj,
                 "NV_AGENT_MODULE": self.config.agent_server_module,
                 "NV_AGENT_CLASS": self.config.agent_server_class,
                 "NV_AGENT_CFG_CLASS": self.config.agent_config_class,
+                "NV_AGENT_DEPS_DIR": self._agent_deps_dir(),
             },
             files={
                 f"{traj}/instruction.txt": instruction,
                 f"{traj}/agent_runner.py": load_runner_source(),
                 **files,
             },
+            metadata=metadata,
             provider_options=provider_options,
-            **{k: v for k, v in extra.items() if k != "provider_options"},
+            **extra,
         )
 
     def _traj_dir(self) -> str:
-        """runner, instruction, and response location, kept under the workdir mount so spec.files lands."""
+        """Return the trajectory directory."""
         return f"{self.config.container_workdir.rstrip('/')}/.nv"
+
+    def _agent_deps_dir(self) -> str:
+        if self.config.deps_provision == "archive":
+            return f"{self.config.container_workdir.rstrip('/')}/.agent_deps"
+        return "/agent_deps_mount"
+
+    def _failed_agentic_response(
+        self,
+        body: CVDPAgentRunRequest,
+        error: str,
+        *,
+        return_code: int | None = None,
+    ) -> CVDPAgentVerifyResponse:
+        """Return a zero-reward rollout for a per-task harness failure."""
+        meta = (body.model_extra or {}).get("verifier_metadata") or {}
+        categories = meta.get("categories") or []
+        response = NeMoGymResponse(
+            id="cvdp-agent-error",
+            created_at=0.0,
+            model=body.responses_create_params.model or "error",
+            object="response",
+            output=[],
+            tools=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+        )
+        print(f"[CVDP AGENT ERROR] task_id={meta.get('task_id')}: {error}", flush=True)
+        return CVDPAgentVerifyResponse(
+            **body.model_dump(),
+            response=response,
+            reward=0.0,
+            task_id=meta.get("task_id"),
+            category=categories[0] if categories else None,
+            difficulty=meta.get("difficulty"),
+            container_exit_code=return_code,
+            container_stderr=error,
+        )
 
     async def _remote_harvest(
         self,
@@ -533,7 +544,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         seeded: Dict[str, str],
         mirror: Path,
     ) -> dict:
-        """list and download files matching globs from the sandbox, then filter via harvest()."""
+        """Download files matching the harvest globs."""
         dirs = sorted({g.split("/")[0] for g in globs if "/" in g}) or ["."]
         listing = await box.exec(
             f"cd {shlex.quote(workdir)} && find {' '.join(shlex.quote(d) for d in dirs)} -type f 2>/dev/null"
@@ -550,7 +561,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 pass
         return harvest(mirror, globs, seeded=seeded)
 
-    async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest):
+    async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
         meta = (body.model_extra or {}).get("verifier_metadata") or {}
         context_files = meta.get("context_files") or {}
         target_files = meta.get("target_files") or []
@@ -566,48 +577,57 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         )
 
         async with self.sem:
-            # one-time host setup: only the first task provisions/pulls, others wait
-            # then reuse the memoized results (avoids concurrent-write races).
             async with self._setup_lock:
-                if self._deps_dir is None:
+                if self.config.deps_provision == "archive" and self._deps_dir is None:
                     self._deps_dir = await asyncio.to_thread(self._provision_deps)
+                if self.config.deps_provision == "archive" and self._deps_archive is None:
+                    self._deps_archive = await asyncio.to_thread(self._archive_deps, self._deps_dir)
                 if self._image is None:
                     self._image = await asyncio.to_thread(self._resolve_image)
-            deps_dir = self._deps_dir
+            deps_archive = self._deps_archive
             image = self._image
             seeded = self._seed_files(wd, context_files, meta.get("harness_files"))
-            spec = self._build_spec(body, instruction, deps_dir, seeded, image)
+            spec = self._build_spec(body, instruction, seeded, image)
 
-            async with AsyncSandbox(self.config.sandbox_provider, spec) as box:
+            async with AsyncSandbox(self._sandbox_provider, spec) as box:
                 await box.start()
                 traj = self._traj_dir()
-                await box.exec(
-                    f"/agent_deps_mount/bin/python {traj}/agent_runner.py",
+                agent_deps_dir = self._agent_deps_dir()
+                if self.config.deps_provision == "archive":
+                    deps_archive_path = f"{traj}/agent-deps.tar.gz"
+                    await box.exec(f"mkdir -p {shlex.quote(agent_deps_dir)}", timeout_s=30)
+                    await box.upload(deps_archive, deps_archive_path)
+                    unpack = await box.exec(
+                        f"tar -xzf {shlex.quote(deps_archive_path)} -C {shlex.quote(agent_deps_dir)}",
+                        timeout_s=600,
+                    )
+                    if unpack.return_code != 0:
+                        raise RuntimeError(f"agent runtime extraction failed: {(unpack.stderr or '')[-500:]}")
+                elif self.config.deps_provision == "baked":
+                    runtime = await box.exec(f"test -x {shlex.quote(agent_deps_dir)}/bin/python", timeout_s=30)
+                    if runtime.return_code != 0:
+                        raise RuntimeError(f"sandbox image does not contain {agent_deps_dir}/bin/python")
+                agent_result = await box.exec(
+                    f"{shlex.quote(agent_deps_dir)}/bin/python {traj}/agent_runner.py",
                     cwd=wd,
                     timeout_s=self.config.timeout,
                 )
+                if agent_result.return_code != 0:
+                    details = (agent_result.stderr or agent_result.stdout or "")[-2000:]
+                    return self._failed_agentic_response(
+                        body,
+                        f"sandbox harness exited with code {agent_result.return_code}: {details}",
+                        return_code=agent_result.return_code,
+                    )
 
                 with tempfile.TemporaryDirectory(prefix="cvdp_agent_run_") as scratch:
                     scratch_path = Path(scratch)
                     resp_local = scratch_path / "response.json"
                     try:
                         await box.download(f"{traj}/response.json", resp_local)
-                    except Exception:
-                        pass
-                    response = (
-                        NeMoGymResponse.model_validate_json(resp_local.read_text())
-                        if resp_local.exists()
-                        else NeMoGymResponse(
-                            id=f"resp_{uuid4().hex}",
-                            created_at=int(time()),
-                            model=body.responses_create_params.model or "model",
-                            object="response",
-                            output=[],
-                            parallel_tool_calls=False,
-                            tool_choice="auto",
-                            tools=[],
-                        )
-                    )
+                        response = NeMoGymResponse.model_validate_json(resp_local.read_text())
+                    except Exception as e:
+                        return self._failed_agentic_response(body, f"could not load harness response.json: {e}")
 
                     rtl_files = await self._remote_harvest(
                         box,

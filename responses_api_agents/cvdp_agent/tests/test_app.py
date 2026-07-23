@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from unittest.mock import AsyncMock, MagicMock, call
+import tarfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -29,6 +33,8 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cvdp_agent.app import (
     CVDPAgent,
     CVDPAgentConfig,
+    CVDPAgentRunRequest,
+    deps_build_env,
 )
 
 
@@ -162,6 +168,157 @@ class TestApp:
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
+
+
+class TestAgenticSandboxSpec:
+    def _agent(self, **overrides) -> CVDPAgent:
+        values = {
+            "image": "docker://ghcr.io/hdl/sim/osvb",
+            "sandbox_provider": {"opensandbox": {}},
+            **overrides,
+        }
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="cvdp_agent",
+            simple_agent=False,
+            resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
+            **values,
+        )
+        return CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _run_request() -> CVDPAgentRunRequest:
+        return CVDPAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "build rtl"}],
+                    "model": "test-model",
+                },
+                "verifier_metadata": {
+                    "task_id": "task-1",
+                    "categories": ["cid001"],
+                    "difficulty": "easy",
+                },
+            }
+        )
+
+    @staticmethod
+    def _sandbox_context(box):
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=box)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return context
+
+    def test_open_sandbox_uses_oci_ref_without_provider_options(self) -> None:
+        agent = self._agent(deps_provision="archive")
+        agent._model_url = MagicMock(return_value="https://model.example/v1")
+        body = MagicMock()
+        body.responses_create_params.model = "model"
+        spec = agent._build_spec(body, "build rtl", {}, agent._resolve_image())
+        assert spec.image == "ghcr.io/hdl/sim/osvb"
+        assert spec.provider_options == {}
+        assert spec.env["NV_AGENT_HOME"] == "/code/.home"
+
+    def test_local_sif_rejected_for_open_sandbox(self) -> None:
+        agent = self._agent(image="/tmp/cvdp.sif")
+        with pytest.raises(ValueError, match="Apptainer"):
+            agent._resolve_image()
+
+    async def test_harness_failure_returns_zero_reward(self) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=7, stdout="", stderr="harness failed"),
+            ]
+        )
+
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            result = await agent.run(MagicMock(cookies={}), self._run_request())
+
+        assert result.reward == 0.0
+        assert result.task_id == "task-1"
+        assert result.container_exit_code == 7
+        assert "harness failed" in result.container_stderr
+        agent.server_client.post.assert_not_called()
+
+    async def test_missing_harness_response_returns_zero_reward(self) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+            ]
+        )
+        box.download = AsyncMock(side_effect=FileNotFoundError("response.json"))
+
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            result = await agent.run(MagicMock(cookies={}), self._run_request())
+
+        assert result.reward == 0.0
+        assert result.task_id == "task-1"
+        assert result.container_exit_code is None
+        assert "response.json" in result.container_stderr
+        agent.server_client.post.assert_not_called()
+
+    def test_deps_archive_contains_runtime_root(self, tmp_path) -> None:
+        agent = self._agent()
+        deps = tmp_path / "hermes"
+        (deps / "bin").mkdir(parents=True)
+        (deps / "bin" / "python").write_text("runtime")
+        (deps / ".installed").write_text("recipe")
+        archive = agent._archive_deps(deps)
+        with tarfile.open(archive, "r:gz") as tar:
+            assert "bin/python" in tar.getnames()
+
+    def test_deps_build_uses_private_host_state(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", "/full-home")
+        deps = tmp_path / "deps" / "claude_code_agent"
+        env = deps_build_env(deps)
+
+        build_root = deps.parent / ".claude_code_agent-build"
+        assert env["HOME"] == str(build_root / "home")
+        assert env["PIP_CACHE_DIR"] == str(build_root / "cache" / "pip")
+        assert env["NPM_CONFIG_CACHE"] == str(build_root / "cache" / "npm")
+        assert env["TMPDIR"] == str(build_root / "tmp")
+        assert env["PYTHONPATH"] == ""
+        assert Path(env["TMPDIR"]).is_dir()
+
+    def test_named_provider_config_is_resolved(self) -> None:
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="cvdp_agent",
+            simple_agent=False,
+            resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
+            sandbox_provider="sandbox",
+        )
+        client = ServerClient.model_construct(
+            global_config_dict={
+                "sandbox": {
+                    "opensandbox": {"connection": {"domain": "sandbox.example"}},
+                    "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+                }
+            }
+        )
+        agent = CVDPAgent(config=config, server_client=client)
+        assert "opensandbox" in agent._sandbox_provider
+        assert agent._sandbox_metadata == {"sandbox-api": "opensandbox-sdk"}
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
         config = CVDPAgentConfig(

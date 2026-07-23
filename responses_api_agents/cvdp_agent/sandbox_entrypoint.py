@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Guest entrypoint copied verbatim into the sandbox and executed as ``python agent_runner.py``.
-
-It imports the configured gym agent (module/class chosen via ``NV_AGENT_*`` env vars),
-points it at the model server, calls ``responses()`` so the agent edits files with its own
-tools, and writes the trajectory out. Kept as a plain, lintable module rather than a string
-template so it is diffable and syntax-checked with the rest of the package;
-``app.load_runner_source`` reads its source and drops it into the container unchanged.
-"""
+"""Run the configured Gym agent inside the sandbox."""
 
 import asyncio
 import importlib
@@ -29,9 +22,15 @@ import sys
 from pathlib import Path
 
 
-# the mounts only exist inside the sandbox; do this before importing nemo_gym / the agent
 sys.path.insert(0, "/nemo_gym_mount")
-os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
+agent_deps_dir = os.environ.get("NV_AGENT_DEPS_DIR", "/agent_deps_mount")
+os.environ["PATH"] = f"{agent_deps_dir}/bin:" + os.environ.get("PATH", "")
+agent_home = Path(os.environ.get("NV_AGENT_HOME", "/code/.home"))
+os.environ["HOME"] = str(agent_home)
+os.environ["XDG_CACHE_HOME"] = str(agent_home / ".cache")
+os.environ["XDG_CONFIG_HOME"] = str(agent_home / ".config")
+os.environ["XDG_DATA_HOME"] = str(agent_home / ".local" / "share")
+agent_home.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
