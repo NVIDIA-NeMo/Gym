@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -431,8 +432,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
             # Step 2: LLM judge evaluation (if needed and enabled)
             if need_judge:
-                first_equal, first_eval = await self._generate_judge_evaluation(
-                    expected_answer=expected, generated_answer=text
+                first_equal, first_eval = await run_judge(
+                    self._generate_judge_evaluation(expected_answer=expected, generated_answer=text)
                 )
                 judge_evaluations.append(first_eval)
                 logger.info(
@@ -447,8 +448,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     reward = 0.0
                 elif first_equal:
                     if self.config.check_twice_swap:
-                        second_equal, second_eval = await self._generate_judge_evaluation(
-                            expected_answer=text, generated_answer=expected
+                        second_equal, second_eval = await run_judge(
+                            self._generate_judge_evaluation(expected_answer=text, generated_answer=expected)
                         )
                         judge_evaluations.append(second_eval)
                         logger.info(
@@ -484,6 +485,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 reward = 1.0
                 failure_reason = FailureCode.NONE
 
+        except JudgeError:
+            raise
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")

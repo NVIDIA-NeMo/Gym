@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -400,6 +401,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         return self._make_response(body, expected, reward, [first_eval, second_eval])
 
     async def verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
+        return await run_judge(self._verify(body))
+
+    async def _verify(self, body: LLMJudgeVerifyRequest) -> LLMJudgeVerifyResponse:
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:

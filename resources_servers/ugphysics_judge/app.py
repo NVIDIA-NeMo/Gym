@@ -53,6 +53,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field
 
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -192,12 +193,15 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 assistant_responses.append(content_item.text)
         combined_response = "".join(assistant_responses)
 
-        reward, extracted_answer, library_reward, judge_evaluations, verdict = await self._verify_answer(
-            question=body.question,
-            expected_answer=body.expected_answer,
-            generated_answer=combined_response,
-            solution=body.solution,
+        result = await run_judge(
+            self._verify_answer(
+                question=body.question,
+                expected_answer=body.expected_answer,
+                generated_answer=combined_response,
+                solution=body.solution,
+            )
         )
+        reward, extracted_answer, library_reward, judge_evaluations, verdict = result
         return UGPhysicsJudgeVerifyResponse(
             **body.model_dump(),
             reward=reward,

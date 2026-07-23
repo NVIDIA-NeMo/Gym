@@ -56,6 +56,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -217,23 +218,26 @@ class ArenaJudgeServer(SimpleResourcesServer):
             )
             category = self.config.default_category
 
-        # Two judge calls in parallel — A=candidate/B=baseline (gen-base)
-        # and swapped (base-gen).
-        (gen_base_text, gen_base_verdict), (base_gen_text, base_gen_verdict) = await asyncio.gather(
+        # Two judge calls in parallel — A=candidate/B=baseline (gen-base) and swapped (base-gen).
+        (
+            (gen_base_text, gen_base_verdict),
+            (base_gen_text, base_gen_verdict),
+        ) = await asyncio.gather(
             self._judge_once(category, question, candidate_answer, baseline_answer),
             self._judge_once(category, question, baseline_answer, candidate_answer),
         )
-
-        # Per-rollout binary reward from the gen-base direction.
-        # Candidate wins (reward=1.0) if it strictly beats the baseline in
-        # the gen-base call; ties and losses both score 0.
-        reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
 
         # ``body.model_dump()`` already carries ``category`` (declared
         # field). Drop it before spreading so the RESOLVED category
         # (post-fallback) isn't a duplicate kwarg to the response constructor.
         body_dict = body.model_dump()
         body_dict.pop("category", None)
+
+        # Per-rollout binary reward from the gen-base direction.
+        # Candidate wins (reward=1.0) if it strictly beats the baseline in
+        # the gen-base call; ties and losses both score 0.
+        reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
+
         return ArenaJudgeVerifyResponse(
             **body_dict,
             reward=reward,
@@ -255,8 +259,10 @@ class ArenaJudgeServer(SimpleResourcesServer):
     ) -> tuple[str, Optional[str]]:
         """Run a single judge call via /v1/chat/completions.
 
-        Returns (raw_text, parsed_verdict). Network or parse failures
-        return ("", None), treated as "invalid score" by the aggregate.
+        Returns (raw_text, parsed_verdict). A failed judge CALL raises
+        JudgeError (via run_judge) — routed to the failures sidecar, not scored
+        as a wrong answer. A successful call with no parseable label yields
+        (text, None), the existing "invalid verdict" outcome.
         """
         prompt = self._prompts[category]
         fill = {"question": question, "answer_1": answer_1, "answer_2": answer_2}
@@ -269,17 +275,15 @@ class ArenaJudgeServer(SimpleResourcesServer):
         request_params = self.config.judge_chat_completions_create_params.model_copy(deep=True)
         request_params.messages = messages
 
-        try:
+        async def _call() -> NeMoGymChatCompletion:
             response_obj = await self.server_client.post(
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=request_params,
             )
-            judge_response = NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
-        except Exception:
-            logger.exception("Judge call failed for category=%s; treating as invalid verdict.", category)
-            return "", None
+            return NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
 
+        judge_response = await run_judge(_call())
         text = self._extract_chat_completion_text(judge_response)
         verdict = self._parse_verdict(text)
         return text, verdict

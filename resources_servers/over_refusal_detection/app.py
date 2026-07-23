@@ -61,6 +61,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -227,6 +228,9 @@ class OverRefusalDetectionResourcesServer(SimpleResourcesServer):
             safe_prompt=safe_prompt,
             model_response=response_for_judge,
         )
+
+        if judge_eval is not None and judge_eval.error:
+            raise JudgeError(judge_eval.error)
 
         # Step 4: Determine reward (INVERTED from jailbreak detection)
         # Here, we WANT the model to comply (respond helpfully)

@@ -36,6 +36,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -275,25 +276,28 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                 failure_reason = FailureCode.NO_SQL_EXTRACTED
                 reward = 0.0
             else:
-                # Run LLM judge evaluation
-                first_equal, first_eval = await self._generate_judge_evaluation(
-                    sql_prompt=sql_prompt,
-                    sql_context=sql_context,
-                    expected_sql=expected_sql,
-                    generated_sql=extracted_sql,
-                    sql_dialect=sql_dialect,
+                first_equal, first_eval = await run_judge(
+                    self._generate_judge_evaluation(
+                        sql_prompt=sql_prompt,
+                        sql_context=sql_context,
+                        expected_sql=expected_sql,
+                        generated_sql=extracted_sql,
+                        sql_dialect=sql_dialect,
+                    )
                 )
                 judge_evaluations.append(first_eval)
 
                 if first_equal:
                     if self.config.check_twice_swap:
                         # Run swap check
-                        second_equal, second_eval = await self._generate_judge_evaluation(
-                            sql_prompt=sql_prompt,
-                            sql_context=sql_context,
-                            expected_sql=extracted_sql,
-                            generated_sql=expected_sql,
-                            sql_dialect=sql_dialect,
+                        second_equal, second_eval = await run_judge(
+                            self._generate_judge_evaluation(
+                                sql_prompt=sql_prompt,
+                                sql_context=sql_context,
+                                expected_sql=extracted_sql,
+                                generated_sql=expected_sql,
+                                sql_dialect=sql_dialect,
+                            )
                         )
                         judge_evaluations.append(second_eval)
 
@@ -312,6 +316,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                     failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                     reward = 0.0
 
+        except JudgeError:
+            raise
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             reward = 0.0
@@ -323,7 +329,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         payload.pop("sql_context", None)
         payload.pop("sql_prompt", None)
 
-        return TextToSqlVerifyResponse(
+        response = TextToSqlVerifyResponse(
             **payload,
             reward=reward,
             sql=expected_sql,
@@ -336,6 +342,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             failure_reason=failure_reason,
             judge_evaluations=judge_evaluations,
         )
+        return response
 
     async def _generate_judge_evaluation(
         self,

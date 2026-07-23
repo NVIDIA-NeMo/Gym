@@ -44,6 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -259,27 +260,17 @@ class MultiChallengeServer(SimpleResourcesServer):
         if not rubric and body.metadata and "rubric" in body.metadata:
             rubric = body.metadata["rubric"]
 
-        # Evaluate each rubric item
-        if self.config.parallel_evaluation and len(rubric) > 1:
-            import asyncio
+        payload = body.model_dump()
+        payload.pop("context", None)
+        payload.pop("rubric", None)
 
-            evaluations = await asyncio.gather(
-                *[self._evaluate_rubric_item(item, context, generated_response) for item in rubric]
-            )
-        else:
-            evaluations = []
-            for item in rubric:
-                eval_result = await self._evaluate_rubric_item(item, context, generated_response)
-                evaluations.append(eval_result)
+        evaluations = await run_judge(self._evaluate_rubric(rubric, context, generated_response))
 
         # Aggregate scores
         reward = self._aggregate_scores(evaluations)
         num_passed = sum(1 for e in evaluations if e.score >= 0.99)
 
         # Build response
-        payload = body.model_dump()
-        payload.pop("context", None)
-        payload.pop("rubric", None)
         return MultiChallengeVerifyResponse(
             **payload,
             reward=reward,
@@ -290,6 +281,16 @@ class MultiChallengeServer(SimpleResourcesServer):
             num_passed=num_passed,
             num_total=len(evaluations),
         )
+
+    async def _evaluate_rubric(self, rubric: list, context: str, response: str) -> List[RubricEvaluation]:
+        """Evaluate every rubric item, in parallel when enabled."""
+        if self.config.parallel_evaluation and len(rubric) > 1:
+            import asyncio
+
+            return list(
+                await asyncio.gather(*[self._evaluate_rubric_item(item, context, response) for item in rubric])
+            )
+        return [await self._evaluate_rubric_item(item, context, response) for item in rubric]
 
     async def _evaluate_rubric_item(self, item: dict, context: str, response: str) -> RubricEvaluation:
         """Evaluate a single rubric item using the LLM judge."""

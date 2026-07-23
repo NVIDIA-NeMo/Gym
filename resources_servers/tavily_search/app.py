@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -400,16 +401,22 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ground_truth = body.ground_truth
         last_assistant_response = body.response.output_text
 
+        judge_error = None
         if self.config.use_judge:
-            judge_evaluation = await self._verify_answer_with_judge(question, ground_truth, last_assistant_response)
+            judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                question, ground_truth, last_assistant_response
+            )
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-        return TavilySearchVerifyResponse(
+        response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
+        if judge_error is not None:
+            raise JudgeError(judge_error)
+        return response
 
     ###### UTILITY FUNCTIONS ######
 
@@ -488,7 +495,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     exclude_domains.append(prop["value"])
         return exclude_domains
 
-    async def _verify_answer_with_judge(self, question: str, ground_truth: str, response: str) -> JudgeEvaluation:
+    async def _verify_answer_with_judge(
+        self, question: str, ground_truth: str, response: str
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -529,9 +538,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 judge_response=judge_response,
             )
 
-        judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
+        try:
+            judge_create_params, judge_response = await run_judge(
+                _get_judge_response(question, ground_truth, response)
+            )
+        except JudgeError as e:
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
-        return judge_evaluation
+        return judge_evaluation, None
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
         """Verify answer by checking if ground_truth (as regex) matches in response."""

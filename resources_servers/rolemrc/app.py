@@ -53,6 +53,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -564,7 +565,7 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
 
         reward = sum(aspect_scores.values()) / len(aspect_scores)
         per_aspect = {f"aspect_{k}": float(v) for k, v in aspect_scores.items()}
-        return RoleMRCVerifyResponse(
+        result = RoleMRCVerifyResponse(
             **data,
             reward=reward,
             generation=response[:500],
@@ -575,6 +576,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             judge_response=text,
             **per_aspect,
         )
+        # A judge call error is a judge failure, not a low score from averaging unscored aspects as 0.
+        if errors:
+            raise JudgeError(f"judge call failed for aspect(s): {', '.join(errors)}")
+        return result
 
     async def _call_judge(self, aspect_name: str, prompt: str) -> Optional[str]:
         """One judge call for a single aspect; returns text or None on failure."""

@@ -54,6 +54,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -303,6 +304,9 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
             adversarial_prompt=adversarial_prompt,
             model_response=response_for_judge,
         )
+
+        if judge_eval.error:
+            raise JudgeError(judge_eval.error)
 
         # Determine safety reward (Reward 1)
         if is_safe is True:

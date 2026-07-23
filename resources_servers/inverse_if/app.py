@@ -49,6 +49,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -267,6 +268,15 @@ class InverseIFServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: InverseIFVerifyRequest) -> InverseIFVerifyResponse:
+        """Verify a model response, routing judge-call failures to the failures sidecar.
+
+        A failed judge call (auth, rate limit, timeout, endpoint error) is a distinct
+        outcome, not a wrong answer: carry the model's output and route the row to the
+        sidecar so it stays out of the accuracy denominator.
+        """
+        return await run_judge(self._verify(body))
+
+    async def _verify(self, body: InverseIFVerifyRequest) -> InverseIFVerifyResponse:
         """Verify a model response against per-criterion rubric using the LLM judge."""
 
         # Extract the generated response (excluding thinking blocks)

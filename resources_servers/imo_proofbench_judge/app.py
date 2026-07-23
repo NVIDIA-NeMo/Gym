@@ -45,6 +45,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -399,6 +400,38 @@ class ImoProofBenchJudgeServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
         return key
 
+    async def _call_judge(self, judge_prompt: str) -> str:
+        """Call the judge model and return its extracted text. Raises on any transport error."""
+        if self.config.use_chat_completions_for_judge:
+            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": judge_prompt}],
+                max_tokens=self.config.judge_responses_create_params.max_output_tokens or 4096,
+                temperature=self.config.judge_responses_create_params.temperature or 0.0,
+                top_p=self.config.judge_responses_create_params.top_p or 1.0,
+            )
+            response_obj = await self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/chat/completions",
+                json=chat_params,
+            )
+            chat_response = NeMoGymChatCompletion.model_validate(await response_obj.json())
+            content = chat_response.choices[0].message.content if chat_response.choices else None
+            return content.strip() if content else ""
+
+        msgs: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        response_obj = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
+        return extract_text_from_response(judge_response)
+
     async def verify(self, body: ImoProofBenchVerifyRequest) -> ImoProofBenchVerifyResponse:
         # Match Skills' wiring exactly: extract the contents of the rightmost
         # `\boxed{}` from the model's post-think text (`eval_type=math`) and
@@ -473,35 +506,7 @@ class ImoProofBenchJudgeServer(SimpleResourcesServer):
             predicted_answer=extracted,
         )
 
-        if self.config.use_chat_completions_for_judge:
-            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-                messages=[{"role": "user", "content": judge_prompt}],
-                max_tokens=self.config.judge_responses_create_params.max_output_tokens or 4096,
-                temperature=self.config.judge_responses_create_params.temperature or 0.0,
-                top_p=self.config.judge_responses_create_params.top_p or 1.0,
-            )
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/chat/completions",
-                json=chat_params,
-            )
-            chat_response = NeMoGymChatCompletion.model_validate(await response_obj.json())
-            content = chat_response.choices[0].message.content if chat_response.choices else None
-            judge_text = content.strip() if content else ""
-        else:
-            msgs: List[NeMoGymEasyInputMessage] = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            request_params.input = msgs
-
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-            judge_text = extract_text_from_response(judge_response)
+        judge_text = await run_judge(self._call_judge(judge_prompt))
 
         # Parse the judge response with Skills' 3-format priority. Format 1
         # ("Judgement: Yes/No") and Format 2 (\boxed{Correct/Incorrect}) win

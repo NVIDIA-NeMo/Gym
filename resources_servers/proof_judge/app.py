@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -205,6 +206,10 @@ class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
     problem: str = ""
 
 
+class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
+    pass
+
+
 class IncorrectGroupCoordinator(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -225,13 +230,13 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
         default_factory=lambda: defaultdict(IncorrectGroupCoordinator)
     )
 
-    async def verify(self, body: ProofWithJudgeVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: ProofWithJudgeVerifyRequest) -> ProofWithJudgeVerifyResponse:
         problem = getattr(body, "problem", "") or (body.model_dump().get("problem") or "")
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
             reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
         else:
-            reward, details = await self._judge_single(problem, full_response)
+            reward, details = await run_judge(self._judge_single(problem, full_response))
         reward, details = await self._maybe_zero_incorrect_group_reward(
             problem=problem, reward=reward, details=details
         )
@@ -243,7 +248,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofWithJudgeVerifyResponse(**body.model_dump(), reward=reward)
 
     async def _append_log_jsonl(
         self,

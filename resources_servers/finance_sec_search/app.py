@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -1194,6 +1195,17 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # Verify Endpoint
     # ========================================================================
 
+    async def _call_judge(self, judge_params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        response = await asyncio.wait_for(
+            self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=judge_params,
+            ),
+            timeout=self.config.judge_call_timeout,
+        )
+        return NeMoGymResponse.model_validate(await get_response_json(response))
+
     async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
         """Verify the agent's answer.
 
@@ -1274,24 +1286,14 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         for attempt in range(max_judge_retries):
             try:
-                response = await asyncio.wait_for(
-                    self.server_client.post(
-                        server_name=self.config.judge_model_server.name,
-                        url_path="/v1/responses",
-                        json=judge_params,
-                    ),
-                    timeout=self.config.judge_call_timeout,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
-                logger.warning(
-                    "Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e
-                )
+                judge_response = await run_judge(self._call_judge(judge_params))
+            except JudgeError as judge_error:
+                logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
                 logger.error("Judge model call failed after %d attempts", max_judge_retries)
-                return FinanceAgentVerifyResponse(**body.model_dump(), reward=0.0)
+                raise
 
             try:
                 last_output = judge_response.output[-1]

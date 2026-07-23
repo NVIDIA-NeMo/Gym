@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -360,7 +361,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
-            return await self._verify_comparison(body)
+            return await run_judge(self._verify_comparison(body))
 
         return await self._verify_rubric(body)
 
@@ -454,12 +455,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
+        # Empty/unusable judge output is a judge failure, not a low score.
+        if judge_result is None:
+            raise JudgeError("empty or unusable judge response")
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=(judge_result is None),
+            invalid_judge_response=False,
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:

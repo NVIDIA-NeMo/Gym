@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -184,12 +185,8 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        result = await run_judge(self._verify_answer(body.question, body.expected_answer, combined_response))
+        reward, extracted_answer, library_reward, judge_evaluations = result
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
