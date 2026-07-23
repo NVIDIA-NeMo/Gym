@@ -21,7 +21,22 @@ records a ``TokenEntry`` from its complete response; a trainer reads a rollout's
 entries through a ``TokenSource``.
 """
 
+from nemo_gym.token_id_capture.builder import (
+    BuildOutput,
+    Chain,
+    Trajectory,
+    assert_nemo_rl_contiguity,
+    build_trajectories,
+    per_request,
+    prefix_merging,
+    project_main_chain_response,
+)
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import (
+    token_id_capture_dirs_from_config,
+    trajectories_for_rollout,
+    trajectories_from_source,
+)
 from nemo_gym.token_id_capture.reader import HttpTokenReader, LocalTokenReader, TokenReader
 from nemo_gym.token_id_capture.records import TOKEN_FIELDS, TokenEntry, extract_token_fields
 from nemo_gym.token_id_capture.routes import install_token_capture_routes, make_token_store
@@ -48,4 +63,15 @@ __all__ = [
     "CaptureTokenSource",
     "make_token_store",
     "install_token_capture_routes",
+    "build_trajectories",
+    "per_request",
+    "prefix_merging",
+    "project_main_chain_response",
+    "assert_nemo_rl_contiguity",
+    "Trajectory",
+    "Chain",
+    "BuildOutput",
+    "trajectories_for_rollout",
+    "trajectories_from_source",
+    "token_id_capture_dirs_from_config",
 ]
