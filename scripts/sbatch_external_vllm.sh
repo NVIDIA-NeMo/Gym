@@ -22,13 +22,15 @@ vllm serve $MODEL \
     --kv-cache-dtype fp8 \
     -cc.pass_config.fuse_allreduce_rms=False \
     --mamba-ssm-cache-dtype float32 \
-    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
+    --load-format instanttensor \
     --moe-backend triton \
     --max-num-batched-tokens 32768 \
     --host \$(hostname) \
     --port 8000
 EOF
 )
+
+# --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
 
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
