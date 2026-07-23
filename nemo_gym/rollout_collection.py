@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
@@ -48,7 +49,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_wandb_run,
 )
-from nemo_gym.path_utils import failures_path_for, resolve_input_path
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     get_response_json,
@@ -301,10 +302,12 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        _input_path = resolve_input_path(
-            config.input_jsonl_fpath,
-            f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly.",
-        )
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)

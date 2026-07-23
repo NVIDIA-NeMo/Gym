@@ -533,6 +533,10 @@ class SimpleServer(BaseServer):
         return f"{self.__class__.__name__}___{self.config.name}"
 
     def setup_session_middleware(self, app: FastAPI) -> None:
+        if getattr(app.state, "nemo_gym_session_middleware_installed", False):
+            return
+        app.state.nemo_gym_session_middleware_installed = True
+
         # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
         # Says that if you register middlewares A and then B,
         # - at request time: They execute B first then A
@@ -674,6 +678,12 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
+        # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
+            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+
+            maybe_auto_expose(server, app)
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()

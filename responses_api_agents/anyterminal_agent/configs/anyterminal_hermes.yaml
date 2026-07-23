@@ -16,11 +16,8 @@ anyterminal_hermes:
         compression_enabled: true
         compression_threshold: 0.85
 
-      # Path to pre-built Apptainer SIF files produced by prepare.py --sif-dir.
-      # If omitted, Apptainer will pull docker:// images at runtime (requires internet).
-      tb_sif_dir: null
+      container_formatter: "docker://{docker_image}"
 
-      apptainer_memory_limit_mb: 32768
       concurrency: 6
 
       model_server:
