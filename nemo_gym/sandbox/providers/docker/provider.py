@@ -526,9 +526,7 @@ class DockerProvider:
         except TimeoutError as exc:
             raise TimeoutError(f"Timed out resolving Docker sandbox port {port}") from exc
         if code != 0:
-            raise RuntimeError(
-                f"docker port failed (code={code}) for {inst.name!r} port {port}: {err.strip()}"
-            )
+            raise RuntimeError(f"docker port failed (code={code}) for {inst.name!r} port {port}: {err.strip()}")
 
         bindings = [line.strip() for line in out.splitlines() if line.strip()]
         if not bindings:

@@ -78,9 +78,7 @@ If any item is not verified, take one corrective or verification action instead 
 STEP_TEMPLATE = "# Step {step_num}:\n"
 TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 ASSISTANT_HISTORY_TEMPLATE_THINKING = "<think>\n{thought}\n</think>\n## Action:\n{action}\n"
-ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = (
-    "## Thought:\n{thought}\n\n## Action:\n{action}\n"
-)
+ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 
 # Keep the validated checkpoint prompt spelling stable. Although "passoword"
 # is misspelled, changing prompt bytes here would make maintained runs differ

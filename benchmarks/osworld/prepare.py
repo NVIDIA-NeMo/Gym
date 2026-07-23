@@ -54,8 +54,7 @@ BACKEND_CONFIGS = {
 }
 
 PINNED_OSWORLD_IMAGE = (
-    "docker://happysixd/osworld-docker@"
-    "sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9"
+    "docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9"
 )
 
 
@@ -167,9 +166,7 @@ def write_task_shard(
             total_tasks += 1
 
     if not selected_rows:
-        raise ValueError(
-            f"shard {shard_index}/{num_shards} is empty for an input containing {total_tasks} task(s)"
-        )
+        raise ValueError(f"shard {shard_index}/{num_shards} is empty for an input containing {total_tasks} task(s)")
 
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     output_jsonl.write_text("".join(selected_rows), encoding="utf-8")
@@ -216,9 +213,7 @@ def write_vm_snapshot_manifest(
     actual_sha256 = _sha256_file(resolved_vm)
     normalized_expected = expected_sha256.removeprefix("sha256:").lower() if expected_sha256 else None
     if normalized_expected and actual_sha256 != normalized_expected:
-        raise ValueError(
-            f"OSWorld qcow2 SHA-256 mismatch: expected {normalized_expected}, got {actual_sha256}"
-        )
+        raise ValueError(f"OSWorld qcow2 SHA-256 mismatch: expected {normalized_expected}, got {actual_sha256}")
 
     manifest = {
         "schema_version": 1,

@@ -129,8 +129,7 @@ class AsyncSandbox:
         declared_ports = self._spec.ports if self._spec is not None else ()
         if port not in declared_ports:
             raise ValueError(
-                f"Sandbox port {port} was not declared in SandboxSpec.ports; "
-                f"declared ports: {list(declared_ports)!r}"
+                f"Sandbox port {port} was not declared in SandboxSpec.ports; declared ports: {list(declared_ports)!r}"
             )
         resolver = getattr(self._provider, "endpoint", None)
         if resolver is None:
@@ -138,10 +137,7 @@ class AsyncSandbox:
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support service endpoints")
         resolved = await resolver(self._require_handle(), port)
         if not isinstance(resolved, SandboxEndpoint):
-            raise TypeError(
-                "Sandbox provider endpoint() must return SandboxEndpoint, "
-                f"got {type(resolved).__name__}"
-            )
+            raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
     async def stop(self) -> None:

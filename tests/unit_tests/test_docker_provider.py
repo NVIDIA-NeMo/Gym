@@ -682,9 +682,7 @@ async def test_status_timeout_is_unknown(fake_binary: str, monkeypatch: pytest.M
     assert await provider.status(_make_handle()) is SandboxStatus.UNKNOWN
 
 
-async def test_endpoint_resolves_declared_dynamic_port(
-    fake_binary: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_endpoint_resolves_declared_dynamic_port(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, rec = _make_provider(
         monkeypatch,
         lambda argv: (0, "127.0.0.1:49153\n", ""),
@@ -695,9 +693,7 @@ async def test_endpoint_resolves_declared_dynamic_port(
     assert rec.calls[0]["argv"] == [FAKE_BINARY, "port", "nemo-gym-x", "5000/tcp"]
 
 
-async def test_endpoint_rejects_undeclared_or_missing_port(
-    fake_binary: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_endpoint_rejects_undeclared_or_missing_port(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
     with pytest.raises(ValueError, match="was not declared"):
         await provider.endpoint(_make_handle(), 5000)

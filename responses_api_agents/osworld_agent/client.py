@@ -42,9 +42,7 @@ from responses_api_agents.osworld_agent.runner_registry import load_attr, resolv
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
 
-SANDBOX_DESKTOP_ENV_CLASS = (
-    "responses_api_agents.osworld_agent.sandbox_desktop_env.SandboxDesktopEnv"
-)
+SANDBOX_DESKTOP_ENV_CLASS = "responses_api_agents.osworld_agent.sandbox_desktop_env.SandboxDesktopEnv"
 
 # Sentinel actions OSWorld recognises in step().
 _TERMINAL_ACTIONS = {"DONE", "FAIL"}
@@ -1681,12 +1679,10 @@ def run_osworld_task(
             "observation_type": runner_spec.observation_type,
             "provider_name": provider_name,
             "container_image": container_image,
-            "execution_backend": "gym_sandbox" if use_gym_sandbox else (
-                "resources_server" if use_remote_resources else "osworld_provider"
-            ),
-            "sandbox_provider": (
-                next(iter(sandbox_provider_config)) if sandbox_provider_config else None
-            ),
+            "execution_backend": "gym_sandbox"
+            if use_gym_sandbox
+            else ("resources_server" if use_remote_resources else "osworld_provider"),
+            "sandbox_provider": (next(iter(sandbox_provider_config)) if sandbox_provider_config else None),
             "sandbox_image": (sandbox_spec or {}).get("image") if use_gym_sandbox else None,
             "headless": headless,
             "screen_size": list(screen_size),
@@ -1764,11 +1760,7 @@ def run_osworld_task(
         env = env_cls(
             **env_kwargs,
         )
-        linked_cache_files = (
-            0
-            if use_remote_resources
-            else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
-        )
+        linked_cache_files = 0 if use_remote_resources else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)

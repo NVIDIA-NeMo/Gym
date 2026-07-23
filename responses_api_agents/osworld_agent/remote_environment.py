@@ -71,9 +71,7 @@ class RemoteDesktopEnv:
         if not resources_server_url.strip():
             raise ValueError("resources_server_url must not be empty")
         if provider_name != "remote_docker":
-            raise ValueError(
-                "remote OSWorld Resources Server currently requires provider_name='remote_docker'"
-            )
+            raise ValueError("remote OSWorld Resources Server currently requires provider_name='remote_docker'")
         if os_type.lower() != "ubuntu":
             raise ValueError("remote OSWorld Resources Server currently supports Ubuntu only")
         self.resources_server_url = resources_server_url.rstrip("/")

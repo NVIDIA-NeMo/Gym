@@ -44,8 +44,7 @@ def _string_list(value: Any, *, field: str) -> list[str]:
 
 def _has_option(args: list[str], flag: str, value: str) -> bool:
     return any(
-        (item == flag and index + 1 < len(args) and args[index + 1] == value)
-        or item == f"{flag}={value}"
+        (item == flag and index + 1 < len(args) and args[index + 1] == value) or item == f"{flag}={value}"
         for index, item in enumerate(args)
     )
 
@@ -61,8 +60,7 @@ def _parse_plain_http_endpoint(resolved: SandboxEndpoint, port: int) -> tuple[st
     parsed = urlsplit(resolved.endpoint)
     if parsed.scheme != "http":
         raise ValueError(
-            f"Sandbox endpoint for OSWorld port {port} must use direct HTTP, "
-            f"got scheme {parsed.scheme!r}"
+            f"Sandbox endpoint for OSWorld port {port} must use direct HTTP, got scheme {parsed.scheme!r}"
         )
     if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
         raise ValueError(
@@ -123,10 +121,7 @@ class GymSandboxDesktopProvider:
         vm_path = os.path.realpath(os.path.abspath(os.path.expanduser(path_to_vm)))
         if not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK):
             raise FileNotFoundError(f"OSWorld base qcow2 is not readable: {vm_path}")
-        if (
-            self._require_kvm
-            and (not os.path.exists("/dev/kvm") or not os.access("/dev/kvm", os.R_OK | os.W_OK))
-        ):
+        if self._require_kvm and (not os.path.exists("/dev/kvm") or not os.access("/dev/kvm", os.R_OK | os.W_OK)):
             raise RuntimeError("OSWorld Gym Sandbox requires readable/writable /dev/kvm")
 
         values = copy.deepcopy(self._sandbox_spec)
@@ -213,9 +208,7 @@ class GymSandboxDesktopProvider:
                         f"Gym Sandbox stopped before the OSWorld guest became ready: status={status.value}"
                     )
                 time.sleep(min(self._ready_poll_s, max(deadline - time.monotonic(), 0.0)))
-        raise TimeoutError(
-            f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}"
-        )
+        raise TimeoutError(f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}")
 
     def start_emulator(self, path_to_vm: str, headless: bool, os_type: str) -> None:
         if self._sandbox is not None:

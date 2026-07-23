@@ -663,9 +663,7 @@ class TestApp:
         assert response.reward == 1.0
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         runner_kwargs = positional_args[1]
-        assert runner_kwargs["sandbox_provider_config"] == {
-            "docker": {"create": {"use_init": False}}
-        }
+        assert runner_kwargs["sandbox_provider_config"] == {"docker": {"create": {"use_init": False}}}
         assert runner_kwargs["sandbox_spec"] == {
             "image": "docker://osworld@sha256:fixed",
             "metadata": {"sandbox-api": "docker-cli", "owner": "agent"},

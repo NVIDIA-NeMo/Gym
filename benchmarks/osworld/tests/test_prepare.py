@@ -31,9 +31,7 @@ def test_prepare_validates_committed_example() -> None:
     [[], ["--num-shards", "1", "--shard-index", "0"]],
     ids=["defaults", "explicit-single-shard"],
 )
-def test_main_single_shard_keeps_the_original_input(
-    monkeypatch, tmp_path: Path, shard_args: list[str]
-) -> None:
+def test_main_single_shard_keeps_the_original_input(monkeypatch, tmp_path: Path, shard_args: list[str]) -> None:
     output = tmp_path / "results" / "rollouts.jsonl"
     monkeypatch.setattr(
         sys,
@@ -151,8 +149,7 @@ def test_write_task_shards_are_disjoint_complete_and_manifested(tmp_path: Path) 
 def test_write_task_shard_rejects_invalid_index(tmp_path: Path) -> None:
     source = tmp_path / "tasks.jsonl"
     source.write_text(
-        json.dumps({"verifier_metadata": {"task_id": "task-0", "osworld_task": {"id": "task-0"}}})
-        + "\n",
+        json.dumps({"verifier_metadata": {"task_id": "task-0", "osworld_task": {"id": "task-0"}}}) + "\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="shard_index"):
@@ -170,7 +167,7 @@ def test_write_env_pins_vm_path_for_sandbox(tmp_path: Path) -> None:
         input_jsonl=DEFAULT_INPUT,
         output_jsonl=tmp_path / "rollouts.jsonl",
         policy_base_url="http://model.test/v1",
-        policy_api_key="local",
+        policy_api_key="local",  # pragma: allowlist secret
         policy_model_name="model",
         execution_backend="gym_sandbox",
         vm_path=vm_path,
@@ -190,7 +187,7 @@ def test_write_env_rejects_sandbox_without_explicit_vm(tmp_path: Path) -> None:
             input_jsonl=DEFAULT_INPUT,
             output_jsonl=tmp_path / "rollouts.jsonl",
             policy_base_url="http://model.test/v1",
-            policy_api_key="local",
+            policy_api_key="local",  # pragma: allowlist secret
             policy_model_name="model",
             execution_backend="gym_sandbox",
         )

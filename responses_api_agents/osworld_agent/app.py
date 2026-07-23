@@ -9,10 +9,6 @@ and ``tau2``): ``/run`` is the single entrypoint that takes a Gym JSONL row,
 runs the full OSWorld rollout against the Gym policy model, and returns a
 ``BaseVerifyResponse`` with the final reward.
 
-For a decoupled deployment, the optional Gym-native
-``resources_servers/osworld/`` owns the live DesktopEnv and its inline
-evaluator. The agent keeps the same rollout loop and talks to that server via
-the DesktopEnv-compatible HTTP client.
 """
 
 from __future__ import annotations
@@ -867,9 +863,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     global_config_dict,
                     self.config.resources_server.name,
                 )
-                resources_server_url = (
-                    f"http://{resources_server_config['host']}:{resources_server_config['port']}"
-                )
+                resources_server_url = f"http://{resources_server_config['host']}:{resources_server_config['port']}"
 
             temperature = body.responses_create_params.temperature or self.config.temperature
             top_p = body.responses_create_params.top_p or self.config.top_p
