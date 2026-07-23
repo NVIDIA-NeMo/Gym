@@ -24,11 +24,11 @@ import tempfile
 from asyncio import Semaphore
 from pathlib import Path
 from time import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -46,8 +46,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
@@ -243,6 +245,9 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
@@ -381,6 +386,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        observation_collector: Optional[Callable[[Path], None]] = None,
     ) -> tuple[str, str]:
         """Run claude -p --output-format=stream-json and return (stdout, model_name).
 
@@ -441,7 +447,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return stdout.decode(errors="replace"), model
         finally:
             if claude_config_dir is not None:
-                shutil.rmtree(claude_config_dir, ignore_errors=True)
+                try:
+                    if observation_collector is not None:
+                        try:
+                            await asyncio.to_thread(observation_collector, claude_config_dir)
+                        except Exception:
+                            LOG.exception("failed to collect Claude Code observations")
+                finally:
+                    shutil.rmtree(claude_config_dir, ignore_errors=True)
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(
@@ -509,6 +522,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        observation_collector: Optional[Callable[[Path], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -524,6 +538,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             mcp_config=mcp_config,
             skills_path=skills_path,
             rollout_id=rollout_id,
+            observation_collector=observation_collector,
         )
         output_items, usage = parse_stream_json(stdout)
 
@@ -568,7 +583,46 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body)
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
+        return await self._create_response(body, rollout_id=rollout_id)
+
+    async def responses_with_observations(
+        self,
+        request: Optional[Request],
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        mcp_config: Optional[str] = None,
+        skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
+    ) -> AgentEpisode:
+        observations: Optional[AgentObservationBundle] = None
+
+        def collect(config_dir: Path) -> None:
+            nonlocal observations
+            try:
+                observations = extract_claude_code_observations(config_dir, model_ref=self.config.model_server)
+                if self.config.model_server is None:
+                    observations.gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
+            except Exception:
+                LOG.exception("failed to extract Claude Code observations")
+                observations = AgentObservationBundle(
+                    source="claude_code",
+                    gaps=[ObservationGap(code="observation_parse_failed")],
+                )
+
+        response = await self._create_response(
+            body,
+            mcp_config=mcp_config,
+            skills_path=skills_path,
+            rollout_id=rollout_id,
+            observation_collector=collect,
+        )
+        if observations is None:
+            observations = AgentObservationBundle(
+                source="claude_code",
+                gaps=[ObservationGap(code="agent_transcript_unavailable")],
+            )
+        return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -593,18 +647,30 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                agent_resp = await self._create_response(
-                    body.responses_create_params,
-                    mcp_config=mcp_config,
-                    skills_path=skills_path,
-                    rollout_id=rollout_id,
-                )
+                if rollout_id is not None:
+                    episode = await self.responses_with_observations(
+                        request,
+                        body.responses_create_params,
+                        mcp_config=mcp_config,
+                        skills_path=skills_path,
+                        rollout_id=rollout_id,
+                    )
+                    agent_resp, observations = episode.response, episode.observations
+                else:
+                    agent_resp = await self._create_response(
+                        body.responses_create_params,
+                        mcp_config=mcp_config,
+                        skills_path=skills_path,
+                    )
+                    observations = None
                 agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump()
+                | {"response": agent_resp_json}
+                | ({"rollout_id": rollout_id} if rollout_id is not None else {}),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
@@ -619,9 +685,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return ClaudeCodeAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":
