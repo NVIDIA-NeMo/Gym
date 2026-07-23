@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Verification"
+  short_description: "Design reliable verifier and reward logic"
+  default_prompt: "Use $nemo-gym-verification-and-scoring to design, implement, and validate this verifier."

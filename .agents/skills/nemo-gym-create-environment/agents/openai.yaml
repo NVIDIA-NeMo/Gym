@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create NeMo Gym Environment"
+  short_description: "Build a complete custom Gym environment"
+  default_prompt: "Use $nemo-gym-create-environment to create a complete NeMo Gym environment."

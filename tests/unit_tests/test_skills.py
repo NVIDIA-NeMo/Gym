@@ -25,6 +25,17 @@ from nemo_gym.skills import (
 )
 
 
+FOUNDATIONAL_SKILLS = (
+    "nemo-gym-create-environment",
+    "nemo-gym-integrate-benchmark",
+    "nemo-gym-training",
+    "nemo-gym-evaluation",
+    "nemo-gym-verification-and-scoring",
+    "nemo-gym-async-patterns-and-performance",
+    "nemo-gym-integrate-environment-framework",
+)
+
+
 def _write_skill(skills_dir, name, description="A skill.", version=None, body="# Body\n"):
     skill_dir = skills_dir / name
     skill_dir.mkdir(parents=True)
@@ -196,3 +207,24 @@ class TestStageSkills:
     def test_missing_source_raises(self, tmp_path):
         with pytest.raises(ValueError, match="is not a directory"):
             stage_skills(str(tmp_path / "nope"), tmp_path / "dest")
+
+
+class TestRepositoryFoundationalSkills:
+    def test_foundational_skills_load_from_canonical_directory(self):
+        ref = load_skill_directory(str(PARENT_DIR / ".agents" / "skills"))
+        loaded_names = {skill.name for skill in ref.skills}
+
+        assert set(FOUNDATIONAL_SKILLS) <= loaded_names
+        assert "add-benchmark" not in loaded_names
+
+    @pytest.mark.parametrize("skill_name", FOUNDATIONAL_SKILLS)
+    def test_native_discovery_paths_resolve_to_canonical_skill(self, skill_name):
+        canonical = PARENT_DIR / ".agents" / "skills" / skill_name
+
+        assert (canonical / "SKILL.md").is_file()
+        assert (canonical / "agents" / "openai.yaml").is_file()
+
+        for native_dir in (".claude", ".codex"):
+            compatibility_path = PARENT_DIR / native_dir / "skills" / skill_name
+            assert compatibility_path.is_symlink()
+            assert compatibility_path.resolve() == canonical.resolve()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Training"
+  short_description: "Configure RL training with Gym environments"
+  default_prompt: "Use $nemo-gym-training to configure and validate this NeMo Gym RL training workflow."

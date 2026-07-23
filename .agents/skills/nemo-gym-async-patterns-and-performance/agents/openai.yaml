@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Async Performance"
+  short_description: "Implement scalable async and concurrency patterns"
+  default_prompt: "Use $nemo-gym-async-patterns-and-performance to implement or diagnose this concurrency path."
