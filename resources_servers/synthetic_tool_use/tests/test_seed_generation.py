@@ -88,7 +88,7 @@ class QueueGenerator:
 
 
 def role(model: str) -> ModelRoleConfig:
-    return ModelRoleConfig(model=model, base_url="http://model.invalid/v1", api_key_env="TEST_API_KEY")
+    return ModelRoleConfig(model=model)
 
 
 def config(tmp_path: Path) -> SeedGenerationConfig:
@@ -276,6 +276,8 @@ def test_generation_assets_are_stable_and_loadable() -> None:
 
 
 def test_generation_components_have_explicit_ownership_boundaries() -> None:
+    assert (PIPELINE_DIR / "app.py").is_file()
+    assert (PIPELINE_DIR / "requirements.txt").is_file()
     component_names = (
         "synthetic_tool_use_domain_generation",
         "synthetic_tool_use_policy_tool_generation",
@@ -283,6 +285,8 @@ def test_generation_components_have_explicit_ownership_boundaries() -> None:
     )
     for component_name in component_names:
         component_dir = RESOURCE_SERVERS_DIR / component_name
+        assert (component_dir / "app.py").is_file()
+        assert (component_dir / "requirements.txt").is_file()
         source = "\n".join(path.read_text(encoding="utf-8") for path in component_dir.glob("*.py"))
         for other_name in component_names:
             if other_name != component_name:
@@ -290,6 +294,8 @@ def test_generation_components_have_explicit_ownership_boundaries() -> None:
 
     runtime_dir = RESOURCE_SERVERS_DIR / "synthetic_tool_use_simulation"
     assert not (runtime_dir / "seed_generation").exists()
+    assert not list(PIPELINE_DIR.rglob("*.slurm"))
+    assert not (PIPELINE_DIR / "scripts" / "generate_synthetic_tool_use_seeds.py").exists()
     assert sorted(path.name for path in (PIPELINE_DIR / "configs").glob("*.yaml")) == [
         "general.yaml",
         "proactive.yaml",
@@ -556,12 +562,13 @@ async def test_end_to_end_seed_generation_and_materialization(tmp_path: Path) ->
     assert rows[0]["source_artifacts"]["domain_id"] == candidates[0].domain_id
 
 
-def test_manifest_omits_endpoint_and_credential_configuration(tmp_path: Path) -> None:
+def test_manifest_contains_only_model_role_behavior(tmp_path: Path) -> None:
     generation_config = config(tmp_path)
     store = RunArtifactStore.create(generation_config, generation_asset_hashes("proactive"))
     serialized = store.manifest_path.read_text(encoding="utf-8")
-    assert "http://model.invalid" not in serialized
-    assert "TEST_API_KEY" not in serialized
+    assert '"model": "domain-model"' in serialized
+    assert "base_url" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_run_identity_changes_with_profile_assets(tmp_path: Path) -> None:

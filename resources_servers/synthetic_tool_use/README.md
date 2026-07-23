@@ -1,91 +1,83 @@
 # Synthetic Conversational Tool-Use Pipeline
 
-This directory is the index and shared integration layer for the synthetic conversational tool-use pipeline. The
-stage implementations are sibling packages with the same `synthetic_tool_use_` prefix, so each stage has an explicit
-owner while the complete workflow remains easy to find.
+This package connects the resource servers that generate and consume synthetic conversational tool-use data.
 
 ## Components
 
-| Component | Path | Owns | Produces |
-| --- | --- | --- | --- |
-| Domain generation | [`synthetic_tool_use_domain_generation`](../synthetic_tool_use_domain_generation/README.md) | Domain prompt and candidate generation | Accepted domain JSONL and per-domain `domain.json` |
-| Policy/tool generation | [`synthetic_tool_use_policy_tool_generation`](../synthetic_tool_use_policy_tool_generation/README.md) | General/proactive profiles, policy/tool prompts, references, refinement, and judging | `policy.md`, `tools.jsonl`, and quality reports |
-| Scenario generation | [`synthetic_tool_use_scenario_generation`](../synthetic_tool_use_scenario_generation/README.md) | Scenario prompts, response schema, scope assignment, and scenario validation | `scenarios/**/*.jsonl` |
-| Dataset materialization and rollout simulation | [`synthetic_tool_use_simulation`](../synthetic_tool_use_simulation/README.md) | Gym row materialization, session state, user/tool simulation, and verification | Gym input rows and scored rollouts |
-| Policy loop | [`synthetic_tool_use_agent`](../../responses_api_agents/synthetic_tool_use_agent/README.md) | Policy-model turns and tool-call orchestration | Responses API trajectory |
+| Resource server | Path | Responsibility |
+| --- | --- | --- |
+| Pipeline | `synthetic_tool_use` | Orchestrate generation, validate artifacts, and materialize Gym rows |
+| Domain generation | `synthetic_tool_use_domain_generation` | Generate and deduplicate domain candidates |
+| Policy/tool generation | `synthetic_tool_use_policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
+| Scenario generation | `synthetic_tool_use_scenario_generation` | Generate and validate inside/outside-policy customer scenarios |
+| Rollout simulation | `synthetic_tool_use_simulation` | Simulate users and tools and verify completed trajectories |
 
-Only `synthetic_tool_use_simulation` is a long-running Gym resource server. The three generation packages are
-independently owned offline stages that call OpenAI-compatible model endpoints and exchange durable artifacts. This
-keeps generation dependencies and prompts out of the runtime server without introducing HTTP services around a
-filesystem batch pipeline.
+Each component is a Gym `app.py` server. Generation models are configured as `responses_api_models` and referenced
+with `ModelServerRef`; resource servers communicate through `ServerClient`. The generation servers do not construct
+provider clients or read endpoint credentials.
 
 ## Artifact Flow
 
 ```text
-domain prompt
-    |
-    v
-domains.raw.jsonl + domains.accepted.jsonl
-    |
-    v
-<domain>/domain.json
-    |
-    v
-<domain>/policy.md + <domain>/tools.jsonl
-    |
-    v
-<domain>/scenarios/<model>/scenarios_*.jsonl
-    |
-    v
-build_synthetic_tool_use_dataset.py
-    |
-    v
-Gym JSONL row
-    |
-    +--> synthetic_tool_use_agent
-    |
-    +--> synthetic_tool_use_simulation
+domain generation
+  -> domains.accepted.jsonl and domains/<index>/domain.json
+policy/tool generation
+  -> domains/<index>/policy.md and tools.jsonl
+scenario generation
+  -> domains/<index>/scenarios/<model>/scenarios_*.jsonl
+pipeline materialization
+  -> Gym JSONL rows
+synthetic_tool_use_agent + synthetic_tool_use_simulation
+  -> scored rollout trajectories
 ```
 
-The shared code under [`common`](common) defines only the cross-stage artifact models, manifest store, provider client,
-parsing, and deterministic validation. Stage-specific prompts and renderers do not live in `common` and are not
-imported from another stage.
+All generation stages share a manifest-backed output directory. Completed artifacts are checked before a resumed
+stage is skipped, and every provider response or validation failure is retained under the run's `attempts` paths.
+`seed_generation.output_dir` must be an absolute path visible to every server process.
 
-## Prompt Assets
+## Configuration
 
-Each generation component owns the prompts and references it uses:
-
-- domain assets: `synthetic_tool_use_domain_generation/prompts`
-- policy/tool assets: `synthetic_tool_use_policy_tool_generation/prompts` and `references`
-- scenario assets: `synthetic_tool_use_scenario_generation/prompts`
-
-Asset hashes are recorded in each run manifest so a run identifies the exact prompt, schema, and reference set it
-used. [`test_seed_generation.py`](tests/test_seed_generation.py) checks asset loading, schema generation, prompt
-rendering, and ownership boundaries between stages.
-
-## Running
-
-There are exactly two checked-in generation configs:
+The two complete Gym server graphs are:
 
 - [`general.yaml`](configs/general.yaml)
 - [`proactive.yaml`](configs/proactive.yaml)
 
-Run the complete resumable workflow:
+Set `NVI_KEY_PROD`, or set the role-specific `DOMAIN_MODEL_API_KEY`, `POLICY_MODEL_API_KEY`, `JUDGE_MODEL_API_KEY`,
+and `SCENARIO_MODEL_API_KEY` variables. The model servers default to `https://inference-api.nvidia.com/v1`; the
+corresponding `*_MODEL_BASE_URL` variables override those endpoints.
+
+Start the proactive graph from the repository root:
 
 ```bash
-python resources_servers/synthetic_tool_use/scripts/generate_synthetic_tool_use_seeds.py \
-  --config resources_servers/synthetic_tool_use/configs/proactive.yaml \
-  --resume \
-  all \
-  --dataset-name synthetic_tool_use_proactive \
-  --output-path /tmp/synthetic_tool_use_proactive.jsonl
+gym env start "+config_paths=[resources_servers/synthetic_tool_use/configs/proactive.yaml]"
 ```
 
-Run one stage against the same manifest by replacing `all` with `domains`, `policies`, or `scenarios`. The `validate`
-and `materialize` commands do not call generation models. `--domain-start` is inclusive and `--domain-end` is
-exclusive for partitioned policy/tool and scenario workers.
+Call `synthetic_tool_use_pipeline` through `ServerClient`:
 
-## Design Documents
+```python
+import asyncio
+
+from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+
+
+async def main():
+    client = ServerClient.load_from_global_config()
+    response = await client.post(
+        server_name="synthetic_tool_use_pipeline",
+        url_path="/generate",
+        json={"stages": ["domains", "policy_tools", "scenarios"], "resume": True},
+    )
+    await raise_for_status(response)
+    print(await get_response_json(response))
+
+
+asyncio.run(main())
+```
+
+The pipeline also exposes `POST /validate` and `POST /materialize`. Each stage server exposes its own typed
+`POST /generate` route for partitioned or stage-only work; `domain_start` is inclusive and `domain_end` is exclusive.
+
+## Documentation
 
 - [Generation workflow](docs/generation.md)
 - [Rollout behavior](docs/rollout.md)

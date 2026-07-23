@@ -1,27 +1,15 @@
 # Synthetic Tool-Use Policy And Tool Generation
 
-This package owns the second stage of the [synthetic conversational tool-use pipeline](../synthetic_tool_use/README.md).
-For each accepted domain it generates and optionally refines `policy.md` and `tools.jsonl`, performs deterministic
-schema and leakage validation, and optionally runs cohesion and golden-reference judgments.
+This Gym resource server owns the second stage of the [synthetic tool-use pipeline](../synthetic_tool_use/README.md).
+Its `app.py` exposes `POST /generate` and calls configured policy/tool and judge `ModelServerRef`s.
 
-## Ownership
+The package owns:
 
-- implementation: [`stage.py`](stage.py)
-- prompt input formatting: [`rendering.py`](rendering.py)
-- profile loading: [`profiles.py`](profiles.py)
-- profiles: [`general.yaml`](profiles/general.yaml) and [`proactive.yaml`](profiles/proactive.yaml)
-- prompts: [`prompts`](prompts)
-- 16 golden policy/tool reference files: [`references/golden_policies`](references/golden_policies)
+- `app.py`: Gym server configuration and HTTP route
+- `stage.py`: generation, refinement, validation, judging, and artifact writes
+- `profiles.py` and `profiles/`: general and proactive behavior profiles
+- `rendering.py`: deterministic prompt inputs and reference sampling
+- `prompts/` and `references/`: active prompts, archived prompt iterations, and golden references
 
-The profile names describe behavior, not source domains. `general` is the baseline flow. `proactive` adds the source
-policy instruction requiring proactive confirmation. Shared judge and refinement prompts are stored once.
-
-Run this stage after domains exist in the configured output directory:
-
-```bash
-python resources_servers/synthetic_tool_use/scripts/generate_synthetic_tool_use_seeds.py \
-  --config resources_servers/synthetic_tool_use/configs/proactive.yaml \
-  --resume policies
-```
-
-The next stage is [scenario generation](../synthetic_tool_use_scenario_generation/README.md).
+Requests may select an inclusive `domain_start` and exclusive `domain_end`. Completed `policy.md` and `tools.jsonl`
+artifacts are validated before resume skips a domain.

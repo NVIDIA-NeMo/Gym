@@ -1,41 +1,139 @@
-run_name: synthetic-tool-use-general
-output_dir: /tmp/synthetic-tool-use-general
-generation_profile: general
-source_name: synthetic_tool_use_general
-random_seed: 1
+seed_generation:
+  run_name: synthetic-tool-use-general
+  output_dir: /tmp/synthetic-tool-use-general
+  generation_profile: general
+  source_name: synthetic_tool_use_general
+  random_seed: 1
 
-domain_model:
-  model: Qwen/Qwen3-235B-A22B-Thinking-2507
-  base_url: $DOMAIN_MODEL_BASE_URL
-  api_key_env: DOMAIN_MODEL_API_KEY
+  domain_model:
+    model: Qwen/Qwen3-235B-A22B-Thinking-2507
+    concurrency: 8
+    sampling:
+      temperature: 1
 
-policy_tools_model:
-  model: deepseek-ai/deepseek-r1-0528
-  base_url: $POLICY_MODEL_BASE_URL
-  api_key_env: POLICY_MODEL_API_KEY
+  policy_tools_model:
+    model: deepseek-ai/deepseek-r1-0528
+    concurrency: 8
+    sampling:
+      temperature: 1
 
-judge_model:
-  model: openai/gpt-oss-120b
-  base_url: $JUDGE_MODEL_BASE_URL
-  api_key_env: JUDGE_MODEL_API_KEY
+  judge_model:
+    model: openai/gpt-oss-120b
+    concurrency: 8
+    sampling:
+      temperature: 1
 
-scenario_model:
-  model: Qwen/Qwen3-235B-A22B-Thinking-2507
-  base_url: $SCENARIO_MODEL_BASE_URL
-  api_key_env: SCENARIO_MODEL_API_KEY
-  sampling:
-    temperature: 0.7
+  scenario_model:
+    model: Qwen/Qwen3-235B-A22B-Thinking-2507
+    concurrency: 16
+    sampling:
+      temperature: 0.7
 
-domains:
-  request_count: 100
+  domains:
+    request_count: 100
+    semantic_attempts: 2
 
-policy_tools:
-  refine: true
-  judge_enabled: true
-  golden_comparison_enabled: true
-  golden_comparison_count: 4
+  policy_tools:
+    semantic_attempts: 3
+    refine: true
+    judge_enabled: true
+    judge_votes: 3
+    judge_max_failure_fraction: 0.5
+    golden_comparison_enabled: true
+    golden_comparison_count: 4
 
-scenarios:
-  scenarios_per_request: 80
-  request_count_per_domain: 20
-  outside_policy_scope_fraction: 0.1
+  scenarios:
+    scenarios_per_request: 80
+    request_count_per_domain: 20
+    outside_policy_scope_fraction: 0.1
+    semantic_attempts: 3
+    scenarios_per_file: 3000
+
+synthetic_tool_use_pipeline:
+  resources_servers:
+    synthetic_tool_use:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Generate and materialize synthetic conversational tool-use data
+      generation: ${seed_generation}
+      domain_generation_server:
+        type: resources_servers
+        name: synthetic_tool_use_domain_generation
+      policy_tool_generation_server:
+        type: resources_servers
+        name: synthetic_tool_use_policy_tool_generation
+      scenario_generation_server:
+        type: resources_servers
+        name: synthetic_tool_use_scenario_generation
+
+synthetic_tool_use_domain_generation:
+  resources_servers:
+    synthetic_tool_use_domain_generation:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Generate customer-service domain candidates
+      generation: ${seed_generation}
+      model_server:
+        type: responses_api_models
+        name: synthetic_tool_use_domain_model
+
+synthetic_tool_use_policy_tool_generation:
+  resources_servers:
+    synthetic_tool_use_policy_tool_generation:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Generate and judge domain policies and tool schemas
+      generation: ${seed_generation}
+      model_server:
+        type: responses_api_models
+        name: synthetic_tool_use_policy_tools_model
+      judge_model_server:
+        type: responses_api_models
+        name: synthetic_tool_use_judge_model
+
+synthetic_tool_use_scenario_generation:
+  resources_servers:
+    synthetic_tool_use_scenario_generation:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Generate customer scenarios from accepted policies
+      generation: ${seed_generation}
+      model_server:
+        type: responses_api_models
+        name: synthetic_tool_use_scenario_model
+
+synthetic_tool_use_domain_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:DOMAIN_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:DOMAIN_MODEL_API_KEY,${oc.env:NVI_KEY_PROD,unset}}
+      openai_model: ${seed_generation.domain_model.model}
+
+synthetic_tool_use_policy_tools_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:POLICY_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:POLICY_MODEL_API_KEY,${oc.env:NVI_KEY_PROD,unset}}
+      openai_model: ${seed_generation.policy_tools_model.model}
+
+synthetic_tool_use_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_MODEL_API_KEY,${oc.env:NVI_KEY_PROD,unset}}
+      openai_model: ${seed_generation.judge_model.model}
+
+synthetic_tool_use_scenario_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:SCENARIO_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:SCENARIO_MODEL_API_KEY,${oc.env:NVI_KEY_PROD,unset}}
+      openai_model: ${seed_generation.scenario_model.model}

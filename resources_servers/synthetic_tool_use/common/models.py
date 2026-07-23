@@ -56,7 +56,6 @@ class GenerationMetadata(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str
-    base_url: str | None = None
     sampling: dict[str, Any] = Field(default_factory=dict)
     prompt_name: str | None = None
     prompt_sha256: str | None = None
@@ -136,10 +135,14 @@ class CustomerScenarioArtifact(BaseModel):
 
 
 class ModelRoleConfig(BaseModel):
+    """Generation behavior and model provenance for one pipeline role.
+
+    Transport belongs to the Gym model server referenced by each stage app. Keeping
+    endpoint URLs and credentials out of this model makes the run manifest portable
+    and prevents the generation stages from bypassing Gym's server graph.
+    """
+
     model: str
-    base_url: str
-    api_key_env: str = "OPENAI_API_KEY"
-    timeout_seconds: float = Field(default=600.0, gt=0)
     provider_attempts: int = Field(default=3, ge=1)
     retry_initial_backoff_seconds: float = Field(default=1.0, ge=0)
     retry_max_backoff_seconds: float = Field(default=30.0, ge=0)
@@ -184,6 +187,29 @@ class SeedGenerationConfig(BaseModel):
     domains: DomainStageConfig = Field(default_factory=DomainStageConfig)
     policy_tools: PolicyToolsStageConfig = Field(default_factory=PolicyToolsStageConfig)
     scenarios: ScenarioStageConfig = Field(default_factory=ScenarioStageConfig)
+
+    @field_validator("output_dir")
+    @classmethod
+    def require_absolute_output_dir(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("output_dir must be absolute so every generation server shares the same run directory")
+        return value
+
+
+class StageGenerationRequest(BaseModel):
+    resume: bool = True
+    domain_start: int | None = Field(default=None, ge=0)
+    domain_end: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_domain_range(self) -> StageGenerationRequest:
+        if self.domain_start is not None and self.domain_end is not None and self.domain_end <= self.domain_start:
+            raise ValueError("domain_end must be greater than domain_start")
+        return self
+
+
+class StageGenerationResponse(BaseModel):
+    report: dict[str, Any]
 
 
 class StageStatus(BaseModel):
@@ -230,12 +256,6 @@ class RunManifest(BaseModel):
         asset_hashes: dict[str, str] | None = None,
     ) -> RunManifest:
         asset_hashes = dict(sorted((asset_hashes or {}).items()))
-        non_secret_config = config.model_dump(mode="json")
-        for role_name in ("domain_model", "policy_tools_model", "judge_model", "scenario_model"):
-            role = non_secret_config.get(role_name)
-            if role:
-                role.pop("api_key_env", None)
-                role.pop("base_url", None)
         return cls(
             run_id=canonical_hash(
                 {
@@ -251,6 +271,6 @@ class RunManifest(BaseModel):
             generation_profile=config.generation_profile,
             code_revision=config.code_revision,
             random_seed=config.random_seed,
-            config=non_secret_config,
+            config=config.model_dump(mode="json"),
             asset_hashes=asset_hashes,
         )

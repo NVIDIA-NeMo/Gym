@@ -104,6 +104,13 @@ class RunArtifactStore:
     def load_manifest(self) -> RunManifest:
         return RunManifest.model_validate_json(self.manifest_path.read_text(encoding="utf-8"))
 
+    def select_source_indexes(self, start: int | None, end: int | None) -> set[int] | None:
+        if start is None and end is None:
+            return None
+        lower = 0 if start is None else start
+        upper = float("inf") if end is None else end
+        return {entry.source_index for entry in self.load_manifest().domains if lower <= entry.source_index < upper}
+
     def save_manifest(self, manifest: RunManifest) -> None:
         manifest.updated_at = utc_now()
         with self._manifest_lock():
