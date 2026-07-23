@@ -37,9 +37,9 @@ MOUNTS=/lustre:/lustre \
 sbatch \
     --nodes=4 \
     --account=nemotron_n4_post \
-    --partition=short \
+    --partition=batch \
     --gres=gpu:4 \
-    --time=00:15:00 \
+    --time=04:00:00 \
     --job-name=vllm-$USER \
     --exclusive \
     scripts/sbatch_base.sh bash -lc "$command"
