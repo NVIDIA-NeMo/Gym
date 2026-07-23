@@ -57,6 +57,27 @@ def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
     return [directory] if (config.token_id_capture_enabled and directory is not None) else []
 
 
+def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Path]) -> None:
+    """Remove stale token records for rollouts about to be dispatched.
+
+    Rollout ids are deterministic and ``TokenCaptureStore.append`` opens in "ab"
+    mode, so a rerun that reuses an id would append onto the previous attempt's
+    records and the builder would stitch two attempts into one trajectory. The
+    caller passes only the rows being dispatched, after any retry suffix has been
+    assigned.
+    """
+    if not token_capture_dirs:
+        return
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+
+    for directory in token_capture_dirs:
+        store = TokenCaptureStore(directory)
+        for record in records:
+            rollout_id = maybe_rollout_id_from_run_body(record)
+            if rollout_id:
+                store.delete(rollout_id)
+
+
 def _assemble(
     rollout_id: str,
     entries: list[TokenEntry],

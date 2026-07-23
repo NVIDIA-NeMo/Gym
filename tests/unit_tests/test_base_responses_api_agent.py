@@ -39,3 +39,36 @@ class TestBaseResponsesAPIAgent:
 
         agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
+
+    def _agent(self, global_config: dict, *, token_id_capture: bool = False) -> SimpleResponsesAPIAgent:
+        config = BaseResponsesAPIAgentConfig(
+            host="", port=0, entrypoint="", name="", token_id_capture=token_id_capture
+        )
+
+        class _Agent(SimpleResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+            async def run(self, body=...):
+                raise NotImplementedError
+
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = global_config
+        return _Agent(config=config, server_client=client)
+
+    def test_eval_capture_prefix_applies_to_every_agent(self) -> None:
+        # Eval capture (observability_enabled) correlates every agent, regardless of the per-agent
+        # token-capture opt-in.
+        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+        assert self._agent({}).rollout_id_from_run(body) is None
+        assert self._agent({"observability_enabled": True}).rollout_id_from_run(body) == "0-0"
+
+    def test_token_capture_prefix_is_scoped_to_participating_agents(self) -> None:
+        # Training token capture correlates a call only when the run-level switch is on AND the agent
+        # opted in -- native agents (opt-out) carry token ids inline and must not be correlated here.
+        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+        gc = {"token_id_capture_enabled": True}
+        assert self._agent(gc, token_id_capture=False).rollout_id_from_run(body) is None
+        assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
+        # The run-level switch is still required: opting in alone does nothing.
+        assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
