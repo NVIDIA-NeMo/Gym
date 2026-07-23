@@ -137,13 +137,11 @@ _EXTERNAL_AGENT_RETRY_SLEEP_SECS = 0.5
 # Aggregate metrics is a best-effort, post-collection call; keep its bound fixed.
 _EXTERNAL_AGGREGATE_TIMEOUT_SECS = 600.0
 _DEFAULT_AGENT_RUN_TIMEOUT_SECS = 1800.0
-# Last-resort per-host limit, used by _effective_per_host_connection_limit() only when
-# neither the live client nor the run's global config can be consulted. Derived from the
-# config model so it cannot drift from the default.
+# Last resort when neither the live client nor the run's global config is available;
+# derived from the config model so it cannot drift from the default.
 _FALLBACK_PER_HOST_CONNECTION_LIMIT = GlobalAIOHTTPAsyncClientConfig().global_aiohttp_connector_limit_per_host
 
-# Log every external /run failure for the first few, then sample: a down agent at high
-# concurrency would otherwise print once per pending row and garble the progress bar.
+# Sample failure logs: a down agent at high concurrency would otherwise print per row.
 _NUM_EXTERNAL_AGENT_FAILURES = 0
 _EXTERNAL_AGENT_FAILURE_PRINT_HEAD = 5
 _EXTERNAL_AGENT_FAILURE_PRINT_INTERVAL = 100
@@ -155,16 +153,14 @@ def _normalize_agent_url(url: str) -> str:
     parsed = urlparse(normalized)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError(f"agent_url must be an absolute http:// or https:// URL, got {url!r}")
-    # "/run" is appended to this URL by string concatenation; anything at or after a "?" or
-    # "#" (even a bare delimiter, which urlparse reports as an empty query/fragment) would
-    # swallow "/run" into the query/fragment and the POST would hit the server root instead.
+    # "/run" is string-appended; anything after "?" or "#" would swallow it (bare
+    # delimiters parse as an empty query/fragment, so check the string itself).
     if "?" in normalized or "#" in normalized or parsed.params:
         raise ValueError(
             f"agent_url must not carry a query string or fragment, got {url!r}. "
             "Pass auth material via your agent's own configuration instead."
         )
-    # user:pass@ credentials would be stamped into agent_ref on every artifact row and into
-    # wandb metric labels. The error deliberately does not echo the URL (it holds the secret).
+    # Credentials would be stamped into every artifact row and wandb label; never echo the URL.
     if parsed.username or parsed.password:
         raise ValueError(
             "agent_url must not embed credentials (user:pass@host). "
@@ -199,8 +195,7 @@ def _effective_per_host_connection_limit() -> Optional[int]:
         except Exception:
             return _FALLBACK_PER_HOST_CONNECTION_LIMIT
         return limit if limit > 0 else None  # aiohttp uses 0 to mean unlimited
-    # Only consult the config if it is already loaded — get_global_config_dict() would
-    # otherwise trigger a CLI parse (and sys.exit) in non-CLI processes.
+    # get_global_config_dict() would trigger a CLI parse (and sys.exit) in non-CLI processes.
     if not is_global_config_dict_set():
         return _FALLBACK_PER_HOST_CONNECTION_LIMIT
     try:
@@ -233,16 +228,14 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
     last_connect_error: Optional[BaseException] = None
     for num_try in range(1, _EXTERNAL_AGENT_MAX_TRIES + 1):
         try:
-            # allow_redirects=False: aiohttp turns a redirected POST into a body-less GET;
-            # better to fail loudly with the 3xx status than silently dispatch nothing.
+            # aiohttp follows a redirected POST as a body-less GET; fail with the 3xx instead.
             response = await client.request(
                 "POST", run_url, data=data, headers=headers, timeout=timeout, allow_redirects=False
             )
             break
         except (ClientOSError, ServerDisconnectedError) as e:
-            # ClientOSError covers connection-refused (ClientConnectorError subclasses it) and
-            # mid-send resets (ECONNRESET) — the repo's documented steady-state noise at high
-            # concurrency; ServerDisconnectedError covers keepalive-reuse races.
+            # Refused/reset (ClientOSError) and keepalive races (ServerDisconnectedError)
+            # are transient connection noise at high concurrency.
             last_connect_error = e
             if num_try < _EXTERNAL_AGENT_MAX_TRIES:
                 await asyncio.sleep(_EXTERNAL_AGENT_RETRY_SLEEP_SECS)
@@ -261,15 +254,13 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
             f"({type(last_connect_error).__name__}: {last_connect_error}). Is your agent running at this URL?",
         )
 
-    # client.request() returns once response HEADERS arrive; the body read below can still
-    # raise (ClientPayloadError on a mid-body disconnect, TimeoutError if the total deadline
-    # expires while streaming) and must honor the same never-raise contract.
+    # client.request() returns once headers arrive; the body read can still raise
+    # (mid-body disconnect, deadline) and must honor the same never-raise contract.
     try:
         content = await response.read()
     except Exception as e:
         return _external_agent_failure_result(run_url, f"reading the response body failed: {type(e).__name__}: {e}")
-    # aiohttp's response.ok is `status < 400`, so 3xx must be rejected explicitly — redirects
-    # are not followed (a followed redirect would silently turn the POST into a body-less GET).
+    # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
     if not response.ok or response.status >= 300:
         location = response.headers.get("Location", "")
         return _external_agent_failure_result(
@@ -286,9 +277,8 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
         return _external_agent_failure_result(
             run_url, f"expected a JSON object from /run, got {type(result).__name__}"
         )
-    # A "success" missing reward/response would be written to the main jsonl and crash later
-    # readers (profiling reads result["response"]). Failure rows reported via the sentinel
-    # keys legitimately carry no reward, so they are exempt.
+    # A success missing reward/response crashes later readers (profiling reads
+    # result["response"]); sentinel failure rows legitimately carry no reward.
     if result.get(NG_FAILURE_CLASS_KEY) is None and not result.get(NG_NO_PERSIST_KEY):
         missing_keys = [key for key in ("reward", "response") if key not in result]
         if missing_keys:
@@ -298,8 +288,7 @@ async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, 
                 "a verify-response-shaped object with at least 'reward' (float) and 'response' (the "
                 "Responses API response object)",
             )
-        # Presence is not enough: "response": null or a non-dict passes `in` but crashes
-        # profiling/aggregation later, and a null reward corrupts metrics.
+        # "response": null or a non-dict passes `in` but crashes profiling/aggregation.
         if not isinstance(result["response"], dict) or not isinstance(result["reward"], (int, float)):
             return _external_agent_failure_result(
                 run_url,
@@ -430,8 +419,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     ```
     """
 
-    # Validation errors must not echo raw input: agent_url may carry credentials the
-    # user was told not to embed, and the error itself would print them to the terminal.
+    # Validation errors must not echo raw input — agent_url may carry credentials.
     model_config = ConfigDict(hide_input_in_errors=True)
 
     agent_name: Optional[str] = Field(
@@ -572,8 +560,7 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Repeating rows {fixed_num_repeats} times (in a pattern of abc to aabbcc)!")
         else:
             fixed_num_repeats = None
-            # URL keys get the same strip/rstrip("/") normalization as agent_url and row refs,
-            # so the exact string a user passed to +agent_url always matches its dict entry.
+            # Normalize URL keys like agent_url, so the same string matches its dict entry.
             per_agent_repeats = {
                 (k.strip().rstrip("/") if isinstance(k, str) and k.startswith(("http://", "https://")) else k): v
                 for k, v in config.num_repeats.items()
@@ -627,8 +614,7 @@ class RolloutCollectionHelper(BaseModel):
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
-        # The first tuple element is the limit counter (all zeros when no limit is set) —
-        # data_row_idx is the row's real position for error messages.
+        # The tuple's first element is the limit counter (zeros without a limit); errors use the real position.
         for data_row_idx, (_, row_str, row) in enumerate(raw_rows):
             # Resolve the agent identity. Missing agent_ref is a hard error reported in
             # bulk after the loop; skip the row immediately so the rest of the
@@ -646,8 +632,7 @@ class RolloutCollectionHelper(BaseModel):
                         f"Row {data_row_idx} agent_ref carries both 'name' and 'url' ({agent_ref!r}); "
                         "an agent ref must be exactly one of the two."
                     )
-                # A dataset must not be able to route rows (and their answer keys) to an
-                # arbitrary host: row-level urls are honored only when they match +agent_url.
+                # A dataset must not be able to route rows (and answer keys) to an arbitrary host.
                 normalized_row_url = _normalize_agent_url(str(row_url))
                 if normalized_row_url != config.agent_url:
                     raise ValueError(
@@ -803,10 +788,8 @@ class RolloutCollectionHelper(BaseModel):
                 result_strs,
             ) = self._load_from_cache(config)
 
-            # Named refs re-resolve to host:port at request time, so they survive server restarts
-            # across resume hops. URL refs are frozen into the materialized inputs — re-stamp them
-            # from config so a changed +agent_url redirects the remaining rows instead of silently
-            # dispatching to the old address.
+            # Named refs re-resolve at request time; URL refs are frozen into the materialized
+            # inputs — re-stamp so a changed +agent_url redirects the pending rows.
             if config.agent_url:
 
                 def _restamp_url_rows(url_rows: List[Dict]) -> int:
@@ -819,9 +802,8 @@ class RolloutCollectionHelper(BaseModel):
                     return num_changed
 
                 num_restamped = _restamp_url_rows(input_rows)
-                # Completed rows keep their historical refs in the on-disk artifacts, but these
-                # in-memory copies drive aggregate-metrics grouping — re-key them too so one live
-                # agent aggregates all hops instead of POSTing hop-1 metrics to the dead old URL.
+                # Re-key completed rows too: their in-memory copies drive aggregation grouping
+                # (on-disk artifacts keep their historical refs).
                 num_completed_rekeyed = _restamp_url_rows(rows)
                 if num_restamped or num_completed_rekeyed:
                     print(
@@ -829,9 +811,8 @@ class RolloutCollectionHelper(BaseModel):
                         f"to agent_url={config.agent_url}"
                     )
             else:
-                # Fresh runs validate every row URL against +agent_url; resume applies the same
-                # rule. Completed rows count too: even with nothing left to dispatch,
-                # aggregation would POST result payloads to the frozen URL.
+                # Same row-URL rule as fresh runs; completed rows count too, since aggregation
+                # would POST result payloads to the frozen URL.
                 frozen_urls = sorted(
                     {
                         agent_ref["url"]
@@ -868,17 +849,14 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
-            # A stale sidecar from a previous fresh run would pre-consume resume retry
-            # attempts for this run's task/rollout keys.
+            # A stale sidecar would pre-consume this run's resume retry attempts.
             _failures_path_for(output_fpath).unlink(missing_ok=True)
 
         num_concurrent_samples = config.num_samples_in_parallel
 
-        # Every request to a single agent_url shares one per-host connection pool, and time
-        # spent waiting for a connection counts against agent_run_timeout_secs — dispatching
-        # beyond the pool limit converts queue wait into spurious timeouts.
-        # NOTE: the semaphore below gates ALL rows, so in a mixed named+url run the cap also
-        # bounds named-agent dispatch — a deliberate, conservative simplification.
+        # agent_url traffic shares one per-host connection pool, and queue wait counts
+        # against agent_run_timeout_secs — cap concurrency at the pool limit. The semaphore
+        # gates ALL rows, so mixed named+url runs are conservatively capped too.
         has_url_rows = any(_is_external_url_ref(row.get(AGENT_REF_KEY_NAME)) for row in input_rows)
         if has_url_rows:
             per_host_limit = _effective_per_host_connection_limit()
@@ -1013,10 +991,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         if not results:
             return None
 
-        # Group results by agent identity (server name, or URL for external agents).
-        # Failure/no-persist rows live in the sidecar, not the main jsonl — exclude them here so
-        # in-run aggregation computes over the same rows `gym eval aggregate` would read back,
-        # and so /aggregate_metrics never receives reward-less failure stubs.
+        # Group by agent identity, excluding failure/no-persist rows: they live in the
+        # sidecar, and /aggregate_metrics must not receive reward-less stubs.
         agent_results: Dict[str, List[Dict]] = {}
         agent_refs: Dict[str, Dict] = {}
         for row, result in zip(rows, results):
@@ -1032,9 +1008,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             print("No successful rollouts to aggregate; skipping aggregate metrics.")
             return None
 
-        # A ServerClient requires a live head server; only construct one if some agent needs
-        # name resolution (name-first, matching row_agent_key: a ref carrying both keys is a
-        # named agent). Pure agent_url runs work with no Gym servers.
+        # Construct a ServerClient (needs a live head server) only if a named ref needs
+        # resolution; URL-only runs need no Gym servers.
         needs_named = any(ref.get("name") or not ref.get("url") for ref in agent_refs.values())
         server_client = self.setup_server_client() if needs_named else None
 

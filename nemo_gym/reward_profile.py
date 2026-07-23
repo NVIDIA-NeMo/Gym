@@ -223,12 +223,10 @@ class RewardProfiler:
             # Add additional helpful information
             result = result | (result["response"].get("usage") or {})
 
-            # agent_name is a temporary column used for aggregations below; it holds the
-            # agent identity string (server name, or URL for external agents)
+            # agent_name is a temporary column used for aggregations below
             agent_key = row_agent_key(row)
             if agent_key is None:
-                # pandas groupby silently drops None keys — these rollouts would vanish from
-                # agent-level metrics with no error.
+                # pandas groupby silently drops None keys — the rollouts would vanish from metrics.
                 raise ValueError(
                     f"Rollout row (task_index={row.get(TASK_INDEX_KEY_NAME)}, "
                     f"rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}) carries no usable agent_ref "
