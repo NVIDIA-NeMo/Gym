@@ -22,6 +22,7 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 if (( $# == 0 )); then
     # If there are no arguments provided, then we just block forever so the Ray cluster stays up.
     args="sleep infinity"
+    mkdir -p slurm-attach
     cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
 srun --no-container-mount-home \
     -A $SLURM_JOB_ACCOUNT \
@@ -35,7 +36,7 @@ srun --no-container-mount-home \
     --jobid $SLURM_JOB_ID \
     --pty bash
 EOF
-    echo "No arguments were provided to this script. Run 'slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
+    echo "No arguments were provided to this script. Run 'bash slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
 else
     args="$@"
 fi
