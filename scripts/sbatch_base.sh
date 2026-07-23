@@ -6,6 +6,9 @@
 
 set -euo pipefail
 
+# Input arguments and validation
+CONTAINER=$CONTAINER
+
 # Get the Ray head node IP
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
@@ -26,6 +29,7 @@ if (( $# == 0 )); then
     cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
 srun -A $SLURM_JOB_ACCOUNT \
     -p $SLURM_JOB_PARTITION \
+    --container-name=container-on-node \
     --overlap \
     --nodes=1 \
     --ntasks=1 \
@@ -41,6 +45,8 @@ fi
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
+    --container-image=$CONTAINER \
+    --container-name=container-on-node \
     bash -lc '
         echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
         cd $SLURM_SUBMIT_DIR
