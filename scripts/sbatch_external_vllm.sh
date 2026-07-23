@@ -6,7 +6,7 @@ pip install ray==2.55.1
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \
     --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.9 \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
     --data-parallel-size 4 \
@@ -31,9 +31,9 @@ EOF
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
 sbatch \
-    --nodes=4 \
+    --nodes=2 \
     --account=nemotron_evals_research \
-    --partition=batch \
+    --partition=interactive \
     --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=vllm-$USER \
