@@ -134,9 +134,13 @@ _EXTERNAL_AGENT_RETRY_SLEEP_SECS = 0.5
 # Aggregate metrics is a best-effort, post-collection call; keep its bound fixed.
 _EXTERNAL_AGGREGATE_TIMEOUT_SECS = 600.0
 _DEFAULT_AGENT_RUN_TIMEOUT_SECS = 1800.0
-# Used only when the live client's connector cannot be inspected (e.g. mocked in tests);
-# matches GlobalAIOHTTPAsyncClientConfig.global_aiohttp_connector_limit_per_host's default.
-_FALLBACK_PER_HOST_CONNECTION_LIMIT = 1024
+# The per-host limit the shared client will carry once lazily initialized. Returned by
+# _effective_per_host_connection_limit() before the client exists — the NORMAL case for CLI
+# runs, since run_from_config's concurrency-cap check runs before the first request creates
+# the client — and when a live client's connector cannot be inspected. Derived from the
+# config model so it cannot drift from the default; a per-run override of
+# global_aiohttp_connector_limit_per_host is not visible before initialization.
+_FALLBACK_PER_HOST_CONNECTION_LIMIT = GlobalAIOHTTPAsyncClientConfig().global_aiohttp_connector_limit_per_host
 
 # Log every external /run failure for the first few, then sample: a down agent at high
 # concurrency would otherwise print once per pending row and garble the progress bar.
@@ -151,8 +155,10 @@ def _normalize_agent_url(url: str) -> str:
     parsed = urlparse(normalized)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError(f"agent_url must be an absolute http:// or https:// URL, got {url!r}")
-    if parsed.query or parsed.fragment or parsed.params:
-        # "/run" is appended to this URL; a query/fragment would swallow it into the query string.
+    # "/run" is appended to this URL by string concatenation; anything at or after a "?" or
+    # "#" (even a bare delimiter, which urlparse reports as an empty query/fragment) would
+    # swallow "/run" into the query/fragment and the POST would hit the server root instead.
+    if "?" in normalized or "#" in normalized or parsed.params:
         raise ValueError(
             f"agent_url must not carry a query string or fragment, got {url!r}. "
             "Pass auth material via your agent's own configuration instead."
@@ -302,9 +308,11 @@ async def _post_external_aggregate_metrics(
 
 
 def _agent_metric_label(agent_ref: Dict[str, Any]) -> str:
-    """Label used in metric key names. wandb treats '/' and ':' as structure, so URL agents
-    are reduced to a `host_port[_path]` label; the untouched ref still identifies them in
-    artifacts. The path is included so two agents behind one gateway keep distinct labels."""
+    """Label embedded between '/' separators in wandb metric keys. wandb sections metric
+    names on '/', so a raw URL would inject bogus nesting levels; ':' is replaced purely for
+    a clean flat label. URL agents reduce to `host_port[_path]` — the path is included so two
+    agents behind one gateway keep distinct labels. The untouched ref still identifies them
+    in artifacts."""
     url = agent_ref.get("url")
     if url:
         parsed = urlparse(url)
@@ -811,7 +819,7 @@ class RolloutCollectionHelper(BaseModel):
         # Every request to a single agent_url shares one per-host connection pool, and time
         # spent waiting for a connection counts against agent_run_timeout_secs — dispatching
         # beyond the pool limit converts queue wait into spurious timeouts.
-        has_url_rows = not all((row.get(AGENT_REF_KEY_NAME) or {}).get("url") is None for row in input_rows)
+        has_url_rows = any((row.get(AGENT_REF_KEY_NAME) or {}).get("url") for row in input_rows)
         if has_url_rows:
             per_host_limit = _effective_per_host_connection_limit()
             if per_host_limit is not None and (num_concurrent_samples or per_host_limit + 1) > per_host_limit:
@@ -837,6 +845,8 @@ class RolloutCollectionHelper(BaseModel):
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(map(row_agent_key, input_rows))
+        num_failures_this_run = 0
+        num_no_persist_this_run = 0
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         for future in self.run_examples(
@@ -861,10 +871,11 @@ class RolloutCollectionHelper(BaseModel):
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
                 # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
+                num_no_persist_this_run += 1
             elif failure_class is not None:
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
+                num_failures_this_run += 1
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -910,6 +921,14 @@ class RolloutCollectionHelper(BaseModel):
         else:
             print("Computing aggregate metrics")
             aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+
+        if num_failures_this_run or num_no_persist_this_run:
+            print(
+                f"WARNING: {num_failures_this_run} rollout(s) failed this run (full error rows in "
+                f"{failures_fpath}) and {num_no_persist_this_run} were dropped without a record; "
+                "the outputs below cover fewer rollouts than were dispatched. Re-run with "
+                "+resume_from_cache=true to retry."
+            )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}

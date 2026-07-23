@@ -1929,3 +1929,114 @@ class TestExternalAgentEdgeCases:
         assert entries[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
         assert mock_server_client.post.call_args.kwargs["server_name"] == "my_agent"
         url_client.request.assert_not_called()
+
+
+class TestOwedFixes:
+    """Pins for the review-follow-up fixes: malformed refs, bare URL delimiters, failure summary."""
+
+    @pytest.mark.parametrize(
+        "bad_ref",
+        [None, {}, {"name": None}, "not-a-dict", ["not", "a", "dict"], 5],
+        ids=["null", "empty-dict", "name-null", "str-ref", "list-ref", "int-ref"],
+    )
+    def test_preprocess_malformed_ref_raises_bulk_missing_agent(self, tmp_path: Path, bad_ref) -> None:
+        # Every malformed shape must hit the consolidated missing-agent error — never an
+        # AttributeError mid-loop (the pre-agent_url code crashed on truthy non-dict refs).
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: bad_ref}) + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl")
+        )
+        with pytest.raises(ValueError, match="No agent specified for rows"):
+            RolloutCollectionHelper()._preprocess_rows_from_config(config)
+
+    @pytest.mark.parametrize(
+        "bad_url", ["http://h:9000?", "http://h:9000#", "http://h:9000?x=1", "http://h:9000#frag"]
+    )
+    def test_agent_url_bare_or_full_delimiters_rejected(self, bad_url: str) -> None:
+        with pytest.raises(ValidationError, match="query string or fragment"):
+            RolloutCollectionConfig(agent_url=bad_url, input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl")
+
+    def test_fallback_limit_matches_config_default(self) -> None:
+        from nemo_gym.rollout_collection import _FALLBACK_PER_HOST_CONNECTION_LIMIT
+        from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig
+
+        assert (
+            _FALLBACK_PER_HOST_CONNECTION_LIMIT
+            == GlobalAIOHTTPAsyncClientConfig().global_aiohttp_connector_limit_per_host
+        )
+
+    async def test_end_of_run_failure_summary_printed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run(request: Request):
+            row = await request.json()
+            if row.get("x") == "fail":
+                return JSONResponse(status_code=500, content={"detail": "boom"})
+            return {"reward": 1.0, "response": {"usage": {}}}
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_EXTERNAL_AGENT_RETRY_SLEEP_SECS", 0)
+
+        input_fpath = tmp_path / "input.jsonl"
+        rows = [
+            {"responses_create_params": {"input": []}, "x": "ok"},
+            {"responses_create_params": {"input": []}, "x": "fail"},
+        ]
+        input_fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+            num_samples_in_parallel=2,
+        )
+
+        class NoServerClientHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                raise AssertionError("pure agent_url runs must not construct a ServerClient")
+
+        await NoServerClientHelper().run_from_config(config)
+
+        out = capsys.readouterr().out
+        assert "WARNING: 1 rollout(s) failed this run" in out
+        assert "rollouts_failures.jsonl" in out
+
+    async def test_no_failure_summary_when_all_succeed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from fastapi import FastAPI
+
+        app = FastAPI()
+
+        @app.post("/run")
+        async def run():
+            return {"reward": 1.0, "response": {"usage": {}}}
+
+        adapter = _ExternalAgentASGIAdapter(app)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_aiohttp_client", lambda: adapter)
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            agent_url="http://localhost:9000",
+            upload_rollouts_to_wandb=False,
+        )
+
+        class NoServerClientHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                raise AssertionError("pure agent_url runs must not construct a ServerClient")
+
+        await NoServerClientHelper().run_from_config(config)
+        assert "WARNING:" not in capsys.readouterr().out
