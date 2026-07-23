@@ -49,7 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
@@ -936,7 +936,9 @@ _TASK_METADATA_FIELDS = (
     "rubric_json",
     "rubric_pretty",
     "instance_id",
+    "_ng_task_index",
     "_ng_rollout_index",
+    "_ng_attempt_index",
 )
 
 
@@ -1036,20 +1038,21 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
     # -- helpers ----------------------------------------------------------
 
-    def _get_model_base_url(self) -> str:
+    def _get_model_base_url(self, rollout_id: Optional[str] = None) -> str:
         from nemo_gym.global_config import get_first_server_config_dict
         from nemo_gym.server_utils import ServerClient
 
         global_config_dict = ServerClient.load_from_global_config().global_config_dict
         model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
 
     # -- /v1/responses ----------------------------------------------------
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         task_info = self.task_strategy.extract_task_info(body.metadata)
 
-        model_base_url = self._get_model_base_url()
+        model_base_url = self._get_model_base_url(self.rollout_id_from_run(body.metadata))
 
         if self.config.task == "gdpval":
             system_prompt = None
@@ -1180,10 +1183,16 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             for key in _TASK_METADATA_FIELDS:
                 top_value = body_dict.get(key)
                 meta_value = existing_metadata.get(key)
+                if key in ("_ng_task_index", "_ng_attempt_index") and not self._model_call_capture_enabled():
+                    continue
+                if key.startswith("_ng_") and top_value is not None:
+                    existing_metadata[key] = str(top_value)
+                    continue
                 if top_value is not None and meta_value is None:
                     existing_metadata[key] = top_value
                 elif meta_value is not None and top_value is None:
                     body_dict[key] = meta_value
+            rollout_id = self.rollout_id_from_run(body_dict)
             update: Dict[str, Any] = {"metadata": existing_metadata}
             if fixed_params.tool_choice is None:
                 update["tool_choice"] = "auto"
@@ -1388,6 +1397,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
             verify_request_body = dict(body_dict)
             verify_request_body["response"] = response_clean.model_dump(mode="json")
+            if rollout_id is not None:
+                verify_request_body["rollout_id"] = rollout_id
             if deliverables_dir is not None:
                 verify_request_body["deliverables_dir"] = deliverables_dir
             # Surface the agent's runtime metadata for downstream logging.

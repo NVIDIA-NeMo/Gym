@@ -103,6 +103,9 @@ class TestIterRefRepeatDirs:
 
 
 class TestApp:
+    def test_rollout_id_is_absent_when_correlation_is_disabled(self) -> None:
+        assert "rollout_id" not in _verify_request().model_dump()
+
     def test_sanity_rubric(self) -> None:
         _server(reward_mode="rubric")
 
@@ -241,7 +244,7 @@ class TestApp:
             captured.update(kwargs)
             return 0.5, {"overall_score": 0.5}
 
-        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], rollout_id="7-3")
 
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
@@ -259,7 +262,7 @@ class TestApp:
         assert judges[0].create_overrides == {"reasoning_effort": "medium"}
         assert judges[2].weight == 2.0
         # All share the single proxy base_url.
-        assert {j.base_url for j in judges} == {"http://localhost:9999/v1"}
+        assert {j.base_url for j in judges} == {"http://localhost:9999/ng-rollout/7-3/v1"}
         # A seeded rng is threaded through for reproducible sampling.
         assert captured["rng"] is not None
 
