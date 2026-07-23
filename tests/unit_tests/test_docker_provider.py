@@ -23,6 +23,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
+    SandboxResourceUsage,
     SandboxSpec,
     SandboxStatus,
 )
@@ -188,6 +189,95 @@ def test_redact_argv() -> None:
     assert "SECRET=***" in red
     assert "PLAIN" in red  # no '=' -> left untouched
     assert red[:2] == [FAKE_BINARY, "run"]
+
+
+def test_read_host_cgroup_usage_v2(tmp_path: Path) -> None:
+    container_id = "b" * 64
+    proc_root = tmp_path / "123"
+    mount_root = tmp_path / "cgroup"
+    cgroup_path = f"/docker/{container_id}"
+    cgroup = mount_root / cgroup_path.lstrip("/")
+    cgroup.mkdir(parents=True)
+    proc_root.mkdir()
+    (proc_root / "cgroup").write_text(f"0::{cgroup_path}\n")
+    (cgroup / "cpu.stat").write_text("user_usec 1\nusage_usec 3250000\nsystem_usec 2\n")
+    (cgroup / "memory.peak").write_text("536870912\n")
+
+    assert docker_provider._read_host_cgroup_usage(
+        proc_root,
+        container_id,
+        mount_root,
+    ) == SandboxResourceUsage(
+        cpu_time_s=3.25,
+        peak_memory_mib=512,
+        source="docker_host_cgroup_v2",
+    )
+    assert (
+        docker_provider._read_host_cgroup_usage(
+            proc_root,
+            "c" * 64,
+            mount_root,
+        )
+        == SandboxResourceUsage()
+    )
+
+
+def test_read_host_cgroup_usage_v1(tmp_path: Path) -> None:
+    container_id = "d" * 64
+    proc_root = tmp_path / "456"
+    mount_root = tmp_path / "cgroup"
+    cgroup_path = f"/docker/{container_id}"
+    cpu = mount_root / "cpu,cpuacct" / cgroup_path.lstrip("/")
+    memory = mount_root / "memory" / cgroup_path.lstrip("/")
+    cpu.mkdir(parents=True)
+    memory.mkdir(parents=True)
+    proc_root.mkdir()
+    (proc_root / "cgroup").write_text(f"2:cpu,cpuacct:{cgroup_path}\n3:memory:{cgroup_path}\n")
+    (cpu / "cpuacct.usage").write_text("2500000000\n")
+    (memory / "memory.max_usage_in_bytes").write_text("1048576\n")
+
+    assert docker_provider._read_host_cgroup_usage(proc_root, container_id, mount_root) == SandboxResourceUsage(
+        cpu_time_s=2.5,
+        peak_memory_mib=1,
+        source="docker_host_cgroup_v1",
+    )
+
+
+def test_read_host_cgroup_usage_hybrid_ignores_unrelated_unified_scope(tmp_path: Path) -> None:
+    container_id = "f" * 64
+    proc_root = tmp_path / "456"
+    mount_root = tmp_path / "cgroup"
+    cgroup_path = f"/docker/{container_id}"
+    cpu = mount_root / "cpu,cpuacct" / cgroup_path.lstrip("/")
+    memory = mount_root / "memory" / cgroup_path.lstrip("/")
+    cpu.mkdir(parents=True)
+    memory.mkdir(parents=True)
+    proc_root.mkdir()
+    (proc_root / "cgroup").write_text(f"0::/system.slice\n2:cpu,cpuacct:{cgroup_path}\n3:memory:{cgroup_path}\n")
+    unrelated_unified = mount_root / "system.slice"
+    unrelated_unified.mkdir()
+    (unrelated_unified / "cpu.stat").write_text("usage_usec 999000000\n")
+    (unrelated_unified / "memory.peak").write_text("999999999\n")
+    (cpu / "cpuacct.usage").write_text("1250000000\n")
+    (memory / "memory.max_usage_in_bytes").write_text("2097152\n")
+
+    assert docker_provider._read_host_cgroup_usage(proc_root, container_id, mount_root) == SandboxResourceUsage(
+        cpu_time_s=1.25,
+        peak_memory_mib=2,
+        source="docker_host_cgroup_v1",
+    )
+
+
+def test_read_host_cgroup_usage_returns_unavailable_for_missing_or_unsafe_paths(tmp_path: Path) -> None:
+    container_id = "e" * 64
+    assert docker_provider._read_host_cgroup_usage(tmp_path / "missing", container_id) == SandboxResourceUsage()
+
+    proc_root = tmp_path / "789"
+    proc_root.mkdir()
+    (proc_root / "cgroup").write_text(f"0::/../../{container_id}\n")
+    assert (
+        docker_provider._read_host_cgroup_usage(proc_root, container_id, tmp_path / "cgroup") == SandboxResourceUsage()
+    )
 
 
 def test_constructor_requires_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -656,6 +746,48 @@ async def test_status_timeout_is_unknown(fake_binary: str, monkeypatch: pytest.M
 
     provider, _rec = _make_provider(monkeypatch, responder)
     assert await provider.status(_make_handle()) is SandboxStatus.UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# resource usage
+# --------------------------------------------------------------------------- #
+async def test_resource_usage_reads_container_cgroup(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    container_id = "a" * 64
+    expected = SandboxResourceUsage(
+        cpu_time_s=1.25,
+        peak_memory_mib=256,
+        source="docker_host_cgroup_v2",
+    )
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, f"{container_id} 4321\n", ""))
+    monkeypatch.setattr(docker_provider, "_read_host_cgroup_usage", lambda path, expected_id: expected)
+
+    usage = await provider.resource_usage(_make_handle())
+
+    assert usage == expected
+    assert rec.calls == [
+        {
+            "argv": [FAKE_BINARY, "inspect", "-f", "{{.Id}} {{.State.Pid}}", "nemo-gym-x"],
+            "timeout_s": docker_provider.RESOURCE_USAGE_TIMEOUT_S,
+            "stdin": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        (1, "", "container stopped"),
+        (0, "not-a-pid", ""),
+        (0, f"{'a' * 64} 0", ""),
+    ],
+)
+async def test_resource_usage_failure_is_unavailable(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    response: tuple[int, str, str],
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: response)
+    assert await provider.resource_usage(_make_handle()) == SandboxResourceUsage()
 
 
 # --------------------------------------------------------------------------- #

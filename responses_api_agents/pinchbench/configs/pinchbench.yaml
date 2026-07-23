@@ -28,10 +28,12 @@ pinchbench_agent:
       model_base_url: ${model_base_url}
       model_api_key: ${model_api_key}
       model_name: ${model_name}
+      model_server: null
       # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
       judge_model: ${judge_model}
       judge_base_url: ${judge_base_url}
       judge_api_key: ${judge_api_key}
+      judge_model_server: null
       web_search_provider: brave
       brave_api_key: ${brave_api_key}
       max_concurrent: 2
