@@ -28,18 +28,30 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import pytest
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    SandboxObservation,
+    ToolCallObservation,
+)
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     ActiveContainerProcess,
     AnyTerminalAgent,
     AnyTerminalAgentConfig,
     AnyTerminalInstanceConfig,
+    AnyTerminalRunRequest,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
+    TerminalBenchMetrics,
     _instruction_from_input,
+    _load_agent_observations,
     _read_task_meta,
     _safe_config_json,
+    _terminal_sandbox_observations,
     update_metrics,
 )
 
@@ -57,6 +69,23 @@ def _config(**overrides) -> AnyTerminalAgentConfig:
     )
     base.update(overrides)
     return AnyTerminalAgentConfig(**base)
+
+
+def test_terminal_sandbox_observations_only_map_available_metrics() -> None:
+    observations = _terminal_sandbox_observations(
+        TerminalBenchMetrics(
+            agent_timed_out=True,
+            container_timed_out=True,
+            agent_run_time=30.0,
+            eval_run_time=4.0,
+            total_run_time=35.0,
+        )
+    )
+
+    assert [(item.role, item.outcome, item.wall_time_s) for item in observations] == [
+        ("environment", "timeout", 35.0),
+    ]
+    assert all(item.cpu_time_s is None and item.peak_memory_mib is None for item in observations)
 
 
 class TestRunnerTemplate:
@@ -87,6 +116,21 @@ class TestRunnerTemplate:
         assert "NGTB_SAMPLING" in rendered
         assert "**SAMPLING," in rendered
         assert "HermesAgentConfig.model_fields" in rendered
+
+    def test_observed_episode_is_written_when_enabled(self) -> None:
+        rendered = self._render()
+        assert "responses_with_observations" in rendered
+        assert "/trajectories_mount/agent_observations.json" in rendered
+        assert 'os.environ.get("NGTB_OBSERVABILITY") == "1"' in rendered
+
+    def test_uses_configured_model_ref_and_writes_response_first(self) -> None:
+        rendered = self._render()
+        assert "ModelServerRef.model_validate(MODEL_SERVER_REF)" in rendered
+        assert 'ModelServerRef(name="policy_model"' not in rendered
+        assert rendered.index('Path("/trajectories_mount/response.json").write_text') < rendered.index(
+            'Path("/trajectories_mount/agent_observations.json").write_text'
+        )
+        assert "failed to persist agent observations" in rendered
 
 
 class TestAgentKey:
@@ -321,6 +365,39 @@ class TestSafeConfigJson:
         cfg = _make_instance_config(tmp_path)
         assert "\n" in _safe_config_json(cfg, indent=2)
 
+    def test_disabled_observability_does_not_change_serialized_config(self, tmp_path: Path) -> None:
+        serialized = _safe_config_json(_make_instance_config(tmp_path))
+
+        assert "observability_enabled" not in json.loads(serialized)
+        assert AnyTerminalInstanceConfig.model_validate_json(serialized).observability_enabled is False
+
+
+class TestLoadAgentObservations:
+    def test_validates_and_canonicalizes_sidecar(self, tmp_path: Path) -> None:
+        path = tmp_path / "observations.json"
+        bundle = AgentObservationBundle(source="claude_code", records=[AgentInvocation(invocation_id="root")])
+        path.write_text(bundle.model_dump_json())
+
+        raw, error = _load_agent_observations(path)
+
+        assert error == ""
+        assert AgentObservationBundle.model_validate_json(raw) == bundle
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_error"),
+        [("not json", "observation_parse_failed"), ("{}", "observation_parse_failed")],
+    )
+    def test_rejects_invalid_sidecar(self, tmp_path: Path, contents: str, expected_error: str) -> None:
+        path = tmp_path / "observations.json"
+        path.write_text(contents)
+        assert _load_agent_observations(path) == ("", expected_error)
+
+    def test_read_failure_is_nonfatal(self, tmp_path: Path) -> None:
+        path = tmp_path / "observations.json"
+        path.write_text("{}")
+        with patch.object(Path, "read_text", side_effect=PermissionError):
+            assert _load_agent_observations(path) == ("", "observation_read_failed")
+
 
 # ── AnyTerminalInstanceConfig properties ──────────────────────────────────────────
 
@@ -503,14 +580,30 @@ class TestBuildAgentCmd:
         assert "agent_done" in script
 
     def test_model_url_env_when_set(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000/ng-rollout/2-1")
+        cfg = _make_instance_config(
+            tmp_path,
+            model_server=ModelServerRef(type="responses_api_models", name="custom_policy"),
+            model_server_url="http://model:8000/ng-rollout/2-1",
+        )
         cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
         assert "NGTB_MODEL_URL=http://model:8000/ng-rollout/2-1" in cmd
+        assert 'NGTB_MODEL_SERVER_REF=\'{"type":"responses_api_models","name":"custom_policy"}\'' in cmd
 
     def test_no_model_url_env_when_empty(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, model_server_url="")
         cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
         assert "NGTB_MODEL_URL" not in cmd
+        assert "NGTB_MODEL_SERVER_REF" not in cmd
+
+    def test_observability_env_is_opt_in(self, tmp_path: Path) -> None:
+        disabled = AnyTerminalAgent._build_agent_cmd(self._stub(), _make_instance_config(tmp_path / "off"))
+        enabled = AnyTerminalAgent._build_agent_cmd(
+            self._stub(),
+            _make_instance_config(tmp_path / "on", observability_enabled=True),
+        )
+
+        assert "NGTB_OBSERVABILITY" not in disabled
+        assert "NGTB_OBSERVABILITY=1" in enabled
 
     def test_workdir_passed_when_in_problem_info(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
@@ -524,6 +617,178 @@ class TestBuildAgentCmd:
         )
         cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
         assert "--pwd /app" in cmd
+
+
+class TestObservationRoundTrip:
+    @staticmethod
+    def _agent() -> AnyTerminalAgent:
+        server_client = MagicMock()
+        server_client.global_config_dict = {"observability_enabled": True}
+        with patch.object(AnyTerminalAgent, "model_post_init"):
+            agent = AnyTerminalAgent.model_construct(
+                config=_config(model_server={"type": "responses_api_models", "name": "custom_policy"}),
+                server_client=server_client,
+            )
+        agent._sem = asyncio.Semaphore(1)
+        return agent
+
+    @staticmethod
+    def _response(
+        instance: AnyTerminalInstanceConfig,
+        observations: str,
+        error: str = "",
+        metrics: dict | None = None,
+    ) -> NeMoGymResponse:
+        return NeMoGymResponse(
+            id="anyterminal-test",
+            created_at=1,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps(metrics or {"resolved": True}),
+                "instance_config": _safe_config_json(instance),
+                "agent_observations": observations,
+                "agent_observations_error": error,
+            },
+        )
+
+    @staticmethod
+    def _body() -> AnyTerminalRunRequest:
+        return AnyTerminalRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_preserves_nondefault_model_ref(self, tmp_path: Path) -> None:
+        model_ref = ModelServerRef(type="responses_api_models", name="custom_policy")
+        bundle = AgentObservationBundle(
+            source="claude_code",
+            records=[
+                AgentInvocation(
+                    invocation_id="root",
+                    model_calls=[ModelCallRef(model_ref=model_ref, response_id="resp-1")],
+                )
+            ],
+        )
+        instance = _make_instance_config(
+            tmp_path,
+            model_server=model_ref,
+            observability_enabled=True,
+        )
+        agent = self._agent()
+
+        with patch.object(
+            agent, "_responses", AsyncMock(return_value=self._response(instance, bundle.model_dump_json()))
+        ):
+            result = await agent.run(self._body())
+
+        emitted = result.ng_agent_observations
+        assert result.reward == 1.0
+        assert emitted is not None
+        invocation = next(record for record in emitted.records if isinstance(record, AgentInvocation))
+        assert invocation.model_calls[0].model_ref == model_ref
+        assert invocation.model_calls[0].response_id == "resp-1"
+
+    @pytest.mark.asyncio
+    async def test_appends_terminal_sandbox_metrics_to_agent_observations(self, tmp_path: Path) -> None:
+        bundle = AgentObservationBundle(
+            source="hermes",
+            records=[
+                AgentInvocation(invocation_id="root"),
+                ToolCallObservation(
+                    invocation_id="root",
+                    tool_call_id="call-1",
+                    started_at=1.0,
+                    completed_at=3.0,
+                ),
+                ToolCallObservation(
+                    invocation_id="root",
+                    tool_call_id="call-2",
+                    started_at=2.0,
+                    completed_at=4.0,
+                ),
+            ],
+        )
+        instance = _make_instance_config(tmp_path, observability_enabled=True)
+        response = self._response(
+            instance,
+            bundle.model_dump_json(),
+            metrics={"resolved": False, "agent_run_time": 12.0, "total_run_time": 15.0},
+        )
+        agent = self._agent()
+
+        with patch.object(agent, "_responses", AsyncMock(return_value=response)):
+            result = await agent.run(self._body())
+
+        assert result.ng_agent_observations is not None
+        sandboxes = [
+            record for record in result.ng_agent_observations.records if isinstance(record, SandboxObservation)
+        ]
+        tools = [record for record in result.ng_agent_observations.records if isinstance(record, ToolCallObservation)]
+        assert [(item.role, item.wall_time_s) for item in sandboxes] == [
+            ("environment", 15.0),
+        ]
+        assert sandboxes[0].sandbox_id == instance.agent_run_id
+        assert {tool.sandbox_id for tool in tools} == {instance.agent_run_id}
+        assert [gap.code for gap in result.ng_agent_observations.gaps] == [
+            "sandbox_cpu_time_unavailable",
+            "sandbox_memory_usage_unavailable",
+        ]
+
+    @pytest.mark.parametrize(
+        ("observations", "error", "gap_code"),
+        [
+            ("[]", "", "observation_parse_failed"),
+            ("", "observation_read_failed", "observation_read_failed"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sidecar_failure_keeps_reward_and_emits_typed_gap(
+        self,
+        tmp_path: Path,
+        observations: str,
+        error: str,
+        gap_code: str,
+    ) -> None:
+        instance = _make_instance_config(tmp_path, observability_enabled=True)
+        agent = self._agent()
+
+        with patch.object(
+            agent,
+            "_responses",
+            AsyncMock(return_value=self._response(instance, observations, error)),
+        ):
+            result = await agent.run(self._body())
+
+        assert result.reward == 1.0
+        assert result.ng_agent_observations is not None
+        assert result.ng_agent_observations.records == []
+        assert [gap.code for gap in result.ng_agent_observations.gaps] == [
+            gap_code,
+            "sandbox_observation_unavailable",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_disabled_observability_does_not_change_response(self, tmp_path: Path) -> None:
+        instance = _make_instance_config(tmp_path)
+        agent = self._agent()
+
+        with patch.object(agent, "_responses", AsyncMock(return_value=self._response(instance, ""))):
+            result = await agent.run(self._body())
+
+        assert result.reward == 1.0
+        assert result.ng_agent_observations is None
+        assert "ng_agent_observations" not in result.model_dump(mode="json")
+        assert "observability_enabled" not in result.instance_config
 
 
 # ── RunTerminalAgent.process_single_datapoint ────────────────────────────────────
