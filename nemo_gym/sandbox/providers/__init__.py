@@ -22,6 +22,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxProvider,
     SandboxResources,
+    SandboxResourceUsage,
     SandboxSpec,
     SandboxStatus,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "SandboxExecResult",
     "SandboxHandle",
     "SandboxProvider",
+    "SandboxResourceUsage",
     "SandboxResources",
     "SandboxSpec",
     "SandboxStatus",

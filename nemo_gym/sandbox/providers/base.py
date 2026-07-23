@@ -14,6 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -113,6 +114,22 @@ class SandboxExecResult:
 ExecResult = SandboxExecResult
 
 
+@dataclass(frozen=True)
+class SandboxResourceUsage:
+    """Pre-stop resource snapshot for one managed sandbox."""
+
+    wall_time_s: float | None = None
+    cpu_time_s: float | None = None
+    peak_memory_mib: float | None = None
+    source: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("wall_time_s", "cpu_time_s", "peak_memory_mib"):
+            value = getattr(self, name)
+            if value is not None and (value < 0 or not math.isfinite(value)):
+                raise ValueError(f"{name} must be a finite non-negative value")
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
@@ -122,7 +139,11 @@ class SandboxCreateVerificationError(SandboxCreateError):
 
 
 class SandboxProvider(Protocol):
-    """Runtime/infra provider contract used by the public sandbox API."""
+    """Runtime/infra provider contract used by the public sandbox API.
+
+    Providers with exact lifetime counters may additionally implement
+    ``resource_usage(handle) -> SandboxResourceUsage``.
+    """
 
     name: str
 
