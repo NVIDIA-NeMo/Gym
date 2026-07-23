@@ -115,10 +115,8 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
 
-        # run_examples resolves its client via the module-level setup_server_client(), so patch that
-        # (an instance-method override on a helper subclass is no longer called by the production code).
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
 
         async def fail_raise_for_status(_response):
@@ -866,9 +864,8 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=mock_response)
 
-        # _call_aggregate_metrics resolves its client via the module-level setup_server_client().
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
         helper = RolloutCollectionHelper()
 
@@ -938,9 +935,8 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
-        # _call_aggregate_metrics resolves its client via the module-level setup_server_client().
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
         helper = RolloutCollectionHelper()
 

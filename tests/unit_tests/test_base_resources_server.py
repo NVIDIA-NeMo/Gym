@@ -34,4 +34,4 @@ class TestBaseResourcesServer:
         _resources_server().setup_webserver()
 
     def test_reverify_mode(self) -> None:
-        assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNSUPPORTED
+        assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN

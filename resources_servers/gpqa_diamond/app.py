@@ -49,7 +49,7 @@ def extract_letter(text: str) -> Optional[str]:
 class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
     # Reuses mcqa's MCQAResourcesServerConfig (STATELESS); pin back to the safe default so this
     # benchmark does not inherit reverify support until it is separately reviewed.
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
 
 class GPQADiamondResourcesServer(MCQAResourcesServer):

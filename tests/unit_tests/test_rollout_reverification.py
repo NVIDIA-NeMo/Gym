@@ -1249,7 +1249,7 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
         # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         if not path.exists():
@@ -1462,7 +1462,7 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
         config = self._make_config(tmp_path)
 
         returned = await RolloutReverificationHelper().run_from_config(config)
@@ -1533,7 +1533,7 @@ class TestRunFromConfigForceFlag:
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
     async def test_no_unsafe_prefix_when_all_rs_stateless(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1595,7 +1595,7 @@ class TestRunFromConfigResumeFromCache:
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", lambda *_a, **_kw: iter(pairs)
         )
-        monkeypatch.setattr("nemo_gym.rollout_reverification.resolve_input_path", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
         def fake_run(payloads, semaphore=None):
             dispatched.extend(payloads)

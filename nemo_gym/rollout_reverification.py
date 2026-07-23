@@ -212,7 +212,6 @@ def _parse_output_line_key(line: bytes) -> tuple[int, int] | None:
     return task_idx, rollout_idx
 
 
-# to do: OutputPaths to OutputFPaths
 def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
     if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
         print("Skipping resume_from_cache because cache paths don't exist!")
