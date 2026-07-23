@@ -21,7 +21,7 @@ echo "Ray head node IP address: $RAY_HEAD_NODE_IP"
 
 if (( $# == 0 )); then
     # If there are no arguments provided, then we just block forever so the Ray cluster stays up.
-    args=(sleep infinity)
+    command=(sleep infinity)
     mkdir -p slurm-attach
     cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
 srun --no-container-mount-home \
@@ -38,7 +38,7 @@ srun --no-container-mount-home \
 EOF
     echo "No arguments were provided to this script. Run 'bash slurm-attach/$SLURM_JOB_ID.sh' to enter interactive shell."
 else
-    args="$@"
+    command=("$@")
 fi
 
 # All nodes (including head and workers) will execute this block.
@@ -55,6 +55,6 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
       --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \
       --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \
       -- "$@"
-  ' bash "$args"
+  ' bash "${command[@]}"
 
 # TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
