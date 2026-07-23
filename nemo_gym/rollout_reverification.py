@@ -570,52 +570,53 @@ class RolloutReverificationHelper(BaseModel):
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
         completed = 0  # number of rows re-verified this run (for progress reporting)
-        for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
-            row, result = await future
+        try:
+            for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
+                row, result = await future
 
-            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-            if SKILLS_REF_KEY_NAME in row:
-                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                if SKILLS_REF_KEY_NAME in row:
+                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+                no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+                failure_class = result.get(NG_FAILURE_CLASS_KEY)
 
-            serialized = orjson.dumps(result)
+                serialized = orjson.dumps(result)
 
-            if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
-            elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
-                failures_file.write(serialized + b"\n")
-                failures_file.flush()
-            else:
-                # Success → main jsonl.
-                results_file.write(serialized + b"\n")
-                results_file.flush()
+                if no_persist:
+                    # kill_shaped: don't write anywhere. Set-difference on resume
+                    # naturally re-dispatches; per-task timeout bounds wallclock.
+                    pass
+                elif failure_class is not None:
+                    # Non-kill_shaped failure → sidecar. The aggregator only reads
+                    # the main jsonl, so this keeps win-rate uncontaminated.
+                    failures_file.write(serialized + b"\n")
+                    failures_file.flush()
+                else:
+                    # Success → main jsonl.
+                    results_file.write(serialized + b"\n")
+                    results_file.flush()
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            completed += 1
-            current_pct = 100 * completed / len(payloads_to_reverify)
-            if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
+                completed += 1
+                current_pct = 100 * completed / len(payloads_to_reverify)
+                if pcts_to_print and current_pct >= pcts_to_print[0]:
+                    while pcts_to_print and current_pct >= pcts_to_print[0]:
+                        pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
-
-        results_file.close()
-        failures_file.close()
+                    top_left = counts_left.most_common(5)  # Fix to top 3 for now.
+                    if top_left:
+                        top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                        # Use tqdm.write here so we can print properly with tqdm being used.
+                        tqdm.write(f"Examples left:\n{top_left_str}")
+        finally:
+            results_file.close()
+            failures_file.close()
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
         # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
