@@ -41,4 +41,4 @@ sbatch \
     --time=04:00:00 \
     --job-name=vllm-$USER \
     --exclusive \
-    scripts/sbatch_base.sh bash "$command"
+    scripts/sbatch_base.sh bash -lc "$command"
