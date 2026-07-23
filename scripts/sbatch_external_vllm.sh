@@ -22,7 +22,7 @@ vllm serve $MODEL \
     --kv-cache-dtype fp8 \
     -cc.pass_config.fuse_allreduce_rms=False \
     --mamba-ssm-cache-dtype float32 \
-    --load-format instanttensor \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --moe-backend triton \
     --max-num-batched-tokens 32768 \
     --host \$(hostname -I | awk '{print \$1}') \
@@ -30,7 +30,6 @@ vllm serve $MODEL \
 EOF
 )
 
-# --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
 
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
