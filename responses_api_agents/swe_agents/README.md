@@ -409,8 +409,10 @@ Bundled YAML configs:
 - `configs/swebench_openhands_training.yaml` — same shape as above but tuned for training.
 - `configs/swe_agent_config.yaml` — alternative SWE-agent path (uses `agent_tools_file`).
 - `configs/swebench_multi_tools.yaml` — full 15-way prompt × agent-class × tool-name bundle (OpenHands).
-- `configs/swebench_opencode.yaml` — opencode harness (`agent_framework: opencode`), pinned fork + commit, no prompt overrides.
-- `configs/swebench_opencode_training.yaml` — opencode harness tuned for training.
+- `configs/swebench_opencode.yaml` — upstream opencode harness (`opencode_source: opencode`), routed through Switchyard, no prompt overrides.
+- `configs/swebench_opencode_training.yaml` — upstream opencode harness tuned for training.
+- `configs/swebench_nv_opencode.yaml` — NeMo-Gym opencode fork (`opencode_source: nv-opencode`), pinned repo + commit. Deprecated; prefer the upstream configs above.
+- `configs/swebench_nv_opencode_training.yaml` — fork harness tuned for training. Deprecated; prefer the upstream config above.
 - `configs/swebench_opencode_multi_tools.yaml` — opencode harness with the 11-way `prompts/opencode_harness/*.txt` prompt bundle. See [Prompt overrides](#opencode-integration).
 - `configs/swebench_opencode_no_instruction.yaml` / `configs/swebench_opencode_empty.yaml` — opencode ablation baselines (minimal / no methodology instructions).
 - `configs/swebench_deepswe.yaml` / `configs/swebench_denovoswe.yaml` — the `deepswe` / `denovoswe` datasets (⚠️ WIP, see [Supported datasets and harnesses](#supported-datasets-and-harnesses)).

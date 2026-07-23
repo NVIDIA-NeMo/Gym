@@ -126,6 +126,48 @@ class TestReconstruction:
         assert trace.tools[0].name == "str_replace_editor"
         assert trace.tools[0].description == "Edit files"
         assert trace.tools[0].parameters == TOOL_SCHEMA
+
+    def test_reformatted_tool_args_tolerated_and_original_kept(self) -> None:
+        # The model emits pretty-printed JSON args; the client re-sends them compact
+        # in the next turn's history. The extension check must tolerate that
+        # (canonicalized comparison), and the reconstructed item must keep the
+        # ORIGINAL arguments (canonicalization is comparison-only).
+        pretty = '{\n  "path": "a.py"\n}'
+        compact = '{"path": "a.py"}'
+        first = _record(
+            0,
+            [
+                {"role": "system", "content": "You are a SWE agent."},
+                {"role": "user", "content": "Fix the bug."},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "str_replace_editor", "arguments": pretty}}
+                    ],
+                },
+            ],
+            TRIPLE_0,
+        )
+        second = _record(
+            1,
+            [
+                {"role": "system", "content": "You are a SWE agent."},
+                {"role": "user", "content": "Fix the bug."},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "str_replace_editor", "arguments": compact}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "edited ok"},
+                {"role": "assistant", "content": "All fixed."},
+            ],
+            TRIPLE_1,
+        )
+
+        trace = _reconstruct(_envelope([first, second]))  # tolerated — does not raise
+
+        assert trace.output_items[0].arguments == pretty  # original kept, not canonicalized
         assert trace.tools[0].type == "function"
 
     def test_single_record_session(self) -> None:

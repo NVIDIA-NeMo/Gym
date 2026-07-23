@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sys
 import time
 import uuid
@@ -65,7 +66,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict, get_response_json, raise_for_status, request
-from nemo_gym.switchyard_trace import SwitchyardTrace, reconstruct_switchyard_rollout
+from nemo_gym.switchyard_trace import SwitchyardTrace, SwitchyardTraceError, reconstruct_switchyard_rollout
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -106,6 +107,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Which agent harness drives the SWE-bench rollout. 'openhands' uses the nv-OpenHands "
         "fork at swe_openhands_setup/. 'opencode' uses the opencode fork at swe_opencode_setup/ via "
         "its bench/ entry point.",
+    )
+    opencode_source: Literal["opencode", "nv-opencode"] = Field(
+        default="opencode",
+        description="For agent_framework='opencode', which opencode to run. 'opencode' (default) runs "
+        "upstream opencode headless (`opencode run`) with an opencode.json provider pointed at Switchyard "
+        "— no fork, so opencode's native X-Session-Id is captured. 'nv-opencode' uses the pinned fork's "
+        "bench entry point.",
     )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(
@@ -192,6 +200,26 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    switchyard_spawn_routing_profile: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a Switchyard routing-profiles YAML. When set, one dedicated token-capture Switchyard "
+            "instance is spawned per agent run on a free port (stateful token injection requires every "
+            "call of a session to reach the same process) and torn down after trace retrieval in run(). "
+            "Records land under the run's persistent_dir, so retrieval and /v1/sessions listing are "
+            "scoped per run. Mutually exclusive with switchyard_base_url. The `switchyard` CLI must be "
+            "on PATH. Instances are reaped in run(); calling responses() directly leaks the instance."
+        ),
+    )
+    switchyard_spawn_host: Optional[str] = Field(
+        default=None,
+        description=(
+            "Host advertised to agent containers for spawned Switchyard instances (the instance binds "
+            "0.0.0.0). Defaults to this node's hostname, which peer nodes resolve on Slurm clusters. "
+            "Set explicitly when containers must use a specific routable IP."
+        ),
+    )
+
     openhands_should_log: bool = False
     debug: bool = False
 
@@ -266,6 +294,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
+    # Served model context length, fetched from Switchyard's /v1/models before the
+    # agent command is built; None leaves the opencode provider entry limit-less.
+    opencode_context_len: Optional[int] = None
 
     # GRPO related fields
     mask_sample: bool = False
@@ -1518,6 +1549,29 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _validate_switchyard_config(config: SWEBenchWrapperConfig) -> None:
+    """Fail fast on malformed Switchyard settings (URL shape, spawn-mode conflicts)."""
+    if config.switchyard_base_url:
+        _parse_switchyard_base_url(config.switchyard_base_url)
+    if config.switchyard_spawn_routing_profile:
+        if config.switchyard_base_url:
+            raise ValueError(
+                "switchyard_spawn_routing_profile and switchyard_base_url are mutually exclusive: "
+                "spawn mode assigns each run its own instance URL"
+            )
+        if not Path(config.switchyard_spawn_routing_profile).is_file():
+            raise ValueError(
+                f"switchyard_spawn_routing_profile does not exist: {config.switchyard_spawn_routing_profile!r}"
+            )
+
+
+def _find_free_port() -> int:
+    """An OS-assigned free TCP port (small bind-to-use race, acceptable per run)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return int(sock.getsockname()[1])
+
+
 def _parse_switchyard_base_url(switchyard_base_url: str) -> Tuple[str, int]:
     """Host/port of the Switchyard proxy.
 
@@ -1975,10 +2029,89 @@ def _render_opencode_user_message(
         )
 
 
+# Container path for the system-prompt instruction file we hand opencode via the
+# config's ``instructions`` list. Kept outside the workspace so it never shows up
+# in the ``git diff HEAD`` that becomes the task patch.
+_OPENCODE_INSTRUCTIONS_PATH = "/tmp/switchyard_opencode_instructions.md"
+
+# Steer the model away from opencode's `task` tool crash: upstream opencode
+# hard-fails when the model supplies a `task_id` that does not begin with `ses`
+# (a synchronous SessionID.make throw defeats its graceful fallback — see
+# sst/opencode task tool). Smaller models routinely invent one; omitting it lets
+# opencode spawn a fresh subagent session, which Switchyard captures cleanly.
+_OPENCODE_TASK_ID_GUIDANCE = (
+    "When you use the `task` tool to start a new subagent, do not set the "
+    "`task_id` parameter — omit it so a fresh subagent session is created. "
+    "Only pass `task_id` to resume a subagent session you started earlier in "
+    "this conversation; a valid session id begins with `ses`. Never invent or "
+    "guess a `task_id` value."
+)
+
+
+def _opencode_switchyard_config(
+    switchyard_base_url: str, model: str, context_len: Optional[int] = None
+) -> Dict[str, Any]:
+    """opencode.json for upstream opencode routed through Switchyard (no fork).
+
+    A custom ``@ai-sdk/openai-compatible`` provider — whose id does NOT start with
+    ``opencode`` — points at Switchyard. That id prefix is load-bearing: upstream
+    opencode only emits its native ``X-Session-Id`` / ``x-parent-session-id``
+    correlation headers for non-``opencode`` providers, and those headers are how
+    Switchyard captures the session tree. Set as the default model so opencode does
+    not fall back to its hosted free models. ``instructions`` appends the task-tool
+    guidance to opencode's system prompt (see ``_OPENCODE_TASK_ID_GUIDANCE``).
+
+    ``context_len`` (the served model's max_model_len) populates the model's
+    ``limit`` metadata: opencode budgets its ``max_tokens`` from ``limit.output``
+    (falling back to a flat 32000 without it) and enables compaction only when
+    ``limit.context`` is set. Output is reserved as ``min(32000, context // 4)``
+    so compaction (triggered at ``context - output``) keeps most of the window.
+    """
+    model_entry: Dict[str, Any] = {"name": model}
+    if context_len is not None:
+        model_entry["limit"] = {
+            "context": context_len,
+            "output": min(32000, context_len // 4),
+        }
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "switchyard": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Switchyard",
+                "options": {"baseURL": f"{switchyard_base_url.rstrip('/')}/v1", "apiKey": "dummy"},
+                "models": {model: model_entry},
+            }
+        },
+        "model": f"switchyard/{model}",
+        "instructions": [_OPENCODE_INSTRUCTIONS_PATH],
+        "autoupdate": False,
+    }
+
+
+def _filter_title_gen_records(envelope: dict) -> dict:
+    """Strip the title-generation record opencode fires before the agent loop.
+
+    opencode calls the model once with system='You are a title generator' to
+    name each session. Removing it keeps reconstruction to agent turns only.
+    """
+    filtered = [
+        r
+        for r in envelope.get("completions", [])
+        if not any(
+            msg.get("role") == "system" and "title generator" in str(msg.get("content", "")).lower()
+            for msg in r.get("messages", [])
+        )
+    ]
+    return {**envelope, "completions": filtered}
+
+
 class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
+        if self.config.opencode_source == "opencode":
+            return self._setup_upstream()
         setup_dir = self.parent_dir / "swe_opencode_setup"
 
         with self._setup_directory_lock(setup_dir, "opencode"):
@@ -2009,7 +2142,26 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             self._run_setup_command(command)
             return setup_dir
 
+    def _setup_upstream(self) -> Path:
+        """Install upstream opencode-ai via bun; no fork clone."""
+        setup_dir = self.parent_dir / "swe_upstream_opencode_setup"
+        with file_lock(setup_dir, "upstream opencode setup"):
+            bun_dir = setup_dir / "bun"
+            install_dir = setup_dir / "opencode"
+            opencode_bin = install_dir / "node_modules" / ".bin" / "opencode"
+            if opencode_bin.exists() and (bun_dir / "bin" / "bun").exists():
+                print(f"upstream opencode already installed at {setup_dir}", flush=True)
+                return setup_dir
+            print(f"Installing upstream opencode-ai at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            self._run_setup_command(f"BUN_INSTALL={bun_dir} curl -fsSL https://bun.sh/install | bash")
+            self._run_setup_command(f"cd {install_dir} && PATH={bun_dir}/bin:$PATH bun add opencode-ai")
+            return setup_dir
+
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        if self.config.opencode_source == "opencode":
+            return self._get_upstream_run_command()
         data_point = self.config.problem_info
         agent_run_id = self.config.agent_run_id
 
@@ -2173,6 +2325,157 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f.write("#!/bin/bash\nset -e\n")
             f.write(opencode_log_trap)
             f.write(agent_main_cmd)
+            f.flush()
+            os.fsync(f.fileno())
+
+        agent_timeout_seconds = self.config.swebench_agent_timeout
+        opencode_cmd = (
+            f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
+            f"bash /trajectories_mount/{agent_script_name}"
+        )
+
+        search_path = os.path.join(
+            self.config.opencode_setup_dir / "opencode" / eval_dir_in_opencode,
+            "**",
+            "output.jsonl",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=opencode_cmd,
+            expected_file_pattern=search_path,
+            mode="agent",
+            timeout=self.config.swebench_agent_timeout + 60,
+        )
+
+    def _get_upstream_run_command(self) -> ExecuteContainerCommandArgs:
+        """Run command for opencode_source='opencode': upstream stock opencode via opencode.json."""
+        data_point = self.config.problem_info
+        agent_run_id = self.config.agent_run_id
+        instance_id = data_point["instance_id"]
+        eval_dir_in_opencode = self.config.eval_dir_in_openhands
+
+        assert self.config.opencode_setup_dir is not None, (
+            "opencode setup directory is not set; opencode_source='opencode' requires _setup_upstream() to have run."
+        )
+        assert self.config.switchyard_base_url is not None, (
+            "opencode_source='opencode' requires switchyard_base_url — Switchyard captures the session."
+        )
+
+        try:
+            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
+            default_model_name = (
+                getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not resolve model server '{self.config.model_server_name}' for upstream opencode: {e}"
+            )
+
+        effective_model = self.config.body.model or default_model_name
+        workspace_path = _resolve_opencode_workspace_path(data_point)
+        user_message = _render_opencode_user_message(
+            data_point,
+            workspace_path,
+            template_override_path=self.config.resolved_user_prompt_template,
+        )
+        user_message_host_path = self.config.persistent_dir / f"user_message_{agent_run_id}.txt"
+        user_message_host_path.write_text(user_message)
+
+        opencode_cfg_json = json.dumps(
+            _opencode_switchyard_config(
+                self.config.switchyard_base_url, effective_model, self.config.opencode_context_len
+            )
+        )
+
+        # Output goes to the same eval-dir layout as the fork so _openhands_dir_copy_from_host works unchanged.
+        output_dir_in_container = f"/opencode_setup/opencode/{eval_dir_in_opencode}/{instance_id}/bench_run"
+        output_jsonl_in_container = f"{output_dir_in_container}/output.jsonl"
+
+        dataset_name = str(data_point.get("dataset_name", ""))
+        if "SWE-Gym" in dataset_name:
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed || true; "
+                "fi; } && "
+            )
+        elif "R2E-Gym" in dataset_name:
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -f /testbed/.venv/bin/activate ]; then "
+                ". /testbed/.venv/bin/activate || true; "
+                "fi; } && "
+            )
+        elif dataset_name in ("nv-internal-1", "swe-bench-ext") or "SWE-rebench-V2" in dataset_name:
+            conda_activate_cmd = ""
+        else:
+            conda_activate_cmd = (
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed || true; "
+                "fi && "
+            )
+
+        baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
+        baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
+
+        # args dict encoded as JSON so the extraction Python never sees shell metacharacters
+        py_args_json = json.dumps(
+            {
+                "workspace": workspace_path,
+                "instance_id": instance_id,
+                "model": effective_model,
+                "output_dir": output_dir_in_container,
+                "output_jsonl": output_jsonl_in_container,
+            }
+        )
+
+        agent_main_cmd = (
+            "mkdir -p /tmp/ && "
+            "export PATH=/opencode_setup/bun/bin:$PATH && "
+            f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
+            f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
+            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
+            "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
+            f"export SWITCHYARD_BASE_URL={shlex.quote(self.config.switchyard_base_url)} && "
+            "mkdir -p /root/.cache/opencode && "
+            "echo '{}' >/root/.cache/opencode/models.json && "
+            f"{conda_activate_cmd}"
+            f"{baseline_fix_cmd}"
+            f"cd {shlex.quote(workspace_path)} && "
+            f"echo {shlex.quote(opencode_cfg_json)} > opencode.json && "
+            f"echo {shlex.quote(_OPENCODE_TASK_ID_GUIDANCE)} > {_OPENCODE_INSTRUCTIONS_PATH} && "
+            "_OC_EXIT=0 && "
+            f"timeout {self.config.swebench_agent_timeout} "
+            "/opencode_setup/opencode/node_modules/.bin/opencode run "
+            f"--model {shlex.quote(f'switchyard/{effective_model}')} "
+            '"$(cat /opencode_setup/opencode/user_message.txt)" '
+            "|| _OC_EXIT=$?"
+        )
+
+        # Post-run extraction: git diff → output.jsonl in bench format.
+        # Uses _OC_ARGS JSON so no shell metacharacter issues in paths/ids.
+        extract_py = (
+            "import json,os,subprocess;"
+            "a=json.loads(os.environ['_OC_ARGS']);"
+            "r=subprocess.run(['git','-C',a['workspace'],'diff','HEAD'],capture_output=True,text=True,errors='replace');"
+            "patch=r.stdout.strip() or None;"
+            "ec=int(os.environ.get('_OC_EXIT','0'));"
+            "os.makedirs(a['output_dir'],exist_ok=True);"
+            "f=open(a['output_jsonl'],'w');"
+            "json.dump({'instance_id':a['instance_id'],'test_result':{'git_patch':patch},"
+            "'metadata':{'llm_config':{'model':a['model']}},"
+            "'error':None if ec==0 else f'opencode exit {ec}','metrics':None},f);"
+            "f.close()"
+        )
+
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        agent_script_path = self.config.persistent_dir / agent_script_name
+        with open(agent_script_path, "w") as f:
+            f.write("#!/bin/bash\nset -e\n")
+            f.write(agent_main_cmd)
+            f.write(f"\nexport _OC_ARGS={shlex.quote(py_args_json)}\n")
+            f.write(f"python3 -c {shlex.quote(extract_py)}\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -2832,9 +3135,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
 
     def model_post_init(self, context: Any) -> None:
-        # Fail fast on a malformed Switchyard URL rather than masking every sample.
-        if self.config.switchyard_base_url:
-            _parse_switchyard_base_url(self.config.switchyard_base_url)
+        # Fail fast on a malformed Switchyard config rather than masking every sample.
+        _validate_switchyard_config(self.config)
+        # Spawned per-run Switchyard instances, keyed by agent_run_id; reaped in run().
+        self._switchyard_procs: Dict[str, Process] = {}
 
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
@@ -3185,20 +3489,32 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
             (Path(opencode_dir) / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
-            # opencode reads SQLite migrations from `<bundle>/../../migration`
-            # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
-            mount_args.extend(
-                [
-                    f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
-                    f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
-                    f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
-                    f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
-                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-                    f"--mount type=bind,src={opencode_dir}/packages/opencode/migration,dst=/opencode_setup/migration,ro",
-                ]
-            )
+            if params.opencode_source == "opencode":
+                # Upstream stock opencode: no fork repo structure, no migration mount.
+                mount_args.extend(
+                    [
+                        f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
+                        f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
+                        f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                    ]
+                )
+            else:
+                # nv-opencode fork: existing mounts (unchanged).
+                # opencode reads SQLite migrations from `<bundle>/../../migration`
+                # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
+                mount_args.extend(
+                    [
+                        f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
+                        f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
+                        f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
+                        f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
+                        f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                        f"--mount type=bind,src={opencode_dir}/packages/opencode/migration,dst=/opencode_setup/migration,ro",
+                    ]
+                )
             user_message_host = params.persistent_dir / f"user_message_{params.agent_run_id}.txt"
             mount_args.append(
                 f"--mount type=bind,src={user_message_host},dst=/opencode_setup/opencode/user_message.txt,ro"
@@ -3479,7 +3795,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # retries. Golden-patch verification makes no policy calls, so no session.
         switchyard_session_id = None
         if (
-            self.config.switchyard_base_url
+            (self.config.switchyard_base_url or self.config.switchyard_spawn_routing_profile)
             and self.config.agent_framework == "openhands"
             and not self.config.verify_golden_patch
         ):
@@ -3600,6 +3916,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
+        # Switchyard-routed runs defer the build to responses(): the script
+        # embeds the Switchyard routing, and spawn mode's instance URL plus the
+        # served model's context length are only known there.
+        if not self._agent_command_deferred(params):
+            self._build_agent_command(params)
+
+        return params, dataset_processor
+
+    def _agent_command_deferred(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether ``responses`` builds the agent command instead of ``_setup_params``."""
+        if self._switchyard_spawn_needed(params):
+            return True
+        return bool(
+            self.config.switchyard_base_url
+            and self.config.agent_framework == "opencode"
+            and self.config.opencode_source == "opencode"
+        )
+
+    def _build_agent_command(self, params: SWEBenchWrapperInstanceConfig) -> None:
+        """Build the agent script and command from the current params.
+
+        Called at the end of ``_setup_params``, except for Switchyard-routed
+        runs, where ``responses`` calls it after the instance URL and the
+        served model's context length are known.
+        """
         if self.config.agent_framework == "opencode":
             params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
         else:
@@ -3607,10 +3948,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
 
-        return params, dataset_processor
-
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
+
+        if self._switchyard_spawn_needed(params):
+            # run() reaps the spawned instance after trace retrieval.
+            params.switchyard_base_url = await self._spawn_switchyard(params)
+        if self._agent_command_deferred(params):
+            if params.switchyard_base_url and self.config.agent_framework == "opencode":
+                params.opencode_context_len = await self._fetch_switchyard_max_model_len(
+                    params.switchyard_base_url, params.model_server_name
+                )
+            self._build_agent_command(params)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3624,6 +3973,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             print(f"Hit an exception in {self.config.name}! See {traceback_file} for more details", file=sys.stderr)
 
+            # The agent never ran to completion; run() may never see this
+            # instance, so reap its Switchyard instance here.
+            await self._teardown_switchyard(params.agent_run_id)
             raise e
 
     async def _inner_responses(
@@ -3775,28 +4127,47 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
             switchyard_trace_error = None
-            if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
-                try:
-                    trace = await self._retrieve_switchyard_trace(instance_config)
-                    switchyard_input = [item.model_dump() for item in trace.input_items]
-                    switchyard_tools = [tool.model_dump() for tool in trace.tools]
-                    responses_create_params["input"] = switchyard_input
-                    responses_create_params["tools"] = switchyard_tools
-                    response.output = trace.output_items
-                    response.metadata = {
-                        "switchyard_source": "switchyard",
-                        "switchyard_session_id": instance_config.switchyard_session_id,
-                        "switchyard_record_uuids": json.dumps(trace.record_uuids),
-                        "switchyard_model": trace.model,
-                    }
-                except Exception as e:
-                    # Fail closed for training, open for diagnostics: keep the
-                    # OpenHands-derived rollout/patch/reward, but mask the sample
-                    # rather than emit a partially token-annotated trajectory.
-                    instance_config.mask_sample = True
-                    switchyard_trace_error = (
-                        f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
-                    )
+            try:
+                if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
+                    try:
+                        trace = await self._retrieve_switchyard_trace(
+                            instance_config.switchyard_base_url, instance_config.switchyard_session_id
+                        )
+                        self._apply_switchyard_trace(
+                            responses_create_params, response, trace, instance_config.switchyard_session_id
+                        )
+                    except Exception as e:
+                        # Fail closed for training, open for diagnostics: keep the
+                        # OpenHands-derived rollout/patch/reward, but mask the sample
+                        # rather than emit a partially token-annotated trajectory.
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = (
+                            f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
+                        )
+                elif (
+                    instance_config.switchyard_base_url
+                    and instance_config.agent_framework == "opencode"
+                    and instance_config.opencode_source == "opencode"
+                ):
+                    # Upstream opencode mints its own session id per (sub)agent, so
+                    # there is no Gym-minted switchyard_session_id: discover the session
+                    # tree from
+                    # Switchyard (no harness logs), then reconstruct root -> main rollout
+                    # and subagents -> token-annotated subagent_trajectories (replacing
+                    # the text ones on success).
+                    try:
+                        sessions = await self._list_switchyard_sessions(instance_config.switchyard_base_url)
+                        root_trace, root_id, subagent_trajectories = await self._reconstruct_switchyard_sessions(
+                            instance_config.switchyard_base_url, sessions, filter_title_gen=True
+                        )
+                        self._apply_switchyard_trace(responses_create_params, response, root_trace, root_id)
+                    except Exception as e:
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = f"opencode sessions: {type(e).__name__}: {e}"
+            finally:
+                # The run's dedicated Switchyard instance (spawn mode) has served
+                # its records; reap it regardless of retrieval outcome.
+                await self._teardown_switchyard(instance_config.agent_run_id)
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3809,21 +4180,205 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 switchyard_trace_error=switchyard_trace_error,
             )
 
-    async def _retrieve_switchyard_trace(self, instance_config: SWEBenchWrapperInstanceConfig) -> SwitchyardTrace:
-        """Fetch this run's captured completions from Switchyard and rebuild the rollout.
+    def _switchyard_spawn_needed(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether this run gets its own Switchyard instance.
+
+        Spawn for exactly the runs whose calls are captured: OpenHands runs
+        with a minted session id, and upstream-opencode runs (which mint their
+        own ids). Golden-patch verification makes no policy calls.
+        """
+        if not self.config.switchyard_spawn_routing_profile or self.config.verify_golden_patch:
+            return False
+        if params.switchyard_session_id:
+            return True
+        return self.config.agent_framework == "opencode" and self.config.opencode_source == "opencode"
+
+    async def _spawn_switchyard(self, params: SWEBenchWrapperInstanceConfig) -> str:
+        """Spawn this run's Switchyard instance and return its base URL when ready.
+
+        The instance binds 0.0.0.0 on a free port and is advertised via
+        ``switchyard_spawn_host`` (default: this node's hostname) so agent
+        containers on peer nodes can reach it. Records go under the run's
+        ``persistent_dir`` so retrieval is scoped per run. Registered under
+        ``agent_run_id`` and reaped by :meth:`_teardown_switchyard`.
+        """
+        port = _find_free_port()
+        host = self.config.switchyard_spawn_host or socket.gethostname()
+        base_url = f"http://{host}:{port}"
+        rl_log_dir = params.persistent_dir / "switchyard_traces"
+        rl_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = params.persistent_dir / "switchyard.log"
+        with log_path.open("w") as log_file:
+            process = await asyncio.create_subprocess_exec(
+                "switchyard",
+                "--routing-profiles",
+                str(self.config.switchyard_spawn_routing_profile),
+                "--enable-rl-logging",
+                "--rl-log-dir",
+                str(rl_log_dir),
+                "--",
+                "serve",
+                "--port",
+                str(port),
+                stdout=log_file,
+                stderr=log_file,
+            )
+        self._switchyard_procs[params.agent_run_id] = process
+        try:
+            await self._wait_switchyard_ready(f"http://127.0.0.1:{port}", process)
+        except Exception:
+            await self._teardown_switchyard(params.agent_run_id)
+            raise
+        return base_url
+
+    async def _wait_switchyard_ready(self, local_url: str, process: Process, timeout_s: float = 60.0) -> None:
+        """Poll the spawned instance until it serves ``/v1/models`` or fail."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if process.returncode is not None:
+                raise RuntimeError(
+                    f"spawned Switchyard exited with code {process.returncode} before ready "
+                    "(see the run's switchyard.log)"
+                )
+            try:
+                response = await request("GET", f"{local_url}/v1/models", timeout=ClientTimeout(total=5))
+                if response.status == 200:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        raise RuntimeError(f"spawned Switchyard not ready after {timeout_s}s")
+
+    async def _teardown_switchyard(self, agent_run_id: str) -> None:
+        """Reap the run's spawned Switchyard instance, if any. Idempotent."""
+        process = self._switchyard_procs.pop(agent_run_id, None)
+        if process is None or process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+    async def _fetch_switchyard_max_model_len(self, base_url: str, route_id: str) -> Optional[int]:
+        """The served model's context length from Switchyard's ``/v1/models``, or ``None``.
+
+        Switchyard surfaces the engine's ``max_model_len`` on token-capture
+        routes. Absence (older Switchyard, engine unreachable at proxy start)
+        degrades gracefully: the opencode provider entry ships without limits,
+        exactly today's behavior.
+        """
+        try:
+            response = await request(
+                "GET", f"{base_url.rstrip('/')}/v1/models", timeout=ClientTimeout(total=30)
+            )
+            await raise_for_status(response)
+            entries = (await get_response_json(response)).get("data") or []
+        except Exception as e:
+            print(f"WARNING: could not fetch max_model_len from Switchyard: {e}", flush=True)
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == route_id:
+                value = entry.get("max_model_len")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
+        print(f"WARNING: Switchyard /v1/models has no max_model_len for route {route_id!r}", flush=True)
+        return None
+
+    async def _list_switchyard_sessions(self, base_url: str) -> List[Dict[str, Any]]:
+        """Session ids (with parent links) Switchyard captured for this run.
+
+        Harnesses that mint their own session ids (e.g. opencode), so Gym
+        discovers them from Switchyard rather than any harness log. Returns
+        ``[{"session_id", "parent_session_id"}, ...]``. Requires a per-run
+        ``--rl-log-dir`` so the list is scoped to this rollout.
+        """
+        url = f"{base_url.rstrip('/')}/v1/sessions"
+        response = await request("GET", url, timeout=ClientTimeout(total=60))
+        await raise_for_status(response)
+        envelope = await get_response_json(response)
+        return envelope.get("sessions", [])
+
+    async def _retrieve_switchyard_trace(
+        self, base_url: str, session_id: str, filter_title_gen: bool = False
+    ) -> SwitchyardTrace:
+        """Fetch one session's captured completions from Switchyard and rebuild the rollout.
+
+        Harness-neutral: keyed only on ``(base_url, session_id)`` so both the
+        single-session (OpenHands) and per-subagent (OpenCode) paths reuse it.
 
         No polling is needed: the agent has exited and Switchyard durably writes
         each record before returning that call's model response. The GET is
         idempotent, so the helper's transport retries are safe.
         """
-        url = (
-            f"{instance_config.switchyard_base_url.rstrip('/')}"
-            f"/v1/sessions/{instance_config.switchyard_session_id}/completions"
-        )
+        url = f"{base_url.rstrip('/')}/v1/sessions/{session_id}/completions"
         response = await request("GET", url, timeout=ClientTimeout(total=60))
         await raise_for_status(response)
         envelope = await get_response_json(response)
-        return reconstruct_switchyard_rollout(envelope, instance_config.switchyard_session_id, self._vllm_converter)
+        if filter_title_gen:
+            envelope = _filter_title_gen_records(envelope)
+        return reconstruct_switchyard_rollout(envelope, session_id, self._vllm_converter)
+
+    @staticmethod
+    def _apply_switchyard_trace(
+        responses_create_params: dict,
+        response: NeMoGymResponse,
+        trace: SwitchyardTrace,
+        session_id: str,
+    ) -> None:
+        """Replace the rollout's input/tools/output with a reconstructed Switchyard trace.
+
+        Switchyard is the source of truth for the token-annotated messages; the
+        harness supplies only the outcome/reward.
+        """
+        responses_create_params["input"] = [item.model_dump() for item in trace.input_items]
+        responses_create_params["tools"] = [tool.model_dump() for tool in trace.tools]
+        response.output = trace.output_items
+        response.metadata = {
+            "switchyard_source": "switchyard",
+            "switchyard_session_id": session_id,
+            "switchyard_record_uuids": json.dumps(trace.record_uuids),
+            "switchyard_model": trace.model,
+        }
+
+    async def _reconstruct_switchyard_sessions(
+        self, base_url: str, sessions: List[Dict[str, Any]], filter_title_gen: bool = False
+    ) -> Tuple[SwitchyardTrace, str, List[Dict[str, Any]]]:
+        """Retrieve + reconstruct every session in an OpenCode session tree.
+
+        ``sessions`` is ``[{"session_id", "parent_session_id"}, ...]`` — OpenCode
+        mints a distinct session id per (sub)agent and Switchyard captures each
+        separately, so each is an independent linear chain reconstructed by
+        Layer 1. Returns ``(root_trace, root_session_id, subagent_entries)``: the
+        parent-less root becomes the main rollout; each subagent becomes a
+        token-annotated entry tagged with its parent. Fail-closed — any missing
+        root, ambiguous tree, or reconstruction failure raises so the caller masks
+        the whole sample rather than emit partial training data.
+        """
+        roots = [s for s in sessions if not s.get("parent_session_id")]
+        if len(roots) != 1:
+            raise SwitchyardTraceError(f"expected exactly one root session, got {len(roots)}")
+        root_id = str(roots[0]["session_id"])
+        root_trace = await self._retrieve_switchyard_trace(base_url, root_id, filter_title_gen=filter_title_gen)
+
+        subagents: List[Dict[str, Any]] = []
+        for entry in sessions:
+            if not entry.get("parent_session_id"):
+                continue
+            session_id = str(entry["session_id"])
+            trace = await self._retrieve_switchyard_trace(base_url, session_id, filter_title_gen=filter_title_gen)
+            subagents.append(
+                {
+                    "session_id": session_id,
+                    "parent_session_id": entry["parent_session_id"],
+                    "input": [item.model_dump() for item in trace.input_items],
+                    "output": [item.model_dump() for item in trace.output_items],
+                    "model": trace.model,
+                    "record_uuids": trace.record_uuids,
+                }
+            )
+        return root_trace, root_id, subagents
 
 
 if __name__ == "__main__":

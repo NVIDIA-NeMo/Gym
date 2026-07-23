@@ -1,20 +1,20 @@
-# SWE-bench wrapper configuration for upstream opencode RL training.
-# Runs `opencode run` headless with an opencode.json provider pointed at Switchyard
-# (no fork, no harness modification). Supply the Switchyard endpoint at run time via
-# `switchyard_base_url` or `switchyard_spawn_routing_profile` — token capture needs it.
+# SWE-bench wrapper configuration for the NeMo-Gym opencode fork (nv-opencode), RL training.
 
 swe_agents_train:
   responses_api_agents:
     swe_agents: &swe_agents_config
       entrypoint: app.py
       domain: coding
-      description: SWE-bench driven by upstream opencode for RL training.
-      value: Train software engineering capabilities on SWE tasks using upstream opencode rollouts.
+      description: SWE-bench driven by the opencode agent framework for RL training.
+      value: Train software engineering capabilities on SWE tasks using opencode rollouts.
 
       # Agent framework configuration
       agent_framework: opencode
-      opencode_source: opencode  # upstream opencode-ai (installed via bun); no fork
+      opencode_source: nv-opencode  # pinned NeMo-Gym fork (bench entry point)
       agent_max_turns: 100
+      # Pinned NeMo-Gym opencode fork (adds bench/cli.ts + the nemo-gym LanguageModelV3 provider).
+      agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
+      agent_framework_commit: sdd/dev
 
       # Container configuration (same SIFs as the openhands path)
       container_formatter: ???
