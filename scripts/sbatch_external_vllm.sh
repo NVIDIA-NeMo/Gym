@@ -28,7 +28,7 @@ command=$(cat <<EOF
 EOF
 )
 
-CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1 \
+CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.25.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
 sbatch \
     --nodes=2 \

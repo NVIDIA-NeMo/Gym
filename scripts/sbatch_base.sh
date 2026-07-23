@@ -52,6 +52,7 @@ fi
 # We set the container here on the srun because container support is not universal across sbatch.
 # We name all instances of this container on our nodes as `container-on-node`, referenced in the interactive script above.
 # We set --no-container-mount-home because our mounts are covered via --container-mounts instead.
+# We assume ray is available with the right version inside the container.
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
