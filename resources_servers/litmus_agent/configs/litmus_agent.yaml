@@ -1,0 +1,81 @@
+litmus_agent:
+  resources_servers:
+    litmus_agent:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: >-
+        Domain-agnostic answer verifier: extracts a model's final answer with an
+        answer_format regex and scores it against expected_answer per an
+        answer_type taxonomy (float, bool, string). For tool-using rows it can
+        also host a sandbox-backed stateful Python code-execution tool.
+      value: Reusable scoring for any benchmark whose tasks reduce to "match the expected answer".
+      # Numeric tolerances for the float answer_type.
+      float_rel_tol: ${oc.env:LITMUS_AGENT_FLOAT_REL_TOL,1e-6}
+      float_abs_tol: ${oc.env:LITMUS_AGENT_FLOAT_ABS_TOL,1e-6}
+      # Sandbox-backed code-exec tool. The sandbox is created lazily on the first
+      # tool call, so direct (no-tool) rows never need it and runs without an
+      # OPENSANDBOX_API_KEY still work as long as no row calls the tool.
+      code_exec_tool_name: stateful_python_code_exec
+      code_exec_timeout_s: ${oc.env:LITMUS_AGENT_CODE_EXEC_TIMEOUT_S,120}
+      code_exec_max_output_chars: ${oc.env:LITMUS_AGENT_CODE_EXEC_MAX_OUTPUT_CHARS,10000}
+      code_exec_user: root
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY,''}
+            protocol: http
+            request_timeout_s: 300
+            use_server_proxy: true
+          create:
+            request_timeout_s: 1200
+            timeout_s: 1200
+            skip_health_check: true
+            retries: 10
+            retry_delay_s: 5.0
+            retry_max_delay_s: 90.0
+          probe:
+            timeout_s: 60
+            deadline_s: 180
+            stable_count: 2
+            stable_delay_s: 1.0
+          operations:
+            retries: 5
+            retry_delay_s: 1.0
+            retry_max_delay_s: 45.0
+            command_retries: 0
+            close_timeout_s: 30
+      sandbox_spec:
+        image: ${oc.env:LITMUS_AGENT_SANDBOX_IMAGE,docker.io/library/python:3.12-slim}
+        ttl_s: 1800
+        ready_timeout_s: 1200
+        # OpenSandbox does not create workdir; must be a dir that exists in the image.
+        workdir: /tmp
+        resources:
+          cpu: 2
+          memory_mib: 4096
+          disk_gib: 10
+        provider_options:
+          platform:
+            os: linux
+            arch: amd64
+        metadata:
+          harness: litmus_agent
+          sandbox-api: opensandbox-sdk
+
+litmus_agent_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 10
+      resources_server:
+        type: resources_servers
+        name: litmus_agent
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl

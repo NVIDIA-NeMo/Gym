@@ -15,21 +15,27 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import pytest
+from openai.types.completion_usage import CompletionUsage
 
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
     NeMoGymFunction,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputText,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import (
@@ -282,6 +288,62 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.tools[0]["function"]["name"] == "get_weather"
 
 
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: ResponsesConverter, tools_kwargs: dict):
+    # vLLM rejects tool_choice without tools ("When using `tool_choice`, `tools` must be set."),
+    # so requests with absent or empty tools must not carry tool_choice / parallel_tool_calls.
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            **tools_kwargs,
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert "tools" not in dumped
+    assert "tool_choice" not in dumped
+    assert "parallel_tool_calls" not in dumped
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                model="my-model",
+                tool_choice="required",
+                **tools_kwargs,
+            )
+        )
+
+
+def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": True,
+                }
+            ],
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert dumped["tool_choice"] == "auto"
+    assert len(params.tools) == 1
+
+
 def test_responses_to_chat_completion_token_id_information_path():
     converter = ResponsesConverter(return_token_id_information=True)
     params = converter.responses_to_chat_completion_create_params(
@@ -397,6 +459,75 @@ def test_chat_messages_to_responses_items_all_roles(converter: ResponsesConverte
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
+
+
+# ===========================================================================
+# chat_completion_to_response
+# ===========================================================================
+
+
+def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
+    actual_response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            model="",
+            input=[
+                dict(
+                    role="user",
+                    content="hello",
+                ),
+            ],
+        ),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="hi",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+            ),
+        ),
+    )
+
+    expected_response = NeMoGymResponse(
+        id="resp_123",
+        created_at=0.0,
+        model="",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg_123",
+                content=[
+                    NeMoGymResponseOutputText(text="hi", type="output_text", annotations=[]),
+                ],
+                role="assistant",
+            )
+        ],
+        parallel_tool_calls=True,
+        usage=NeMoGymResponseUsage(
+            input_tokens=1,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=2,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=3,
+        ),
+        tool_choice="auto",
+        tools=[],
+    )
+
+    assert expected_response == actual_response
 
 
 # ===========================================================================

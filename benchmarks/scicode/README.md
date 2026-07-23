@@ -5,12 +5,11 @@ code-generation benchmark. Each problem is decomposed into sub-steps; the model 
 Python function per sub-step, with each sub-step building on the code it generated for previous
 sub-steps. Generated code is executed against the problem's test cases.
 
-- **Tasks**: 80 problems / 341 sub-steps (`validation` + `test` combined — the split nemo-skills calls `test_aai`)
+- **Tasks**: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - **Reward**: binary per problem — `1.0` only if every sub-step passes its tests
 - **Metrics** (reported by the agent): `subtask_accuracy` — the headline SciCode number,
-  total sub-steps passed divided by total sub-steps across all rollouts (matches nemo-skills'
-  `pass@1[avg-of-3]/subtask_accuracy`) — and `problem_accuracy` (= `mean/reward`, the whole problem
-  passing)
+  total sub-steps passed divided by total sub-steps across all rollouts — and `problem_accuracy`
+  (= `mean/reward`, the whole problem passing)
 
 A custom multi-step agent (`responses_api_agents/scicode_agent`) drives the per-sub-step
 generation loop; the resources server (`resources_servers/scicode`) executes each sub-step's
@@ -51,8 +50,12 @@ gym eval prepare --benchmark scicode
 ```
 
 Downloads `SciCode1/SciCode` and writes `benchmarks/scicode/data/scicode_benchmark.jsonl`
-(one row per problem, carrying the full `sub_steps` list). This does not fetch `test_data.h5` — see
-above.
+(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). This
+does not fetch `test_data.h5` — see above.
+
+The agent uses the current AA SciCode prompt in `benchmarks/scicode/prompts/background.yaml`.
+The scientist-authored background in each sub-step is included in the prompt; the model is asked
+to write the next function directly.
 
 ## Dependencies
 
@@ -108,8 +111,8 @@ gym eval run \
     --temperature 0.0
 ```
 
-`num_repeats: 3` (from the dataset config) and `temperature: 0.0` match nemo-skills' SciCode eval
-(`pass@1[avg-of-3]`).
+`num_repeats: 3` comes from Gym's dataset config and can be overridden independently of the
+AA-aligned problem set and prompt.
 
 ## Licensing
 

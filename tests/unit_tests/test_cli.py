@@ -27,7 +27,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.env
 import nemo_gym.global_config
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
@@ -423,3 +423,163 @@ class TestListEnvironments:
         assert json.loads(capsys.readouterr().out) == [
             {"name": "alpha", "domain": "agent", "description": "Alpha env"}
         ]
+
+    def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `gym search environments <query>` reuses this command via the `query` config key
+        # (matches name + domain + description).
+        beta = EnvironmentEntry(
+            name="beta",
+            config_path=Path("environments/beta/config.yaml"),
+            path=Path("environments/beta"),
+            description="Beta env",
+            domain="math",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "alpha"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "beta": beta}
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "Environments matching 'alpha'" in out
+        assert "agent" in out  # alpha's domain -> its row was rendered
+        assert "beta" not in out and "math" not in out  # beta and its domain filtered out
+
+    def test_query_matches_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # "Robotics" only appears in gamma's description, not its name or domain.
+        gamma = EnvironmentEntry(
+            name="gamma",
+            config_path=Path("environments/gamma/config.yaml"),
+            path=Path("environments/gamma"),
+            description="Robotics manipulation tasks",
+            domain="control",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "Robotics"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "gamma": gamma}
+        )
+
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": ["alpha_rs"],
+                "agent": "simple_agent",
+                "datasets": ["train", "example"],
+            },
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+
+        assert "gamma" in out
+        assert "alpha" not in out
+
+    def test_inspect_environment_by_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alpha"})
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": ["alpha_rs"],
+                "agent": "simple_agent",
+                "datasets": ["train", "example"],
+            },
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+
+        assert "The alpha environment (domain: agent)" in out
+        assert "Value: Some value" in out
+        assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
+        assert "datasets: train, example" in out
+        assert "gym env start --environment alpha --model-type vllm_model" in out
+
+    def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, config: dict) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            lambda **k: OmegaConf.create({"component_name": "alpha", **config}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": [],
+                "agent": None,
+                "datasets": [],
+            },
+        )
+
+    def test_inspect_folds_value_into_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `value` is not a separate field: it is appended to the description, not surfaced on its own.
+        self._mock_inspect_alpha(monkeypatch, {"json": True})
+
+        list_environments()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["description"] == "Alpha env\nValue: Some value"
+        assert "value" not in payload and "value" not in payload["details"]
+
+    def test_inspect_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_inspect_alpha(monkeypatch, {"json": True})
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out) == {
+            "name": "alpha",
+            "type": "environment",
+            "domain": "agent",
+            "description": "Alpha env\nValue: Some value",
+            "details": {"config": str(self._ALPHA.config_path.resolve())},
+            "usage_example": "gym env start --environment alpha --model-type vllm_model",
+        }
+
+    def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alfa"})
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        with raises(SystemExit):
+            list_environments()
+
+        out = capsys.readouterr().out
+        assert "Unknown environment 'alfa'" in out and "alpha" in out
+
+    def test_inspect_shows_absolute_config_path(self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path) -> None:
+        # Real discovery (via an extra root): the config line must be the config's absolute path.
+        cfg = tmp_path / "environments" / "my_env" / "config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("my_env:\n  resources_servers:\n    my_env:\n      domain: agent\n      description: D\n")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            lambda **k: OmegaConf.create({"component_name": "my_env"}),
+        )
+
+        list_environments()
+
+        assert f"config: {cfg.resolve()}" in capsys.readouterr().out

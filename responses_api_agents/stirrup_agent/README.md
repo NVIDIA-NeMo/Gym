@@ -403,6 +403,11 @@ LibreOffice preconversion of Office docs runs inside `verify()` automatically;
 ELO is computed in `aggregate_metrics()`. See `benchmarks/gdpval/README.md`
 for the full recipe.
 
+Both comparison and rubric scoring grade with a **multi-judge panel** by default
+(one frontier judge sampled per call, with audio/video tasks routed to a
+natively-multimodal member). See
+[Multi-judge panel](../../benchmarks/gdpval/README.md#multi-judge-panel).
+
 ### Tavily Web Search
 
 To give the agent web access (some GDPVal tasks benefit from fresh facts), set
