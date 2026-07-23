@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
 from wandb import Table
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import (
@@ -36,7 +37,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     get_wandb_run,
 )
-from nemo_gym.path_utils import failures_path_for, resolve_input_path
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -559,8 +560,8 @@ class RolloutReverificationHelper(BaseModel):
         output_fpaths = _prepare_output_fpaths(
             output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite
         )
-        materialized_inputs_jsonl_fpath = resolve_input_path(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = resolve_input_path(
+        materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
+        rollouts_jsonl_fpath = _resolve_under_cwd_or_install(
             config.rollouts_jsonl_fpath
         )  # rollouts are inputs for the verification
 
