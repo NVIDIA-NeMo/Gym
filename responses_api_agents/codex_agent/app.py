@@ -300,7 +300,9 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 600
     system_prompt: Optional[str] = None
     reasoning_effort: Optional[str] = None
-    codex_version: Optional[str] = None
+    # Required: every config pins an explicit npm version so auto-install is reproducible and cannot
+    # silently drift as new Codex releases land. Version bumps are then explicit, tested changes.
+    codex_version: str
     # Working root handed to `codex exec --cd`. None -> a fresh temp dir per request, removed
     # afterwards, so rollouts cannot see each other's files.
     cwd: Optional[str] = None
@@ -348,6 +350,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
         # Mirrors claude_code_agent's null anthropic_base_url: null means the provider's real API.
         return self.config.openai_base_url or "https://api.openai.com/v1"
 
+    def _effective_model(self) -> Optional[str]:
+        """The model name written into the generated config (and reported on the response).
+
+        An explicit (even unknown) model name keeps Codex from applying model-family feature
+        gating: for models it recognizes, Codex may switch tools into code-mode carriers that
+        models served through a Gym model server cannot drive. Gym model servers substitute their
+        own configured model anyway, so a placeholder never reaches the backend. Returns None only
+        for a direct endpoint with no configured model, where Codex uses its own default.
+        """
+        if self.config.model:
+            return self.config.model
+        if self.config.model_server:
+            return "gym-policy-model"
+        return None
+
     def _build_config(
         self,
         base_url: str,
@@ -386,13 +403,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 }
             },
         }
-        model = self.config.model
-        if model is None and self.config.model_server:
-            # An explicit (even unknown) model name keeps Codex from applying model-family feature
-            # gating: for models it recognizes, Codex may switch tools into code-mode carriers that
-            # models served through a Gym model server cannot drive. Gym model servers substitute
-            # their own configured model anyway, so the placeholder never reaches the backend.
-            model = "gym-policy-model"
+        model = self._effective_model()
         if model:
             config["model"] = model
         if self.config.reasoning_effort:
@@ -460,7 +471,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         this rollout.
         """
         base_url = self._resolve_call_base_url(rollout_id)
-        model = self.config.model or "codex-default"
+        # Report the name the config actually pins (so response.model matches what Codex was told);
+        # falls back to a sentinel only for a direct endpoint that lets Codex pick its own default.
+        model = self._effective_model() or "codex-default"
 
         config = self._build_config(base_url, developer_instructions=system_prompt, mcp_servers=mcp_servers)
 

@@ -13,7 +13,7 @@ codex_agent:
       timeout: 600
       system_prompt: null  # inserted as a developer message via `developer_instructions`
       reasoning_effort: null  # passed as `model_reasoning_effort` (e.g. low, medium, high)
-      codex_version: null  # npm version to pin on auto-install (null means latest)
+      codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
       cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
       stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000
       extra_config: {}  # extra config.toml content deep-merged over the generated base config

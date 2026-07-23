@@ -26,6 +26,7 @@ from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
@@ -39,6 +40,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
     sanitize_streaming_responses_body,
+    synthesize_responses_failure_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
@@ -278,7 +280,6 @@ class TestValidateStreamingParams:
 
     def test_unfixable_errors_still_raise(self) -> None:
         import pydantic
-        import pytest
 
         with pytest.raises(pydantic.ValidationError):
             validate_streaming_responses_params({"input": [], "temperature": "not-a-number"})
@@ -322,6 +323,14 @@ class TestSynthesizeSSE:
         assert events[1]["item"]["name"] == "exec_command"
         assert "namespace" not in events[1]["item"]
 
+    def test_failure_stream_is_terminal_response_failed(self) -> None:
+        events = self._events("".join(synthesize_responses_failure_sse("boom", code="server_error")))
+        assert [e["type"] for e in events] == ["response.created", "response.failed"]
+        failed = events[-1]["response"]
+        assert failed["status"] == "failed"
+        assert failed["error"] == {"code": "server_error", "message": "boom"}
+        assert failed["output"] == []
+
 
 class _EchoModel(SimpleResponsesAPIModel):
     """Fake model server capturing the params its responses() receives."""
@@ -351,6 +360,11 @@ class _RequestAwareEchoModel(_EchoModel):
     ) -> NeMoGymResponse:
         object.__setattr__(self, "saw_request", isinstance(request, Request))
         return await super().responses(body)
+
+
+class _FailingModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise RuntimeError("backend exploded")
 
 
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
@@ -409,3 +423,24 @@ class TestResponsesDispatchRoute:
         client, _ = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"stream": True})  # no input at all
         assert resp.status_code == 422
+
+    def test_streaming_backend_error_yields_response_failed(self) -> None:
+        # A responses() failure after the streaming contract is committed becomes a terminal
+        # response.failed event (HTTP 200 SSE), not a broken-stream HTTP 500.
+        client, _ = _client(_FailingModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in resp.text
+        assert "event: response.completed" not in resp.text
+        failed = [line for line in resp.text.splitlines() if line.startswith("data: ") and "response.failed" in line]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["status"] == "failed"
+        assert "backend exploded" in payload["response"]["error"]["message"]
+
+    def test_non_streaming_backend_error_still_raises(self) -> None:
+        # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
+        # synthesized response.failed — only the stream path swallows it into a terminal event.
+        client, _ = _client(_FailingModel)
+        with pytest.raises(RuntimeError, match="backend exploded"):
+            client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})

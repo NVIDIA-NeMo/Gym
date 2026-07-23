@@ -81,13 +81,15 @@ def ensure_codex(version: str | None = None) -> None:
             raise RuntimeError(f"npm not found after local Node.js install in {bin_dir}")
         _npm_install(npm, version)
 
-    # npm install -g may put the binary in a prefix not yet on PATH
+    # npm install -g may put the binary in a prefix not yet on PATH. `npm bin -g` was removed in
+    # npm >= 9 (Node 22.15 ships npm 10), so resolve the global prefix and append its bin dir.
     if not shutil.which("codex"):
-        npm_bin_dir = subprocess.run(
-            [shutil.which("npm") or "npm", "bin", "-g"],
+        npm_prefix = subprocess.run(
+            [shutil.which("npm") or "npm", "prefix", "-g"],
             capture_output=True,
             text=True,
         ).stdout.strip()
+        npm_bin_dir = str(Path(npm_prefix) / "bin") if npm_prefix else ""
         if npm_bin_dir and Path(npm_bin_dir).is_dir():
             os.environ["PATH"] = npm_bin_dir + os.pathsep + os.environ.get("PATH", "")
 

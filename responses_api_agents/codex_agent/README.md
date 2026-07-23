@@ -108,7 +108,7 @@ codex_agent:
       timeout: 600
       system_prompt: null
       reasoning_effort: null
-      codex_version: null
+      codex_version: 0.144.4
       cwd: null
       stream_idle_timeout_ms: null
       extra_config: {}
@@ -122,7 +122,7 @@ codex_agent:
 - `timeout`: per-request wall-clock seconds
 - `system_prompt`: inserted as a `developer` role message via Codex's `developer_instructions` config. The data's system message (if any) is appended after this
 - `reasoning_effort`: passed as `model_reasoning_effort` (e.g. `low`, `medium`, `high`)
-- `codex_version`: npm version to pin on auto-install (null means latest)
+- `codex_version`: **required** — npm version pinned on auto-install. Every config must pin an explicit version so runs are reproducible and cannot silently drift as new Codex releases land; version bumps become explicit, tested changes
 - `cwd`: working root handed to `codex exec --cd`. `null` creates a fresh temp dir per request and removes it afterwards
 - `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
@@ -152,3 +152,4 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.
+- Multi-turn dataset inputs are collapsed to a single prompt: only the first `system` message (as `developer_instructions`) and the last `user` message are passed to `codex exec`; any earlier user/assistant/tool turns in `responses_create_params.input` are dropped. This matches the Claude Code agent and is fine for single-turn datasets like reasoning_gym, but datasets that encode prior conversation turns in `input` will not see that history.

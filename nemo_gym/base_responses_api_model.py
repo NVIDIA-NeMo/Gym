@@ -61,6 +61,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_streaming import (
     sanitize_streaming_responses_body,
+    synthesize_responses_failure_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
@@ -126,7 +127,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         always do), the request is first sanitized from the streaming wire dialect (extra
         bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
-        synthesized Responses SSE event stream.
+        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
+        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
+        still fails eagerly, before the stream is committed).
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -137,8 +140,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
-        response = await self._invoke_responses(request, params)
-        response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+
+        try:
+            response = await self._invoke_responses(request, params)
+            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+        except Exception as exc:
+            # The streaming contract is already the response's shape, so a backend failure must be a
+            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            logger.exception("responses() failed while serving a streaming /v1/responses request")
+            return StreamingResponse(
+                synthesize_responses_failure_sse(str(exc)),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(
             synthesize_responses_sse(response_json, ns_map),
             media_type="text/event-stream",

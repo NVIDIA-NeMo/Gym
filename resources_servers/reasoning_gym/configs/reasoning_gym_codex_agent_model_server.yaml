@@ -38,6 +38,7 @@ reasoning_gym_codex_agent_model_server:
       openai_base_url: null
       sandbox_mode: danger-full-access
       timeout: 600
+      codex_version: 0.144.4
       system_prompt: |
         You are a precise reasoning assistant. You can run shell commands to use Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.

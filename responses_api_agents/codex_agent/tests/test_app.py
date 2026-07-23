@@ -23,6 +23,7 @@ import orjson
 import pytest
 import yaml
 from fastapi import Request
+from pydantic import ValidationError
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -55,6 +56,7 @@ def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
 
 def _config(**kwargs) -> CodexAgentConfig:
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
+    kwargs.setdefault("codex_version", "0.144.4")
     return CodexAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -103,6 +105,17 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+    def test_codex_version_is_required(self) -> None:
+        # Pinning is mandatory so auto-install cannot silently drift; omitting it is a config error.
+        with pytest.raises(ValidationError):
+            CodexAgentConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            )
 
 
 class TestTomlDumps:
@@ -165,6 +178,21 @@ class TestBuildConfig:
         assert config["model_reasoning_effort"] == "high"
         assert config["developer_instructions"] == "be terse"
         assert config["model_providers"]["gym"]["stream_idle_timeout_ms"] == 42
+
+    def test_model_server_without_model_pins_placeholder(self) -> None:
+        # With a model server and no explicit model, config pins a placeholder to avoid Codex's
+        # model-family code-mode gating, and the effective name is reported consistently.
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        config = agent._build_config("http://x/v1")
+        assert config["model"] == "gym-policy-model"
+        assert agent._effective_model() == "gym-policy-model"
+
+    def test_direct_endpoint_without_model_omits_model(self) -> None:
+        # A direct endpoint with no model lets Codex pick its own default: no model key in config.
+        agent = _make_agent()
+        config = agent._build_config("http://x/v1")
+        assert "model" not in config
+        assert agent._effective_model() is None
 
     def test_extra_config_deep_merged(self) -> None:
         agent = _make_agent(

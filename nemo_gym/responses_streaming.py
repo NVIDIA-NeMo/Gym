@@ -35,6 +35,7 @@ import json
 import logging
 from copy import deepcopy
 from typing import Any, Iterator, Optional
+from uuid import uuid4
 
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
@@ -258,3 +259,24 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     for index, item in enumerate(output_items):
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
     yield _sse_event({"type": "response.completed", "response": {**response_json, "output": output_items}})
+
+
+def synthesize_responses_failure_sse(message: str, *, code: str = "server_error") -> Iterator[str]:
+    """Emit a terminal Responses SSE stream for a backend failure.
+
+    Once the streaming contract is committed (HTTP 200 + ``text/event-stream``), a ``responses()``
+    error can no longer surface as an HTTP 500. Streaming clients (e.g. Codex) expect a terminal
+    ``response.failed`` event; without one they see a truncated stream and cannot tell an
+    application error from a transport failure. Emitting ``response.failed`` lets the client report
+    a clean turn failure, and lets model-call capture classify it as an upstream error (its
+    terminal-SSE table maps ``response.failed`` to an error) rather than a stream truncation.
+    """
+    response = {
+        "id": f"resp_{uuid4().hex}",
+        "object": "response",
+        "status": "failed",
+        "output": [],
+        "error": {"code": code, "message": message},
+    }
+    yield _sse_event({"type": "response.created", "response": {**response, "status": "in_progress"}})
+    yield _sse_event({"type": "response.failed", "response": response})
