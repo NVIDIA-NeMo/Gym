@@ -364,9 +364,9 @@ class TestParseOutputLineKey:
         line = orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 2}) + b"\n"
         assert _parse_output_line_key(line) == (1, 2)
 
-    def test_missing_indices_return_none_tuple(self) -> None:
+    def test_missing_indices_return_none(self) -> None:
         line = orjson.dumps({"reward": 1.0})
-        assert _parse_output_line_key(line) == (None, None)
+        assert _parse_output_line_key(line) is None
 
 
 class TestLoadCacheKeysByStatus:

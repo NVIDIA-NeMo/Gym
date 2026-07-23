@@ -79,7 +79,9 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=None, ge=1, description="Maximum number of samples to re-verify in parallel (omit for unbounded)."
     )
     limit: Optional[int] = Field(
-        default=None, ge=1, description="Maximum number of examples to re-verify (omit for no limit)."
+        default=None,
+        ge=1,
+        description="Maximum number of examples to re-verify (omit for no limit). When combined with resume_from_cache, already-completed rows within the limit count against it, so fewer (or zero) rows may actually be re-verified.",
     )
     upload_rollouts_to_wandb: bool = Field(
         default=True,
@@ -193,10 +195,20 @@ def _rollout_verify_debug_summary(row: Dict[str, Any], resources_server_name: st
 # ---------------------------------------------------------------------------
 
 
-def _parse_output_line_key(line: bytes) -> tuple[int, int]:
+def _parse_output_line(line: bytes) -> Dict[str, Any]:
     result_str = line.strip()
-    result = orjson.loads(result_str)
-    return result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)
+    if not result_str:
+        return {}
+    return orjson.loads(result_str)
+
+
+def _parse_output_line_key(line: bytes) -> tuple[int, int] | None:
+    result = _parse_output_line(line)
+    task_idx = result.get(TASK_INDEX_KEY_NAME)
+    rollout_idx = result.get(ROLLOUT_INDEX_KEY_NAME)
+    if task_idx is None or rollout_idx is None:
+        return None
+    return task_idx, rollout_idx
 
 
 # to do: OutputPaths to OutputFPaths
@@ -213,7 +225,7 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
     successful_keys: set[tuple[int, int]] = set()
     if output_fpaths.output.exists():
         with output_fpaths.output.open("rb") as f:
-            successful_keys = {_parse_output_line_key(line) for line in f}
+            successful_keys = {key for line in f if (key := _parse_output_line_key(line)) is not None}
 
     # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
     # per key + flag terminal rows so chain-hop 2 retries the right ones.
@@ -222,10 +234,9 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
     if output_fpaths.failures.exists():
         with output_fpaths.failures.open("rb") as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                fr = _parse_output_line(line)
+                if not fr:
                     continue
-                fr = orjson.loads(line)
                 if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                     continue
                 k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
