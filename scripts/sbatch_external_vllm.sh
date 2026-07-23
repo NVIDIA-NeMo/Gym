@@ -22,7 +22,8 @@ vllm serve $MODEL \
     --enable-flashinfer-autotune \
     --async-scheduling \
     -cc.pass_config.fuse_allreduce_rms=False \
-    --mamba-backend triton \
+    --enable-expert-parallel
+    --mamba-backend flashinfer \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --max-num-batched-tokens 32768 \
