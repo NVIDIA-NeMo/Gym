@@ -74,8 +74,19 @@ stages (`rollout` / `train` / `rollout --backend lexmount`). Read on for what ea
 
 ### 0. Serve a policy model (the #1 reviewer stumbling block)
 
-Stage A collects rollouts, so it needs a model that speaks the **Responses API**
-(`POST /v1/responses`) — pick either:
+Stage A collects rollouts, so it needs a model endpoint that satisfies **both**:
+
+1. **Speaks the Responses API** (`POST /v1/responses`). Chat-completions-only
+   gateways do NOT work — the agent calls `/v1/responses` on the upstream with no
+   chat fallback. Recent vLLM serves `/v1/responses` natively.
+2. **Parses tool calls into structured `function_call` items.** If the server
+   returns the model's tool-call markup as plain text (e.g. a literal
+   `<tool_call>{"name": "browser_observe", ...}</tool_call>` string), the agent
+   sees zero tool calls, the browser is never driven, and every rollout
+   "succeeds" with **reward 0.0** — silently. For vLLM + Qwen-family models,
+   launch with `--enable-auto-tool-choice --tool-call-parser hermes`.
+
+Pick either:
 
 - **A generic OpenAI-compatible endpoint (no local GPU).** Point at any server that
   implements the Responses API and export three vars; `example.sh` / the `openai_model`
@@ -103,6 +114,16 @@ uv run --no-project --with playwright --with pytest --with pytest-asyncio python
 Drives headless Chromium against the bundled offline `site/` (deterministic,
 ToS-safe) and asserts navigate/click/type/observe + reward logic end-to-end.
 
+> **Bare containers/VMs**: Chromium needs system libraries (libnss3, libgbm1,
+> ...). If the install prints `Host system is missing dependencies to run
+> browsers`, run (root/sudo required — `example.sh` attempts this automatically
+> when it can):
+> ```bash
+> uv run --no-project --with playwright python -m playwright install-deps chromium
+> ```
+> Network note: setup downloads from pypi.org (deps), astral.sh (uv), and
+> cdn.playwright.dev (~190 MB Chromium).
+
 ### 2. Stage A — rollouts as a NeMo-Gym environment (no GPU)
 ```bash
 # after exporting POLICY_* from step 0:
@@ -127,9 +148,24 @@ hyperparameters to a 1-GPU smoke; every value is annotated with its provenance) 
 NeMo-RL's `examples/nemo_gym/run_grpo_nemo_gym.py`.
 
 ### 4. Stage C — same rollout on the Lexmount cloud backend (one flag)
+
+Two Stage-C-specific facts:
+
+- **The SDK must live in the *server* venv** — the resources server runs in its
+  own venv at `resources_servers/lexmount_browser/.venv` (created by the first
+  `gym env start`, e.g. by running Stage A once). Installing `lexmount` into the
+  repo-root venv does nothing for the server process.
+- **Stage C rolls out on real-web tasks**, not the bundled offline `site/`: the
+  offline tasks are local `file://` URIs, which a cloud browser cannot load.
+  `example.sh` uses the 3 bundled WebVoyager sample tasks
+  (`data/webvoyager_sample.jsonl`, already in this env's input format) and
+  writes rollouts to `data/webvoyager_rollouts.jsonl` (conservative
+  `url_contains` reward — see [Data](#data-webvoyager-bridge)).
+
 ```bash
+bash example.sh rollout            # Stage A once, so the server venv exists
+uv pip install --python resources_servers/lexmount_browser/.venv/bin/python "lexmount>=0.5.13"
 export LEXMOUNT_API_KEY=... LEXMOUNT_PROJECT_ID=... LEXMOUNT_BASE_URL=...
-pip install "lexmount>=0.5.13"    # into the server venv
 bash example.sh rollout --backend lexmount
 ```
 
@@ -142,8 +178,9 @@ bash example.sh rollout --backend lexmount
 pipeline (row-count / SHA-256 validation, duplicate-id rejection, source-id
 preservation, task-agnostic system prompt — no answers or synthetic data injected).
 The full 600-task WebVoyager set is **not bundled** (fetch it from upstream); three
-verbatim sample tasks ship in `data/webvoyager_sample.jsonl` and are embedded in the
-converter for `--selftest`.
+sample tasks (Allrecipes--0 / Amazon--0 / GitHub--0) ship **already converted** in
+`data/webvoyager_sample.jsonl` (directly usable as rollout input — Stage C uses it);
+their raw upstream form is embedded in the converter for `--selftest`.
 
 Because WebVoyager has no rule-checkable ground truth, converted rows carry a
 **conservative** `url_contains` spec (agent reached/stayed on the task host) and, with
