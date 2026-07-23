@@ -26,7 +26,11 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_first_server_config_dict
+from nemo_gym.global_config import (
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    TOKEN_ID_CAPTURE_ENABLED_KEY_NAME,
+    get_first_server_config_dict,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -42,7 +46,13 @@ from nemo_gym.server_utils import (
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
-    pass
+    # Whether this agent's rollouts participate in training token capture. Native agents receive
+    # token ids inline on the model response and leave this off; opaque external harnesses (whose
+    # returned output carries no token ids) set it true so their model calls are correlated and
+    # captured into the token store, then rebuilt into a token-bearing response.output. The run-level
+    # token_id_capture_enabled switch still gates the capture infrastructure; this scopes which
+    # agents use it.
+    token_id_capture: bool = False
 
 
 class BaseResponsesAPIAgent(BaseServer):
@@ -67,21 +77,33 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
-    def _model_call_capture_enabled(self) -> bool:
-        # Fail closed: an agent whose client carries no usable global config runs uncorrelated
-        # rather than erroring on every model call.
+    def _capture_correlation_enabled(self) -> bool:
+        """Whether the per-rollout ``/ng-rollout/<id>`` correlation prefix should be applied.
+
+        Two independent capture paths consume the same prefix:
+        - Eval model-call capture (``observability_enabled``), which applies to every agent.
+        - Training token capture (``token_id_capture_enabled``), which applies only to agents
+          that opt in with the per-agent ``token_id_capture`` flag -- native agents carry token
+          ids inline and do not need the store, so they do not emit the prefix for token capture.
+
+        Fail closed: an agent whose client carries no usable global config runs uncorrelated
+        rather than erroring on every model call.
+        """
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
-        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+        token_capture = bool(global_config.get(TOKEN_ID_CAPTURE_ENABLED_KEY_NAME, False)) and bool(
+            getattr(self.config, "token_id_capture", False)
+        )
+        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or token_capture)
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
         """Per-rollout capture id for a run-request (its task/rollout indices).
 
-        None when model-call capture (observability) is disabled or the body carries no indices,
-        so callers apply no correlation prefix in either case.
+        None when neither capture path is enabled or the body carries no indices, so callers apply
+        no correlation prefix in either case.
         """
-        if not self._model_call_capture_enabled():
+        if not self._capture_correlation_enabled():
             return None
         return maybe_rollout_id_from_run_body(body)
 

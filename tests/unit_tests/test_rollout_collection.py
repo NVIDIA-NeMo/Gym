@@ -34,11 +34,23 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _agent_participates_in_token_capture,
     _expand_input_glob,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
+
+
+def test_agent_participates_in_token_capture_is_scoped_per_agent() -> None:
+    global_config = {
+        "ext_agent": {"responses_api_agents": {"claude_code_agent": {"token_id_capture": True}}},
+        "native_agent": {"responses_api_agents": {"simple_agent": {}}},
+    }
+    assert _agent_participates_in_token_capture(global_config, "ext_agent") is True
+    assert _agent_participates_in_token_capture(global_config, "native_agent") is False
+    assert _agent_participates_in_token_capture(global_config, "missing") is False
+    assert _agent_participates_in_token_capture(global_config, None) is False
 
 
 @pytest.fixture
