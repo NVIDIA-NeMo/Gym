@@ -117,6 +117,31 @@ async def test_extracts_nemo_proxy_shape():
     assert llm.pop_routed_experts_for_rollout_details([11, 12], [13, 14], [-0.3, -0.4]) is None
 
 
+@pytest.mark.asyncio
+async def test_extracts_routed_experts_string_envelope():
+    """Routes may arrive as one opaque string envelope (e.g. NeMo-RL's
+    "nrlre1:<dtype>:<SxLxK>:<base64>"); it must be extracted and stored, not dropped."""
+    llm = _make_llm(collect_rollout_details=True)
+    routed_experts = "nrlre1:int16:2x1x2:AAABAAIAAwA="
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            content="proxy output",
+            extra_message={
+                "prompt_token_ids": [11, 12],
+                "generation_token_ids": ["token_id:13", "token_id:14"],
+                "generation_log_probs": [-0.3, -0.4],
+                "routed_experts": routed_experts,
+            },
+        ),
+        prompt="hello",
+    )
+
+    assert response.prompt_token_ids == [11, 12]
+    assert llm.pop_routed_experts_for_rollout_details([11, 12], [13, 14], [-0.3, -0.4]) == routed_experts
+    assert llm.pop_routed_experts_for_rollout_details([11, 12], [13, 14], [-0.3, -0.4]) is None
+
+
 def test_duplicate_rollout_details_keys_do_not_guess_routed_experts():
     """Duplicate token/logprob keys are ambiguous, so they fail closed instead of guessing."""
     llm = _make_llm(collect_rollout_details=True)
