@@ -47,7 +47,8 @@ host and port), or pin the port in your config so it is known in advance.
 
 `--agent-url` and `--agent` are mutually exclusive: a run either dispatches to your external
 endpoint or to a named Gym agent server. Rows that already carry their own `agent_ref` keep it,
-exactly as with `--agent`.
+exactly as with `--agent` — except that a row-level `{"url": ...}` must match the run's
+`--agent-url` (a mismatch is a hard error, so a dataset can't route rows to another host).
 
 ## The `/run` contract
 
@@ -70,7 +71,8 @@ Gym POSTs one JSON object per rollout to `{agent_url}/run` and expects a JSON ob
 | `response` | yes | The Responses API response object for the rollout (the trajectory). Include `usage` (`input_tokens`, `output_tokens`, `total_tokens`) or token/cost metrics for the run will be empty. |
 | anything else | no | Extra keys are preserved into the rollout artifacts. |
 
-A response missing `reward` or `response` is recorded as a failure, not a success — this keeps
+A response missing `reward`/`response`, or one where `reward` isn't a number or `response` isn't
+a JSON object, is recorded as a failure, not a success — this keeps
 malformed rows out of your results and out of downstream profiling.
 
 ## Stateful environments and session cookies
@@ -101,7 +103,7 @@ demonstrates. See [Integrate Existing Agents](/agent-server/integrate-existing-a
 
 External endpoints fail differently than Gym-managed servers, and the collector is built for that:
 
-- **Nothing crashes the run.** A connection failure (3 bounded retries), a timeout, a non-2xx
+- **Nothing crashes the run.** A connection failure (up to 3 attempts), a timeout, a non-2xx
   status, or a malformed response becomes a failure row in the `*_failures.jsonl` sidecar — never
   a scored result. Re-running with `--resume` re-dispatches only what's missing, up to the
   attempt cap.
@@ -115,7 +117,8 @@ External endpoints fail differently than Gym-managed servers, and the collector 
   `--agent-url` again; a changed URL re-points the remaining rows (the collector tells you how
   many). This prevents silently sending tasks to a stale address.
 - Redirects are not followed (a redirected POST would silently lose its body — fix the URL), and
-  `agent_url` must not carry a query string or fragment.
+  `agent_url` must not carry a query string, fragment, or embedded `user:pass@host` credentials
+  (pass auth material through your agent's own configuration instead).
 
 ## Aggregate metrics
 

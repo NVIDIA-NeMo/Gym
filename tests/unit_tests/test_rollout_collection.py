@@ -2145,9 +2145,11 @@ class TestFreshEyesFixes:
         assert "Skipping aggregate metrics" in capsys.readouterr().out
 
     def test_agent_url_userinfo_rejected_without_echoing_secret(self) -> None:
+        # A basic-auth-shaped URL is the point of the test; not a real secret.
+        credential_url = "http://alice:hunter2@host:9000"  # pragma: allowlist secret
         with pytest.raises(ValidationError) as excinfo:
             RolloutCollectionConfig(
-                agent_url="http://alice:hunter2@host:9000",
+                agent_url=credential_url,
                 input_jsonl_fpath="in.jsonl",
                 output_jsonl_fpath="out.jsonl",
             )
