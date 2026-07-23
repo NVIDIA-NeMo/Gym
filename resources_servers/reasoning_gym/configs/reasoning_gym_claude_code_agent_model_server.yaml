@@ -32,6 +32,9 @@ reasoning_gym_claude_code_agent_model_server:
       model_server:
         type: responses_api_models
         name: policy_model
+      # External harness: returned output carries no token ids, so opt into token capture so this
+      # agent's model calls are correlated, captured, and rebuilt into a token-bearing response.
+      token_id_capture: true
       concurrency: 32
       model: ${policy_model_name}
       anthropic_api_key: EMPTY  # pragma: allowlist secret
@@ -41,7 +44,9 @@ reasoning_gym_claude_code_agent_model_server:
       thinking: disabled
       system_prompt: |
         You are a precise reasoning assistant. You have access to Bash to run Python for calculations.
-        For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
+        For every problem: think step by step, use code to verify when helpful, then end your reply
+        with ONLY your final answer inside <answer>...</answer> tags, matching the exact format the
+        task asks for (reasoning_gym scores the text inside <answer>).
       datasets:
       - name: example
         type: example
