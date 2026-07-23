@@ -31,11 +31,7 @@ from fastapi import Request
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -50,7 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
@@ -223,7 +219,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # pragma: allowlist secret
     anthropic_base_url: Optional[str] = None
-    max_turns: int = 30
+    max_turns: Optional[int] = 30  # None -> unlimited turns
     timeout: int = 300
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
@@ -272,6 +268,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
             return self.server_client._build_server_base_url(cfg)
         return self.config.anthropic_base_url or ""
+
+    def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
+        """Base URL for the CLI's model calls, with the per-rollout capture prefix applied only when a
+        Gym model server is configured. A real Anthropic endpoint (``model_server`` unset) has no
+        prefix-stripping middleware, so prefixing it would 404 every call.
+        """
+        base_url = self._resolve_base_url()
+        if base_url and self.config.model_server:
+            base_url = apply_rollout_prefix(base_url, rollout_id)
+        return base_url
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
@@ -349,7 +355,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.bare and not skills_active:
             cmd.append("--bare")
-        cmd += ["--max-turns", str(self.config.max_turns), "--model", model]
+        cmd += ["--model", model]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -363,6 +369,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
+        if self.config.max_turns is not None:
+            cmd += ["--max-turns", str(self.config.max_turns)]
         cmd += ["--", instruction]
         return cmd
 
@@ -372,9 +380,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
     ) -> tuple[str, str]:
-        """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
-        base_url = self._resolve_base_url()
+        """Run claude -p --output-format=stream-json and return (stdout, model_name).
+
+        When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix is
+        applied to ANTHROPIC_BASE_URL so the CLI's streaming /v1/messages calls correlate to this rollout.
+        """
+        base_url = self._resolve_call_base_url(rollout_id)
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
@@ -495,6 +508,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -509,6 +523,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             system_prompt=system_prompt,
             mcp_config=mcp_config,
             skills_path=skills_path,
+            rollout_id=rollout_id,
         )
         output_items, usage = parse_stream_json(stdout)
 
@@ -574,11 +589,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             # can stage the skills into its per-request CLAUDE_CONFIG_DIR. run() calls _create_response
             # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
+            rollout_id = self.rollout_id_from_run(body)
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
                 agent_resp = await self._create_response(
-                    body.responses_create_params, mcp_config=mcp_config, skills_path=skills_path
+                    body.responses_create_params,
+                    mcp_config=mcp_config,
+                    skills_path=skills_path,
+                    rollout_id=rollout_id,
                 )
                 agent_resp_json = agent_resp.model_dump(mode="json")
 
