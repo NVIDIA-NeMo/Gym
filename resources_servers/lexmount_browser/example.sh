@@ -68,13 +68,41 @@ run_backend_test() {
   have uv || die "uv is required for the standalone backend test (https://docs.astral.sh/uv/)."
   ( cd "$SCRIPT_DIR"
     uv run --no-project --with playwright python -m playwright install chromium
+    # Chromium needs system libraries (libnss3, libgbm1, ...). On a bare
+    # container/VM the install above warns 'Host system is missing dependencies
+    # to run browsers' and the test below fails to launch. Install them via apt
+    # when we can (root, or passwordless sudo); otherwise leave a clear hint.
+    if [[ "$(id -u)" == "0" ]]; then
+      uv run --no-project --with playwright python -m playwright install-deps chromium
+    elif have sudo && sudo -n true 2>/dev/null; then
+      sudo env "PATH=$PATH" "$(command -v uv)" run --no-project --with playwright python -m playwright install-deps chromium
+    else
+      echo "NOTE: skipping browser system deps (need root/sudo). If the test below fails" >&2
+      echo "      with 'Host system is missing dependencies', run:" >&2
+      echo "      sudo \$(command -v uv) run --no-project --with playwright python -m playwright install-deps chromium" >&2
+    fi
     uv run --no-project --with playwright --with pytest --with pytest-asyncio \
       python -m pytest tests/test_backend.py -q )
 }
 
 # --- Stage A / C: serving-stack rollout ------------------------------------- #
 SERVER_PID=""
-cleanup() { [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true; }
+cleanup() {
+  [[ -n "$SERVER_PID" ]] || return 0
+  # `gym env start` spawns one subprocess per server (plus Ray infra); they do
+  # not reliably die with the parent, so sweep a few levels of descendants.
+  local pids="$SERVER_PID" frontier="$SERVER_PID" next="" p
+  for _ in 1 2 3; do
+    next=""
+    for p in $frontier; do
+      next="$next $(pgrep -P "$p" 2>/dev/null || true)"
+    done
+    frontier="$next"
+    pids="$pids $next"
+  done
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+}
 trap cleanup EXIT
 
 policy_flags() {
@@ -98,43 +126,71 @@ run_rollout() {
   run_backend_test
 
   local backend_override=()
+  local input="$ENV_REL/data/example.jsonl"
+  local out="$ENV_REL/data/example_rollouts.jsonl"
   if [[ "$BACKEND" == "lexmount" ]]; then
     for v in LEXMOUNT_API_KEY LEXMOUNT_PROJECT_ID LEXMOUNT_BASE_URL; do
       [[ -n "${!v:-}" ]] || die "backend: lexmount needs $v exported (see README 'Using the Lexmount cloud backend'). The SDK must also be installed in the server venv: pip install lexmount."
     done
-    # One Hydra override flips the browser backend; tools/observation/reward are identical.
-    backend_override=("lexmount_browser.resources_servers.lexmount_browser.backend=lexmount")
-    log "Stage C — rollout with the Lexmount cloud backend"
+    # The Lexmount SDK is imported by the RESOURCES-SERVER process, which runs in
+    # its own venv at resources_servers/lexmount_browser/.venv (built by the first
+    # `gym env start`) — NOT the repo-root venv. Fail fast with the exact fix
+    # instead of a mid-rollout HTTP 500.
+    local server_venv="$SCRIPT_DIR/.venv"
+    if [[ -x "$server_venv/bin/python" ]]; then
+      "$server_venv/bin/python" -c 'import lexmount' 2>/dev/null || die "the Lexmount SDK is not installed in the SERVER venv. Run:
+    uv pip install --python $server_venv/bin/python 'lexmount>=0.5.13'"
+    else
+      die "the per-server venv ($server_venv) does not exist yet. Run Stage A once first
+    (bash example.sh rollout) so 'gym env start' builds it, then install the SDK into it:
+    uv pip install --python $server_venv/bin/python 'lexmount>=0.5.13'"
+    fi
+    # One Hydra override flips the browser backend; tools/observation/reward are
+    # identical. The leading '+' is required: CLI overrides are parsed against an
+    # empty Hydra struct, so a bare key fails with "Key 'lexmount_browser' is not
+    # in struct"; '+' appends it and it then wins the merge with the yaml config.
+    backend_override=("+lexmount_browser.resources_servers.lexmount_browser.backend=lexmount")
+    # The bundled offline tasks are file:// URIs on THIS machine — the cloud
+    # browser runs elsewhere and cannot load them (net::ERR_BLOCKED_BY_ADMINISTRATOR).
+    # Stage C therefore rolls out on the 3 bundled real-web WebVoyager sample
+    # tasks, which already ship in this env's input format (conservative
+    # url_contains reward; see README "Data").
+    input="$ENV_REL/data/webvoyager_sample.jsonl"
+    out="$ENV_REL/data/webvoyager_rollouts.jsonl"
+    log "Stage C — rollout with the Lexmount cloud backend (real-web sample tasks)"
   else
     log "Stage A — rollout with the local Playwright backend"
   fi
-
-  local out="$ENV_REL/data/example_rollouts.jsonl"
   local server_log; server_log="$(mktemp -t lexmount_browser_env_start.XXXXXX.log)"
+  # (out/input were chosen above; Stage C writes webvoyager_rollouts.jsonl)
+  # NOTE: run in the main shell (not a subshell) so SERVER_PID is visible to the
+  # EXIT trap — otherwise the serving stack outlives the script and a re-run
+  # (e.g. Stage A then Stage C) talks to the stale stack with the old backend.
+  cd "$REPO_ROOT"
+  log "Starting the Gym serving stack (resources server + policy model)"
+  # Word-splitting of policy_flags is intended (they are CLI flags). First run
+  # builds a per-server venv (a few minutes); reruns reuse it.
   # shellcheck disable=SC2046
-  ( cd "$REPO_ROOT"
-    log "Starting the Gym serving stack (resources server + policy model)"
-    # Word-splitting of policy_flags is intended (they are CLI flags). First run
-    # builds a per-server venv (a few minutes); reruns reuse it.
-    gym env start --resources-server lexmount_browser $(policy_flags) \
-      ${backend_override[@]+"${backend_override[@]}"} >"$server_log" 2>&1 &
-    SERVER_PID=$!
+  gym env start --resources-server lexmount_browser $(policy_flags) \
+    ${backend_override[@]+"${backend_override[@]}"} >"$server_log" 2>&1 &
+  SERVER_PID=$!
 
-    log "Waiting for servers to report ready (log: $server_log)"
-    # env start prints 'All N / N servers ready' once every server is up.
-    local ready=""
-    for _ in $(seq 1 180); do
-      kill -0 "$SERVER_PID" 2>/dev/null || { tail -30 "$server_log" >&2; die "server process exited before becoming ready"; }
-      if grep -qiE "servers ready" "$server_log" 2>/dev/null; then ready=1; break; fi
-      sleep 5
-    done
-    [[ -n "$ready" ]] || die "timed out waiting for servers (see $server_log)"
+  log "Waiting for servers to report ready (log: $server_log)"
+  # env start prints 'All N / N servers ready!' once every server is up. The
+  # pattern must NOT match the interim '0 / 3 servers ready. Waiting...' lines,
+  # or eval starts before the stack is up and spins on connection errors.
+  local ready=""
+  for _ in $(seq 1 180); do
+    kill -0 "$SERVER_PID" 2>/dev/null || { tail -30 "$server_log" >&2; die "server process exited before becoming ready"; }
+    if grep -qE "All [0-9]+ / [0-9]+ servers ready" "$server_log" 2>/dev/null; then ready=1; break; fi
+    sleep 5
+  done
+  [[ -n "$ready" ]] || die "timed out waiting for servers (see $server_log)"
 
-    log "Collecting $LIMIT rollout(s) over $ENV_REL/data/example.jsonl"
-    gym eval run --no-serve --agent lexmount_browser_simple_agent \
-      --input "$ENV_REL/data/example.jsonl" \
-      --output "$out" --limit "$LIMIT"
-  )
+  log "Collecting $LIMIT rollout(s) over $input"
+  gym eval run --no-serve --agent lexmount_browser_simple_agent \
+    --input "$input" \
+    --output "$out" --limit "$LIMIT"
   log "Rollouts written to $out"
   echo "First rollout reward:"
   cd "$REPO_ROOT" && head -1 "$out" | python3 -c 'import sys,json; print("  reward =", json.loads(sys.stdin.readline()).get("reward"))' || true
