@@ -35,6 +35,7 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
+    maybe_rollout_id_from_run_body,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
@@ -46,6 +47,8 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TOKEN_ID_CAPTURE_KEY_NAME,
+    get_first_server_config_dict,
     get_global_config_dict,
     get_wandb_run,
 )
@@ -60,6 +63,7 @@ from nemo_gym.server_utils import (
     set_global_aiohttp_client,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import token_id_capture_dirs_from_config, trajectories_for_rollout
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +249,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+
+def _agent_participates_in_token_capture(global_config: Any, agent_name: Optional[str]) -> bool:
+    """Whether the producing agent opted into training token capture (its ``token_id_capture``
+    flag). Native agents leave it off -- they carry token ids inline and need no store rebuild -- so
+    this scopes the rebuild (and its token-less warnings) to external-harness rollouts. Defaults to
+    False when the agent or flag is absent."""
+    if not agent_name:
+        return False
+    try:
+        agent_config = get_first_server_config_dict(global_config, agent_name)
+    except (KeyError, IndexError, TypeError):
+        return False
+    return bool((agent_config or {}).get(TOKEN_ID_CAPTURE_KEY_NAME, False))
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -518,7 +536,12 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store dir once, so each rollout's captured tokens can be built
+        # into a trajectory below. Independent of eval capture; empty (and a no-op) when token
+        # capture is off.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
@@ -545,6 +568,54 @@ class RolloutCollectionHelper(BaseModel):
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_dirs:
                 merge_model_call_capture_into_record(result, capture_dirs)
+
+            # Build this rollout's captured tokens into a trajectory and attach it (no-op when token
+            # capture is off or no tokens were captured for the rollout). Never alters output/reward.
+            agent_name = (result.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if token_capture_dirs and _agent_participates_in_token_capture(global_config, agent_name):
+                rollout_id = maybe_rollout_id_from_run_body(result)
+                if rollout_id is None:
+                    # Capture is on but the rollout carries no task/rollout indices, so its model
+                    # calls could not be correlated. Fail loud: a silently token-less rollout would
+                    # become an unusable (masked/empty) training sample. Usually means the agent did
+                    # not apply the /ng-rollout correlation prefix to its model calls.
+                    warnings.warn(
+                        "training token capture is enabled but a rollout result carries no "
+                        "task/rollout indices; its model calls were not correlated or captured and "
+                        "it will be token-less. Check that the agent applies the /ng-rollout prefix.",
+                        stacklevel=2,
+                    )
+                else:
+                    response = result.get("response") if isinstance(result.get("response"), dict) else {}
+                    built = trajectories_for_rollout(
+                        rollout_id,
+                        token_capture_dirs,
+                        reward=float(result.get("reward") or 0.0),
+                        reward_components=result.get("reward_components"),
+                        model=str(response.get("model") or ""),
+                    )
+                    if built is not None:
+                        # Uniform delivery: replace the training-facing response's output with the
+                        # merged, contiguous, content-bearing + token-bearing items, so NeMo-RL reads
+                        # response.output the same way for native and blackbox rollouts (no sidecar,
+                        # no per-agent branch). reward / reward_components stay on the record for GDPO.
+                        projected = built["nemo_rl_response"]
+                        if isinstance(result.get("response"), dict):
+                            result["response"]["output"] = projected["output"]
+                        else:
+                            result["response"] = projected
+                    else:
+                        # A derivable rollout id but an empty store means correlation broke somewhere
+                        # between the agent and the capture middleware (e.g. an external harness or
+                        # proxy that did not preserve the prefix). Surface it rather than emitting a
+                        # token-less rollout into training.
+                        warnings.warn(
+                            f"training token capture is enabled but no tokens were captured for "
+                            f"rollout {rollout_id}; its response.output was not rebuilt and it will "
+                            "be token-less. The agent's model calls likely did not reach the capture "
+                            "middleware correlated.",
+                            stacklevel=2,
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
