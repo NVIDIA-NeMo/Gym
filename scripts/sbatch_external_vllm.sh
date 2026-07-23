@@ -6,7 +6,6 @@ pip install ray==2.55.1
 vllm serve $MODEL \
     --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
     --gpu-memory-utilization 0.9 \
-    --distributed-executor-backend ray \
     --data-parallel-backend ray \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
