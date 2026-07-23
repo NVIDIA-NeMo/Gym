@@ -37,6 +37,12 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body,
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import (
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+    link_tool_calls_to_sandbox,
+)
 from nemo_gym.server_utils import apply_rollout_prefix
 
 
@@ -124,6 +130,45 @@ def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int]
     return json.dumps(d, indent=indent)
 
 
+def _load_agent_observations(path: Path) -> tuple[str, str]:
+    """Return canonical observation JSON and an error code without raising."""
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return "", ""
+    except OSError:
+        return "", "observation_read_failed"
+
+    try:
+        bundle = AgentObservationBundle.model_validate_json(raw)
+    except Exception:
+        return "", "observation_parse_failed"
+    return bundle.model_dump_json(), ""
+
+
+def _observation_gap(source: str, code: str) -> AgentObservationBundle:
+    return AgentObservationBundle(
+        source=source,
+        gaps=[ObservationGap(code=code)],
+    )
+
+
+def _terminal_sandbox_observations(
+    metrics: TerminalBenchMetrics, sandbox_id: Optional[str] = None
+) -> list[SandboxObservation]:
+    if metrics.total_run_time is None and not metrics.agent_timed_out and not metrics.container_timed_out:
+        return []
+    return [
+        SandboxObservation(
+            role="environment",
+            provider="apptainer",
+            sandbox_id=sandbox_id,
+            outcome="timeout" if metrics.agent_timed_out or metrics.container_timed_out else "unknown",
+            wall_time_s=metrics.total_run_time,
+        )
+    ]
+
+
 # Recreates /etc/dpkg in the writable tmpfs overlay so dpkg's rename() calls
 # don't cross filesystem boundaries (squashfs base → tmpfs overlay = EXDEV).
 _DPKG_FIX = """\
@@ -153,6 +198,8 @@ MODEL_NAME   = os.environ["NGTB_MODEL_NAME"]
 INSTRUCTION  = Path("/trajectories_mount/instruction.txt").read_text()
 AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
+OBSERVABILITY = os.environ.get("NGTB_OBSERVABILITY") == "1"
+MODEL_SERVER_REF = json.loads(os.environ.get("NGTB_MODEL_SERVER_REF", "null"))
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -164,7 +211,7 @@ _mock_client._build_server_base_url = lambda cfg: MODEL_URL
 
 _cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
 
-_model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
+_model_server = ModelServerRef.model_validate(MODEL_SERVER_REF) if MODEL_URL and MODEL_SERVER_REF else None
 config = {agent_cfg_class}(
     host="0.0.0.0",
     port=0,
@@ -190,8 +237,20 @@ body = NeMoGymResponseCreateParamsNonStreaming(
     model=MODEL_NAME,
     **SAMPLING,
 )
-response = asyncio.run(agent.responses(request=None, body=body))
+observed = getattr(agent, "responses_with_observations", None)
+if OBSERVABILITY and callable(observed):
+    episode = asyncio.run(observed(request=None, body=body))
+    response = episode.response
+else:
+    response = asyncio.run(agent.responses(request=None, body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
+if OBSERVABILITY and callable(observed):
+    try:
+        Path("/trajectories_mount/agent_observations.json").write_text(
+            episode.observations.model_dump_json()
+        )
+    except Exception as exc:
+        print(f"failed to persist agent observations: {{type(exc).__name__}}", file=sys.stderr, flush=True)
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
 
@@ -300,6 +359,7 @@ class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig)
     metrics_fpath: Path
     container: str
     ray_queue_timestamp: float
+    observability_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     agent_command_str: Optional[str] = None
 
     @property
@@ -313,6 +373,10 @@ class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig)
 
 class AnyTerminalVerifyResponse(TerminalBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 ### Container lifecycle
@@ -566,11 +630,18 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             if getattr(params.body, k, None) is not None
         }
         model_name = params.agent_kwargs.get("model") or params.body.model or "model"
+        model_server_ref = (
+            json.dumps(params.model_server.model_dump(mode="json"), separators=(",", ":"))
+            if params.model_server is not None
+            else ""
+        )
         env = (
             (f"--env NGTB_MODEL_URL={shlex.quote(params.model_server_url)} " if params.model_server_url else "")
             + f"--env NGTB_MODEL_NAME={shlex.quote(model_name)} "
+            + (f"--env NGTB_MODEL_SERVER_REF={shlex.quote(model_server_ref)} " if model_server_ref else "")
             + f"--env NGTB_AGENT_KWARGS={shlex.quote(json.dumps(params.agent_kwargs))} "
             + f"--env NGTB_SAMPLING={shlex.quote(json.dumps(sampling))} "
+            + ("--env NGTB_OBSERVABILITY=1 " if params.observability_enabled else "")
         )
         workdir = params.problem_info.get("workdir")
         return self._apptainer_exec(params, mounts, "bash /container_scripts/run_script.sh", env=env, workdir=workdir)
@@ -618,6 +689,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             container=self._find_container(task_name, problem_info.get("docker_image", "ubuntu:22.04")),
             ray_queue_timestamp=time.time(),
+            observability_enabled=rollout_id is not None,
         )
         params.metrics_fpath.write_text("{}")
 
@@ -687,6 +759,20 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         else:
             output_items, tools = [], []
 
+        metadata = {
+            "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
+            "metrics": params.metrics_fpath.read_text(),
+            "instance_config": _safe_config_json(params),
+        }
+        if params.observability_enabled:
+            observations_json, observations_error = _load_agent_observations(
+                params.persistent_dir / "agent_observations.json"
+            )
+            metadata.update(
+                agent_observations=observations_json,
+                agent_observations_error=observations_error,
+            )
+
         return NeMoGymResponse(
             id=f"anyterminal-{params.instance_id}",
             created_at=int(time.time()),
@@ -696,11 +782,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
-            metadata={
-                "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
-                "metrics": params.metrics_fpath.read_text(),
-                "instance_config": _safe_config_json(params),
-            },
+            metadata=metadata,
         )
 
     async def run(self, body: AnyTerminalRunRequest) -> AnyTerminalVerifyResponse:
@@ -711,8 +793,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
             meta, response.metadata = response.metadata, None
             metrics = TerminalBenchMetrics.model_validate_json(meta["metrics"])
+            instance_config = AnyTerminalInstanceConfig.model_validate_json(meta["instance_config"])
 
-            return AnyTerminalVerifyResponse(
+            result = dict(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {
                     "input": json.loads(meta["input"]),
@@ -722,8 +805,35 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
-                instance_config=AnyTerminalInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
+                instance_config=instance_config.model_dump(),
             )
+            observations_json = meta.get("agent_observations")
+            source = self.config.agent_server_module.split(".")[-2].removesuffix("_agent")
+            observations: Optional[AgentObservationBundle] = None
+            if observations_json:
+                try:
+                    observations = AgentObservationBundle.model_validate_json(observations_json)
+                except Exception:
+                    observations = _observation_gap(source, "observation_parse_failed")
+            elif meta.get("agent_observations_error"):
+                observations = _observation_gap(source, meta["agent_observations_error"])
+            elif instance_config.observability_enabled:
+                observations = _observation_gap(source, "agent_observations_unavailable")
+            if observations is not None:
+                sandbox_observations = _terminal_sandbox_observations(metrics, instance_config.agent_run_id)
+                observations.records.extend(sandbox_observations)
+                if sandbox_observations:
+                    link_tool_calls_to_sandbox(observations, instance_config.agent_run_id)
+                    observations.gaps.extend(
+                        [
+                            ObservationGap(code="sandbox_cpu_time_unavailable"),
+                            ObservationGap(code="sandbox_memory_usage_unavailable"),
+                        ]
+                    )
+                else:
+                    observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return AnyTerminalVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":
