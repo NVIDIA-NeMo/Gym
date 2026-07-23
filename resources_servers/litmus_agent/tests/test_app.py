@@ -180,6 +180,44 @@ class TestExtractPredictedValue:
     def test_all_formats_registered(self):
         assert set(_ANSWER_FORMAT_REGEXES) == {f"fmt_{i:02d}" for i in range(31)}
 
+    def test_output_regex_extracts_value(self):
+        assert (
+            extract_predicted_value("Correct Answer: [3]", FLOAT, output_regex=r"Correct Answer:\s*\[(.+?)\]") == 3.0
+        )
+
+    def test_output_regex_preferred_over_answer_format(self):
+        # answer_format would pick the boxed 7; output_regex targets the label.
+        text = r"\boxed{7}. Final Answer = 42"
+        assert (
+            extract_predicted_value(text, FLOAT, output_regex=r"Final Answer\s*=\s*(.+)", answer_format="fmt_07")
+            == 42.0
+        )
+
+    def test_output_regex_recovers_dropped_wrapper(self):
+        # A lenient row regex (optional bracket) scores an answer that the strict
+        # fmt_06 regex would miss when the model drops the '[]' wrapper.
+        text = "Correct Answer: 2"
+        assert extract_predicted_value(text, FLOAT, answer_format="fmt_06") is None
+        lenient = r"Correct Answer:\s*\**\[?\s*([-+]?\d*\.?\d+)"
+        assert extract_predicted_value(text, FLOAT, output_regex=lenient) == 2.0
+
+    def test_output_regex_last_match_wins(self):
+        assert extract_predicted_value("val: 3 then val: 5", FLOAT, output_regex=r"val:\s*(\d+)") == 5.0
+
+    def test_output_regex_string_returns_raw(self):
+        assert extract_predicted_value("SMILES: CCO", STRING, output_regex=r"SMILES:\s*(.+)") == "CCO"
+
+    def test_output_regex_no_match_returns_none(self):
+        assert extract_predicted_value("no answer here", FLOAT, output_regex=r"Answer:\s*(\d+)") is None
+
+    def test_output_regex_invalid_raises(self):
+        with pytest.raises(ValueError, match="Invalid output_regex"):
+            extract_predicted_value("x", FLOAT, output_regex=r"(unclosed")
+
+    def test_output_regex_wrong_group_count_raises(self):
+        with pytest.raises(ValueError, match="exactly one capture group"):
+            extract_predicted_value("x", FLOAT, output_regex=r"(a)(b)")
+
 
 # ---------------------------------------------------------------------------
 # compute_reward
@@ -303,6 +341,28 @@ class TestVerify:
         assert result.predicted_value == 3.0
         assert result.resolved_answer_type == FLOAT
         assert result.resolved_reward_rule == "isclose"
+
+    async def test_output_regex_row_scores_dropped_wrapper(self):
+        # End-to-end: a lenient output_regex on the row recovers an answer whose
+        # strict fmt_06 wrapper the model dropped ("Correct Answer: 2", no []).
+        server = _make_server()
+        strict = await server.verify(
+            _make_verify_request("Correct Answer: 2", expected_answer="2", answer_type=FLOAT, answer_format="fmt_06")
+        )
+        assert strict.reward == 0.0
+        assert strict.predicted_value is None
+
+        lenient = await server.verify(
+            _make_verify_request(
+                "Correct Answer: 2",
+                expected_answer="2",
+                answer_type=FLOAT,
+                answer_format="fmt_06",
+                output_regex=r"Correct Answer:\s*\**\[?\s*([-+]?\d*\.?\d+)",
+            )
+        )
+        assert lenient.reward == 1.0
+        assert lenient.predicted_value == 2.0
 
     async def test_per_row_match_window(self):
         server = _make_server()

@@ -84,7 +84,7 @@ To support skills in a new agent, implement the three-step adapter. NeMo Gym pro
    | Agent | Discovery location |
    |---|---|
    | Claude Code | `CLAUDE_CONFIG_DIR/skills/` |
-   | Codex CLI | the Codex config home (e.g. `$CODEX_HOME`) |
+   | Codex CLI | `CODEX_HOME/skills/` |
    | MCP-backed agent | configure the MCP skill server to serve from the directory |
 
    Prefer staging into a **per-request** ephemeral location so concurrent requests with different skills do not contaminate one another, and so nothing leaks between rollouts.
@@ -94,7 +94,7 @@ To support skills in a new agent, implement the three-step adapter. NeMo Gym pro
    Note that enabling discovery is usually all-or-nothing: with Claude Code, dropping `--bare` so skills load also re-enables *all* other auto-discovery — hooks, plugins, MCP servers, memory, and `CLAUDE.md` — not just skills. If you are measuring a skill's isolated impact, be aware that a baseline (`--bare`, no skills) versus a skills run may differ by more than the skill content alone.
 
 <Note>
-The reference implementation is the [Claude Code agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent). It stages skills into a fresh per-request `CLAUDE_CONFIG_DIR/skills/` and drops `--bare` when skills are active.
+The reference implementation is the [Claude Code agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent). It stages skills into a fresh per-request `CLAUDE_CONFIG_DIR/skills/` and drops `--bare` when skills are active. The [Codex agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/codex_agent) follows the same pattern, staging into a fresh per-request `CODEX_HOME/skills/` (Codex discovers them natively — no discovery flag needed).
 </Note>
 
 ## What NeMo Gym does not do
