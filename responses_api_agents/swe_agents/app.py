@@ -62,7 +62,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, link_tool_calls_to_sandbox
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from responses_api_agents.swe_agents.observability import (
+    OBSERVATIONS_FILENAME,
+    build_swe_observations,
+    latest_completion_paths,
+    materialize_completion,
+    sandbox_observations_from_metrics,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -212,6 +220,7 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
+    rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
@@ -299,6 +308,13 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class SWEBenchRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
 
 
 ########################################
@@ -1953,7 +1969,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
+            model_server_base_url = apply_rollout_prefix(
+                f"http://{model_server_cfg.host}:{model_server_cfg.port}", self.config.rollout_id
+            )
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
             )
@@ -2360,28 +2378,32 @@ class RunOpenHandsAgent(BaseModel):
             str(eval_dir_on_host / "**" / "llm_completions" / "*" / "*.json"),
             recursive=True,
         )
-        # When subagents are enabled (opencode) we get multiple sessions, each
-        # writing its own per-turn JSONs. Group by session_id (from the file
-        # payload) and copy each session's most recent turn — that file's
-        # `messages` field carries the full cumulative history for the session.
-        if completion_candidates:
-            latest_per_session: dict[str, str] = {}
-            session_mtime: dict[str, float] = {}
-            for path_str in completion_candidates:
-                sess_id = "main"
-                try:
-                    with open(path_str, "r") as f:
-                        payload = json.load(f)
-                    if isinstance(payload, dict) and payload.get("session_id"):
-                        sess_id = str(payload["session_id"])
-                except (OSError, json.JSONDecodeError):
-                    pass
-                mtime = os.path.getmtime(path_str)
-                if mtime > session_mtime.get(sess_id, -1):
-                    session_mtime[sess_id] = mtime
-                    latest_per_session[sess_id] = path_str
-            for path_str in latest_per_session.values():
-                shutil.copy2(path_str, llm_completions_dir / Path(path_str).name)
+        retained = latest_completion_paths(Path(path) for path in completion_candidates)
+        if self.config.rollout_id is not None:
+            try:
+                observations = build_swe_observations(
+                    (Path(path) for path in completion_candidates),
+                    framework=self.config.agent_framework,
+                    model_ref=self.config.model_server,
+                )
+            except Exception:
+                observations = AgentObservationBundle(
+                    source=f"swe_{self.config.agent_framework}",
+                    gaps=[
+                        ObservationGap(
+                            code="observation_parse_failed",
+                            source=f"swe_{self.config.agent_framework}",
+                        )
+                    ],
+                )
+            try:
+                (self.config.persistent_dir / OBSERVATIONS_FILENAME).write_text(observations.model_dump_json())
+            except OSError:
+                pass
+
+        # Keep only the cumulative artifact selected for each invocation.
+        for path in retained:
+            shutil.copy2(path, llm_completions_dir / path.name)
 
         shutil.rmtree(eval_dir_on_host, ignore_errors=True)
         try:
@@ -2792,31 +2814,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     # START Results processing logic
     ########################################
 
-    @staticmethod
-    def _materialize_trajectory(data: dict) -> tuple[list, list]:
-        """Inflate one completion-file payload into (messages, tools)."""
-        messages = list(data.get("messages") or [])
-        tools = data.get("kwargs", {}).get("tools", [])
-        provider_specific_fields = data.get("provider_specific_fields", {})
-        try:
-            final_assistant_message = data["response"]["choices"][0]["message"]
-        except (KeyError, IndexError):
-            return messages, tools
-
-        for key in [
-            "prompt_token_ids",
-            "generation_token_ids",
-            "generation_log_probs",
-            "routed_experts",
-        ]:
-            if key in provider_specific_fields:
-                final_assistant_message[key] = provider_specific_fields[key]
-
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
-            messages.append(final_assistant_message)
-
-        return messages, tools
-
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
         """Extract the main session's trajectory for the API response.
 
@@ -2868,7 +2865,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             with open(completion_files[-1], "r") as f:
                 main_data = json.load(f)
 
-        messages, tools = self._materialize_trajectory(main_data)
+        messages, tools = materialize_completion(main_data)
         return messages, tools, first_prefix_count
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
@@ -2894,7 +2891,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 continue
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
-            messages, tools = self._materialize_trajectory(data)
+            messages, tools = materialize_completion(data)
             out.append(
                 {
                     "session_id": sess_id,
@@ -3374,7 +3371,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return json.dumps(chat_messages)
 
     def _setup_params(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
@@ -3448,6 +3445,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
+            rollout_id=rollout_id,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -3522,7 +3520,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return params, dataset_processor
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(body)
+        return await self._responses(body)
+
+    async def _responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
+        params, dataset_processor = self._setup_params(body, rollout_id)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3640,6 +3643,59 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
+        observations: Optional[AgentObservationBundle] = None
+        if params.rollout_id is not None:
+            observations_path = params.persistent_dir / OBSERVATIONS_FILENAME
+            try:
+                observations = AgentObservationBundle.model_validate_json(observations_path.read_text())
+            except (OSError, ValueError):
+                observations = AgentObservationBundle(
+                    source=f"swe_{params.agent_framework}",
+                    gaps=[
+                        ObservationGap(
+                            code="agent_artifact_unavailable",
+                        )
+                    ],
+                )
+            if params.agent_framework == "openhands":
+                observations.gaps.append(
+                    ObservationGap(
+                        code="model_call_capture_correlation_unavailable",
+                    )
+                )
+            sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
+            for sandbox in sandbox_observations:
+                sandbox.sandbox_id = f"{params.agent_run_id}:{sandbox.role}"
+            observations.records.extend(sandbox_observations)
+            agent_sandbox = next(
+                (sandbox for sandbox in sandbox_observations if sandbox.role == "agent"),
+                None,
+            )
+            if agent_sandbox is not None:
+                link_tool_calls_to_sandbox(observations, agent_sandbox.sandbox_id)
+            for sandbox in sandbox_observations:
+                if sandbox.cpu_time_s is None:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_cpu_time_unavailable",
+                            detail=sandbox.role,
+                        )
+                    )
+                if sandbox.peak_memory_mib is None:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_memory_usage_unavailable",
+                            detail=sandbox.role,
+                        )
+                    )
+                else:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_memory_usage_sampled",
+                            detail=sandbox.role,
+                        )
+                    )
+
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
@@ -3655,6 +3711,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 if entry.get("parent_session_id")
             ]
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
+        if observations is not None:
+            metadata["agent_observations"] = observations.model_dump_json()
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3668,12 +3726,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata=metadata,
         )
 
-    async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
+    async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
 
-            response = await self.responses(body.responses_create_params)
+            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
@@ -3684,6 +3742,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+            observations = None
+            if "agent_observations" in metadata:
+                observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3694,6 +3755,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
+                ng_agent_observations=observations,
             )
 
 
