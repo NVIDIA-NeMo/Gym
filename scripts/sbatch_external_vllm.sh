@@ -32,7 +32,7 @@ CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu
 MOUNTS=/lustre:/lustre \
 sbatch \
     --nodes=4 \
-    --account=nemotron_evals_research \
+    --account=nemotron_n4_post \
     --partition=batch \
     --gres=gpu:4 \
     --time=04:00:00 \
