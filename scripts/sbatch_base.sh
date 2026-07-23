@@ -8,6 +8,7 @@ set -euo pipefail
 
 # Input arguments and validation
 CONTAINER=$CONTAINER
+MOUNTS=$MOUNTS
 
 # Get the Ray head node IP
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
@@ -26,10 +27,14 @@ if (( $# == 0 )); then
     # If there are no arguments provided, then we just block forever so the Ray cluster stays up.
     command=(sleep infinity)
     mkdir -p slurm-attach
+
+    # Adapted from https://github.com/NVIDIA-NeMo/RL/blob/d5824c0644e5afde3ffdc9372be06c4a017f0a3d/ray.sub#L1060
     cat <<EOF > slurm-attach/$SLURM_JOB_ID.sh
 srun -A $SLURM_JOB_ACCOUNT \
     -p $SLURM_JOB_PARTITION \
     --container-name=container-on-node \
+    --no-container-mount-home \
+    --container-workdir=$SLURM_SUBMIT_DIR \
     --overlap \
     --nodes=1 \
     --ntasks=1 \
@@ -46,9 +51,13 @@ fi
 # The command after '--' will only run on the head node
 # We set the container here on the srun because container support is not universal across sbatch.
 # We name all instances of this container on our nodes as `container-on-node`, referenced in the interactive script above.
+# We set --no-container-mount-home because our mounts are covered via --container-mounts instead.
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
+    --container-mounts=$MOUNTS \
+    --container-workdir=$SLURM_SUBMIT_DIR \
+    --no-container-mount-home \
     bash -lc '
         echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
         cd $SLURM_SUBMIT_DIR
