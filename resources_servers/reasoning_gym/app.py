@@ -108,6 +108,15 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
         if boxed_match:
             return boxed_match.group(1).strip()
 
+        # Conversational agents (e.g. Claude Code driving the policy) often do not use <answer>/\boxed
+        # and instead state the final answer as the last quoted string, e.g.
+        #   So the final answer is: "Zoey is a fool, and Riley is a sage."
+        # Passing the whole chain-of-thought to the task scorer lets it parse an intermediate
+        # hypothesis and mis-score a correct rollout, so isolate that trailing quoted answer.
+        quoted = re.findall(r'["\u201c]([^"\u201d]{3,}?)["\u201d]', full_text)
+        if quoted:
+            return quoted[-1].strip()
+
         # return full text if <answer> or \boxed{} fail
         return full_text.strip() if full_text.strip() else ""
 
