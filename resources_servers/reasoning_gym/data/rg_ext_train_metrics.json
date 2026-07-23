@@ -1,0 +1,47 @@
+{
+    "name": "train",
+    "type": "train",
+    "jsonl_fpath": "resources_servers/reasoning_gym/data/rg_ext_train.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Creative Commons Attribution 4.0 International",
+    "Number of examples": 20,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 20,
+        "Average": 46.45,
+        "Min": 42.0,
+        "Max": 53.0,
+        "Standard deviation": 4.29
+    },
+    "Number of turns": {
+        "Total # non-null values": 20,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "question": {
+        "unique_count": 20,
+        "total_count": 20
+    },
+    "answer": {
+        "unique_count": 20,
+        "total_count": 20
+    }
+}
