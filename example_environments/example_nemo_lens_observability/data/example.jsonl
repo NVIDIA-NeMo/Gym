@@ -1,0 +1,3 @@
+{"input": [{"role": "user", "content": "Write a Python function that returns the sum of two integers and print the result of calling it with 3 and 4."}], "verifier_metadata": {"expected_output": "7"}}
+{"input": [{"role": "user", "content": "Create a file named hello.txt containing the text 'Hello, World!' and then print its contents."}], "verifier_metadata": {"expected_output": "Hello, World!"}}
+{"input": [{"role": "user", "content": "List all files in the /tmp directory and count how many there are."}], "verifier_metadata": {"expected_output": null}}

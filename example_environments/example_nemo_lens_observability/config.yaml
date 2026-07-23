@@ -1,0 +1,32 @@
+# NeMo Lens Observability Example — Gym evaluation config
+#
+# Run with:
+#   bash example_environments/example_nemo_lens_observability/run_example.sh
+
+defaults:
+  - _self_
+
+resources_server:
+  _target_: resources_servers.example_single_tool_call.app.ExampleSingleToolCallServer
+
+agent:
+  _target_: responses_api_agents.mini_swe_agent.app.MiniSWEAgentServer
+
+model:
+  _target_: responses_api_models.vllm_model.app.VLLMModelServer
+
+dataset:
+  path: example_environments/example_nemo_lens_observability/data/example.jsonl
+
+rollout:
+  max_workers: 2
+  timeout_s: 120
+
+# Sandbox observability is configured entirely via environment variables.
+# See run_example.sh for the full set of env vars that activate it.
+#
+# Key env vars:
+#   LENS_SANDBOX_OBSERVABILITY_DIR     — where to write events.jsonl + artifacts
+#   NEMO_LENS_ENABLED                  — set to 1 to activate live OTLP export
+#   OTEL_EXPORTER_OTLP_ENDPOINT        — OTLP receiver URL (e.g. Jaeger)
+#   OTEL_SERVICE_NAME                  — service name shown in the trace UI

@@ -238,6 +238,14 @@ all = [
     "nemo-gym[dev,sandbox]",
 ]
 
+lens = [
+    # nemo-lens: Shared OpenTelemetry instrumentation for NeMo ecosystem.
+    # Enables sandbox observability via nemo.lens.sandbox.observability.
+    # Updated: Wed Jul 16, 2026
+    # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
+    "nemo-lens[sdk]>=0.1.0; python_version>='3.13'",
+]
+
 sandbox = [
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
