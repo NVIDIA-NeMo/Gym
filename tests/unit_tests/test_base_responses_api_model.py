@@ -135,6 +135,7 @@ def test_build_model_call_record_from_exchange():
         "latency_ms": 18.4,
         "request": {"input": "hi"},
         "response": {
+            "id": "resp-1",
             "model": "m",
             "usage": {
                 "input_tokens": 10,
@@ -152,8 +153,10 @@ def test_build_model_call_record_from_exchange():
     }
     rec = build_model_call_record(exchange, call_index=3)
     assert rec.model_call_id == "call-1"
+    assert rec.response_id == "resp-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
+    assert rec.model == "m"
     assert rec.dialect == "responses"
     assert rec.started_at == 100.0 and rec.completed_at == 100.02
     assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
@@ -161,12 +164,19 @@ def test_build_model_call_record_from_exchange():
     assert rec.reasoning_content == "thinking..."
     assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
     assert rec.latency_total_ms == 18.4
+    assert build_model_call_record({"response": {"id": 123}}, call_index=0).response_id is None
+    empty = build_model_call_record({"request": {}, "response": {}}, call_index=0)
+    assert empty.request == {}
+    assert empty.response == {}
     assert {
         "model_call_id",
+        "response_id",
         "call_index",
         "model_ref",
+        "model",
         "dialect",
         "status_code",
+        "finish_reason",
         "started_at",
         "completed_at",
         "tokens_in",
@@ -175,6 +185,8 @@ def test_build_model_call_record_from_exchange():
         "tokens_total",
         "request",
         "response",
+        "request_raw",
+        "response_raw",
         "tool_calls",
         "reasoning_content",
         "cache_hit",
@@ -184,6 +196,36 @@ def test_build_model_call_record_from_exchange():
         "latency_total_ms",
         "latency_ttft_ms",
     } <= type(rec).model_json_schema()["properties"].keys()
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        ({"choices": [{"finish_reason": "tool_calls"}]}, "tool_calls"),
+        ({"stop_reason": "end_turn"}, "end_turn"),
+        ({"incomplete_details": {"reason": "max_output_tokens"}}, "max_output_tokens"),
+        ({"status": "completed"}, None),
+        ({"choices": {"finish_reason": "invalid"}, "incomplete_details": []}, None),
+    ],
+)
+def test_build_model_call_record_normalizes_finish_reason(response, expected):
+    assert build_model_call_record({"response": response}, call_index=0).finish_reason == expected
+
+
+def test_build_model_call_record_tolerates_malformed_nested_shapes():
+    record = build_model_call_record(
+        {
+            "response": {
+                "usage": {"input_tokens": "invalid", "prompt_tokens_details": {"cached_tokens": []}},
+                "choices": [{"message": "invalid"}],
+                "output": [{"type": "reasoning", "summary": [{"text": {}}]}],
+            }
+        },
+        call_index=0,
+    )
+
+    assert record.tokens_total is None
+    assert record.tool_calls == []
 
 
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
@@ -230,6 +272,48 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     )
 
     assert durable_call_counts == [0, 1, 1]
+
+
+def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    partial = b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+
+    async def app(_scope, receive, send):
+        await receive()
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+        )
+        await send({"type": "http.response.body", "body": partial, "more_body": True})
+        raise RuntimeError("stream failed")
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"hi"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    with pytest.raises(RuntimeError, match="stream failed"):
+        asyncio.run(
+            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/partial/v1/responses",
+                    "raw_path": b"/ng-rollout/partial/v1/responses",
+                    "headers": [],
+                },
+                receive,
+                send,
+            )
+        )
+
+    [call] = read_model_call_records(store, "partial")
+    assert call.status_code == 200
+    assert call.error_category == "exception"
+    assert call.response_raw == partial.decode()
 
 
 def test_stream_error_events_are_terminal():
@@ -343,7 +427,7 @@ def test_invalid_request_body_does_not_drop_capture(tmp_path, request_bytes):
 
     [record] = read_model_call_records(CaptureStore(tmp_path), "invalid-request")
     assert record.request is None
-    assert "request_raw" not in record.model_dump()
+    assert record.request_raw == request_bytes.decode()
 
 
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
@@ -490,16 +574,15 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
     assert obs.make_capture_store(config) is None
 
 
-def test_record_swallows_store_failure():
+def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, monkeypatch):
     from nemo_gym.base_responses_api_model import _record
 
-    class _BadStore:
-        def record(self, *args, **kwargs):
-            raise RuntimeError("disk full")
+    store = CaptureStore(tmp_path)
+    monkeypatch.setattr(store, "record", MagicMock(side_effect=RuntimeError("disk full")))
 
     # Best-effort: a failing store must not raise out of _record.
     _record(
-        _BadStore(),
+        store,
         "chat",
         "srv",
         b"{}",
@@ -512,6 +595,7 @@ def test_record_swallows_store_failure():
         error_category=None,
         latency_ms=1.0,
     )
+    assert store.is_incomplete("r")
 
 
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
@@ -555,8 +639,11 @@ def test_capture_records_non_json_response_as_none(tmp_path):
     assert r.status_code == 200 and r.text == "not json"  # response passed through unaltered
     records = CaptureStore(tmp_path).read("rnj")
     assert len(records) == 1 and records[0]["response"] is None  # non-JSON body -> None
+    assert records[0]["response_raw"] == "not json"
     # a 2xx whose body we couldn't parse is flagged, not silently counted as a clean success
     assert records[0]["error_category"] == "capture_parse_error"
+    [record] = read_model_call_records(CaptureStore(tmp_path), "rnj")
+    assert record.response_raw == "not json"
 
 
 def test_as_arguments():
@@ -835,11 +922,13 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
 
     records = CaptureStore(tmp_path).read("3-0")
     assert len(records) == 1 and records[0]["response"] is not None  # reassembled, not dropped
+    assert records[0]["response_raw"] == r.text  # lossless SSE evidence is retained alongside the projection
 
     calls = read_model_call_records(CaptureStore(tmp_path), "3-0")
     assert len(calls) == 1
     call = calls[0]
     assert call.model_call_id
+    assert call.response_id == "msg_1"
     assert call.model_ref is not None and call.model_ref.name == "srv"
     assert call.started_at is not None and call.completed_at is not None
     assert call.started_at <= call.completed_at
@@ -850,13 +939,18 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     assert call.tool_calls == [{"call_id": "t1", "name": "calc", "arguments": {"x": 1}}]
     assert call.latency_ttft_ms is not None
     assert call.error_category is None
+    assert call.response_raw == r.text
 
 
 def test_reconstruct_chat_sse():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 
     chunks = [
-        {"model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}]},
+        {
+            "id": "chatcmpl-1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}}],
+        },
         {"choices": [{"index": 0, "delta": {"content": "lo", "reasoning": "hmm"}}]},  # vLLM `reasoning` alias
         {
             "choices": [
@@ -882,6 +976,7 @@ def test_reconstruct_chat_sse():
     raw = (b"".join(_sse("", c) for c in chunks) + b"data: [DONE]\n\n").replace(b"\n", b"\r\n")
     resp = _reconstruct_streamed_response(raw, "chat")
     msg = resp["choices"][0]["message"]
+    assert resp["id"] == "chatcmpl-1"
     assert msg["content"] == "Hello" and msg["reasoning_content"] == "hmm"
     assert msg["tool_calls"][0]["function"] == {"name": "f", "arguments": '{"a":1}'}
     assert resp["usage"]["total_tokens"] == 8
@@ -957,17 +1052,41 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
-    store.record(
-        "0-0",
-        _capture_exchange(
-            "responses",
-            "A",
-            {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-            {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]},
-        ),
+    exchange = _capture_exchange(
+        "responses",
+        "A",
+        {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        {
+            "id": "resp-A",
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+        },
     )
+    exchange["request_raw"] = "malformed request"
+    exchange["response_raw"] = "malformed response"
+    store.record("0-0", exchange)
 
-    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"harness": "A"}}
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "reward": 1.0,
+        "response": {"harness": "A"},
+        "ng_agent_observations": {
+            "source": "test",
+            "records": [
+                {
+                    "kind": "agent_invocation",
+                    "invocation_id": "root",
+                    "model_calls": [
+                        {
+                            "model_ref": {"type": "responses_api_models", "name": "A"},
+                            "response_id": "resp-A",
+                        }
+                    ],
+                }
+            ],
+            "gaps": [{"code": "model_call_ownership_unavailable"}],
+        },
+    }
     merge_model_call_capture_into_record(record, [tmp_path])
 
     capture = record["ng_model_call_capture"]
@@ -976,33 +1095,74 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert capture["metrics"]["num_calls"] == 1
     attached_call = capture["calls"][0]
     assert attached_call["model_call_id"] == "call-A"
+    assert attached_call["response_id"] == "resp-A"
     assert attached_call["model_ref"] == {"type": "responses_api_models", "name": "A"}
+    assert attached_call["model"] == "m"
     assert attached_call["started_at"] == 100.0 and attached_call["completed_at"] == 100.01
     assert attached_call["tokens_in"] == 3
-    assert "request" not in attached_call and "response" not in attached_call
+    assert {"request", "response", "request_raw", "response_raw"}.isdisjoint(attached_call)
     assert record["response"] == {"harness": "A"} and record["reward"] == 1.0
+    [joined_ref] = record["ng_agent_observations"]["records"][0]["model_calls"]
+    assert joined_ref["model_call_id"] == "call-A"
+    assert record["ng_agent_observations"]["gaps"] == []
 
 
-def test_merge_capture_noop_without_capture(tmp_path):
-    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+def test_merge_capture_reports_missing_capture(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
-    rec = {"_ng_task_index": 9, "_ng_rollout_index": 9, "reward": 1.0}
+    rec = {
+        "_ng_task_index": 9,
+        "_ng_rollout_index": 9,
+        "reward": 1.0,
+        "ng_agent_observations": {
+            "source": "test",
+            "gaps": [{"code": "model_call_ownership_unavailable"}],
+        },
+    }
     merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
-    assert "ng_model_call_capture" not in rec
-    merge_model_call_capture_into_record(rec, [])  # no dirs
-    assert "ng_model_call_capture" not in rec
+    assert rec["ng_model_call_capture"]["calls"] == []
+    assert [gap["code"] for gap in rec["ng_model_call_capture"]["gaps"]] == ["model_call_capture_no_records"]
+    assert rec["ng_agent_observations"]["gaps"] == [{"code": "model_call_ownership_unavailable"}]
+
+    CaptureStore(tmp_path).path_for("8-8").touch()
+    empty = {"_ng_task_index": 8, "_ng_rollout_index": 8}
+    merge_model_call_capture_into_record(empty, [tmp_path])
+    assert [gap["code"] for gap in empty["ng_model_call_capture"]["gaps"]] == ["model_call_capture_no_records"]
 
 
-def test_merge_capture_surfaces_malformed_data_only_when_active(tmp_path):
+def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
     from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
-    store.path_for("9-9").write_bytes(b"{not-json}\n")
-    record = {"_ng_task_index": 9, "_ng_rollout_index": 9}
+    first = _capture_exchange("responses", "A", {}, {"id": "resp-A"})
+    third = _capture_exchange("responses", "B", {}, {"id": "resp-B"})
+    store.path_for("9-8").write_bytes(orjson.dumps(first) + b"\n{not-json}\n" + orjson.dumps(third) + b"\n")
+    record = {"_ng_task_index": 9, "_ng_rollout_index": 8}
 
-    merge_model_call_capture_into_record(record, [])
-    with pytest.raises(orjson.JSONDecodeError):
-        merge_model_call_capture_into_record(record, [tmp_path])
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert [call["call_index"] for call in record["ng_model_call_capture"]["calls"]] == [0, 2]
+    assert [call["response_id"] for call in record["ng_model_call_capture"]["calls"]] == ["resp-A", "resp-B"]
+    assert record["ng_model_call_capture"]["gaps"] == [
+        {
+            "code": "model_call_capture_records_unreadable",
+            "detail": "count=1",
+        }
+    ]
+
+
+def test_merge_capture_reports_partial_write_loss(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record("4-2", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.mark_incomplete("4-2")
+    record = {"_ng_task_index": 4, "_ng_rollout_index": 2}
+
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert len(record["ng_model_call_capture"]["calls"]) == 1
+    assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["model_call_capture_incomplete"]
 
 
 def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
@@ -1012,11 +1172,12 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
     store = CaptureStore(tmp_path)
     store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
     store.record("1-0", {"dialect": "chat", "request": {}, "response": {}})
+    store.mark_incomplete("0-0")
     assert store.read("0-0") and store.read("1-0")
 
     # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
-    assert store.read("0-0") == [] and store.read("1-0")
+    assert store.read("0-0") == [] and not store.is_incomplete("0-0") and store.read("1-0")
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
     assert store.read("1-0")
 
@@ -1126,8 +1287,38 @@ def test_capture_store_concurrent_append_no_loss(tmp_path):
     for t in threads:
         t.join()
     rows = store.read("0-0")
-    assert len(rows) == 20  # flock + in-process lock: no lost or corrupted appends
+    assert len(rows) == 20  # flock prevents lost or corrupted appends
     assert sorted(r["request"]["i"] for r in rows) == list(range(20))
+
+
+def test_capture_store_does_not_serialize_independent_rollouts(tmp_path, monkeypatch):
+    import os
+    import threading
+
+    store = CaptureStore(tmp_path)
+    first_fsync = threading.Event()
+    release_first = threading.Event()
+    original_fsync = os.fsync
+
+    def _fsync(fd):
+        if threading.current_thread().name == "first-rollout":
+            first_fsync.set()
+            assert release_first.wait(timeout=5)
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _fsync)
+    first = threading.Thread(name="first-rollout", target=store.record, args=("0-0", {"request": {}, "response": {}}))
+    second = threading.Thread(target=store.record, args=("1-0", {"request": {}, "response": {}}))
+    first.start()
+    assert first_fsync.wait(timeout=5)
+    second.start()
+    second.join(timeout=1)
+    try:
+        assert not second.is_alive()
+        assert store.read("1-0") == [{"request": {}, "response": {}}]
+    finally:
+        release_first.set()
+        first.join(timeout=5)
 
 
 def test_capture_store_read_waits_for_in_progress_append(tmp_path):

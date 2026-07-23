@@ -877,7 +877,13 @@ class TestRolloutCollection:
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1},
         ]
         results = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {"usage": {"tokens": 10}},
+                "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
+            },
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
@@ -906,6 +912,7 @@ class TestRolloutCollection:
         )
         for item in sent_data:
             assert "responses_create_params" not in item
+            assert "ng_agent_observations" not in item
             assert "usage" in item["response"]
 
     async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
