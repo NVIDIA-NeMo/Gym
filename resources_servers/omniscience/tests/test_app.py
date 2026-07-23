@@ -412,28 +412,6 @@ class TestOmniscienceServer:
         assert result.extracted_answer == ""
         assert result.verdict == "not_attempted"
 
-    async def test_verify_judge_failure_routed_to_sidecar(self, config: OmniscienceConfig) -> None:
-        # A judge call that errors is a distinct outcome, not a wrong answer:
-        # reward 0.0, the model's answer carried, and the row flagged for the
-        # failures sidecar instead of contaminating accuracy.
-        server_mock = MagicMock(spec=ServerClient)
-        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-        server = OmniscienceServer(config=config, server_client=server_mock)
-
-        request = OmniscienceVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=self._make_model_response("<think>reasoning</think>1989"),
-            question="In what year did the Berlin Wall fall?",
-            expected_answer="1989",
-        )
-
-        data = (await server.verify(request)).model_dump()
-        assert data["reward"] == approx(0.0)
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["response"] is not None
-
 
 class TestOmniscienceScoreFn:
     def test_correct(self) -> None:

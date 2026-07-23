@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_response_json
 
@@ -106,25 +106,10 @@ Reply only with CORRECT or INCORRECT."""
         judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
-        # A failed or empty judge call (auth, rate limit, timeout, HTTP error) is a
-        # distinct outcome, not a wrong answer. Carry the model's final output and
-        # route the row to the failures sidecar so it stays out of the denominator.
-        judge_response, judge_error = await run_judge(self._call_judge(judge_responses_create_params))
+        judge_response = await run_judge(self._call_judge(judge_responses_create_params))
         judge_response_text = judge_response.output_text.strip() if judge_response is not None else ""
-        if judge_error is not None or not judge_response_text:
-            reward = 0.0
-            return judge_failure(
-                AALCRVerifyResponse(
-                    **body.model_dump(),
-                    reward=reward,
-                    invalid_model_response=False,
-                    invalid_judge_response=True,
-                    judge_responses_create_params=judge_responses_create_params,
-                    judge_response=judge_response,
-                    **{input_tokens_band_key: reward},
-                ),
-                judge_error,
-            )
+        if not judge_response_text:
+            raise JudgeError("empty judge response")
 
         if judge_response_text == "CORRECT":
             invalid_judge_response = False

@@ -12,59 +12,55 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.judge import (
-    JUDGE_FAILURE_CLASS,
-    NG_FAILURE_CLASS_KEY,
-    NG_JUDGE_ERROR_KEY,
-    NG_JUDGE_FAILED_KEY,
-    judge_failure,
-    run_judge,
-)
+from nemo_gym.judge import JudgeError, judge_failsafe, run_judge
 
 
-class _Resp(BaseModel):
+class _Req(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    reward: float = 1.0
     response: dict = {}
 
 
 class TestRunJudge:
     @pytest.mark.asyncio
-    async def test_success_returns_result_no_error(self) -> None:
+    async def test_success_returns_result(self) -> None:
         async def ok():
             return "verdict"
 
-        result, error = await run_judge(ok())
-        assert result == "verdict"
-        assert error is None
+        assert await run_judge(ok()) == "verdict"
 
     @pytest.mark.asyncio
-    async def test_exception_recorded_verbatim(self) -> None:
+    async def test_exception_reraised_as_judge_error(self) -> None:
         async def boom():
             raise RuntimeError("judge timeout")
 
-        result, error = await run_judge(boom())
-        assert result is None
-        assert error == "RuntimeError: judge timeout"
+        with pytest.raises(JudgeError, match="RuntimeError: judge timeout"):
+            await run_judge(boom())
 
 
-class TestJudgeFailure:
-    def test_stamps_routing_keys_and_zero_reward(self) -> None:
-        out = judge_failure(_Resp(reward=1.0, response={"final": "answer"}), "RuntimeError: boom")
-        data = out.model_dump()
+class TestJudgeFailsafe:
+    @pytest.mark.asyncio
+    async def test_success_passes_through(self) -> None:
+        async def verify(body):
+            return {"reward": 1.0}
+
+        assert await judge_failsafe(verify)(_Req()) == {"reward": 1.0}
+
+    @pytest.mark.asyncio
+    async def test_judge_error_routed_to_sidecar(self) -> None:
+        async def verify(body):
+            raise JudgeError("RuntimeError: judge 401")
+
+        out = await judge_failsafe(verify)(_Req(response={"final": "answer"}))
+        data = orjson.loads(out.body)
         assert data["reward"] == 0.0
-        assert data[NG_FAILURE_CLASS_KEY] == JUDGE_FAILURE_CLASS
-        assert data[NG_JUDGE_FAILED_KEY] is True
-        assert data[NG_JUDGE_ERROR_KEY] == "RuntimeError: boom"
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["_ng_failure_judge_error"] == "RuntimeError: judge 401"
         # The model's final output is carried for a later judge-only replay.
         assert data["response"] == {"final": "answer"}
         # Transient: never terminal, so resume re-dispatches it.
         assert "_ng_failure_terminal" not in data
-
-    def test_empty_error_defaults_to_message(self) -> None:
-        out = judge_failure(_Resp(), None)
-        assert out.model_dump()[NG_JUDGE_ERROR_KEY] == "empty judge response"

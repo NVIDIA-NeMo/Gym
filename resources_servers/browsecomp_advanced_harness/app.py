@@ -41,7 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -1145,11 +1145,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self.config.workspace == "per_session":
             self._cleanup_workspace(request.session[SESSION_ID_KEY])
 
-        # A judge that never produced a usable score (repeated call errors or
-        # unparseable verdicts) is a distinct outcome, not a wrong answer: route
-        # it to the failures sidecar.
         if judge_error is not None:
-            return judge_failure(verify_response, judge_error)
+            raise JudgeError(judge_error)
         return verify_response
 
     ###### UTILITY FUNCTIONS ######
@@ -1228,10 +1225,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp=1.0]",
                 flush=True,
             )
-            # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct outcome,
-            # not a wrong answer: record it instead of crashing the sample.
-            result, last_error = await run_judge(self._call_judge(judge_create_params))
-            if last_error is not None:
+            try:
+                judge_response, text = await run_judge(self._call_judge(judge_create_params))
+            except JudgeError as e:
+                last_error = str(e)
                 sleep_s = min(2**attempt, 30)
                 print(
                     f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error={last_error[:200]} backoff_s={sleep_s}]",
@@ -1240,7 +1237,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 await sleep(sleep_s)
                 continue
 
-            judge_response, text = result
             is_correct, extracted, parsed_ok = self._parse_judge(text)
             if parsed_ok:
                 print(

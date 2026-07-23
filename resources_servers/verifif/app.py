@@ -41,14 +41,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import judge_failure
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 
 
-# Per-request collector for judge transport failures. A ContextVar is shared by
-# reference across the asyncio.gather child tasks a verify() spawns, so any judge
-# call that fails is recorded here and the row is routed to the failures sidecar
-# instead of being silently scored via the fallback string.
+# Per-request collector for judge failures. A ContextVar is shared by reference
+# across the asyncio.gather child tasks a verify() spawns, so failures raised in
+# any child task are recorded here rather than silently scored via the fallback string.
 _JUDGE_ERRORS: ContextVar[Optional[List[str]]] = ContextVar("verifif_judge_errors", default=None)
 
 
@@ -759,8 +758,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             TuringVIFVerifyResponse with reward and validation details
         """
         final_response_text = _extract_text_from_response(body.response)
-        # Collect any judge transport failures raised during this request (see
-        # _JUDGE_ERRORS); a non-empty list routes the row to the failures sidecar.
+        # Collect judge failures raised during this request (see _JUDGE_ERRORS).
         judge_errors: List[str] = []
         _JUDGE_ERRORS.set(judge_errors)
 
@@ -935,11 +933,9 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             follow_instruction_list=is_following_list,
             validation_results=validation_results,
         )
-        # A judge transport failure means at least one instruction could not be
-        # scored: route the row to the failures sidecar instead of trusting a
-        # reward computed from the fallback verdict.
+        # A judge failure means an instruction couldn't be scored; don't trust a fallback-verdict reward.
         if judge_errors:
-            return judge_failure(response, "; ".join(judge_errors))
+            raise JudgeError("; ".join(judge_errors))
         return response
 
 

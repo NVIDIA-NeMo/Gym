@@ -44,7 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -260,29 +260,11 @@ class MultiChallengeServer(SimpleResourcesServer):
         if not rubric and body.metadata and "rubric" in body.metadata:
             rubric = body.metadata["rubric"]
 
-        # A failed judge CALL on any rubric item (auth, rate limit, timeout,
-        # endpoint error) is a distinct outcome, not a wrong answer. Carry the
-        # model's final output (via body) and route the row to the failures
-        # sidecar so it stays out of the accuracy denominator.
         payload = body.model_dump()
         payload.pop("context", None)
         payload.pop("rubric", None)
 
-        evaluations, judge_error = await run_judge(self._evaluate_rubric(rubric, context, generated_response))
-        if judge_error is not None:
-            return judge_failure(
-                MultiChallengeVerifyResponse(
-                    **payload,
-                    reward=0.0,
-                    context=context,
-                    generated_response=generated_response,
-                    rubric_evaluations=[],
-                    aggregation_mode=self.config.aggregation_mode.value,
-                    num_passed=0,
-                    num_total=0,
-                ),
-                judge_error,
-            )
+        evaluations = await run_judge(self._evaluate_rubric(rubric, context, generated_response))
 
         # Aggregate scores
         reward = self._aggregate_scores(evaluations)

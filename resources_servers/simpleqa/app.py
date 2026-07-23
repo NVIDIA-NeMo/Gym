@@ -46,7 +46,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -275,23 +275,10 @@ class SimpleQAServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        judge_text, judge_error = await run_judge(self._call_judge(judge_prompt))
-
-        # A failed or empty judge call is a distinct outcome, not a wrong answer.
-        # Carry the model's final output (via body) and route the row to the
-        # failures sidecar so it stays out of the accuracy denominator.
-        if judge_error is not None or not judge_text:
-            return judge_failure(
-                SimpleQAVerifyResponse(
-                    **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-                    reward=0.0,
-                    extracted_answer=generation,
-                    expected_answer=expected_answer,
-                    verdict=None,
-                    judge_output=judge_text or "",
-                ),
-                judge_error,
-            )
+        # Empty judge output is a judge failure, not a wrong answer.
+        judge_text = await run_judge(self._call_judge(judge_prompt))
+        if not judge_text:
+            raise JudgeError("empty judge response")
 
         grade = parse_judge_grade(judge_text)
 

@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -416,10 +416,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
-        # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct
-        # outcome, not a wrong answer: route it to the failures sidecar.
         if judge_error is not None:
-            return judge_failure(response, judge_error)
+            raise JudgeError(judge_error)
         return response
 
     ###### UTILITY FUNCTIONS ######
@@ -542,10 +540,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 judge_response=judge_response,
             )
 
-        result, judge_error = await run_judge(_get_judge_response(question, ground_truth, response))
-        if judge_error is not None:
-            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), judge_error
-        judge_create_params, judge_response = result
+        try:
+            judge_create_params, judge_response = await run_judge(
+                _get_judge_response(question, ground_truth, response)
+            )
+        except JudgeError as e:
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
         return judge_evaluation, None
 

@@ -36,7 +36,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -248,7 +248,6 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         judge_passed = False
         judge_evaluations = []
         extracted_sql = None
-        judge_error: Optional[str] = None
 
         if not generated:
             failure_reason = FailureCode.NO_SQL_EXTRACTED
@@ -279,11 +278,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                 failure_reason = FailureCode.NO_SQL_EXTRACTED
                 reward = 0.0
             else:
-                # A failed judge CALL (auth, rate limit, timeout, HTTP error) is
-                # a distinct outcome, not a wrong answer — carry the model's
-                # output and route the row to the failures sidecar so it stays
-                # out of the accuracy denominator.
-                first, judge_error = await run_judge(
+                first_equal, first_eval = await run_judge(
                     self._generate_judge_evaluation(
                         sql_prompt=sql_prompt,
                         sql_context=sql_context,
@@ -292,41 +287,39 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                         sql_dialect=sql_dialect,
                     )
                 )
-                if judge_error is None:
-                    first_equal, first_eval = first
-                    judge_evaluations.append(first_eval)
+                judge_evaluations.append(first_eval)
 
-                    if first_equal:
-                        if self.config.check_twice_swap:
-                            # Run swap check
-                            second, judge_error = await run_judge(
-                                self._generate_judge_evaluation(
-                                    sql_prompt=sql_prompt,
-                                    sql_context=sql_context,
-                                    expected_sql=extracted_sql,
-                                    generated_sql=expected_sql,
-                                    sql_dialect=sql_dialect,
-                                )
+                if first_equal:
+                    if self.config.check_twice_swap:
+                        # Run swap check
+                        second_equal, second_eval = await run_judge(
+                            self._generate_judge_evaluation(
+                                sql_prompt=sql_prompt,
+                                sql_context=sql_context,
+                                expected_sql=extracted_sql,
+                                generated_sql=expected_sql,
+                                sql_dialect=sql_dialect,
                             )
-                            if judge_error is None:
-                                second_equal, second_eval = second
-                                judge_evaluations.append(second_eval)
+                        )
+                        judge_evaluations.append(second_eval)
 
-                                if second_equal:
-                                    judge_passed = True
-                                    reward = 1.0
-                                    failure_reason = FailureCode.NONE
-                                else:
-                                    reward = self.config.reward_if_swap_fails
-                                    failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
-                        else:
+                        if second_equal:
                             judge_passed = True
                             reward = 1.0
                             failure_reason = FailureCode.NONE
+                        else:
+                            reward = self.config.reward_if_swap_fails
+                            failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                     else:
-                        failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
-                        reward = 0.0
+                        judge_passed = True
+                        reward = 1.0
+                        failure_reason = FailureCode.NONE
+                else:
+                    failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
+                    reward = 0.0
 
+        except JudgeError:
+            raise
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             reward = 0.0
@@ -351,8 +344,6 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             failure_reason=failure_reason,
             judge_evaluations=judge_evaluations,
         )
-        if judge_error is not None:
-            return judge_failure(response, judge_error)
         return response
 
     async def _generate_judge_evaluation(

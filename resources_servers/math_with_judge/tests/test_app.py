@@ -256,32 +256,6 @@ class TestApp:
             "reward",
         ]
 
-    async def test_verify_judge_failure_routed_to_sidecar(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        # Library says "not equal" -> judge is consulted; the judge call errors.
-        # The row is scored 0.0 and routed to the failures sidecar, not silently
-        # scored as a wrong answer.
-        server_mock = MagicMock(spec=ServerClient)
-        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-
-        question = "Simplify the expression x + 7 - 6"
-        request = LibraryJudgeMathVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[{"role": "user", "content": question}]
-            ),
-            response=NeMoGymResponse(
-                **self._create_response("resp_id", self._create_response_output_message("the answer is 42"))
-            ),
-            question=question,
-            expected_answer="x + 1",
-        )
-        data = (await resources_server.verify(request)).model_dump()
-        assert data["reward"] == approx(0.0)
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["response"] is not None
-
     async def test_verify_answer(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)

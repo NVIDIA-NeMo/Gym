@@ -45,7 +45,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -506,27 +506,7 @@ class ImoProofBenchJudgeServer(SimpleResourcesServer):
             predicted_answer=extracted,
         )
 
-        # A judge call that errors (auth, rate limit, timeout, endpoint/HTTP
-        # error, malformed response) is a distinct outcome, not a wrong answer:
-        # route it to the failures sidecar instead of scoring the proof as
-        # incorrect. The response carries the model's final output so a later
-        # judge-only replay can skip regeneration.
-        judge_text, judge_error = await run_judge(self._call_judge(judge_prompt))
-        if judge_error is not None:
-            return judge_failure(
-                ImoProofBenchVerifyResponse(
-                    **body.model_dump(exclude={"reward"}),
-                    reward=0.0,
-                    extracted_answer=extracted,
-                    judge_output=None,
-                    judge_points=None,
-                    judge_correct=0.0,
-                    symbolic_correct=0.0,
-                    any_correct=0.0,
-                    no_judge_score=0.0,
-                ),
-                judge_error,
-            )
+        judge_text = await run_judge(self._call_judge(judge_prompt))
 
         # Parse the judge response with Skills' 3-format priority. Format 1
         # ("Judgement: Yes/No") and Format 2 (\boxed{Correct/Incorrect}) win

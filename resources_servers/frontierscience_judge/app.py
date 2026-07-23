@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -348,27 +348,7 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        # A judge call that errors (auth, rate limit, timeout, endpoint/HTTP
-        # error, malformed response) is a distinct outcome, not a wrong answer:
-        # route it to the failures sidecar instead of scoring the attempt as
-        # incorrect. The response carries the model's final output so a later
-        # judge-only replay can skip regeneration.
-        judge_text, judge_error = await run_judge(self._call_judge(judge_prompt))
-        if judge_error is not None:
-            return judge_failure(
-                FrontierScienceJudgeVerifyResponse(
-                    **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-                    reward=0.0,
-                    extracted_answer=generation if generation else None,
-                    expected_answer=expected_answer,
-                    verdict=None,
-                    judge_output=None,
-                    rubric_score=None,
-                    rubric_score_normalized=None,
-                    invalid_judge_response=False,
-                ),
-                judge_error,
-            )
+        judge_text = await run_judge(self._call_judge(judge_prompt))
 
         verdict = parse_judgement(judge_text)
         rubric_score = None

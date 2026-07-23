@@ -50,7 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -1287,16 +1287,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         rating = None
 
         for attempt in range(max_judge_retries):
-            # A failed judge call (auth, rate limit, timeout, HTTP error) is a distinct
-            # outcome, not a wrong answer: route it to the failures sidecar.
-            judge_response, judge_error = await run_judge(self._call_judge(judge_params))
-            if judge_error is not None:
+            try:
+                judge_response = await run_judge(self._call_judge(judge_params))
+            except JudgeError as judge_error:
                 logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
                 logger.error("Judge model call failed after %d attempts", max_judge_retries)
-                return judge_failure(FinanceAgentVerifyResponse(**body.model_dump(), reward=0.0), judge_error)
+                raise
 
             try:
                 last_output = judge_response.output[-1]

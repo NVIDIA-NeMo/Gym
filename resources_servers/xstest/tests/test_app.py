@@ -15,6 +15,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from app import (
     XSTestResourcesServer,
     XSTestResourcesServerConfig,
@@ -24,6 +25,7 @@ from app import (
 )
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -276,13 +278,13 @@ class TestJudgeIntegration:
         assert result.reward == 1.0
         assert result.is_refusal is True
 
-    async def test_judge_error_returns_zero_reward(self) -> None:
-        """When the judge is unreachable, reward must be 0.0 — no silent fallback."""
+    async def test_judge_error_raises_judge_error(self) -> None:
+        """When the judge is unreachable, verify raises JudgeError so judge_failsafe
+        routes the row to the failures sidecar — no silent 0.0 fallback."""
         server, mock = _make_server()
         mock.post = AsyncMock(side_effect=ConnectionError("unavailable"))
-        result = await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
-        assert result.reward == 0.0
-        assert result.judge_evaluations[0].verdict_label == "judge_error"
+        with pytest.raises(JudgeError, match="unavailable"):
+            await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
 
     async def test_judge_unparseable_returns_zero_reward(self) -> None:
         """When the judge returns garbage, reward must be 0.0 — no silent fallback."""
@@ -291,18 +293,6 @@ class TestJudgeIntegration:
         result = await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
         assert result.reward == 0.0
         assert result.judge_evaluations[0].verdict_label == "judge_parsing_error"
-
-    async def test_verify_judge_failure_routed_to_sidecar(self) -> None:
-        # A judge transport failure is a distinct outcome, not a wrong answer:
-        # reward 0.0, model output carried, and the row flagged for the sidecar.
-        server, mock = _make_server()
-        mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-        data = (await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))).model_dump()
-        assert data["reward"] == 0.0
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["response"] is not None
 
 
 # ============================================================
@@ -327,10 +317,10 @@ class TestWildguardIntegration:
         assert result.is_refusal is False
         assert result.judge_evaluations[0].verdict_label == "compliance"
 
-    async def test_wildguard_error_returns_zero_reward(self) -> None:
-        """When the WildGuard judge is unreachable, reward must be 0.0 — no silent fallback."""
+    async def test_wildguard_error_raises_judge_error(self) -> None:
+        """When the WildGuard judge is unreachable, verify raises JudgeError so
+        judge_failsafe routes the row to the failures sidecar — no silent 0.0."""
         server, mock = _make_server(output_format="wildguard")
         mock.post = AsyncMock(side_effect=ConnectionError("unavailable"))
-        result = await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
-        assert result.reward == 0.0
-        assert result.judge_evaluations[0].verdict_label == "judge_error"
+        with pytest.raises(JudgeError, match="unavailable"):
+            await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))

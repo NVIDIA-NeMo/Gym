@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure, run_judge
+from nemo_gym.judge import JudgeError, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -295,22 +295,9 @@ class OmniscienceServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        judge_text, judge_error = await run_judge(self._call_judge(judge_prompt))
-
-        # A failed or empty judge call is a distinct outcome, not a wrong answer:
-        # carry the model's output and route the row to the failures sidecar.
-        if judge_error is not None or not judge_text:
-            return judge_failure(
-                OmniscienceVerifyResponse(
-                    **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-                    reward=0.0,
-                    extracted_answer=generation,
-                    expected_answer=expected_answer,
-                    verdict=None,
-                    judge_output=judge_text or "",
-                ),
-                judge_error,
-            )
+        judge_text = await run_judge(self._call_judge(judge_prompt))
+        if not judge_text:
+            raise JudgeError("empty judge response")
 
         grade = parse_judge_grade(judge_text)
 

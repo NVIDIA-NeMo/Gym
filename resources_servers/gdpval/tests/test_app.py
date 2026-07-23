@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -940,12 +941,10 @@ class TestMultiReference:
         assert resp.judge_response["reference_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_verify_all_references_fail_routed_to_sidecar(self, tmp_path) -> None:
+    async def test_verify_all_references_fail_raises_judge_error(self, tmp_path) -> None:
         """When every matchup fails the rollout is genuinely unjudgeable: verify
-        routes it to the failures sidecar (reward 0, judge_failed routing keys)
+        raises JudgeError so judge_failsafe routes it to the failures sidecar
         rather than crashing the sample or faking a reward."""
-        from pytest import approx
-
         server, body = self._two_ref_server_and_body(tmp_path)
 
         def always_fail(**_kwargs):
@@ -957,13 +956,8 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = (await server.verify(body)).model_dump()
-
-        assert resp["reward"] == approx(0.0)
-        assert resp["_ng_failure_class"] == "judge_failed"
-        assert resp["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in resp["_ng_failure_judge_error"]
-        assert resp["verify_mode"] == "comparison"
+            with pytest.raises(JudgeError, match="judge timeout"):
+                await server.verify(body)
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest

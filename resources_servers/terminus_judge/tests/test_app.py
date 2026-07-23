@@ -1129,24 +1129,6 @@ class TestVerifyWithRubricsV4JudgeResponse:
         assert response.judge_passed is None  # None because judge didn't return meaningful result
         assert response.judge_evaluations[0].verdict_label is None
 
-    @pytest.mark.asyncio
-    async def test_verify_judge_failure_routed_to_sidecar(self, resources_server: TerminusJudgeResourcesServer):
-        # A judge CALL that errors is a distinct outcome, not a wrong answer:
-        # reward 0.0, the model's answer carried, and the row flagged for the
-        # failures sidecar instead of contaminating accuracy.
-        expected_answer = create_terminus_1_response([{"keystrokes": "ls\n"}])
-        pred_answer = create_terminus_1_response([{"keystrokes": "pwd\n"}])
-        request = self._create_verify_request(json.dumps(pred_answer), expected_answer, "terminus_1")
-
-        resources_server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-
-        data = (await resources_server.verify(request)).model_dump()
-        assert data["reward"] == 0.0
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["response"] is not None
-
 
 class TestVerifyAdditionalScenarios:
     """Additional test scenarios for full coverage."""

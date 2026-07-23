@@ -251,30 +251,6 @@ class TestSimpleQAServer:
         assert result.verdict == "not_attempted"
         assert result.is_not_attempted == approx(1.0)
 
-    async def test_verify_judge_failure_routed_to_sidecar(self, config: SimpleQAConfig) -> None:
-        # A judge call that errors is a distinct outcome, not a wrong answer:
-        # reward 0.0, the model's answer carried, and the row flagged for the
-        # failures sidecar instead of contaminating accuracy.
-        server_mock = MagicMock(spec=ServerClient)
-        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-        server = SimpleQAServer(config=config, server_client=server_mock)
-
-        request = SimpleQAVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=_make_response("Pancreas"),
-            question="What organ in the human body produces insulin?",
-            expected_answer="Pancreas",
-        )
-
-        data = (await server.verify(request)).model_dump()
-        assert data["reward"] == approx(0.0)
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["verdict"] is None
-        # The model's final output is carried so a later re-judge can skip generation.
-        assert data["response"] is not None
-
     async def test_verify_passes_message_content_verbatim(self, config: SimpleQAConfig) -> None:
         """The model-server's --reasoning-parser strips <think> blocks
         before they reach the resource server, so verify() forwards the

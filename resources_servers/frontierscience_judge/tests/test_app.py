@@ -251,29 +251,6 @@ class TestFrontierScienceJudgeServer:
         assert result.reward == approx(0.0)
         assert result.verdict == "NO"
 
-    async def test_verify_judge_failure_routed_to_sidecar(self, config: FrontierScienceJudgeConfig) -> None:
-        # A judge call that errors is a distinct outcome, not a wrong answer:
-        # reward 0.0, the model's answer carried, and the row flagged for the
-        # failures sidecar instead of contaminating accuracy.
-        server_mock = MagicMock(spec=ServerClient)
-        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
-        server = FrontierScienceJudgeServer(config=config, server_client=server_mock)
-
-        request = FrontierScienceJudgeVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=self._make_model_response("CO2"),
-            question="What is the chemical formula of carbon dioxide?",
-            expected_answer="CO2",
-            subject="chemistry",
-        )
-
-        data = (await server.verify(request)).model_dump()
-        assert data["reward"] == approx(0.0)
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["_ng_failure_judge_failed"] is True
-        assert "judge timeout" in data["_ng_failure_judge_error"]
-        assert data["response"] is not None
-
     async def test_verify_unparseable_judge(self, config: FrontierScienceJudgeConfig) -> None:
         """Judge response with no Judgement: marker => verdict=None, reward=0."""
         server_mock = MagicMock(spec=ServerClient)

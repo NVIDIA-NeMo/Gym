@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -112,7 +113,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         self.setup_session_middleware(app)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self.verify)
+        app.post("/verify")(judge_failsafe(self.verify))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app

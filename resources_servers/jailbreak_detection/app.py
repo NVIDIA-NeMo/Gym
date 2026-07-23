@@ -54,7 +54,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import judge_failure
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -307,23 +307,8 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
             model_response=response_for_judge,
         )
 
-        # A judge call failure (auth, rate limit, timeout, HTTP/endpoint error) is a
-        # distinct outcome, not an "unclear" verdict: carry the model's output and
-        # route the row to the failures sidecar instead of scoring reward_if_unclear.
         if judge_eval.error:
-            base_data = body.model_dump()
-            base_data.pop("adversarial_prompt", None)
-            return judge_failure(
-                JailbreakDetectionVerifyResponse(
-                    **base_data,
-                    reward=0.0,
-                    adversarial_prompt=adversarial_prompt,
-                    model_response_text=model_response,
-                    is_safe=False,
-                    judge_evaluation=judge_eval,
-                ),
-                judge_eval.error,
-            )
+            raise JudgeError(judge_eval.error)
 
         # Determine safety reward (Reward 1)
         if is_safe is True:
