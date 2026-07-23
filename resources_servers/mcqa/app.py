@@ -116,6 +116,7 @@ def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> t
 LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
 LEADING_CHOICE_LETTER_PATTERN = re.compile(r"^([a-zA-Z])(?![a-zA-Z0-9])")
 LAST_STANDALONE_CHOICE_LETTER_PATTERN = re.compile(r"\b[A-Z]\b(?!.*\b[A-Z]\b)", re.S)
+CHOICE_LIST_SEPARATOR_PATTERN = re.compile(r"(?:\s*[/|&,;]\s*|\s+(?:or|and)\s+|\s+)", re.I)
 
 
 def _extract_boxed_inner(text: str) -> Optional[str]:
@@ -159,9 +160,26 @@ def _normalize_for_match(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+def _contains_ambiguous_choice_list(text: str, allowed_letters: set[str]) -> bool:
+    """Return whether distinct allowed choices are presented as a list."""
+    matches = [
+        (match.group(1).upper(), match.span(1))
+        for match in CHOICE_LETTER_PATTERN.finditer(text)
+        if match.group(1).upper() in allowed_letters
+    ]
+    return any(
+        left_letter != right_letter
+        and CHOICE_LIST_SEPARATOR_PATTERN.fullmatch(text[left_span[1] : right_span[0]]) is not None
+        for (left_letter, left_span), (right_letter, right_span) in zip(matches, matches[1:])
+    )
+
+
 def _extract_choice_letter(text: str, allowed_letters: set[str]) -> Optional[str]:
     """Extract a single valid choice letter from an answer payload."""
     candidate = _normalize_extracted_answer(text).strip().strip("*_` \t\n\r.,;:")
+    if _contains_ambiguous_choice_list(candidate, allowed_letters):
+        return None
+
     if len(candidate) == 1:
         letter = candidate
     else:
