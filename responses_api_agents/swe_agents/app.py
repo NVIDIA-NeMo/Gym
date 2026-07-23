@@ -109,12 +109,11 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         "its bench/ entry point.",
     )
     opencode_source: Literal["opencode", "nv-opencode"] = Field(
-        default="nv-opencode",
-        description="For agent_framework='opencode', which opencode to run. 'nv-opencode' (default) uses "
-        "the pinned fork's bench entry point. 'opencode' runs upstream opencode headless "
-        "(`opencode run`) with an opencode.json provider pointed at Switchyard — no fork, so opencode's "
-        "native X-Session-Id is captured. Flip the default to 'opencode' once the upstream path is "
-        "validated end-to-end.",
+        default="opencode",
+        description="For agent_framework='opencode', which opencode to run. 'opencode' (default) runs "
+        "upstream opencode headless (`opencode run`) with an opencode.json provider pointed at Switchyard "
+        "— no fork, so opencode's native X-Session-Id is captured. 'nv-opencode' uses the pinned fork's "
+        "bench entry point.",
     )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(

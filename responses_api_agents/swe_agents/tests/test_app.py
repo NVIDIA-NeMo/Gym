@@ -1106,6 +1106,7 @@ class TestOpenCodeHarnessProcessor:
         return _make_instance_config(
             tmpdir,
             agent_framework="opencode",
+            opencode_source="nv-opencode",  # fork run-command path (default is now upstream 'opencode')
             opencode_setup_dir=opencode_setup_dir,
             agent_framework_repo="https://example.invalid/opencode.git",
             agent_framework_commit="deadbeef",
