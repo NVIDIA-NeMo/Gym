@@ -35,6 +35,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
+    SandboxResourceUsage,
     SandboxSpec,
     SandboxStatus,
 )
@@ -57,6 +58,8 @@ DOCKER_RUNTIME_ERROR_MARKERS = (
     "error response from daemon",
 )
 DOCKER_MISSING_CONTAINER_MARKERS = ("no such container", "no such object")
+RESOURCE_USAGE_TIMEOUT_S = 5.0
+HOST_CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 class DockerCreateError(SandboxCreateError):
@@ -214,6 +217,82 @@ def _is_runtime_failure(stderr: str) -> bool:
 def _is_missing_container(stderr: str) -> bool:
     low = stderr.lower()
     return any(marker in low for marker in DOCKER_MISSING_CONTAINER_MARKERS)
+
+
+def _read_decimal(path: Path) -> int | None:
+    try:
+        value = path.read_text().strip()
+    except OSError:
+        return None
+    return int(value) if value.isdecimal() else None
+
+
+def _cgroup_base(mount_root: Path, cgroup_path: str) -> Path | None:
+    relative = Path(cgroup_path.lstrip("/"))
+    if ".." in relative.parts:
+        return None
+    return mount_root / relative
+
+
+def _read_host_cgroup_usage(
+    proc_root: Path,
+    expected_container_id: str,
+    mount_root: Path = HOST_CGROUP_ROOT,
+) -> SandboxResourceUsage:
+    """Read a container process's cgroup counters without executing code inside it."""
+    try:
+        rows = [line.split(":", 2) for line in (proc_root / "cgroup").read_text().splitlines()]
+    except OSError:
+        return SandboxResourceUsage()
+    if any(len(row) != 3 for row in rows):
+        return SandboxResourceUsage()
+
+    unified = next((path for hierarchy, controllers, path in rows if hierarchy == "0" and not controllers), None)
+    if unified is not None and expected_container_id in unified:
+        base = _cgroup_base(mount_root, unified)
+        if base is None:
+            return SandboxResourceUsage()
+        cpu_time_s = None
+        try:
+            cpu_stat = (base / "cpu.stat").read_text().splitlines()
+        except OSError:
+            cpu_stat = []
+        for line in cpu_stat:
+            fields = line.split()
+            if len(fields) == 2 and fields[0] == "usage_usec" and fields[1].isdecimal():
+                cpu_time_s = int(fields[1]) / 1_000_000
+                break
+        peak_bytes = _read_decimal(base / "memory.peak")
+        if cpu_time_s is not None or peak_bytes is not None:
+            return SandboxResourceUsage(
+                cpu_time_s=cpu_time_s,
+                peak_memory_mib=None if peak_bytes is None else peak_bytes / (1024 * 1024),
+                source="docker_host_cgroup_v2",
+            )
+
+    controllers = {
+        controller: path for _, names, path in rows if expected_container_id in path for controller in names.split(",")
+    }
+    cpu_path = controllers.get("cpuacct")
+    memory_path = controllers.get("memory")
+    cpu_usage_ns = None
+    if cpu_path is not None:
+        for directory in ("cpuacct", "cpu,cpuacct", "cpuacct,cpu", "cpu"):
+            base = _cgroup_base(mount_root / directory, cpu_path)
+            if base is not None and (cpu_usage_ns := _read_decimal(base / "cpuacct.usage")) is not None:
+                break
+    peak_bytes = None
+    if memory_path is not None:
+        base = _cgroup_base(mount_root / "memory", memory_path)
+        if base is not None:
+            peak_bytes = _read_decimal(base / "memory.max_usage_in_bytes")
+    if cpu_usage_ns is None and peak_bytes is None:
+        return SandboxResourceUsage()
+    return SandboxResourceUsage(
+        cpu_time_s=None if cpu_usage_ns is None else cpu_usage_ns / 1_000_000_000,
+        peak_memory_mib=None if peak_bytes is None else peak_bytes / (1024 * 1024),
+        source="docker_host_cgroup_v1",
+    )
 
 
 class DockerProvider:
@@ -467,6 +546,39 @@ class DockerProvider:
         if code != 0:
             return SandboxStatus.STOPPED if _is_missing_container(err) else SandboxStatus.UNKNOWN
         return _to_sandbox_status(out.strip())
+
+    async def resource_usage(self, handle: SandboxHandle) -> SandboxResourceUsage:
+        """Read lifetime CPU and peak memory from a local Linux Docker daemon."""
+        inst = handle.raw
+        configured_timeout = self._exec_config.default_timeout_s
+        timeout_s = (
+            RESOURCE_USAGE_TIMEOUT_S
+            if configured_timeout is None
+            else min(float(configured_timeout), RESOURCE_USAGE_TIMEOUT_S)
+        )
+        try:
+            code, out, _err = await self._run(
+                [self._binary, "inspect", "-f", "{{.Id}} {{.State.Pid}}", inst.name],
+                timeout_s=timeout_s,
+            )
+            fields = out.split()
+            if code != 0 or len(fields) != 2:
+                return SandboxResourceUsage()
+            container_id, pid = fields
+            if (
+                len(container_id) != 64
+                or any(character not in "0123456789abcdef" for character in container_id)
+                or not pid.isdecimal()
+                or int(pid) <= 0
+            ):
+                return SandboxResourceUsage()
+            return await asyncio.to_thread(
+                _read_host_cgroup_usage,
+                Path(f"/proc/{pid}"),
+                container_id,
+            )
+        except TimeoutError:
+            return SandboxResourceUsage()
 
     async def close(self, handle: SandboxHandle) -> None:
         """Force-remove the container (already-gone counts as success)."""

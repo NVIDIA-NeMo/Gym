@@ -16,10 +16,11 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -27,17 +28,37 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
     OpenClawAgentConfig,
+    OpenClawAgentRunRequest,
     ResourcesServerRef,
     _decode_last_json_dict_suffix,
     _extract_instruction,
     _text_from_openclaw_payloads,
+    openclaw_session_conversation,
     parse_openclaw_output,
     parse_openclaw_session,
+    parse_openclaw_session_events,
+    parse_openclaw_session_items,
 )
+
+
+class _FakeResponse:
+    ok = True
+
+    def __init__(self, payload: dict, cookies: dict | None = None) -> None:
+        self.payload = payload
+        self.cookies = cookies or {}
+
+    async def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
+
+
+def _invocations(bundle):
+    return [record for record in bundle.records if isinstance(record, AgentInvocation)]
 
 
 def _config(**kwargs) -> OpenClawAgentConfig:
@@ -201,9 +222,65 @@ class TestParseOpenclawSession:
         assert parse_openclaw_session(line) == []
 
     def test_malformed_lines_skipped(self) -> None:
-        line = "not-json\n" + self._msg("assistant", [{"type": "text", "text": "ok"}])
+        line = "not-json\nnull\n[]\n" + self._msg("assistant", [{"type": "text", "text": "ok"}])
         items = parse_openclaw_session(line)
         assert len(items) == 1
+
+    def test_preserves_string_input_and_reasoning(self) -> None:
+        events = [
+            {"type": "message", "message": {"role": "user", "content": "solve this"}},
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "reasoning", "text": "need a tool"},
+                        {"type": "toolCall", "id": "c1", "name": "search", "arguments": {}},
+                    ],
+                },
+            },
+        ]
+
+        items = parse_openclaw_session_items(events, include_input=True)
+
+        assert [item.type for item in items] == ["message", "reasoning", "function_call"]
+        assert items[0].content == "solve this"
+        assert items[1].summary[0].text == "need a tool"
+
+    def test_input_only_transcript_uses_fallback_output(self) -> None:
+        fallback = NeMoGymResponseOutputMessage(
+            id="fallback",
+            content=[{"type": "output_text", "text": "done", "annotations": []}],
+        )
+
+        conversation = openclaw_session_conversation(
+            [{"type": "message", "message": {"role": "user", "content": "retained input"}}],
+            input_items=[NeMoGymEasyInputMessage(role="user", content="request input")],
+            fallback_output=[fallback],
+        )
+
+        assert conversation == [NeMoGymEasyInputMessage(role="user", content="retained input"), fallback]
+
+    def test_preserves_conflicting_duplicate_event_ids(self) -> None:
+        events = [
+            {"id": "same", "type": "message", "message": {"role": "assistant", "content": "one"}},
+            {"id": "same", "type": "message", "message": {"role": "assistant", "content": "two"}},
+        ]
+
+        items = parse_openclaw_session_items(events, include_input=True)
+
+        assert [item.content[0].text for item in items] == ["one", "two"]
+
+    def test_restores_missing_known_system_input(self) -> None:
+        system = NeMoGymEasyInputMessage(role="system", content="system rules")
+        user = NeMoGymEasyInputMessage(role="user", content="solve this")
+
+        conversation = openclaw_session_conversation(
+            [{"type": "message", "message": {"role": "user", "content": "solve this"}}],
+            input_items=[system, user],
+        )
+
+        assert conversation == [system, user]
 
 
 class TestBuildOpenclawConfig:
@@ -233,6 +310,31 @@ class TestBuildOpenclawConfig:
         assert cfg["extra"] == {"k": "v"}
         assert cfg["gateway"]["mode"] == "local"
 
+    def test_model_server_replaces_provider_base_url_for_rollout(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            openclaw_config={"models": {"providers": {"nvinf": {"api": "openai-completions"}}}},
+        )
+        with patch.object(
+            OpenClawAgent,
+            "resolve_model_base_url",
+            return_value="http://policy/ng-rollout/7-2/v1",
+        ):
+            cfg = agent._build_openclaw_config({}, "7-2")
+
+        assert cfg["models"]["providers"]["nvinf"]["baseUrl"] == "http://policy/ng-rollout/7-2/v1"
+
+    def test_responses_propagates_rollout_path(self) -> None:
+        agent = _make_agent()
+
+        async def run_openclaw(*args, **kwargs):
+            assert kwargs["rollout_id"] == "7-2"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+
+        request = MagicMock(path_params={"rollout_id": "7-2"})
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
     def test_user_deny_cannot_drop_headless_deny(self) -> None:
         agent = _make_agent(openclaw_config={"tools": {"deny": ["custom"]}})
         cfg = agent._build_openclaw_config({})
@@ -258,6 +360,238 @@ class TestBuildOpenclawConfig:
         assert env["NVIDIA_API_KEY"] == "k"
         assert env["HOME"] == "/tmp/h"
         assert "EMPTY" not in env
+
+
+class TestObservability:
+    def test_collects_session_artifact_before_workspace_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+        work_dir = tmp_path / "run"
+        config_path = work_dir / ".openclaw-home" / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        sessions_dir = config_path.parent / "agents" / "main" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        session_path = sessions_dir / "session-1.jsonl"
+        session_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "session-1"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                        }
+                    ),
+                ]
+            )
+        )
+        child_path = sessions_dir / "child-transcript.jsonl"
+        child_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "child-transcript"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "child done"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+        )
+        (sessions_dir / "sessions.json").write_text(
+            json.dumps(
+                {
+                    "agent:main:main": {"sessionId": "session-1", "sessionFile": str(session_path)},
+                    "agent:main:subagent:child": {
+                        "sessionId": "child-transcript",
+                        "spawnedBy": "agent:main:main",
+                    },
+                }
+            )
+        )
+        stdout = json.dumps({"payloads": [], "meta": {"agentMeta": {"sessionFile": str(session_path)}}})
+        collector = MagicMock()
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", AsyncMock(side_effect=[(0, "", ""), (0, stdout, "")])),
+        ):
+            output, _, _ = asyncio.run(agent._run_openclaw("solve", None, observation_collector=collector))
+
+        assert output[0].content[0].text == "done"
+        assert collector.call_args.args[0] == "session-1"
+        assert collector.call_args.args[1][1]["type"] == "message"
+        assert [(item[0], item[1]) for item in collector.call_args.args[2]] == [
+            ("agent:main:main", None),
+            ("agent:main:subagent:child", "agent:main:main"),
+        ]
+        assert not work_dir.exists()
+
+    def test_scoring_padding_is_not_reported_as_agent_output(self) -> None:
+        agent = _make_agent()
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            observation_collector(
+                "session-without-output",
+                [{"type": "session", "id": "session-without-output"}],
+                [],
+                [],
+            )
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            episode = asyncio.run(agent.responses_with_observations(None, body))
+
+        assert episode.response.output[0].content[0].text == ""
+        [invocation] = _invocations(episode.observations)
+        assert invocation.invocation_id == "session-without-output"
+        assert invocation.conversation == [NeMoGymEasyInputMessage(role="user", content="solve")]
+        assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+
+    def test_fallback_output_is_preserved_without_a_session_transcript(self) -> None:
+        agent = _make_agent()
+        output = NeMoGymResponseOutputMessage(
+            id="fallback",
+            content=[{"type": "output_text", "text": "done", "annotations": []}],
+        )
+
+        async def run_openclaw(*args, **kwargs):
+            return [output], {"input_tokens": 1, "output_tokens": 1}, "model"
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            episode = asyncio.run(agent.responses_with_observations(None, body))
+
+        [invocation] = _invocations(episode.observations)
+        assert invocation.conversation == [
+            NeMoGymEasyInputMessage(role="user", content="solve"),
+            output,
+        ]
+        assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+
+    def test_root_observation_uses_retained_transcript(self) -> None:
+        agent = _make_agent()
+        scored_output = NeMoGymResponseOutputMessage(
+            id="scored",
+            content=[{"type": "output_text", "text": "scoring view", "annotations": []}],
+        )
+        events = [
+            {"type": "session", "id": "session-1"},
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "retained input"}],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "from transcript"}],
+                },
+            },
+        ]
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            observation_collector("session-1", events, [("root", None, events)], [])
+            return [scored_output], {"input_tokens": 1, "output_tokens": 1}, "model"
+
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            episode = asyncio.run(
+                agent.responses_with_observations(None, NeMoGymResponseCreateParamsNonStreaming(input="solve"))
+            )
+
+        [invocation] = _invocations(episode.observations)
+        conversation = invocation.conversation
+        assert conversation[0] == NeMoGymEasyInputMessage(role="user", content="retained input")
+        assert conversation[1].content[0].text == "from transcript"
+        assert "scoring view" not in str(conversation)
+
+    def test_run_returns_observations_when_enabled(self) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        session = "\n".join(
+            [
+                json.dumps({"type": "session", "id": "session-1"}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                    }
+                ),
+            ]
+        )
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            observation_collector("session-1", parse_openclaw_session_events(session), [], [])
+            return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model"
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return _FakeResponse({}, {"session": "1"})
+            if url_path.endswith("/v1/responses"):
+                response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                return _FakeResponse(response.model_dump(mode="json"), cookies)
+            return _FakeResponse(json | {"reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = OpenClawAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            result = asyncio.run(agent.run(request, body))
+
+        observations = result.ng_agent_observations
+        assert observations is not None
+        [invocation] = _invocations(observations)
+        assert invocation.invocation_id == "session-1"
+        assert invocation.conversation
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
+
+    def test_observation_failure_does_not_change_response(self) -> None:
+        agent = _make_agent()
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            if observation_collector is not None:
+                observation_collector("session-1", [], [], [])
+            return (
+                [
+                    NeMoGymResponseOutputMessage(
+                        id="msg-1",
+                        content=[{"type": "output_text", "text": "done", "annotations": []}],
+                    )
+                ],
+                {"input_tokens": 1, "output_tokens": 1},
+                "model",
+            )
+
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            baseline = asyncio.run(agent.responses(MagicMock(), body))
+        with (
+            patch.object(agent, "_run_openclaw", run_openclaw),
+            patch(
+                "responses_api_agents.openclaw_agent.app.build_openclaw_observations",
+                side_effect=RuntimeError("observer failed"),
+            ),
+        ):
+            episode = asyncio.run(agent.responses_with_observations(None, body))
+
+        assert episode.response.output == baseline.output
+        assert episode.response.usage == baseline.usage
+        assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
 
 
 class TestDeepMerge:
