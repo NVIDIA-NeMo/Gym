@@ -16,9 +16,9 @@
 """Training-token capture: produce, store, read, and source ``TokenEntry`` records.
 
 This is the per-model-call training data path, kept separate from evaluation
-capture. The capture middleware sets a per-request capture context; the model
-server records a ``TokenEntry`` from its complete response; a trainer reads a
-rollout's entries through a ``TokenSource``.
+capture. The capture middleware sets a per-request token sink; the model server
+records a ``TokenEntry`` from its complete response; a trainer reads a rollout's
+entries through a ``TokenSource`` and stitches them into a trajectory.
 
 **This package is a leaf.** Importing it must not pull in fastapi, ray, uvicorn,
 aiohttp, requests, or torch, because a training framework's inference worker
@@ -26,11 +26,26 @@ imports the record, the protocols, and the capture core to write into its own
 data plane (see ``protocols.py``). The HTTP read route and the HTTP reader do
 need Gym's server stack, so they are deliberately *not* re-exported here --
 import ``nemo_gym.token_id_capture.routes`` / ``.reader`` directly from server
-code. ``tests/unit_tests/test_token_id_capture.py::test_package_is_dependency_free_leaf``
-enforces this.
+code.
 """
 
+from nemo_gym.token_id_capture.builder import (
+    BuildNotes,
+    BuildOutput,
+    Chain,
+    assert_prefix_contiguity,
+    per_request,
+    prefix_merging,
+    project_chain_to_output_items,
+    project_main_chain_response,
+    run_builder,
+)
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import (
+    token_id_capture_dirs_from_config,
+    trajectories_for_rollout,
+    trajectories_from_source,
+)
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
     TokenSource,
@@ -74,4 +89,16 @@ __all__ = [
     "set_token_sink",
     "reset_token_sink",
     "capture_tokens",
+    "per_request",
+    "prefix_merging",
+    "project_chain_to_output_items",
+    "project_main_chain_response",
+    "run_builder",
+    "assert_prefix_contiguity",
+    "Chain",
+    "BuildNotes",
+    "BuildOutput",
+    "trajectories_for_rollout",
+    "trajectories_from_source",
+    "token_id_capture_dirs_from_config",
 ]
