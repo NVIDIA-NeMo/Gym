@@ -2979,6 +2979,52 @@ def test_opencode_switchyard_config_points_at_switchyard() -> None:
     assert "policy-model" in provider["models"]
     # Task-tool guidance is appended to opencode's system prompt via instructions.
     assert cfg["instructions"] == [swe_app._OPENCODE_INSTRUCTIONS_PATH]
+    # Without a known context length, the model entry ships no limit metadata.
+    assert "limit" not in provider["models"]["policy-model"]
+
+
+def test_opencode_switchyard_config_sets_model_limits() -> None:
+    cfg = swe_app._opencode_switchyard_config(
+        "http://switchyard:4000", "policy-model", context_len=32768
+    )
+    entry = cfg["provider"]["switchyard"]["models"]["policy-model"]
+    # context from the engine; output reserved as min(32000, context // 4) so
+    # opencode's compaction threshold (context - output) keeps most of the window.
+    assert entry["limit"] == {"context": 32768, "output": 8192}
+
+    large = swe_app._opencode_switchyard_config(
+        "http://switchyard:4000", "policy-model", context_len=131072
+    )
+    assert large["provider"]["switchyard"]["models"]["policy-model"]["limit"]["output"] == 32000
+
+
+class TestFetchSwitchyardMaxModelLen:
+    def _wrapper(self, monkeypatch) -> SWEBenchWrapper:
+        return _create_wrapper(monkeypatch)
+
+    @pytest.mark.asyncio
+    async def test_reads_route_entry(self, monkeypatch) -> None:
+        wrapper = self._wrapper(monkeypatch)
+        payload = {"data": [{"id": "other", "max_model_len": 1}, {"id": "policy-model", "max_model_len": 32768}]}
+        response = MagicMock(status=200)
+        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=response))
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=payload))
+        assert await wrapper._fetch_switchyard_max_model_len("http://sy:4000", "policy-model") == 32768
+
+    @pytest.mark.asyncio
+    async def test_missing_route_returns_none(self, monkeypatch) -> None:
+        wrapper = self._wrapper(monkeypatch)
+        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock(status=200)))
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value={"data": []}))
+        assert await wrapper._fetch_switchyard_max_model_len("http://sy:4000", "policy-model") is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_failure_returns_none(self, monkeypatch) -> None:
+        wrapper = self._wrapper(monkeypatch)
+        monkeypatch.setattr(swe_app, "request", AsyncMock(side_effect=ConnectionError))
+        assert await wrapper._fetch_switchyard_max_model_len("http://sy:4000", "policy-model") is None
 
 
 ########################################

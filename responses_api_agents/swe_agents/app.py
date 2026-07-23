@@ -294,6 +294,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
+    # Served model context length, fetched from Switchyard's /v1/models before the
+    # agent command is built; None leaves the opencode provider entry limit-less.
+    opencode_context_len: Optional[int] = None
 
     # GRPO related fields
     mask_sample: bool = False
@@ -2045,7 +2048,9 @@ _OPENCODE_TASK_ID_GUIDANCE = (
 )
 
 
-def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[str, Any]:
+def _opencode_switchyard_config(
+    switchyard_base_url: str, model: str, context_len: Optional[int] = None
+) -> Dict[str, Any]:
     """opencode.json for upstream opencode routed through Switchyard (no fork).
 
     A custom ``@ai-sdk/openai-compatible`` provider — whose id does NOT start with
@@ -2055,7 +2060,19 @@ def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[st
     Switchyard captures the session tree. Set as the default model so opencode does
     not fall back to its hosted free models. ``instructions`` appends the task-tool
     guidance to opencode's system prompt (see ``_OPENCODE_TASK_ID_GUIDANCE``).
+
+    ``context_len`` (the served model's max_model_len) populates the model's
+    ``limit`` metadata: opencode budgets its ``max_tokens`` from ``limit.output``
+    (falling back to a flat 32000 without it) and enables compaction only when
+    ``limit.context`` is set. Output is reserved as ``min(32000, context // 4)``
+    so compaction (triggered at ``context - output``) keeps most of the window.
     """
+    model_entry: Dict[str, Any] = {"name": model}
+    if context_len is not None:
+        model_entry["limit"] = {
+            "context": context_len,
+            "output": min(32000, context_len // 4),
+        }
     return {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
@@ -2063,7 +2080,7 @@ def _opencode_switchyard_config(switchyard_base_url: str, model: str) -> Dict[st
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Switchyard",
                 "options": {"baseURL": f"{switchyard_base_url.rstrip('/')}/v1", "apiKey": "dummy"},
-                "models": {model: {"name": model}},
+                "models": {model: model_entry},
             }
         },
         "model": f"switchyard/{model}",
@@ -2364,7 +2381,11 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         user_message_host_path = self.config.persistent_dir / f"user_message_{agent_run_id}.txt"
         user_message_host_path.write_text(user_message)
 
-        opencode_cfg_json = json.dumps(_opencode_switchyard_config(self.config.switchyard_base_url, effective_model))
+        opencode_cfg_json = json.dumps(
+            _opencode_switchyard_config(
+                self.config.switchyard_base_url, effective_model, self.config.opencode_context_len
+            )
+        )
 
         # Output goes to the same eval-dir layout as the fork so _openhands_dir_copy_from_host works unchanged.
         output_dir_in_container = f"/opencode_setup/opencode/{eval_dir_in_opencode}/{instance_id}/bench_run"
@@ -3895,18 +3916,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
-        # Spawn mode defers the build to responses(): the script embeds the
-        # Switchyard routing, and the run's instance URL is not known yet.
-        if not self._switchyard_spawn_needed(params):
+        # Switchyard-routed runs defer the build to responses(): the script
+        # embeds the Switchyard routing, and spawn mode's instance URL plus the
+        # served model's context length are only known there.
+        if not self._agent_command_deferred(params):
             self._build_agent_command(params)
 
         return params, dataset_processor
 
+    def _agent_command_deferred(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether ``responses`` builds the agent command instead of ``_setup_params``."""
+        if self._switchyard_spawn_needed(params):
+            return True
+        return bool(
+            self.config.switchyard_base_url
+            and self.config.agent_framework == "opencode"
+            and self.config.opencode_source == "opencode"
+        )
+
     def _build_agent_command(self, params: SWEBenchWrapperInstanceConfig) -> None:
         """Build the agent script and command from the current params.
 
-        Called at the end of ``_setup_params``, except in spawn mode, where
-        ``responses`` calls it after assigning the run's ``switchyard_base_url``.
+        Called at the end of ``_setup_params``, except for Switchyard-routed
+        runs, where ``responses`` calls it after the instance URL and the
+        served model's context length are known.
         """
         if self.config.agent_framework == "opencode":
             params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
@@ -3919,10 +3952,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params, dataset_processor = self._setup_params(body)
 
         if self._switchyard_spawn_needed(params):
-            # The agent script embeds the Switchyard routing, so it is built
-            # here (not in _setup_params) once the run's instance URL is known;
-            # run() reaps the instance after trace retrieval.
+            # run() reaps the spawned instance after trace retrieval.
             params.switchyard_base_url = await self._spawn_switchyard(params)
+        if self._agent_command_deferred(params):
+            if params.switchyard_base_url and self.config.agent_framework == "opencode":
+                params.opencode_context_len = await self._fetch_switchyard_max_model_len(
+                    params.switchyard_base_url, params.model_server_name
+                )
             self._build_agent_command(params)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
@@ -4224,6 +4260,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
+
+    async def _fetch_switchyard_max_model_len(self, base_url: str, route_id: str) -> Optional[int]:
+        """The served model's context length from Switchyard's ``/v1/models``, or ``None``.
+
+        Switchyard surfaces the engine's ``max_model_len`` on token-capture
+        routes. Absence (older Switchyard, engine unreachable at proxy start)
+        degrades gracefully: the opencode provider entry ships without limits,
+        exactly today's behavior.
+        """
+        try:
+            response = await request(
+                "GET", f"{base_url.rstrip('/')}/v1/models", timeout=ClientTimeout(total=30)
+            )
+            await raise_for_status(response)
+            entries = (await get_response_json(response)).get("data") or []
+        except Exception as e:
+            print(f"WARNING: could not fetch max_model_len from Switchyard: {e}", flush=True)
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == route_id:
+                value = entry.get("max_model_len")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
+        print(f"WARNING: Switchyard /v1/models has no max_model_len for route {route_id!r}", flush=True)
+        return None
 
     async def _list_switchyard_sessions(self, base_url: str) -> List[Dict[str, Any]]:
         """Session ids (with parent links) Switchyard captured for this run.
