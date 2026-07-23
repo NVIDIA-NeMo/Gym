@@ -24,9 +24,10 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture
+from pytest import approx, fixture, raises
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -34,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,
     PhysicsJudgeResourcesServerConfig,
@@ -380,3 +382,21 @@ class TestGetKeyMetrics:
         key = server.get_key_metrics({"pass@1[avg-of-4]/symbolic_accuracy": 0.5})
         assert "mean/input_tokens" not in key
         assert "mean/output_tokens" not in key
+
+
+class TestJudgeFailureInheritance:
+    async def test_judge_transport_failure_raises_through_inherited_verify(
+        self, server: PhysicsJudgeResourcesServer
+    ) -> None:
+        # Covered transitively: the inherited math_with_judge.verify() wraps the
+        # overridden _verify_answer in run_judge, so a judge transport failure
+        # surfaces as JudgeError (routed to the failures sidecar), not a raw 500.
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_text_response(r"\boxed{5}"),  # wrong → library fails → judge is invoked
+            question="What is 2+2?",
+            expected_answer="4",
+        )
+        with raises(JudgeError, match="judge down"):
+            await server.verify(request)

@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -1147,6 +1148,21 @@ class TestVerify:
         res = await server.verify(self._mock_request(), req)
         assert res.reward == 0.0
         assert res.judge_rating is None
+
+    @pytest.mark.asyncio
+    async def test_verify_judge_call_failure_raises_after_retries(self, tmp_path) -> None:
+        """Judge HTTP call failing on every retry → JudgeError, so judge_failsafe
+        routes it to the failures sidecar instead of scoring 0.0."""
+        server = self._create_server_with_judge(tmp_path)
+        server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        with patch("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock()):
+            with pytest.raises(JudgeError, match="judge unavailable"):
+                await server.verify(self._mock_request(), req)
 
     @pytest.mark.asyncio
     async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:

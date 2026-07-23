@@ -51,11 +51,14 @@ class TestJudgeFailsafe:
         assert await judge_failsafe(verify)(_Req()) == {"reward": 1.0}
 
     @pytest.mark.asyncio
-    async def test_judge_error_routed_to_sidecar(self) -> None:
+    @pytest.mark.parametrize("by_keyword", [False, True])
+    async def test_judge_error_routed_to_sidecar(self, by_keyword: bool) -> None:
         async def verify(body):
             raise JudgeError("RuntimeError: judge 401")
 
-        out = await judge_failsafe(verify)(_Req(response={"final": "answer"}))
+        req = _Req(response={"final": "answer"})
+        # FastAPI injects by keyword (kwargs["body"]); direct callers pass positionally.
+        out = await (judge_failsafe(verify)(body=req) if by_keyword else judge_failsafe(verify)(req))
         data = orjson.loads(out.body)
         assert data["reward"] == 0.0
         assert data["_ng_failure_class"] == "judge_failed"

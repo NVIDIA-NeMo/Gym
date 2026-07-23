@@ -15,10 +15,14 @@
 """Shared LLM-as-judge failure abstraction.
 
 A failed judge call is a distinct outcome, not a wrong answer. Resources servers
-``await run_judge(<judge call>)`` (and ``raise JudgeError`` for an empty/unusable
-response); ``judge_failsafe`` wraps every verify endpoint so a JudgeError becomes
-a row tagged ``_ng_failure_class="judge_failed"``, which rollout_collection routes
-to ``<output>_failures.jsonl`` — excluded from the metric, retryable on resume.
+``await run_judge(<judge call>)``; ``judge_failsafe`` wraps every verify endpoint
+so a JudgeError becomes a row tagged ``_ng_failure_class="judge_failed"``, which
+rollout_collection routes to ``<output>_failures.jsonl`` — excluded from the
+metric, retryable on resume.
+
+Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
+*received-but-unparseable* response is a legitimate wrong answer (let the parser
+score it, don't raise). Empty output is a per-benchmark call, so servers differ.
 """
 
 import functools
@@ -55,8 +59,11 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             return await verify_fn(*args, **kwargs)
         except JudgeError as e:
             body = kwargs.get("body") or next(
-                a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")
+                (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
+                None,
             )
+            if body is None:  # verify always has a request body; guard against an opaque 500
+                raise RuntimeError("judge_failsafe: could not locate the verify request body") from e
             data = body.model_dump() | {
                 "reward": 0.0,
                 "_ng_failure_class": "judge_failed",
