@@ -24,7 +24,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, ConfigDict, PositiveFloat, PositiveInt
+from pydantic import BaseModel, PositiveFloat, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -67,8 +67,6 @@ class JudgeEvaluation(BaseModel):
 
 
 class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     expected_answer: str
     extracted_answer: Optional[str]
     library_reward: float

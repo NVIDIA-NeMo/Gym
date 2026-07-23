@@ -207,7 +207,7 @@ class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
 
 
 class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
+    pass
 
 
 class IncorrectGroupCoordinator(BaseModel):

@@ -15,8 +15,6 @@
 
 from typing import Any, Dict, Optional
 
-from pydantic import ConfigDict
-
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -47,8 +45,6 @@ class AALCRVerifyRequest(BaseVerifyRequest):
 
 
 class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     invalid_model_response: bool
     invalid_judge_response: Optional[bool] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -174,7 +174,7 @@ class ProofVerificationVerifyRequest(BaseVerifyRequest):
 
 
 class ProofVerificationVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
+    pass
 
 
 class ProofVerificationResourcesServer(SimpleResourcesServer):

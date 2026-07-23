@@ -190,8 +190,6 @@ class JudgeEvaluation(BaseModel):
 class TextToSqlVerifyResponse(BaseVerifyResponse):
     """Verification response for text-to-SQL tasks."""
 
-    model_config = ConfigDict(extra="allow")
-
     uuid: Optional[str | int] = None
     sql: str  # Ground truth SQL query
     model_output: str

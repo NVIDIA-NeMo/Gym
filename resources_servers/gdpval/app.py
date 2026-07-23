@@ -41,7 +41,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -252,8 +252,6 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None

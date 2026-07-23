@@ -70,8 +70,6 @@ class JudgeEvaluation(BaseModel):
 
 
 class XSTestVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     label: str
     prompt_type: str
     is_refusal: bool

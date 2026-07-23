@@ -151,8 +151,6 @@ class JudgeEvaluation(BaseModel):
 class OverRefusalDetectionVerifyResponse(BaseVerifyResponse):
     """Response from the over-refusal detection verification."""
 
-    model_config = ConfigDict(extra="allow")
-
     safe_prompt: Optional[str] = None
     model_response_text: str = ""
     complied: bool = False  # True if model responded helpfully

@@ -162,8 +162,6 @@ class JudgeEvaluation(BaseModel):
 class JailbreakDetectionVerifyResponse(BaseVerifyResponse):
     """Response from the jailbreak detection verification."""
 
-    model_config = ConfigDict(extra="allow")
-
     adversarial_prompt: Optional[str] = None
     model_response_text: str = ""
     is_safe: bool = False

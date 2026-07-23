@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
@@ -200,8 +200,6 @@ class TavilySearchMetrics(BaseModel):
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
-    model_config = ConfigDict(extra="allow")
-
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics

@@ -138,8 +138,6 @@ class JudgeEvaluation(BaseModel):
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 

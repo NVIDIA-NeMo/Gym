@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -203,8 +203,6 @@ class ValidationResult(BaseModel):
 
 class TuringVIFVerifyResponse(BaseVerifyResponse):
     """Response from the verify endpoint."""
-
-    model_config = ConfigDict(extra="allow")
 
     follow_all_instructions: bool
     follow_instruction_list: List[bool]

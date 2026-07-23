@@ -37,7 +37,7 @@ import aiohttp
 import yaml
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
 from nemo_gym.base_resources_server import (
@@ -295,8 +295,6 @@ class FinanceAgentVerifyRequest(FinanceAgentRunRequest, BaseVerifyRequest):
 
 class FinanceAgentVerifyResponse(BaseVerifyResponse):
     """Verify response for SEC search tasks."""
-
-    model_config = ConfigDict(extra="allow")
 
     expected_answer: str
     judge_rating: Optional[int] = None

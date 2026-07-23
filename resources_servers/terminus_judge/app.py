@@ -225,8 +225,6 @@ class JudgeEvaluation(BaseModel):
 
 
 class TerminusJudgeVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
     uuid: Optional[str | int] = None
     expected_answer: str
     model_output: str

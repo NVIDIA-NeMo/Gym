@@ -45,13 +45,18 @@ async def run_judge(coro: Awaitable[Any]) -> Any:
 def judge_failsafe(verify_fn: Callable) -> Callable:
     """Wrap verify() so a JudgeError returns a sidecar-routed row (reward 0.0, the
     routing keys, the request's ``response`` carried) instead of propagating.
-    functools.wraps keeps the request type so FastAPI still parses the body."""
+    functools.wraps keeps verify's signature so FastAPI injects the same params
+    (``body``, and ``request`` for servers that take it); ``*args, **kwargs`` pass
+    them straight through."""
 
     @functools.wraps(verify_fn)
-    async def wrapper(body):
+    async def wrapper(*args, **kwargs):
         try:
-            return await verify_fn(body)
+            return await verify_fn(*args, **kwargs)
         except JudgeError as e:
+            body = kwargs.get("body") or next(
+                a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")
+            )
             data = body.model_dump() | {
                 "reward": 0.0,
                 "_ng_failure_class": "judge_failed",
