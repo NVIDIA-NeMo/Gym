@@ -4,7 +4,8 @@ example_mcp_weather:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Claude Code MCP smoke test with a Gym-owned weather tool
+      expose_tools_over_mcp: true
+      description: Claude Code MCP smoke test — a plain HTTP weather tool route auto-exposed over MCP
 
 example_mcp_weather_claude_code_agent:
   responses_api_agents:
