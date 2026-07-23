@@ -552,3 +552,46 @@ class TestRewardProfile:
             }
         ]
         assert expected_agent_level_metrics == actual_agent_level_metrics
+
+
+class TestRewardProfileUrlRefs:
+    def _row(self, task_idx: int, rollout_idx: int, agent_ref: dict) -> dict:
+        return {
+            "_ng_task_index": task_idx,
+            "_ng_rollout_index": rollout_idx,
+            "responses_create_params": {"input": []},
+            "agent_ref": agent_ref,
+        }
+
+    def _result(self, task_idx: int, rollout_idx: int, reward: float = 1.0) -> dict:
+        return {
+            "_ng_task_index": task_idx,
+            "_ng_rollout_index": rollout_idx,
+            "response": {"usage": {"total_tokens": 7}},
+            "reward": reward,
+        }
+
+    def test_profile_from_data_url_refs(self) -> None:
+        url_ref = {"url": "http://localhost:9000"}
+        rows = [self._row(0, 0, url_ref), self._row(0, 1, url_ref)]
+        results = [self._result(0, 0, reward=1.0), self._result(0, 1, reward=0.0)]
+
+        group_level_metrics, agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+
+        assert len(group_level_metrics) == 1
+        assert len(agent_level_metrics) == 1
+        # The ref round-trips in url form, not rewrapped as a name
+        assert agent_level_metrics[0]["agent_ref"] == {"url": "http://localhost:9000"}
+        assert agent_level_metrics[0]["mean/reward"] == 0.5
+
+    def test_profile_from_data_mixed_refs(self) -> None:
+        rows = [
+            self._row(0, 0, {"name": "named_agent"}),
+            self._row(1, 0, {"url": "http://localhost:9000"}),
+        ]
+        results = [self._result(0, 0), self._result(1, 0)]
+
+        _, agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+
+        refs = sorted((m["agent_ref"] for m in agent_level_metrics), key=str)
+        assert refs == [{"name": "named_agent"}, {"url": "http://localhost:9000"}]

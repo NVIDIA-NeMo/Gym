@@ -142,6 +142,7 @@ class TestEvalRunFlags:
         [
             (["--agent", "my_agent"], "+agent_name=my_agent"),
             (["-a", "my_agent"], "+agent_name=my_agent"),
+            (["--agent-url", "http://localhost:9000"], "+agent_url=http://localhost:9000"),
             (["--input", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["-i", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),

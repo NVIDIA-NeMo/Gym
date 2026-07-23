@@ -24,10 +24,12 @@ from copy import deepcopy
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import orjson
+from aiohttp import ClientOSError, ClientTimeout, ServerDisconnectedError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -46,13 +48,18 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    canonical_agent_ref,
     get_global_config_dict,
     get_wandb_run,
+    is_global_config_dict_set,
+    row_agent_key,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
+    get_global_aiohttp_client,
+    get_nemo_gym_fastapi_num_workers,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     is_global_aiohttp_client_setup,
@@ -117,6 +124,238 @@ def _get_max_rollout_attempts() -> int:
 def _failures_path_for(output_fpath: Path) -> Path:
     """Sidecar path used by the dispatcher and ``_load_from_cache``."""
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# External agent dispatch (agent_url): rows with ``agent_ref: {"url": ...}``
+# POST straight to ``{url}/run``. This deliberately bypasses
+# ``server_utils.request()``, whose retry loop never gives up on connection
+# errors — a down external endpoint would hang the run. Retries here are
+# bounded, and every failure becomes a result row carrying
+# ``NG_FAILURE_CLASS_KEY`` (sidecar + retry on resume); raising instead would
+# abort the whole collection.
+# ---------------------------------------------------------------------------
+
+EXTERNAL_AGENT_FAILURE_CLASS = "external_agent_error"
+
+_EXTERNAL_AGENT_MAX_TRIES = 3
+_EXTERNAL_AGENT_RETRY_SLEEP_SECS = 0.5
+# Aggregate metrics is a best-effort, post-collection call; keep its bound fixed.
+_EXTERNAL_AGGREGATE_TIMEOUT_SECS = 600.0
+_DEFAULT_AGENT_RUN_TIMEOUT_SECS = 1800.0
+# Last resort when neither the live client nor the run's global config is available;
+# derived from the config model so it cannot drift from the default.
+_FALLBACK_PER_HOST_CONNECTION_LIMIT = GlobalAIOHTTPAsyncClientConfig().global_aiohttp_connector_limit_per_host
+
+# Sample failure logs: a down agent at high concurrency would otherwise print per row.
+_NUM_EXTERNAL_AGENT_FAILURES = 0
+_EXTERNAL_AGENT_FAILURE_PRINT_HEAD = 5
+_EXTERNAL_AGENT_FAILURE_PRINT_INTERVAL = 100
+
+
+def _normalize_agent_url(url: str) -> str:
+    """Validate an external agent URL and strip any trailing slash."""
+    normalized = url.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"agent_url must be an absolute http:// or https:// URL, got {url!r}")
+    # "/run" is string-appended; anything after "?" or "#" would swallow it (bare
+    # delimiters parse as an empty query/fragment, so check the string itself).
+    if "?" in normalized or "#" in normalized or parsed.params:
+        raise ValueError(
+            f"agent_url must not carry a query string or fragment, got {url!r}. "
+            "Pass auth material via your agent's own configuration instead."
+        )
+    # Credentials would be stamped into every artifact row and wandb label; never echo the URL.
+    if parsed.username or parsed.password:
+        raise ValueError(
+            "agent_url must not embed credentials (user:pass@host). "
+            "Pass auth material via your agent's own configuration instead."
+        )
+    return normalized
+
+
+def _is_external_url_ref(agent_ref: Any) -> bool:
+    """True if this ref dispatches by URL. Name-first, matching row_agent_key: a ref carrying
+    both keys is a named agent."""
+    return isinstance(agent_ref, dict) and bool(agent_ref.get("url")) and not agent_ref.get("name")
+
+
+def _rows_need_named_dispatch(rows: List[Dict]) -> bool:
+    """True if any row resolves to a named agent server (requiring a ServerClient/head server)."""
+    return any(not _is_external_url_ref(row.get(AGENT_REF_KEY_NAME)) for row in rows)
+
+
+def _effective_per_host_connection_limit() -> Optional[int]:
+    """The shared HTTP client's per-host connection cap, or None when unlimited.
+
+    Every request to a single agent_url competes for the same per-host connection pool,
+    and time spent waiting for a connection counts against the request's timeout. Never
+    initializes the client; before it exists (the normal CLI case — this check runs before
+    the first request), the limit the client WILL carry is computed from the run's global
+    config, mirroring set_global_aiohttp_client's construction.
+    """
+    if is_global_aiohttp_client_setup():
+        try:
+            limit = int(get_global_aiohttp_client().connector.limit_per_host)
+        except Exception:
+            return _FALLBACK_PER_HOST_CONNECTION_LIMIT
+        return limit if limit > 0 else None  # aiohttp uses 0 to mean unlimited
+    # get_global_config_dict() would trigger a CLI parse (and sys.exit) in non-CLI processes.
+    if not is_global_config_dict_set():
+        return _FALLBACK_PER_HOST_CONNECTION_LIMIT
+    try:
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(get_global_config_dict())
+        limit = cfg.global_aiohttp_connector_limit_per_host // get_nemo_gym_fastapi_num_workers()
+    except Exception:
+        return _FALLBACK_PER_HOST_CONNECTION_LIMIT
+    return limit if limit > 0 else None
+
+
+def _external_agent_failure_result(run_url: str, error: str) -> Dict[str, Any]:
+    """Shape an external /run failure into a sidecar-routable result row."""
+    global _NUM_EXTERNAL_AGENT_FAILURES
+    _NUM_EXTERNAL_AGENT_FAILURES += 1
+    n = _NUM_EXTERNAL_AGENT_FAILURES
+    if n <= _EXTERNAL_AGENT_FAILURE_PRINT_HEAD or n % _EXTERNAL_AGENT_FAILURE_PRINT_INTERVAL == 0:
+        tqdm.write(f"[rollout_collection] external agent /run failed (failure #{n}) url={run_url} error={error}")
+    return {NG_FAILURE_CLASS_KEY: EXTERNAL_AGENT_FAILURE_CLASS, "error": error}
+
+
+async def _post_external_agent_run(row: Dict, timeout_secs: float) -> Dict[str, Any]:
+    """POST one row to an external agent's /run; failures become sidecar rows, never exceptions."""
+    run_url = f"{row[AGENT_REF_KEY_NAME]['url']}/run"
+    client = get_global_aiohttp_client()
+    data = orjson.dumps(row)
+    headers = {"Content-Type": "application/json"}
+    timeout = ClientTimeout(total=timeout_secs)
+
+    response = None
+    last_connect_error: Optional[BaseException] = None
+    for num_try in range(1, _EXTERNAL_AGENT_MAX_TRIES + 1):
+        try:
+            # aiohttp follows a redirected POST as a body-less GET; fail with the 3xx instead.
+            response = await client.request(
+                "POST", run_url, data=data, headers=headers, timeout=timeout, allow_redirects=False
+            )
+            break
+        except (ClientOSError, ServerDisconnectedError) as e:
+            # Refused/reset (ClientOSError) and keepalive races (ServerDisconnectedError)
+            # are transient connection noise at high concurrency.
+            last_connect_error = e
+            if num_try < _EXTERNAL_AGENT_MAX_TRIES:
+                await asyncio.sleep(_EXTERNAL_AGENT_RETRY_SLEEP_SECS)
+        except asyncio.TimeoutError:
+            return _external_agent_failure_result(
+                run_url,
+                f"timed out after {timeout_secs}s (agent_run_timeout_secs; raise it if your rollouts "
+                "legitimately run longer)",
+            )
+        except Exception as e:
+            return _external_agent_failure_result(run_url, f"{type(e).__name__}: {e}")
+    if response is None:
+        return _external_agent_failure_result(
+            run_url,
+            f"could not reach the agent after {_EXTERNAL_AGENT_MAX_TRIES} tries "
+            f"({type(last_connect_error).__name__}: {last_connect_error}). Is your agent running at this URL?",
+        )
+
+    # client.request() returns once headers arrive; the body read can still raise
+    # (mid-body disconnect, deadline) and must honor the same never-raise contract.
+    try:
+        content = await response.read()
+    except Exception as e:
+        return _external_agent_failure_result(run_url, f"reading the response body failed: {type(e).__name__}: {e}")
+    # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
+    if not response.ok or response.status >= 300:
+        location = response.headers.get("Location", "")
+        return _external_agent_failure_result(
+            run_url,
+            f"HTTP {response.status}"
+            + (f" (redirect to {location}; fix agent_url to point at the final address)" if location else "")
+            + f": {content[:500].decode(errors='replace')}",
+        )
+    try:
+        result = orjson.loads(content)
+    except orjson.JSONDecodeError as e:
+        return _external_agent_failure_result(run_url, f"response is not valid JSON: {e}")
+    if not isinstance(result, dict):
+        return _external_agent_failure_result(
+            run_url, f"expected a JSON object from /run, got {type(result).__name__}"
+        )
+    # A success missing reward/response crashes later readers (profiling reads
+    # result["response"]); sentinel failure rows legitimately carry no reward.
+    if result.get(NG_FAILURE_CLASS_KEY) is None and not result.get(NG_NO_PERSIST_KEY):
+        missing_keys = [key for key in ("reward", "response") if key not in result]
+        if missing_keys:
+            return _external_agent_failure_result(
+                run_url,
+                f"/run response is missing required key(s) {missing_keys}; external agents must return "
+                "a verify-response-shaped object with at least 'reward' (float) and 'response' (the "
+                "Responses API response object)",
+            )
+        # "response": null or a non-dict passes `in` but crashes profiling/aggregation.
+        if not isinstance(result["response"], dict) or not isinstance(result["reward"], (int, float)):
+            return _external_agent_failure_result(
+                run_url,
+                f"/run response has invalid types: 'reward' must be a number "
+                f"(got {type(result['reward']).__name__}) and 'response' a JSON object "
+                f"(got {type(result['response']).__name__})",
+            )
+    return result
+
+
+async def _post_external_aggregate_metrics(
+    agent_url: str, agg_request: AggregateMetricsRequest
+) -> Optional[AggregateMetrics]:
+    """POST /aggregate_metrics to an external agent; returns None (with a warning) on any failure.
+
+    External agents are not required to implement /aggregate_metrics, and by the time this runs
+    the rollouts are already safely on disk — so nothing here is allowed to crash the run.
+    """
+    url = f"{agent_url}/aggregate_metrics"
+    client = get_global_aiohttp_client()
+    try:
+        response = await client.request(
+            "POST",
+            url,
+            data=orjson.dumps(agg_request.model_dump()),
+            headers={"Content-Type": "application/json"},
+            timeout=ClientTimeout(total=_EXTERNAL_AGGREGATE_TIMEOUT_SECS),
+            allow_redirects=False,
+        )
+        # Reading the body releases the pooled connection — do it before any early return.
+        content = await response.read()
+        if response.status in (404, 405, 501):
+            print(
+                f"External agent {agent_url} does not implement /aggregate_metrics "
+                f"(HTTP {response.status}); skipping aggregate metrics for it."
+            )
+            return None
+        # response.ok is `status < 400`; 3xx (redirects are not followed) must also skip.
+        if not response.ok or response.status >= 300:
+            print(
+                f"Skipping aggregate metrics for external agent {agent_url}: "
+                f"HTTP {response.status}: {content[:500].decode(errors='replace')}"
+            )
+            return None
+        return AggregateMetrics.model_validate(orjson.loads(content))
+    except Exception as e:
+        print(f"Skipping aggregate metrics for external agent {agent_url}: {type(e).__name__}: {e}")
+        return None
+
+
+def _agent_metric_label(agent_ref: Dict[str, Any]) -> str:
+    """Label embedded between '/' separators in wandb metric keys. wandb sections metric
+    names on '/', so a raw URL would inject bogus nesting levels; ':' is replaced purely for
+    a clean flat label. URL agents reduce to `host_port[_path]` — the path is included so two
+    agents behind one gateway keep distinct labels. The untouched ref still identifies them
+    in artifacts."""
+    url = agent_ref.get("url")
+    if url:
+        parsed = urlparse(url)
+        return (parsed.netloc + parsed.path).replace(":", "_").replace("/", "_")
+    return agent_ref["name"]
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -186,9 +425,30 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     ```
     """
 
+    # Validation errors must not echo raw input — agent_url may carry credentials.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     agent_name: Optional[str] = Field(
         default=None,
         description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+    )
+    agent_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "URL of an external agent server to collect rollouts from, e.g. http://localhost:9000. "
+            "The collector POSTs each row — including verifier_metadata, i.e. the task's answer key — "
+            "directly to {agent_url}/run, so only point this at an agent you trust. The endpoint lives "
+            "outside Gym's config-managed process tree, which is why this is a URL rather than a server "
+            "ref. Mutually exclusive with agent_name."
+        ),
+    )
+    agent_run_timeout_secs: float = Field(
+        default=_DEFAULT_AGENT_RUN_TIMEOUT_SECS,
+        description=(
+            "Wallclock bound on a single external-agent /run request (only used with agent_url; Gym-managed "
+            "agents are unaffected). Requests exceeding it are recorded in the failures sidecar and retried "
+            "on resume. Raise it if your agent's rollouts legitimately run longer than 30 minutes."
+        ),
     )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
@@ -200,7 +460,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=1,
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
-            "dict keyed by agent_ref.name (e.g. {simple_agent: 32, swe_agent: 1}). In dict form, "
+            "dict keyed by agent identity — agent_ref.name for Gym-managed agents, or the agent URL "
+            "for external agents (e.g. {simple_agent: 32, 'http://localhost:9000': 1}). In dict form, "
             "every agent that appears in the input rows must have an entry, unless a special "
             '"_default" key is provided as a fallback. Useful for mean@k.'
         ),
@@ -229,6 +490,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         # for backwards compatibility
         return 1 if v is None else v
 
+    @field_validator("agent_url")
+    @classmethod
+    def _normalize_agent_url_field(cls, v: Optional[str]) -> Optional[str]:
+        return _normalize_agent_url(v) if v else v
+
+    @model_validator(mode="after")
+    def _validate_agent_selection(self) -> "RolloutCollectionConfig":
+        if self.agent_name and self.agent_url:
+            raise ValueError(
+                "agent_name and agent_url are mutually exclusive. Use +agent_name for a Gym-managed agent "
+                "server, or +agent_url to dispatch to an external agent endpoint — not both."
+            )
+        if self.agent_run_timeout_secs <= 0:
+            raise ValueError(f"agent_run_timeout_secs must be > 0, got {self.agent_run_timeout_secs}")
+        return self
+
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
         nr = self.num_repeats
@@ -248,11 +525,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "agent_name": row_agent_key(row),
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -272,6 +548,9 @@ class RolloutCollectionHelper(BaseModel):
         if config.agent_name:
             print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
 
+        if config.agent_url:
+            print(f"Using external agent `{config.agent_url}` for rows that do not already have an agent ref")
+
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
             responses_create_params_overrides = OmegaConf.to_container(
@@ -287,7 +566,12 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Repeating rows {fixed_num_repeats} times (in a pattern of abc to aabbcc)!")
         else:
             fixed_num_repeats = None
-            per_agent_repeats = {k: v for k, v in config.num_repeats.items() if k != "_default"}
+            # Normalize URL keys like agent_url, so the same string matches its dict entry.
+            per_agent_repeats = {
+                (k.strip().rstrip("/") if isinstance(k, str) and k.startswith(("http://", "https://")) else k): v
+                for k, v in config.num_repeats.items()
+                if k != "_default"
+            }
             default_repeats = config.num_repeats.get("_default")
             print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
         agents_seen: set[str] = set()
@@ -334,17 +618,39 @@ class RolloutCollectionHelper(BaseModel):
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
-        for row_idx, row_str, row in raw_rows:
-            # Resolve agent name. Missing agent_ref is a hard error reported in
+        # The tuple's first element is the limit counter (zeros without a limit); errors use the real position.
+        for data_row_idx, (_, row_str, row) in enumerate(raw_rows):
+            # Resolve the agent identity. Missing agent_ref is a hard error reported in
             # bulk after the loop; skip the row immediately so the rest of the
-            # body can assume agent_name is non-None.
+            # body can assume agent_key is non-None.
             if config.agent_name:
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name is None:
-                row_idxs_missing_agent_ref.append(row_idx)
+            elif config.agent_url:
+                row.setdefault(AGENT_REF_KEY_NAME, {"url": config.agent_url})
+
+            agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+            row_url = agent_ref.get("url") if isinstance(agent_ref, dict) else None
+            if row_url is not None:
+                if agent_ref.get("name"):
+                    raise ValueError(
+                        f"Row {data_row_idx} agent_ref carries both 'name' and 'url' ({agent_ref!r}); "
+                        "an agent ref must be exactly one of the two."
+                    )
+                # A dataset must not be able to route rows (and answer keys) to an arbitrary host.
+                normalized_row_url = _normalize_agent_url(str(row_url))
+                if normalized_row_url != config.agent_url:
+                    raise ValueError(
+                        f"Row {data_row_idx} carries agent_ref.url={row_url!r}, which does not match the "
+                        f"configured +agent_url ({config.agent_url!r}). Row-level agent URLs are only "
+                        "honored when they match the configured agent_url."
+                    )
+                agent_ref["url"] = normalized_row_url
+
+            agent_key = row_agent_key(row)
+            if agent_key is None:
+                row_idxs_missing_agent_ref.append(data_row_idx)
                 continue
-            agents_seen.add(agent_name)
+            agents_seen.add(agent_key)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
@@ -367,12 +673,12 @@ class RolloutCollectionHelper(BaseModel):
             # one consolidated raise after the loop.
             if fixed_num_repeats is not None:
                 row_num_repeats = fixed_num_repeats
-            elif agent_name in per_agent_repeats:
-                row_num_repeats = per_agent_repeats[agent_name]
+            elif agent_key in per_agent_repeats:
+                row_num_repeats = per_agent_repeats[agent_key]
             elif default_repeats is not None:
                 row_num_repeats = default_repeats
             else:
-                agents_missing_from_num_repeats.add(agent_name)
+                agents_missing_from_num_repeats.add(agent_key)
                 continue
 
             for _ in range(row_num_repeats):
@@ -392,7 +698,16 @@ class RolloutCollectionHelper(BaseModel):
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+                f"No agent specified for rows {row_idxs_missing_agent_ref}. Provide +agent_name (Gym-managed "
+                "agent) or +agent_url (external agent endpoint), or include agent_ref in data."
+            )
+
+        if config.agent_url and config.agent_url not in agents_seen:
+            warnings.warn(
+                f"agent_url={config.agent_url} was provided, but every input row already carries its own "
+                "agent_ref, so nothing will be dispatched to the external agent. Row-level refs always win "
+                "over the config default (same semantics as agent_name).",
+                stacklevel=2,
             )
 
         if agents_missing_from_num_repeats:
@@ -484,6 +799,45 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+
+            # Named refs re-resolve at request time; URL refs are frozen into the materialized
+            # inputs — re-stamp so a changed +agent_url redirects the pending rows.
+            if config.agent_url:
+
+                def _restamp_url_rows(url_rows: List[Dict]) -> int:
+                    num_changed = 0
+                    for row in url_rows:
+                        agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+                        if isinstance(agent_ref, dict) and agent_ref.get("url") not in (None, config.agent_url):
+                            row[AGENT_REF_KEY_NAME] = {"url": config.agent_url}
+                            num_changed += 1
+                    return num_changed
+
+                num_restamped = _restamp_url_rows(input_rows)
+                # Re-key completed rows too: their in-memory copies drive aggregation grouping
+                # (on-disk artifacts keep their historical refs).
+                num_completed_rekeyed = _restamp_url_rows(rows)
+                if num_restamped or num_completed_rekeyed:
+                    print(
+                        f"Re-pointed {num_restamped} pending and {num_completed_rekeyed} completed rows "
+                        f"to agent_url={config.agent_url}"
+                    )
+            else:
+                # Same row-URL rule as fresh runs; completed rows count too, since aggregation
+                # would POST result payloads to the frozen URL.
+                frozen_urls = sorted(
+                    {
+                        agent_ref["url"]
+                        for row in [*input_rows, *rows]
+                        if isinstance(agent_ref := (row.get(AGENT_REF_KEY_NAME) or {}), dict) and agent_ref.get("url")
+                    }
+                )
+                if frozen_urls:
+                    raise ValueError(
+                        f"Resuming with external-agent rows frozen to {frozen_urls}, but +agent_url "
+                        "was not provided. Pass +agent_url=<url> to confirm where these rows (including "
+                        "their verifier_metadata) should be dispatched."
+                    )
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -507,11 +861,34 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            # A stale sidecar would pre-consume this run's resume retry attempts.
+            _failures_path_for(output_fpath).unlink(missing_ok=True)
+
+        num_concurrent_samples = config.num_samples_in_parallel
+
+        # agent_url traffic shares one per-host connection pool, and queue wait counts
+        # against agent_run_timeout_secs — cap concurrency at the pool limit. The semaphore
+        # gates ALL rows, so mixed named+url runs are conservatively capped too.
+        has_url_rows = any(_is_external_url_ref(row.get(AGENT_REF_KEY_NAME)) for row in input_rows)
+        if has_url_rows:
+            per_host_limit = _effective_per_host_connection_limit()
+            if per_host_limit is not None and (num_concurrent_samples or per_host_limit + 1) > per_host_limit:
+                print(
+                    f"Capping concurrency at {per_host_limit} (the shared HTTP client's per-host connection "
+                    f"limit) for external-agent dispatch"
+                    + (
+                        f"; requested num_samples_in_parallel={num_concurrent_samples}"
+                        if num_concurrent_samples
+                        else ""
+                    )
+                    + "."
+                )
+                num_concurrent_samples = per_host_limit
 
         semaphore = nullcontext()
-        if config.num_samples_in_parallel:
-            print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+        if num_concurrent_samples:
+            print(f"Querying with {num_concurrent_samples} concurrent requests")
+            semaphore = Semaphore(num_concurrent_samples)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = _failures_path_for(output_fpath)
@@ -527,10 +904,16 @@ class RolloutCollectionHelper(BaseModel):
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        counts_left = Counter(map(row_agent_key, input_rows))
+        global _NUM_EXTERNAL_AGENT_FAILURES
+        _NUM_EXTERNAL_AGENT_FAILURES = 0
+        num_failures_this_run = 0
+        num_no_persist_this_run = 0
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        for future in self.run_examples(
+            input_rows, semaphore=semaphore, agent_run_timeout_secs=config.agent_run_timeout_secs
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -557,10 +940,11 @@ class RolloutCollectionHelper(BaseModel):
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
                 # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
+                num_no_persist_this_run += 1
             elif failure_class is not None:
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
+                num_failures_this_run += 1
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -568,9 +952,10 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.write(serialized + b"\n")
                 results_file.flush()
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+            agent_key = row_agent_key(row)
+            counts_left[agent_key] -= 1
+            if counts_left[agent_key] <= 0:
+                counts_left.pop(agent_key)
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -606,6 +991,14 @@ class RolloutCollectionHelper(BaseModel):
             print("Computing aggregate metrics")
             aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
 
+        if num_failures_this_run or num_no_persist_this_run:
+            print(
+                f"WARNING: {num_failures_this_run} rollout(s) failed this run (full error rows in "
+                f"{failures_fpath}) and {num_no_persist_this_run} were dropped without a record; "
+                "the outputs below cover fewer rollouts than were dispatched. Re-run with "
+                "+resume_from_cache=true to retry."
+            )
+
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
@@ -627,17 +1020,29 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         if not results:
             return None
 
-        # Group results by agent name
+        # Group by agent identity, excluding failure/no-persist rows: they live in the
+        # sidecar, and /aggregate_metrics must not receive reward-less stubs.
         agent_results: Dict[str, List[Dict]] = {}
+        agent_refs: Dict[str, Dict] = {}
         for row, result in zip(rows, results):
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if not agent_name:
+            if result.get(NG_FAILURE_CLASS_KEY) is not None or result.get(NG_NO_PERSIST_KEY):
                 continue
-            agent_results.setdefault(agent_name, []).append(result)
+            agent_key = row_agent_key(row)
+            if not agent_key:
+                continue
+            agent_results.setdefault(agent_key, []).append(result)
+            agent_refs.setdefault(agent_key, row.get(AGENT_REF_KEY_NAME) or {})
 
-        server_client = self.setup_server_client()
+        if not agent_results:
+            print("No successful rollouts to aggregate; skipping aggregate metrics.")
+            return None
 
-        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+        # Construct a ServerClient (needs a live head server) only if a named ref needs
+        # resolution; URL-only runs need no Gym servers.
+        needs_named = any(ref.get("name") or not ref.get("url") for ref in agent_refs.values())
+        server_client = self.setup_server_client() if needs_named else None
+
+        async def _fetch_agent_metrics(agent_key: str, agent_result_list: List[Dict]) -> Optional[Dict]:
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
@@ -648,16 +1053,22 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 stripped.append(entry)
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await server_client.post(
-                server_name=agent_name,
-                url_path="/aggregate_metrics",
-                json=agg_request,
-            )
-            await raise_for_status(agg_response)
-            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+            agent_ref = agent_refs[agent_key]
+            if agent_ref.get("url") and not agent_ref.get("name"):
+                agg_result = await _post_external_aggregate_metrics(agent_ref["url"], agg_request)
+                if agg_result is None:
+                    return None
+            else:
+                agg_response = await server_client.post(
+                    server_name=agent_key,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
 
             agent_entry = {
-                AGENT_REF_KEY_NAME: {"name": agent_name},
+                AGENT_REF_KEY_NAME: canonical_agent_ref(agent_ref, agent_key),
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
@@ -665,29 +1076,31 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
-        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        tasks = [_fetch_agent_metrics(key, results_list) for key, results_list in agent_results.items()]
         for coro in asyncio.as_completed(tasks):
             agent_entry = await coro
+            if agent_entry is None:
+                continue
             all_agent_metrics.append(agent_entry)
 
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            agent_identity = row_agent_key({AGENT_REF_KEY_NAME: agent_entry[AGENT_REF_KEY_NAME]})
             key_metrics = agent_entry.get("key_metrics", {})
-            print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+            print(f"\nKey metrics for {agent_identity}:\n" + json.dumps(key_metrics, indent=4))
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()
         for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            agent_label = _agent_metric_label(agent_entry[AGENT_REF_KEY_NAME])
             metrics_to_log.update(
                 {
-                    f"{agent_name}/{k}": v
+                    f"{agent_label}/{k}": v
                     for k, v in agent_entry["agent_metrics"].items()
                     if isinstance(v, primitive_types)
                 }
             )
             metrics_to_log.update(
                 {
-                    f"key_metrics/{agent_name}/{k}": v
+                    f"key_metrics/{agent_label}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
                     if isinstance(v, primitive_types)
                 }
@@ -707,15 +1120,19 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        agent_run_timeout_secs: float = _DEFAULT_AGENT_RUN_TIMEOUT_SECS,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
         """
-        server_client = self.setup_server_client(head_server_config)
+        # Only construct a ServerClient (which needs a live head server) when a named row exists.
+        server_client = self.setup_server_client(head_server_config) if _rows_need_named_dispatch(examples) else None
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                if _is_external_url_ref(row.get(AGENT_REF_KEY_NAME)):
+                    return row, await _post_external_agent_run(row, agent_run_timeout_secs)
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)

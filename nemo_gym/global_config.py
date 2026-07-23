@@ -131,6 +131,34 @@ RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
 SKILLS_REF_KEY_NAME = "skills_ref"
 
+
+def row_agent_key(row: dict) -> Optional[str]:
+    """Identity string for the agent that serves a rollout row.
+
+    Gym-managed agents are referenced by ``agent_ref: {"name": ...}`` (resolved to a
+    server via the global config) and external agents by ``agent_ref: {"url": ...}``
+    (dispatched directly over HTTP). Both shapes group, count, and key the same way
+    downstream; returns None when the row carries neither.
+    """
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    if not isinstance(agent_ref, dict):
+        return None
+    return agent_ref.get("name") or agent_ref.get("url")
+
+
+def canonical_agent_ref(agent_ref: dict, agent_key: str) -> dict:
+    """The agent_ref shape emitted in metrics artifacts for a group keyed by ``agent_key``.
+
+    Mirrors ``row_agent_key``'s name-first precedence so a ref carrying both keys is labeled
+    by the same identity it was grouped under.
+    """
+    if agent_ref.get("name"):
+        return {"name": agent_key}
+    if agent_ref.get("url"):
+        return {"url": agent_ref["url"]}
+    return {"name": agent_key}
+
+
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
@@ -821,6 +849,12 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
     if global_config_dict.get(VERBOSE_KEY_NAME):
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
+
+
+def is_global_config_dict_set() -> bool:
+    """True if the process-wide config dict is already loaded. Lets callers consult it without
+    triggering a parse (parsing reads CLI args and may sys.exit in non-CLI processes)."""
+    return _GLOBAL_CONFIG_DICT is not None
 
 
 def set_global_config_dict(

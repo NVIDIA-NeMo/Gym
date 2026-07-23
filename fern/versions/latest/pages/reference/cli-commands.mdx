@@ -559,10 +559,11 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
 | `--agent`, `-a` | Agent to collect rollouts with. |
+| `--agent-url` | External agent `/run` endpoint URL to collect rollouts with (alternative to `--agent`; mutually exclusive). See [Drive an External Agent](/agent-server/drive-external-agent). |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
-| `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
+| `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by agent identity — `agent_ref.name`, or the agent URL for external agents — for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
 | `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
@@ -579,6 +580,13 @@ gym eval run --benchmark aime24 \
     --model-type openai_model \
     --output results/aime24.jsonl \
     --split validation \
+    --concurrency 10
+
+# Against your own external agent service (no Gym servers needed)
+gym eval run --no-serve \
+    --agent-url http://localhost:9000 \
+    --input tasks.jsonl \
+    --output results/external.jsonl \
     --concurrency 10
 
 # Against an already-running server, with a remote vLLM endpoint

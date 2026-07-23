@@ -31,6 +31,8 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    canonical_agent_ref,
+    row_agent_key,
 )
 
 
@@ -212,6 +214,7 @@ class RewardProfiler:
         filtered_results: List[Dict] = []
         task_idx_to_row: Dict[int, Dict] = dict()
         task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        agent_key_to_ref: Dict[str, Dict] = dict()
         expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
@@ -221,8 +224,17 @@ class RewardProfiler:
             result = result | (result["response"].get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
+            agent_key = row_agent_key(row)
+            if agent_key is None:
+                # pandas groupby silently drops None keys — the rollouts would vanish from metrics.
+                raise ValueError(
+                    f"Rollout row (task_index={row.get(TASK_INDEX_KEY_NAME)}, "
+                    f"rollout_index={row.get(ROLLOUT_INDEX_KEY_NAME)}) carries no usable agent_ref "
+                    "(neither 'name' nor 'url'); cannot attribute it to an agent for profiling."
+                )
+            agent_key_to_ref.setdefault(agent_key, row.get(AGENT_REF_KEY_NAME) or {})
             numeric_result = {
-                "agent_name": row["agent_ref"]["name"],
+                "agent_name": agent_key,
                 TASK_INDEX_KEY_NAME: task_idx,
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
@@ -267,7 +279,9 @@ class RewardProfiler:
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
         for agent_metrics in agent_level_metrics:
-            agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
+            agent_key = agent_metrics.pop("agent_name")
+            agent_ref = agent_key_to_ref.get(agent_key) or {}
+            agent_metrics[AGENT_REF_KEY_NAME] = canonical_agent_ref(agent_ref, agent_key)
 
         return group_level_metrics, agent_level_metrics
 

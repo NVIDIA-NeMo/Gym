@@ -1,0 +1,140 @@
+---
+title: "Drive an External Agent"
+description: "Collect rollouts from your own agent service — running anywhere — with +agent_url"
+position: 3
+---
+
+# Drive an External Agent
+
+Your agent may already exist as its own service: a LangChain app, a custom Python loop, a harness
+running in your own infrastructure. `gym eval run --no-serve +agent_url=http://host:port` drives it
+directly — Gym's rollout collector POSTs each task to your endpoint's `/run` and gives you
+everything the collector provides for built-in agents: repeats, concurrency control,
+resume-after-crash, and standard rollout artifacts that `gym eval profile` and downstream tooling
+understand. Your agent code never moves into the Gym repo, and the collector itself needs **no
+running Gym servers and no config files** — Gym servers exist only if your agent chooses to call
+them.
+
+<Warning>
+The collector sends each task row **in full** to your endpoint — including `verifier_metadata`,
+which typically carries the task's answer key. Only point `agent_url` at an agent you trust, on
+infrastructure you control. This workflow is designed for evaluating your own agent, not for
+training against untrusted ones.
+</Warning>
+
+## Quickstart
+
+Three processes, three terminals. Terminal 1 is only needed if your agent uses a Gym environment
+(tools and verification); a fully self-scoring agent skips it entirely.
+
+```bash
+# Terminal 1 (optional): a Gym resources server for your agent to call
+gym env start --resources-server example_session_state_mgmt --model-type openai_model
+
+# Terminal 2: your agent service, wherever and however you run it
+python my_agent.py --port 9000 --resources-url http://localhost:<resources-port>
+
+# Terminal 3: collect — no config files, no head server, just the URL
+gym eval run --no-serve \
+    --agent-url http://localhost:9000 \
+    --input tasks.jsonl \
+    --output results/rollouts.jsonl \
+    --concurrency 10
+```
+
+Find the resources server's address for Terminal 2 with `gym env status --json` (each server's
+host and port), or pin the port in your config so it is known in advance.
+
+`--agent-url` and `--agent` are mutually exclusive: a run either dispatches to your external
+endpoint or to a named Gym agent server. Rows that already carry their own `agent_ref` keep it,
+exactly as with `--agent` — except that a row-level `{"url": ...}` must match the run's
+`--agent-url` (a mismatch is a hard error, so a dataset can't route rows to another host).
+
+## The `/run` contract
+
+Gym POSTs one JSON object per rollout to `{agent_url}/run` and expects a JSON object back.
+
+**Request body** — the dataset row, verbatim, plus collector bookkeeping:
+
+| Key | Description |
+|---|---|
+| `responses_create_params` | The task input in Responses API format: `input` messages, declared `tools`, sampling params. |
+| `verifier_metadata` (and other task keys) | Task-specific data, passed through untouched — this is where answer keys usually live. |
+| `_ng_task_index`, `_ng_rollout_index` | Which task, and which repeat of it. Echo them back or ignore them; the collector re-stamps them on your response. |
+| `agent_ref` | `{"url": "<your endpoint>"}`. |
+
+**Response body** — a verify-response-shaped object:
+
+| Key | Required | Description |
+|---|---|---|
+| `reward` | yes | The task score (float). Compute it yourself, or call a Gym resources server's `/verify` and return its response body directly — it already has the right shape. |
+| `response` | yes | The Responses API response object for the rollout (the trajectory). Include `usage` (`input_tokens`, `output_tokens`, `total_tokens`) or token/cost metrics for the run will be empty. |
+| anything else | no | Extra keys are preserved into the rollout artifacts. |
+
+A response missing `reward`/`response`, or one where `reward` isn't a number or `response` isn't
+a JSON object, is recorded as a failure, not a success — this keeps
+malformed rows out of your results and out of downstream profiling.
+
+## Stateful environments and session cookies
+
+Stateful Gym environments key per-rollout state to a **session cookie**. If your agent uses one,
+thread the cookie through every hop or the verifier will score a fresh, empty session:
+
+1. `POST /seed_session` on the resources server with the row body; capture the `Set-Cookie`
+   response header.
+2. Send that cookie (`Cookie: <name>=<value>`) on **every** tool call.
+3. Send the same cookie on `POST /verify`. The reward reflects the session the cookie names — a
+   dropped cookie means reward 0 with no error.
+
+```python
+async with http.post(f"{resources_url}/seed_session", json=row) as seed:
+    cookie = seed.headers["Set-Cookie"].split(";", 1)[0]
+# ... agent loop: every tool call and the final /verify carry {"Cookie": cookie} ...
+```
+
+<Tip>
+For structured tool calling, run your own function-call loop against the row's declared
+`responses_create_params.tools` and execute each call as an HTTP POST to the resources server —
+or, for CLI agents like Claude Code, use the MCP wiring the built-in `claude_code_agent`
+demonstrates. See [Integrate Existing Agents](/agent-server/integrate-existing-agents).
+</Tip>
+
+## Failures, timeouts, and resume
+
+External endpoints fail differently than Gym-managed servers, and the collector is built for that:
+
+- **Nothing crashes the run.** A connection failure (up to 3 attempts), a timeout, a non-2xx
+  status, or a malformed response becomes a failure row in the `*_failures.jsonl` sidecar — never
+  a scored result. Re-running with `--resume` re-dispatches only what's missing, up to the
+  attempt cap.
+- **Every `/run` request has a wallclock bound**: `agent_run_timeout_secs` (default 1800). Raise
+  it if your rollouts legitimately run longer than 30 minutes.
+- **Your agent can classify its own failures.** Return HTTP 200 with `"_ng_failure_class":
+  "<your-label>"` in the body to route a row to the failures sidecar (no `reward` needed), and
+  add `"_ng_failure_terminal": true` to mark it not worth retrying on resume. This is optional —
+  returning an HTTP error status gets the same sidecar treatment with a generic label.
+- **Resume re-confirms the target.** If pending rows carry a frozen agent URL, resuming requires
+  `--agent-url` again; a changed URL re-points the remaining rows (the collector tells you how
+  many). This prevents silently sending tasks to a stale address.
+- Redirects are not followed (a redirected POST would silently lose its body — fix the URL), and
+  `agent_url` must not carry a query string, fragment, or embedded `user:pass@host` credentials
+  (pass auth material through your agent's own configuration instead).
+
+## Aggregate metrics
+
+After collection, Gym POSTs the run's successful results to `{agent_url}/aggregate_metrics` with
+the same contract Gym agent servers implement. **Implementing it is optional** — if your endpoint
+returns 404/405/501 (or is already shut down), the collector prints a note and skips it; the
+rollout artifacts are unaffected, and per-task/per-agent metrics remain available via
+`gym eval profile`.
+
+In metrics artifacts your agent is identified by its URL: `agent_ref` is `{"url": "..."}`, and
+`num_repeats` in dict form uses the URL as its key. Note that Hydra's command-line override
+grammar cannot express URL dict keys — put a URL-keyed `num_repeats` in a YAML config file
+passed via `--config` instead of on the command line.
+
+## Concurrency
+
+All traffic to a single `agent_url` shares one connection pool, capped per host (1024 by
+default). The collector caps effective concurrency at that limit automatically; set
+`--concurrency` explicitly to the parallelism your agent can actually serve.
