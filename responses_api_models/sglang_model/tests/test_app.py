@@ -103,6 +103,7 @@ async def test_generate_path_preserves_training_ids_reasoning_and_tools() -> Non
     client = FakeSGLangClient(
         {
             "meta_info": {
+                "output_ids": [11, 12],
                 "output_token_logprobs": [
                     {"token_id": 11, "logprob": -0.1},
                     {"id": 12, "logprob": -0.2},
@@ -170,6 +171,8 @@ def test_followup_prompt_splices_exact_sampled_ids() -> None:
         first_messages,
         first_prompt,
         generation_token_ids=[20, 21],
+        tools=None,
+        chat_template_kwargs={},
     )
     followup_messages = [
         *first_messages,
@@ -206,6 +209,8 @@ def test_session_cache_appends_only_missing_eos_suffix(
         [{"role": "user", "content": "first"}],
         prompt_token_ids=[1],
         generation_token_ids=generation_token_ids,
+        tools=None,
+        chat_template_kwargs={},
     )
 
     assert model._sglang_session_seq["session-eos"]["seq"] == expected_sequence
@@ -219,9 +224,10 @@ async def test_explicit_max_tokens_is_clamped_to_remaining_context(
     client = FakeSGLangClient(
         {
             "meta_info": {
+                "output_ids": [11],
                 "output_token_logprobs": [
                     {"token_id": 11, "logprob": -0.1},
-                ]
+                ],
             }
         }
     )
@@ -258,6 +264,47 @@ async def test_over_context_terminates_without_calling_generate() -> None:
     assert response.choices[0].finish_reason == "length"
     assert response.choices[0].message.prompt_token_ids == [1, 2, 3, 4]
     assert response.choices[0].message.generation_token_ids == []
+
+
+def test_followup_prompt_rejects_changed_rendering_inputs() -> None:
+    tokenizer = FakeTokenizer([10, 11])
+    model = make_model(tokenizer=tokenizer)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session-rendering"})
+    first_messages = [{"role": "user", "content": "first"}]
+    first_prompt, session_id = model._build_sglang_prompt_ids(
+        request,
+        first_messages,
+        tools=[{"type": "function", "function": {"name": "old"}}],
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    model._update_sglang_session_seq(
+        session_id,
+        first_messages,
+        first_prompt,
+        generation_token_ids=[20, 21],
+        tools=[{"type": "function", "function": {"name": "old"}}],
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    followup_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "cached"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    with pytest.raises(RuntimeError, match="session tools or chat-template"):
+        model._build_sglang_prompt_ids(
+            request,
+            followup_messages,
+            tools=[{"type": "function", "function": {"name": "new"}}],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+    with pytest.raises(RuntimeError, match="session tools or chat-template"):
+        model._build_sglang_prompt_ids(
+            request,
+            followup_messages,
+            tools=[{"type": "function", "function": {"name": "old"}}],
+            chat_template_kwargs={"enable_thinking": False},
+        )
 
 
 def test_sglang_config_owns_context_and_tool_format() -> None:

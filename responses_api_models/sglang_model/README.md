@@ -14,10 +14,11 @@ session-splice or context-overflow rules below.
 
 For a multi-turn session, the adapter caches the token sequence and splices
 each prior assistant turn's exact sampled IDs into the next prompt. It never
-re-tokenizes those sampled turns. If a prompt already fills `context_length`,
-the adapter returns a terminal response with `finish_reason="length"` instead
-of truncating the prefix. Both behaviors preserve the trainer's prefix
-contiguity invariant.
+re-tokenizes those sampled turns. Tools and chat-template kwargs must therefore
+remain fixed for the life of a session; the adapter fails loudly if they
+change. If a prompt already fills `context_length`, the adapter returns a
+terminal response with `finish_reason="length"` instead of truncating the
+prefix. Both behaviors preserve the trainer's prefix contiguity invariant.
 
 The session cache is process-local. Run one Gym worker per model-server
 instance, or provide sticky routing that keeps every turn of a session on the
@@ -36,10 +37,9 @@ See `configs/sglang_model_for_training.yaml`.
 - `trust_remote_code`: forwarded to the local tokenizer loader; defaults to
   `false`.
 
-`transformers` is intentionally not pinned at this leaf package. Use the
-environment lockfile to pin a validated release for reproducible deployment.
-The example config leaves `context_length` mandatory (`???`) so a mismatched
-server limit cannot be selected silently.
+The leaf package pins `transformers==5.6.0`, matching NeMo RL's SGLang worker
+environment. The example config leaves `context_length` mandatory (`???`) so a
+mismatched server limit cannot be selected silently.
 
 ## CPU-only tests
 

@@ -177,6 +177,18 @@ class SGLangModel(VLLMModel):
             for left_message, right_message in zip(left, right)
         )
 
+    def _sglang_rendering_sig(
+        self,
+        tools: Any,
+        chat_template_kwargs: Dict[str, Any],
+    ) -> Tuple[str, str, Optional[str]]:
+        """Identify inputs that affect the cached prompt rendering."""
+        return (
+            json.dumps(tools, sort_keys=True, default=str),
+            json.dumps(chat_template_kwargs, sort_keys=True, default=str),
+            self._get_sglang_chat_template(),
+        )
+
     def _build_sglang_prompt_ids(
         self,
         request: Request,
@@ -191,6 +203,16 @@ class SGLangModel(VLLMModel):
             session_id = None
         if session_id is not None:
             state = self._sglang_session_seq.get(session_id)
+            rendering_sig = self._sglang_rendering_sig(
+                tools,
+                chat_template_kwargs,
+            )
+            if state is not None and state.get("rendering_sig") != rendering_sig:
+                raise RuntimeError(
+                    "SGLang session tools or chat-template inputs changed after "
+                    "sampled tokens were cached. Start a new session instead of "
+                    "re-tokenizing the existing trajectory."
+                )
             if state is not None:
                 previous_messages = state["messages"]
                 previous_count = len(previous_messages)
@@ -224,6 +246,8 @@ class SGLangModel(VLLMModel):
         messages: List[Any],
         prompt_token_ids: List[int],
         generation_token_ids: List[int],
+        tools: Any,
+        chat_template_kwargs: Dict[str, Any],
     ) -> None:
         """Cache the exact token sequence through the generated assistant turn."""
         if session_id is None:
@@ -247,6 +271,10 @@ class SGLangModel(VLLMModel):
         self._sglang_session_seq[session_id] = {
             "messages": list(messages),
             "seq": sequence,
+            "rendering_sig": self._sglang_rendering_sig(
+                tools,
+                chat_template_kwargs,
+            ),
         }
 
     def _parse_sglang_generation(
@@ -411,6 +439,8 @@ class SGLangModel(VLLMModel):
             messages,
             prompt_token_ids,
             generation_token_ids,
+            tools,
+            chat_template_kwargs,
         )
 
         generated_text = tokenizer.decode(
