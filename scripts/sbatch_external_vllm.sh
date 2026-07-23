@@ -22,8 +22,8 @@ vllm serve $MODEL \
     -cc.pass_config.fuse_allreduce_rms=False \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
-    --moe-backend triton \
-    --max-num-batched-tokens 32768 \
+    --enable-expert-parallel \
+    --max-num-batched-tokens 16384 \
     --host \$(hostname -I | awk '{print \$1}') \
     --port 8000
 EOF
