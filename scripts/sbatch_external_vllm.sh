@@ -33,7 +33,7 @@ MOUNTS=/lustre:/lustre \
 sbatch \
     --nodes=2 \
     --account=nemotron_evals_research \
-    --partition=interactive \
+    --partition=batch \
     --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=vllm-$USER \
