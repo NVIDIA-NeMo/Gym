@@ -30,6 +30,7 @@ CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu
 sbatch \
     --nodes=2 \
     --account=nemotron_evals_research \
+    --container-name=container-on-node \
     --partition=batch \
     --gres=gpu:4 \
     --time=04:00:00 \

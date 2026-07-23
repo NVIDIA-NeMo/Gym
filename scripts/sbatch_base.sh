@@ -41,7 +41,6 @@ fi
 # All nodes (including head and workers) will execute this block.
 # The command after '--' will only run on the head node
 srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
-    --container-name=container-on-node \
     bash -lc '
         echo "Running from $SLURM_SUBMIT_DIR on $(hostname)"
         cd $SLURM_SUBMIT_DIR
