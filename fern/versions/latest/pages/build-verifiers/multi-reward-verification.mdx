@@ -52,7 +52,7 @@ class MultiRewardResponse(BaseMultiRewardVerifyResponse):
 
 ### 3. Set the scalar `reward`
 
-Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. Summing the components is a common convention.
+Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. A weighted sum of the components is commonly used as the scalar reward.
 
 ### 4. Expose each reward component as a top-level field
 
