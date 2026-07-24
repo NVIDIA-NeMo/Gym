@@ -531,9 +531,7 @@ class ToolSandboxResourcesServer(SimpleResourcesServer):
     async def verify(self, body: ToolSandboxVerifyRequest) -> ToolSandboxVerifyResponse:
         details = self.scoring.pop(body.response.env_id, {"reward": 0.0})
         reward = float(details.get("reward", 0.0))
-        # Surface the scoring breakdown as top-level response fields so the
-        # nemo-evaluator gym solver copies them into ``scoring_details`` (it
-        # takes every result key except responses_create_params/response/reward).
+        # Surface the scoring breakdown as top-level response fields.
         scoring_fields = {k: v for k, v in details.items() if k != "reward"}
         return ToolSandboxVerifyResponse(**(body.model_dump() | scoring_fields), reward=reward)
 

@@ -54,8 +54,8 @@ toolsandbox_agent:
         name: policy_model
       max_steps: 30
       # Emit a single flat trajectory (list of output items), not per-step
-      # transition snapshots. nemo-evaluator's gym adapter parses response.output
-      # as a flat list; transitions (list-of-lists) break its text extraction.
+      # transition snapshots. response.output is consumed as a flat list;
+      # transitions (list-of-lists) break downstream text extraction.
       return_transitions: false
       datasets:
       - name: example

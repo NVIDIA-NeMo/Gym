@@ -64,9 +64,8 @@ class ToolSandboxAgentConfig(BaseResponsesAPIAgentConfig):
     return_transitions: bool = Field(
         default=False,
         description="If True, return per-transition agent-state snapshots "
-        "(a list of lists) instead of a single flat message list. Keep this "
-        "False when driving from nemo-evaluator: its gym adapter parses "
-        "response.output as a flat list and chokes on list-of-lists.",
+        "(a list of lists) instead of a single flat message list. Keep False "
+        "for callers that parse response.output as a flat list.",
     )
 
 

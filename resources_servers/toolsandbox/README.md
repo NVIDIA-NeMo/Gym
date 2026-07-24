@@ -144,14 +144,14 @@ python resources_servers/toolsandbox/prepare_toolsandbox.py \
   --output resources_servers/toolsandbox/data/test_toolsandbox.jsonl
 ```
 
-## nemo-evaluator
+## Serve-only mode
 
-To drive the multi-turn agent from nemo-evaluator via the `gym://` adapter, use
+To serve ToolSandbox for external orchestration, use
 `configs/toolsandbox_serve.yaml`: unlike a deterministic scorer, ToolSandbox is
 agentic, so the gym side launches **both** the resources server and the
-`toolsandbox_agent` harness. nemo-evaluator's `gym_delegation` solver discovers
-the agent, calls its `/run` per dataset row, and (with `trust_reward: true`)
-uses the reward returned from `/verify`.
+`toolsandbox_agent` harness. The orchestrator discovers the agent via
+`/server_instances`, calls its `/run` per dataset row, and (with
+`trust_reward: true`) uses the reward returned from `/verify`.
 
 ## Tests
 

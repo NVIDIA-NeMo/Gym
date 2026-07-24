@@ -1,13 +1,14 @@
-# ToolSandbox gym config for driving from nemo-evaluator via the gym:// adapter.
+# ToolSandbox serve config: brings up both the resources server and the
+# toolsandbox_agent harness for external orchestration.
 #
 # Unlike the deterministic scorers (ragtruth/rolemrc reference), ToolSandbox is
 # multi-turn and agentic, so the gym side must launch BOTH the resources server
-# AND the toolsandbox_agent harness. nemo-evaluator's `gym_delegation` solver
-# discovers the agent via /server_instances, calls its /run per dataset row, and
-# (with trust_reward: true) uses the reward the agent gets back from /verify.
+# AND the toolsandbox_agent harness. An external orchestrator discovers the agent
+# via /server_instances, calls its /run per dataset row, and (with
+# trust_reward: true) uses the reward the agent gets back from /verify.
 #
-# nemo-evaluator injects the model-under-test as `policy_model`; load a model
-# server config alongside this file in the gym service's server_cmd, e.g.:
+# The model-under-test is injected as `policy_model`; load a model server config
+# alongside this file in the gym service's server_cmd, e.g.:
 #
 #   gym env start \
 #     --config resources_servers/toolsandbox/configs/toolsandbox_serve.yaml \
@@ -68,6 +69,6 @@ toolsandbox_agent:
       # truncates a legitimately long scenario before the message cap does.
       max_steps: 50
       # Emit a single flat trajectory (list of output items), not per-step
-      # transition snapshots. nemo-evaluator's gym adapter parses response.output
-      # as a flat list; transitions (list-of-lists) break its text extraction.
+      # transition snapshots. response.output is consumed as a flat list;
+      # transitions (list-of-lists) break downstream text extraction.
       return_transitions: false
