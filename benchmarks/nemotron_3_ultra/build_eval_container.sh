@@ -8,8 +8,10 @@
 # SBATCH_PARTITION=batch \
 # INPUT_CONTAINER=/path/to/vllm/container \
 # OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
-# bash benchmarks/nemotron_3_ultra/sbatch_eval_with_external_vllm.sh \
-# --config benchmarks/my-benchmark/config.yaml
+# sbatch --gres=gpu:4 \
+#   benchmarks/nemotron_3_ultra/sbatch_eval_with_external_vllm.sh \
+#   --config benchmarks/my-benchmark/config.yaml
+# 
 
 set -euo pipefail
 
@@ -29,8 +31,6 @@ EOF
 )
 
 srun --nodes=1 --ntasks=1 \
-    --gres=gpu:4 \
-    --time=04:00:00 \
     --container-image=$INPUT_CONTAINER \
     --container-save=$OUTPUT_CONTAINER \
     bash -s <<INNER_BUILD
