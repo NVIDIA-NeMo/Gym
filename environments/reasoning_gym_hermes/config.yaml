@@ -1,0 +1,35 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Hermes Agent with terminal, file, code_execution, skills, todo toolsets on reasoning_gym tasks
+      value: Improve model reasoning capabilities in hermes agent harness
+
+reasoning_gym_hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      enabled_toolsets: [terminal, file, code_execution, skills, todo]
+      max_turns: 30
+      concurrency: 32
+      terminal_backend: local
+      terminal_timeout: 30
+      system_prompt: |
+        You are a precise reasoning assistant. You have access to a terminal tool to run Python for calculations or verification.
+        Use it when computation would help. State your final answer clearly.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/reasoning_gym_hermes/data/example.jsonl
+        - name: train
+          type: train
+          jsonl_fpath: environments/reasoning_gym_hermes/data/train_knights_knaves.jsonl
+          license: Apache 2.0
