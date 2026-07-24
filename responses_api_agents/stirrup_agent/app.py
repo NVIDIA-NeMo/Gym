@@ -936,9 +936,7 @@ _TASK_METADATA_FIELDS = (
     "rubric_json",
     "rubric_pretty",
     "instance_id",
-    "_ng_task_index",
     "_ng_rollout_index",
-    "_ng_attempt_index",
 )
 
 
@@ -1036,16 +1034,28 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
+    # -- helpers ----------------------------------------------------------
+
+    def _get_model_base_url(self, rollout_id: Optional[str] = None) -> str:
+        from nemo_gym.global_config import get_first_server_config_dict
+        from nemo_gym.server_utils import ServerClient, apply_rollout_prefix
+
+        global_config_dict = ServerClient.load_from_global_config().global_config_dict
+        model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
+        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+        # apply_rollout_prefix adds the /ng-rollout/<id> capture prefix when a rollout id is supplied
+        # (observability enabled); otherwise it returns the plain host:port URL unchanged.
+        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
+
     # -- /v1/responses ----------------------------------------------------
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming = Body(), rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
         task_info = self.task_strategy.extract_task_info(body.metadata)
 
-        # run() moves the row's task/rollout indices into metadata, so the capture rollout id is
-        # read from there (not the top-level body). resolve_model_base_url adds the /ng-rollout/<id>
-        # prefix when observability is enabled; otherwise it returns the plain host:port/v1 URL.
-        rollout_id = self.rollout_id_from_run(body.metadata or {})
-        model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        # run() derives rollout_id from the row's task/rollout indices and passes it here.
+        model_base_url = self._get_model_base_url(rollout_id)
 
         if self.config.task == "gdpval":
             system_prompt = None
@@ -1318,7 +1328,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             else:
                 # Run the Stirrup agent
                 try:
-                    response = await self.responses(fixed_params)
+                    response = await self.responses(fixed_params, self.rollout_id_from_run(body))
                 except Exception as exc:
                     task_info = self.task_strategy.extract_task_info(existing_metadata)
                     failure_class = _classify_rollout_failure(exc)
