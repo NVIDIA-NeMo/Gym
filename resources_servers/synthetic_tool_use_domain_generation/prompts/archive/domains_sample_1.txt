@@ -1,0 +1,19 @@
+Please give me list of all business/industry sectors that may benefit from having a customer-facing internet chatbot agent helper.
+Imagine that the chatbot will have a set of executable tools that interface with a system to help the customer's needs.
+
+
+Please format your response as a JSON such as:
+```json
+[
+    {
+        "name": <name of item>,
+        "applications": [
+            {
+                "function": <name of functionality the chatbot can have that can help the user>
+            },
+            ...
+        ]
+    },
+    ...
+]
+```

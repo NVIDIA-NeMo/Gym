@@ -1,0 +1,2 @@
+Please create {scenario_count} different customer scenarios that describe customers who would contact the representative to complete tasks.  Please output the collection of customer scenarios using the following JSON schema:
+{scenarios_schema}

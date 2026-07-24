@@ -1,0 +1,56 @@
+synthetic_tool_use_simulation_resources_server:
+  resources_servers:
+    synthetic_tool_use_simulation:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Synthetic conversational tool-use simulation environment.
+      simulator_model_server:
+        type: responses_api_models
+        name: simulator_model
+      user_model_server:
+        type: responses_api_models
+        name: simulator_model
+      tool_simulator_model_server:
+        type: responses_api_models
+        name: simulator_model
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      user_responses_create_params:
+        input: []
+        temperature: 1.0
+        parallel_tool_calls: false
+      tool_simulator_responses_create_params:
+        input: []
+        temperature: 1.0
+        parallel_tool_calls: false
+      judge_responses_create_params:
+        input: []
+        temperature: 1.0
+        parallel_tool_calls: false
+      generation_attempts: 3
+      judge_provider_attempts: 3
+      judge_provider_retry_initial_backoff_seconds: 0.5
+      judge_provider_retry_max_backoff_seconds: 8.0
+      enable_llm_judge: true
+      enable_termination: true
+      verification_type: message
+      enforce_transfer_ground_truth: false
+synthetic_tool_use_simulation_agent:
+  responses_api_agents:
+    synthetic_tool_use_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: synthetic_tool_use_simulation_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_agent_steps: 50
+      seed_first_user_message: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/synthetic_tool_use_simulation/data/example.jsonl
+        license: Apache 2.0

@@ -1,0 +1,7 @@
+Your task is to create example customer scenarios within a specified setting.  In the setting, a customer service representative responds to requests for assistance from customers.  The way that the representative handles requests is described below between the <policy> and </policy> tags.
+
+<policy>
+{domain_policy}
+</policy>
+
+Each customer scenario should describe the customer and the tasks that the customer is trying to complete by contacting the representative.  Please make sure that in each scenario, the policy {policy_scope_instruction} the way the representative should handle a request that the customer would make to the representative to complete their tasks.

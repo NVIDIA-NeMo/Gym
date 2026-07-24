@@ -1,0 +1,25 @@
+Your job is to edit the tools.jsonl file for the {domain} domain given the policy.md.
+Specifically, you will be writing the tools specification for an automated chatbot agent that assists a customer based on the given policy.
+You are given a list of reference tools to serve as a guidance for your tool generation.
+
+Your task is as follows:
+1. Carefully read the provided policy.md and existing tools.jsonl and check if the original tools fit naturally for the use cases of the policy.
+2. If a tool is referenced in the policy but omitted in the tools.jsonl, draft a new tool specification to be provided to the agent based on the description in the policy.
+3. Write the edited tools.jsonl file for the chatbot agent between <tools> </tools> tags.
+
+When writing the the tools list, consider:
+1. Do not change the original tools list too much unless needed.
+2. For existing tools, if they should not be edited, leave them as they are. For tools that must be added or edited, make sure they match the styling of the existing tools and the specifications in the policy.
+3. Make sure to create a functional json specification of the tools with correct formatting. Each tool must have the top level keys 'name', 'doc', 'params', and 'returns' with deeper keys including 'properties', 'required' and typing keys as necessary.
+4. Return types must be explicit and simple. Do not use 'returns' as a return type property name.
+
+Do not write the actual code for tools. Only generate the tool specifications in the form of a jsonl.
+You must include all tools listed in the policy.
+
+<policy>
+{policy}
+</policy>
+
+<original_tools.jsonl>
+{tools}
+</original_tools.jsonl>

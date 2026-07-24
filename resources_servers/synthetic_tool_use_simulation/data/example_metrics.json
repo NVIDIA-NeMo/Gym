@@ -1,0 +1,51 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/synthetic_tool_use_simulation/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 18.8,
+        "Min": 18.0,
+        "Max": 22.0,
+        "Standard deviation": 1.79
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1396.6,
+        "Min": 1376.0,
+        "Max": 1479.0,
+        "Standard deviation": 46.06
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 0.6,
+        "Min": 0.6,
+        "Max": 0.6,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "domain_name": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "policy": {
+        "unique_count": 2,
+        "total_count": 5
+    }
+}

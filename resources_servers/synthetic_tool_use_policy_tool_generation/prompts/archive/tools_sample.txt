@@ -1,0 +1,20 @@
+Your job is to generate the tools.jsonl file for the {domain} domain.
+Specifically, you will be writing the tools specification for an automated chatbot agent that assists a customer based on the given policy.
+
+Your task is as follows:
+1. Read and think about the provided policy and list out the tools that are mentioned in the policy.
+2. Deliberate about the input properties and the return types of the tools.
+4. Devise a description and docstring for each tool, as it will be provided to the agent to to be used for interaction with a downstream system.
+5. Create a functional json specification of the tools with correct formatting. Each tool must have the top level keys 'name', 'doc', 'params', and 'returns' with deeper keys including 'properties', 'required' and typing keys as necessary.
+6. Write the tools.jsonl file for the chatbot agent between <tools> </tools> tags.
+
+In addition to the tools in the policy, consider:
+1. Always adding a verification / escalation tool if the policy mentions the need for one.
+2. If you believe that there are implicit tasks described in the policy that do not have specific references to tool names, you can add additional tools with careful deliberation.
+
+Do not write the actual code for tools. Only generate the tool specifications in the form of a jsonl.
+You must include all tools listed in the original policy.
+
+<policy>
+{policy}
+</policy>

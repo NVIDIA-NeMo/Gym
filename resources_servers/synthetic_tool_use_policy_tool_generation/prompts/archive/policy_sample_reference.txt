@@ -1,0 +1,42 @@
+Your job is to generate the policy.md file for an automated agent for the {domain} domain. 
+Specifically, you will be writing the policy for an automated chatbot agent that a customer to a business in the {domain} domain can interact with.
+A reference policy and tools is provided to help show an example output for the task.
+
+Your task is as follows:
+1. Think about the {domain} domain and consider businesses that can span from that domain.
+2. Choose a specific business that can benefit from deploying a chatbot agent that the business' customers can interact with for business-related tasks.
+3. Deliberate about the tools that the chatbot agent can use to interact with an underlying system to resolve a customer's needs. Your tools can be in camel case or snake case. Think of at least 10 tools that can be used by the policy.
+4. Create a policy.md file for the chatbot agent between <policy> </policy> tags.
+
+When writing the policy, consider:
+- Include the current time in the policy the model can refer to, which is {timestamp}.
+- Add a statement to avoid answering questions that the chatbot isn’t qualified to handle—especially those that require advice not based on the policy.
+- Always include a way for the agent to escalate the user's concerns to a real human or transfer to a human agent. When escalating, the model must tell the customer they are being transferred to a human agent.
+
+Make sure the policy contains at least:
+- A few sections for different functionalities of the customer service agent (i.e. enrollment changes, booking modifications, etc).
+- At least one functionality which requires proactive asking from the agent to the user (i.e. can you confirm if you received the invoice? (after sending an invoice and before posting the new payment) or can you check your new status? (after making a status change request and before executing next action)).
+
+In addition, you must add an agent limitations section that contains information regarding never taking actions not defined by the given tools or assuming any information was verified / actions were taken unless explicitly done through a tool execution.
+It should contain in the minimum these core values:
+- Do not answer questions or perform actions outside defined tool capabilities
+- Never assume verification or action completion without explicit tool confirmation
+
+You must also include the following sections:
+1. A section for basic components and objects relevant to the policy:
+    - For example, the idea of a user (e.g. with name, email, etc) and business-specific objects (e.g. reservation for retail/airline/etc, tickets for service, etc.)
+    - This section does not have to be too detailed
+    - Design the objects so that tool parameters can be primitives, not full objects.
+2. Sections for constraints and limitations relevant to interactions with such objects.
+    - For example, if this is an airline policy, there must be constraints for reservation changes, seat changes, baggage policies, etc.
+    - This is the most important part of the policy, and you must think hard and write a concise yet believable constraints.
+
+Do not include the following in the policy:
+- Tools that call other generative models such as pdfs / images / videos should not be added nor considered.
+
+The policy.md is not a description of the business nor a helpful instruction to the agent.
+Instead, it is a strict description of *how* the model should act and *what* constraints there are to its capabilities.
+
+Make sure that the policy has an emphasis on customer service related to the business in the domain {domain}.
+Do not make the generated policy sound like an example template. Make it highly specialized for the specific chatbot and business as if this were a real policy that could be used immediately.
+Ensure that the style, brevity, and realism of the generated policy be akin to the reference policies.

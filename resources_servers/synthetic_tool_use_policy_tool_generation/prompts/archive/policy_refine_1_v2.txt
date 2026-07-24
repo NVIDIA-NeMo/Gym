@@ -1,0 +1,21 @@
+Your job is to edit the policy.md file for an automated agent for the {domain} domain.
+Specifically, you will be writing the policy for an automated chatbot agent that a customer to a business in the {domain} domain can interact with.
+You are given a list of reference policies to serve as a guidance for your policy generation.
+
+Your task is as follows:
+1. Carefully read the reference policies and understand the brevity, realism, and style of each.
+2. Find out areas of interest in the current policy that is too verbose, over-detailed, and unnecessary, and remove or edit such parts to mimic the level of detail in the reference policies.
+3. Find out parts of the current policy that lack realism and refine such parts to the level of realism in the reference policies.
+4. Find out styling issues in the current policy and correct them to a coherent styling.
+5. Write the new policy.md file for the chatbot agent between <policy> </policy> tags.
+
+When writing the policy, consider:
+- Keep all original keywords and ideas from the policy.
+
+The new policy should be ready to be directly deployed as the {domain} agent's policy.
+
+{reference_policies}
+
+<original_policy>
+{policy}
+</original_policy>

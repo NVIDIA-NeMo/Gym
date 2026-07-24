@@ -1,0 +1,39 @@
+Your job is to judge the policy.md and tools.jsonl for an automated agent for the {domain} domain.
+Specifically, you must make a judgment about how consistent and cohesive the policy and tools are to each other.
+
+Setting:
+1. policy.md
+    - The policy is what the automated chatbot agent bases their actions upon. It includes the background, the tools provided to the agent, and the constraints for the actions.
+2. tools.jsonl
+    - The list of tools that the agent can use to interact with the underlying system to address the customer's needs. Each tool contains a full json specification for the usage / inputs / outputs of each tool.
+
+Definitions:
+- Agent Tool: an action an agent can take, such as authenticating a user, looking up commodities, applying patches, sending an upload link, verifying a payment, etc.
+- User Tool: an action a user can take, such as checking a status, uploading a document, sending a payment, etc.
+- The user cannot call a user tool unless prompted by the agent.
+- The agent cannot call a user tool, but can prompt the user to call it.
+
+Your task is as follows:
+1. Carefully read the policy.md and tools.jsonl and understand their usage.
+2. Check for inconsistencies:
+    - If there are references to tools in the policy that are not in the tools list.
+    - If there are tools in the tools list that are not referred to in the policy.
+    - If the description of the tool is consistent with its counterpart in the policy.
+    - If an agent tool or user tool is misclassified and inconsistent with the directions in the policy.
+3. Check for cohesion:
+    - Even if the policy and tools are consistent to each other, they must have synergy. If the contents of the tools and the policy may cause confusion for the automated agent, there is low cohesion and the policy / tools are not a good match for each other.
+4. Write your judgment between <judgment> </judgment> tags. Write 'true' if the policy.md and tools.jsonl is consistent and cohesive to each other, or 'false' if not.
+
+Make sure to deliberate deeply and provide resoning before providing a judgment.
+
+<policy.md>
+{policy}
+</policy.md>
+
+<agent_tools.jsonl>
+{agent_tools}
+</agent_tools.jsonl>
+
+<user_tools.jsonl>
+{user_tools}
+</user_tools.jsonl>
