@@ -61,7 +61,7 @@ uv pip install "\$ray_dependency"
 
 gym eval prepare --config $GYM_CONFIG
 
-gym eval start \
+gym env start \
     --config $GYM_CONFIG \
     ++dry_run=true \
     ++uv_venv_dir=/opt/uv_venvs
