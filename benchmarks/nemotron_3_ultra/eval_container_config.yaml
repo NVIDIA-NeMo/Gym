@@ -8,7 +8,7 @@ policy_base_url: dummy
 policy_api_key: dummy
 policy_model_name: dummy
 
-# The following secrets must be filled in via env.yaml
+# The following secrets must be filled in via env.yaml at runtime
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
