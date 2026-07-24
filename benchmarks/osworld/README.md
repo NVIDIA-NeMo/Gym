@@ -1,0 +1,552 @@
+# OSWorld Benchmark
+
+This package prepares and runs the
+[OSWorld](https://github.com/xlang-ai/OSWorld) desktop benchmark through NeMo
+Gym. It owns the task data, benchmark composition, runner/model overlays,
+asset preparation, launch recipes, and operational documentation.
+
+The reusable Responses API runtime lives in
+[`responses_api_agents/osworld_agent`](../../responses_api_agents/osworld_agent/README.md).
+That README is the source of truth for request/response semantics, supported
+runners, agent ownership, parser contracts, and runtime configuration. The
+runtime uses an unmodified, pinned OSWorld dependency. In the current deployment
+path, Gym Docker Sandbox owns the VM container lifecycle while OSWorld keeps
+its setup, action, and evaluator behavior intact.
+
+## Deployment roles
+
+The runtime has three explicit roles:
+
+```text
+MODEL_HOST  ←─ model HTTP ─  AGENT_CONTROL_HOST  ─ Docker SSH →  ENVIRONMENT_HOST
+                              prepare / control / eval           Docker / KVM / VM
+```
+
+- The model host serves a compatible vision-language model. It does not run
+  Gym eval or OSWorld VM containers.
+- The environment host needs Docker, `/dev/kvm`, and the verified qcow2. It
+  does not need the benchmark or agent checkout.
+- The agent/control host needs this Gym checkout, the task input, and the same
+  qcow2 path for preparation-time identity validation. It runs `prepare.py`,
+  `tools/start_control.sh`, and `tools/run_eval.sh`.
+
+For a local smoke test, the agent/control and environment roles may be the same
+machine and `DOCKER_HOST` remains unset. For split hosts, complete the one-time
+Docker SSH setup below. Start the model first, verify the environment second,
+then prepare and run Gym. Neither the operator workstation nor a persistent
+interactive SSH session is part of runtime communication.
+
+## Requirements
+
+- Linux x86_64 with Docker 20+ and access to the local Docker daemon.
+- 16 GB or more host RAM per concurrent rollout.
+- About 30 GB free disk for the Docker image and `Ubuntu.qcow2` cache.
+- A reachable vision-language model endpoint. Text-only models cannot act on
+  screenshot observations.
+- Read/write access to `/dev/kvm` for the Gym Docker Sandbox path.
+
+## Quickstart
+
+From the Gym repository root, first validate the two external role contracts.
+For a local environment host, run:
+
+```bash
+python3 benchmarks/osworld/tools/probe_model_endpoint.py \
+  --base-url https://your-vlm-endpoint/v1 \
+  --api-key your-key \
+  --model your-vlm-model \
+  --image-count 3
+
+bash benchmarks/osworld/tools/check_environment.sh \
+  /absolute/path/to/Ubuntu.qcow2
+```
+
+Then enter the benchmark directory and prepare the five-task default run. The
+Sandbox path requires the explicit, verified qcow2. Endpoint values can also
+be supplied through `POLICY_BASE_URL`, `POLICY_API_KEY`, and
+`POLICY_MODEL_NAME`:
+
+```bash
+cd benchmarks/osworld
+export POLICY_BASE_URL="https://your-vlm-endpoint/v1"
+export POLICY_API_KEY="your-key"  # pragma: allowlist secret
+export POLICY_MODEL_NAME="your-vlm-model"
+python3 prepare.py \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --force-env
+```
+
+Set a run ID, then keep the control wrapper active:
+
+```bash
+export OSWORLD_RUN_ID=my-osworld-run
+tools/start_control.sh /absolute/run/root
+```
+
+After the control log reports ready, run eval in a second terminal or
+supervisor:
+
+```bash
+tools/run_eval.sh /absolute/run/root
+```
+
+If normal termination fails and stale run-owned processes or containers block
+recovery, invoke the scoped cleanup fallback while preserving results:
+
+```bash
+tools/cleanup_run.sh /absolute/run/root
+```
+
+The wrappers write logs beneath the run root. `cleanup_run.sh` is never part of
+the normal successful path: it stops recorded processes and removes only that
+run's labeled Sandbox containers while preserving results. The exact scripts
+used by each role are summarized in [`tools/README.md`](tools/README.md).
+
+`prepare.py` validates the committed input and qcow2, records the disk identity,
+prefetches setup and evaluator files, and writes a private, gitignored
+`env.yaml` containing the config, agent, input, output, cache, and rollout
+settings. Hugging Face assets use the official client cache and `HF_TOKEN` when
+configured. It keeps an existing env file unless `--force-env` is supplied.
+Python component dependencies are installed by `gym env start` from the agent
+and model server project files.
+
+Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
+shared cache at server startup, then each rollout links only its task's
+read-only files into the OSWorld cache. Use `--skip-assets` only to retain
+OSWorld's upstream runtime-download behavior. A normal run connects directly;
+`OSWORLD_ASSET_PROXY_URL` is an optional fallback used only after an official
+Hugging Face download fails.
+
+Prepare and verify the VM image before the first run:
+
+```bash
+bash benchmarks/osworld/tools/prepare_osworld_vm.sh
+```
+
+The downloader resumes interrupted transfers and verifies the extracted VM by
+size and SHA-256. Pass the resulting qcow2 to `prepare.py --vm-path`. Override
+`VM_DIR`, `VM_URL`, `VM_SHA256`, or `VM_SIZE_BYTES` only when intentionally
+selecting another upstream image.
+
+## Model profiles
+
+Set `runner_name` in the agent config or pass an override to `gym env start`.
+See the [agent runtime README](../../responses_api_agents/osworld_agent/README.md#supported-runners)
+for the complete runner registry and prompt/action contracts. Prefer selecting
+the maintained model/agent composition with `prepare.py --profile`.
+
+### Pointer Agent with Opus 4.7
+
+The Pointer overlay preserves OSWorld's native
+`mm_agents.pointer.PointerAgent` planner, executor, verifier, and screenshot
+action loop. Point it at the Anthropic-compatible endpoint serving Opus 4.7:
+
+```bash
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile pointer \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url https://ANTHROPIC_COMPATIBLE_HOST/v1 \
+  --policy-model-name SERVED_OPUS_4_7_MODEL
+```
+
+Pointer's optional web tools require `PARALLEL_API_KEY`. Without that variable,
+the adapter explicitly disables those tools while retaining the desktop-agent
+loop. Set it when leaderboard-aligned web-tool behavior is required.
+
+This appends `benchmarks/osworld/configs/osworld_sandbox.yaml`, which pins the
+OSWorld image digest, requests KVM, publishes all four OSWorld service ports on
+dynamic loopback ports, and mounts the qcow2 read-only. Preparation fails before
+starting Gym if the VM file is missing; the adapter checks `/dev/kvm` again at
+Sandbox startup.
+
+### Nemotron 3 Nano Omni with vLLM
+
+Start the checkpoint through the deployment layer on a model host with enough
+GPU memory. After its OpenAI-compatible endpoint is reachable from the Gym
+host, prepare the benchmark with the Nano Omni profile:
+
+```bash
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL
+```
+
+Then use `tools/start_control.sh` and `tools/run_eval.sh` exactly as shown in
+the quickstart.
+
+The default overlay sends the current screenshot plus at most two historical
+screenshots and compacts older interactions into text. For an endpoint limited
+to one image per request, use the same class and set
+`agent_kwargs.max_image_history_length: 1`; no alternate agent class is
+required.
+
+Nano Omni history contains Thought and Action only; previously executed Code is
+not repeated. This prompt contract is implemented directly by the standard
+`NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
+extend `PYTHONPATH` with a reproduction overlay.
+
+## Multi-environment runs
+
+Set concurrency and data selection during preparation, then use the same two
+public runtime wrappers. `--concurrency` controls simultaneous `DesktopEnv`
+instances; the selected JSONL controls the task set.
+
+```bash
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input data/test_all.jsonl \
+  --output /absolute/path/to/results/rollouts.jsonl \
+  --concurrency 4 \
+  --force-env
+
+export OSWORLD_RUN_ID=my-osworld-run
+tools/start_control.sh /absolute/run/root
+# After control is ready, in a second terminal:
+tools/run_eval.sh /absolute/run/root
+```
+
+### Deterministic task sharding
+
+`prepare.py` owns task splitting. Use the same canonical input on every
+agent/control host and select one zero-based shard per host:
+
+```bash
+# Agent/control host A
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output /absolute/path/to/results/shard-0/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --force-env
+
+# Agent/control host B uses the same command with --shard-index 1 and its own
+# output directory.
+```
+
+Non-empty input rows are assigned by `row_index % num_shards`. This is stable,
+disjoint, exhaustive, preserves source order inside each shard, and spreads
+adjacent tasks across workers. Beside each generated shard JSONL, preparation
+writes a manifest containing the source SHA-256, total/shard task counts, task
+IDs, and their digest. The generated shard becomes both the rollout input and
+the asset-prefetch input; model and environment hosts never split tasks.
+
+Sharding is optional. Omitting both shard arguments is exactly the original
+single-worker behavior: `prepare.py` uses the input JSONL directly and does not
+create a shard file or manifest. Any positive shard count works; two is only
+the deployment example below.
+
+The repository includes ready-to-use example and small inputs under `data/`.
+Larger inputs passed with `--input` must use the same JSONL schema; no
+untracked conversion helper is part of the public workflow.
+
+### Split agent and OSWorld environment hosts
+
+The same Gym Docker provider can use a Docker daemon on another Linux host
+through Docker's standard SSH transport. The agent/control host still runs
+`prepare.py`, `start_control.sh`, and `run_eval.sh`; only the Sandbox container
+and QEMU/KVM guest run on the environment host.
+
+#### One-time host preparation
+
+This is infrastructure setup, not part of every benchmark run:
+
+1. Install Docker, make `/dev/kvm` read/write, and put the verified qcow2 at
+   the same absolute path on the agent and environment hosts.
+2. Provision non-interactive SSH from the agent host to
+   `REMOTE_USER@ENV_HOST_REACHABLE_IP`. A dedicated, non-default key is
+   recommended.
+3. From the agent host, run the checked-in environment check, then verify the
+   Docker SSH transport:
+
+```bash
+bash tools/check_environment.sh \
+  --ssh REMOTE_USER@ENV_HOST_REACHABLE_IP \
+  /same/absolute/path/on/both/hosts/Ubuntu.qcow2
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP
+DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP docker info
+```
+
+Provisioning may be performed by the cluster administrator. It is complete
+once the command above succeeds; no persistent interactive SSH session is
+needed.
+
+#### Every run
+
+After the one-time preparation, the public run path remains three commands.
+On each agent/control host, export its corresponding environment IP and model
+endpoint, then run:
+
+```bash
+cd /absolute/path/to/Gym/benchmarks/osworld
+
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_REACHABLE_IP
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_REACHABLE_IP
+export OSWORLD_RUN_ID=my-shard-0
+export NEMO_GYM_CONTROL_HOST=AGENT_HOST_REACHABLE_IP
+export GYM_BIN=/absolute/path/to/Gym/.venv/bin/gym
+
+python3 tools/probe_model_endpoint.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model SERVED_NANO_OMNI_MODEL \
+  --image-count 3
+
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /same/absolute/path/on/both/hosts/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output /absolute/run/root/results/my-shard-0/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --force-env
+
+tools/start_control.sh /absolute/run/root
+# After control is ready, launch this in the run's second supervisor:
+tools/run_eval.sh /absolute/run/root
+```
+
+The Sandbox config binds dynamically selected OSWorld ports to
+`OSWORLD_SANDBOX_PUBLISH_HOST`, so the agent receives direct plain-HTTP
+endpoints on the environment host. Keep `DOCKER_HOST` exported when invoking
+`tools/cleanup_run.sh`; its three-label filter then removes only this run's
+remote OSWorld containers. No manually maintained interactive SSH session is
+required: the Docker CLI opens its SSH transport as needed, while Gym owns all
+container operations.
+
+## Configuration
+
+`benchmarks/osworld/config.yaml` is the single default benchmark config. It
+chains the base `responses_api_agents/osworld_agent/configs/osworld_agent.yaml`
+runtime with the generic OpenAI-compatible model transport. Advanced model and
+runner overlays remain under `benchmarks/osworld/configs/` and should be listed
+after the base config so their values win.
+
+The [agent configuration reference](../../responses_api_agents/osworld_agent/README.md#configuration)
+documents the shared environment, runner, timeout, cache, proxy, evaluation,
+and sampling fields. Per-task `responses_create_params` override YAML sampling
+defaults, and explicit CLI overrides have the highest priority.
+
+The Nano Omni overlay uses the tested three-image window, a 4096-token response
+limit, a five-second post-action wait, and parser retries. Optional parser-error
+feedback, repeated-action guidance, and a pre-DONE checklist are available in
+`agent_kwargs` without requiring another agent class.
+
+Its `temperature=0.6` and `top_p=0.95` values follow NVIDIA's thinking-mode
+recommendation in the
+[checkpoint model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/blob/24e67ea000b7c2837fc8f9488aa2008524fac8ba/README.md#model-parameters).
+The 4096-token output limit is the tested OSWorld agent setting rather than the
+model card's longer general-purpose reasoning budget; these values are
+model-specific and do not change defaults for other runners.
+
+### Proxy-required tasks
+
+Proxy policy belongs to the Gym `feature/osworld` adapter; VM setup belongs to
+the pinned OSWorld `nv-gym` runtime. The branch names are independent Git refs
+in different repositories. Gym connects them only through the immutable
+OSWorld commit in `pyproject.toml`. That OSWorld commit merges upstream main
+`83e85344` and retains the `nv-gym` integration overlay.
+
+#### OSWorld version selection
+
+| Consumer workflow | Required OSWorld version |
+| --- | --- |
+| Gym `feature/osworld` | No manual checkout. The agent package installs the exact SHA from `pyproject.toml`. |
+| Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `31b76bf1c4d4e589238b314caa91470afc52651e` or a documented successor. |
+| Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
+| Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
+
+For a direct integration of the tested version:
+
+```bash
+git clone https://github.com/JeffPengCoder/OSWorld.git
+cd OSWorld
+git checkout 31b76bf1c4d4e589238b314caa91470afc52651e
+```
+
+Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
+branch is the integration line that follows upstream main, but its tip can
+move as new upstream changes are merged.
+
+This pinned revision also prevents OSWorld's Chrome setup DEBUG logging from
+serializing the complete worker environment into task artifacts. Model and
+proxy credentials must remain runtime secrets and are never useful setup
+diagnostics.
+
+It also guards dynamic `tinyproxy` installation against PackageKit holding
+APT locks after VM boot. PackageKit is stopped and runtime-masked only during
+the install, then restored to its prior state; no custom VM image is required.
+
+The adapter defaults to proxy disabled. Set both variables only for a run that
+is allowed to use a proxy:
+
+```bash
+export OSWORLD_ENABLE_PROXY=1
+export PROXY_CONFIG_FILE=/run/secrets/osworld-proxy.json
+gym env start
+```
+
+The JSON file is local runtime configuration, not a repository asset. It is a
+non-empty list of HTTP upstreams. Each entry requires `host` and `port`; omit
+both `username` and `password` for an unauthenticated proxy, or provide both
+for an authenticated proxy. No cluster-specific hostname is hard-coded.
+
+| Task `proxy` | Global switch | Config | Result |
+| --- | --- | --- | --- |
+| `false` | `0` | absent | Normal direct-network task |
+| `false` | `1` | valid | Normal task; no VM proxy is installed for this task |
+| `true` | `0` | any | Masked infrastructure result: `proxy_required_but_disabled` |
+| `true` | `1` | valid | OSWorld installs/uses the VM-local proxy |
+| `true` | `1` | absent or invalid | Masked infrastructure result: `proxy_configuration_error` |
+
+An exception while the proxy-marked task is resetting is reported as
+`proxy_setup_error`, also with `mask_sample=true`. These cases are never
+silently counted as formal reward-zero samples. Successful result metadata
+records whether proxy was required, enabled, and configured, but never stores
+credentials.
+
+The OSWorld agent accepts explicit boolean values for `OSWORLD_ENABLE_PROXY`
+and validates the config before starting work. OSWorld loads the file lazily
+only for `proxy: true` tasks, uses the upstream for APT with bounded retry, and
+launches Chrome through the loopback-only `127.0.0.1:18888` tinyproxy endpoint.
+
+Task setup commands may optionally declare `expected_returncodes` and
+`on_nonzero: score_zero`. These fields express evaluator/setup semantics rather
+than model behavior: an allowed return code continues normally, while
+`score_zero` records a valid evaluator score of zero instead of masking the
+rollout as a harness failure. Tasks that omit both fields continue through the
+pinned upstream setup implementation unchanged.
+
+The Docker port-allocation lock wait is configurable because concurrent VM
+startup can legitimately take longer than the pinned upstream default. Raising
+the wait changes only infrastructure failure handling; it does not change
+observations, actions, prompts, or evaluator scoring.
+
+### Pre-staged task files
+
+The default `prepare.py` flow writes task setup inputs, evaluator cloud files,
+and evaluator postconfig downloads to `benchmarks/osworld/.cache/setup` and
+records that absolute path in `env.yaml`. Existing externally prepared caches
+remain supported by setting one of `OSWORLD_SETUP_CACHE_DIR`, `OW_SETUP_CACHE_DIR`,
+`SPREADSHEETBENCH_SETUP_CACHE_DIR`, or `PPTC_SETUP_CACHE_DIR`; matching files
+are linked into the per-task cache before `env.reset()`.
+
+The pre-staged cache may be empty. Missing task files follow OSWorld's normal
+download path and are cached on demand; prewarming affects speed and resilience
+to transient download failures, not task semantics.
+
+### Binary and raw OSWorld metrics
+
+OSWorld aggregate metrics report both `osworld/binary_success_rate` and
+`osworld/raw_reward_rate`. Binary success counts only evaluator scores of 1.0;
+raw reward preserves fractional evaluator credit. Both rates use the same
+completed-rollout denominator and are reported regardless of `reward_mode`,
+which continues to control the training reward returned by each rollout.
+
+## Logs and artifacts
+
+Set `OSWORLD_TASK_ARTIFACT_ROOT` before `gym env start` to enable per-task
+artifacts. Every rollout then receives a collision-safe
+`${domain}/${task_id}` directory with:
+
+- `worker.log` and `runtime.log`;
+- `traj.jsonl` with task/run identity, observation hashes, model/action steps,
+  agent terminal status, evaluator stage, and compact result-file metadata;
+- `step_000.png`, `step_001.png`, and subsequent VM observations;
+- `vm-exec.jsonl` with controller commands and VM responses;
+- `task.json`, `run.json`, `result.json`, and `manifest.json`.
+
+The directory is returned as `verifier_metadata.osworld_artifact_dir`. Leave
+`OSWORLD_TASK_ARTIFACT_ROOT` unset to disable these files.
+
+### Full model I/O
+
+For a focused diagnostic run, opt in to exact agent and transport payloads
+before starting the canonical Gym control process:
+
+```bash
+export OSWORLD_MODEL_IO_LOG="$PWD/results/omni-diagnostic/model-io-agent.jsonl"
+export NEMO_GYM_VLLM_TRANSPORT_LOG="$PWD/results/omni-diagnostic/model-io-transport.jsonl"
+gym env start
+```
+
+This adds `model-io-agent.jsonl` and `model-io-transport.jsonl`. The agent log
+includes direct Anthropic Messages calls made by Pointer as well as Gym-routed
+calls; credential fields are redacted while model-body content is retained.
+Parser events also state whether retry feedback, the pre-DONE checklist, or
+repeated-action recovery was injected. Requests may
+contain embedded screenshots and prompt content, so these logs can be large
+and sensitive. They are disabled by default.
+
+The paths can be set independently with `OSWORLD_MODEL_IO_LOG`,
+`NEMO_GYM_VLLM_TRANSPORT_LOG`, and `OSWORLD_VM_EXEC_LOG`.
+
+## Video recording
+
+Set `OSWORLD_RECORD_VIDEO_DIR` before `gym env start`. To select only specific
+tasks, also set `OSWORLD_RECORD_VIDEO_TASK_IDS_FILE`. Recording is best-effort
+and does not fail the rollout if the VM cannot produce an mp4.
+
+Schema-v2 events carry `run_id`, `adapter`, `task_id`, `domain`,
+`task_attempt`, logical `step`, and `parse_attempt` in addition to the event,
+call, timestamp, and process identifiers. The agent passes that identity to
+the transport logger in HTTP headers; it is not inserted into the model JSON
+body. Embedded image data remains in the full request; a separate image index
+records encoded/decoded sizes and SHA-256 values for integrity checks. These
+files can be large and can contain screenshots or prompt content, so keep the
+option disabled for normal runs and apply the same access controls as the
+source task data.
+
+## Datasets
+
+The repository includes:
+
+- `data/example.jsonl`: five representative smoke tasks;
+- `data/example_rollouts.jsonl`: five sample rollout responses;
+- `data/test_small.jsonl`: the 39-task OSWorld smoke subset.
+
+Additional inputs may be supplied with `prepare.py --input`; each JSONL row
+must follow the same `verifier_metadata.osworld_task` contract as the committed
+examples. Generated full datasets are intentionally not committed.
+
+## Troubleshooting
+
+### `uv` is missing inside `gym env start`
+
+`gym env start` starts component servers in non-interactive shells. If `uv` is only
+on an interactive-shell path, expose it on the system path:
+
+```bash
+sudo ln -sf "$(command -v uv)" /usr/local/bin/uv
+sudo ln -sf "$(command -v uvx)" /usr/local/bin/uvx
+```
+
+### The first screenshot times out
+
+The VM image may still be downloading or the guest may still be booting. Check
+the task `worker.log`, pre-stage `Ubuntu.qcow2`, and increase `task_timeout`
+for slow software-emulated hosts.
+
+### aarch64 hosts
+
+The default `happysixd/osworld-docker` image is x86_64-only. Use an x86_64
+rollout host or provide a compatible OSWorld image and provider configuration.
+
+## Licensing
+
+- Adapter code: Apache-2.0.
+- OSWorld tasks and dependency: see the upstream OSWorld repository.

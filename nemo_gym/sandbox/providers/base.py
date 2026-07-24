@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 class SandboxStatus(str, Enum):
@@ -29,6 +30,35 @@ class SandboxStatus(str, Enum):
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class SandboxEndpoint:
+    """Provider-neutral route to a long-lived service inside a sandbox.
+
+    ``endpoint`` is an absolute URL. ``headers`` carries provider-required
+    authentication or routing headers without exposing the provider's opaque
+    handle to callers.
+    """
+
+    endpoint: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        endpoint = self.endpoint.strip()
+        parsed = urlsplit(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        if not isinstance(self.headers, Mapping):
+            raise TypeError("Sandbox endpoint headers must be a mapping")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(
+            self,
+            "headers",
+            {str(key): str(value) for key, value in self.headers.items()},
+        )
 
 
 @dataclass(frozen=True)
@@ -73,11 +103,30 @@ class SandboxSpec:
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
     provider_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.ports, (list, tuple)):
+            raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
+        normalized_ports: list[int] = []
+        for raw_port in self.ports:
+            if isinstance(raw_port, bool):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            if not isinstance(raw_port, (int, str)):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}") from exc
+            if port < 1 or port > 65535:
+                raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
+            if port in normalized_ports:
+                raise ValueError(f"Duplicate sandbox TCP port: {port}")
+            normalized_ports.append(port)
+        object.__setattr__(self, "ports", tuple(normalized_ports))
 
 
 @dataclass
@@ -159,6 +208,14 @@ class SandboxProvider(Protocol):
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current sandbox lifecycle status."""
+        ...
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint.
+
+        Providers without service networking may omit this optional capability;
+        the public API raises ``NotImplementedError`` in that case.
+        """
         ...
 
     async def close(self, handle: SandboxHandle) -> None:

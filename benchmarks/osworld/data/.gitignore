@@ -1,0 +1,13 @@
+*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+test_all.jsonl
+test_infeasible.jsonl
+test_nogdrive.jsonl
+
+# These small, committed fixtures move with the OSWorld benchmark.
+!example.jsonl
+!example_rollouts.jsonl
+!test_small.jsonl

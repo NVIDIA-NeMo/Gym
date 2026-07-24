@@ -57,9 +57,20 @@ def _contains_seq(haystack: list[str], needle: list[str]) -> bool:
 
 
 def _make_handle(
-    *, name: str = "nemo-gym-x", image: str = "img", shell: str = "sh", env: dict[str, str] | None = None
+    *,
+    name: str = "nemo-gym-x",
+    image: str = "img",
+    shell: str = "sh",
+    env: dict[str, str] | None = None,
+    published_ports: tuple[int, ...] = (),
 ) -> SandboxHandle:
-    inst = docker_provider._DockerContainer(name=name, image=image, shell=shell, env=env or {})
+    inst = docker_provider._DockerContainer(
+        name=name,
+        image=image,
+        shell=shell,
+        env=env or {},
+        published_ports=published_ports,
+    )
     return SandboxHandle(sandbox_id=name, provider_name="docker", raw=inst)
 
 
@@ -109,6 +120,8 @@ def test_config_validation() -> None:
         docker_provider.DockerCreateConfig(start_timeout_s=0)
     with pytest.raises(ValueError, match="pids_limit"):
         docker_provider.DockerCreateConfig(pids_limit=0)
+    with pytest.raises(ValueError, match="publish_host"):
+        docker_provider.DockerCreateConfig(publish_host="localhost")
     with pytest.raises(ValueError, match="default_timeout_s"):
         docker_provider.DockerExecConfig(default_timeout_s=-1)
     with pytest.raises(ValueError, match="concurrency"):
@@ -146,6 +159,13 @@ def test_normalize_image() -> None:
     assert normalize("ubuntu:22.04") == "ubuntu:22.04"
     assert normalize("docker://ubuntu:22.04") == "ubuntu:22.04"
     assert normalize("ghcr.io/org/img:tag") == "ghcr.io/org/img:tag"
+
+
+def test_port_binding_helpers() -> None:
+    assert docker_provider._publish_arg("127.0.0.1", 5000) == "127.0.0.1::5000/tcp"
+    assert docker_provider._publish_arg("::1", 5000) == "[::1]::5000/tcp"
+    assert docker_provider._parse_port_binding("127.0.0.1:49153") == ("127.0.0.1", 49153)
+    assert docker_provider._parse_port_binding("[::1]:49154") == ("::1", 49154)
 
 
 def test_to_sandbox_status() -> None:
@@ -213,6 +233,7 @@ async def test_create_builds_argv_and_runs_probe(fake_binary: str, monkeypatch: 
         workdir="/sandbox",
         env={"FOO": "bar"},
         resources={"cpu": 2, "memory_mib": 1024, "gpu": 1},
+        ports=[5000, 9222],
     )
     handle = await provider.create(spec)
 
@@ -220,6 +241,7 @@ async def test_create_builds_argv_and_runs_probe(fake_binary: str, monkeypatch: 
     assert handle.sandbox_id.startswith(docker_provider.CONTAINER_NAME_PREFIX)
     assert handle.raw.image == "ubuntu:22.04"
     assert handle.raw.env == {"FOO": "bar"}
+    assert handle.raw.published_ports == (5000, 9222)
 
     run_argv = rec.calls[0]["argv"]
     assert run_argv[:4] == [FAKE_BINARY, "run", "-d", "--name"]
@@ -232,6 +254,8 @@ async def test_create_builds_argv_and_runs_probe(fake_binary: str, monkeypatch: 
     assert _contains_seq(run_argv, ["--cpus", "2.0"])
     assert _contains_seq(run_argv, ["--memory", "1024m"])
     assert _contains_seq(run_argv, ["--gpus", "1"])
+    assert _contains_seq(run_argv, ["--publish", "127.0.0.1::5000/tcp"])
+    assert _contains_seq(run_argv, ["--publish", "127.0.0.1::9222/tcp"])
     assert run_argv[-5:] == ["--entrypoint", "/bin/sh", "ubuntu:22.04", "-c", docker_provider.DEFAULT_KEEPALIVE_CMD]
 
     probe_argv = rec.calls[1]["argv"]
@@ -656,6 +680,25 @@ async def test_status_timeout_is_unknown(fake_binary: str, monkeypatch: pytest.M
 
     provider, _rec = _make_provider(monkeypatch, responder)
     assert await provider.status(_make_handle()) is SandboxStatus.UNKNOWN
+
+
+async def test_endpoint_resolves_declared_dynamic_port(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, "127.0.0.1:49153\n", ""),
+    )
+    resolved = await provider.endpoint(_make_handle(published_ports=(5000,)), 5000)
+    assert resolved.endpoint == "http://127.0.0.1:49153"
+    assert resolved.headers == {}
+    assert rec.calls[0]["argv"] == [FAKE_BINARY, "port", "nemo-gym-x", "5000/tcp"]
+
+
+async def test_endpoint_rejects_undeclared_or_missing_port(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    with pytest.raises(ValueError, match="was not declared"):
+        await provider.endpoint(_make_handle(), 5000)
+    with pytest.raises(RuntimeError, match="no host binding"):
+        await provider.endpoint(_make_handle(published_ports=(5000,)), 5000)
 
 
 # --------------------------------------------------------------------------- #

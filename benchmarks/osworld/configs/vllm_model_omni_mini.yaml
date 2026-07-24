@@ -1,0 +1,32 @@
+# External vLLM transport for Nemotron 3 Nano Omni ("Omni Mini").
+#
+# vLLM is intentionally managed outside `gym env start` so the model process can
+# survive Gym/Ray/OSWorld restarts. The generic policy_* values are written by
+# prepare.py and may themselves default from environment variables.
+policy_base_url: ${oc.env:OMNI_MINI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+policy_api_key: ${oc.env:OMNI_MINI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
+policy_model_name: ${oc.env:OMNI_MINI_VLLM_MODEL,nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}  # pragma: allowlist secret
+      model: ${policy_model_name}
+      return_token_id_information: false
+      # The vLLM server must be started with --reasoning-parser nemotron_v3.
+      # Gym converts its separate reasoning field back into <think>...</think>
+      # so the adapter-owned agent sees the same contract as the hosted API.
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # Historical assistant turns must retain <think>...</think> inside
+      # content rather than being split into reasoning fields.
+      preserve_reasoning_in_assistant_content: true
+      replace_developer_role_with_system: false
+      sequential_reasoning_allowed: true
+      is_responses_native: false
+      # The checkpoint's bundled template enables thinking by default.
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

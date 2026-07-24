@@ -1,0 +1,61 @@
+# OSWorld VM lifecycle through NeMo Gym's local Docker Sandbox provider.
+#
+# DesktopEnv, controllers, setup, actions, and evaluators remain owned by the
+# pinned OSWorld package. Gym Sandbox owns the KVM container, dynamic service
+# ports, health/status, and cleanup. The qcow2 path is mounted read-only by the
+# OSWorld-to-Sandbox adapter at runtime.
+
+osworld_sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+    workload: osworld
+  docker:
+    create:
+      # The OSWorld image already starts with tini; avoid wrapping it in a
+      # second Docker --init process when Sandbox preserves that entrypoint.
+      use_init: false
+      start_timeout_s: 600
+      apply_resource_limits: true
+      # Keep loopback for the normal single-host path.  When DOCKER_HOST
+      # targets a remote OSWorld worker, set this to that worker's
+      # caller-reachable IP so the agent can use Docker's dynamic ports.
+      publish_host: ${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+      exec_shell: /bin/bash
+    probe:
+      command: printf osworld-sandbox-container-ready
+      expected_stdout: osworld-sandbox-container-ready
+      timeout_s: 30
+      deadline_s: 120
+      stable_count: 1
+
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      resources_server: null
+      provider_name: docker
+      container_image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
+      env_class_path: responses_api_agents.osworld_agent.sandbox_desktop_env.SandboxDesktopEnv
+      sandbox_provider: osworld_sandbox
+      vm_path: ${oc.env:OSWORLD_VM_PATH,${oc.env:OSWORLD_SANDBOX_VM_PATH,""}}
+      sandbox_vm_path: null
+      sandbox_require_kvm: true
+      sandbox_ready_timeout_s: 600.0
+      sandbox_ready_poll_s: 2.0
+      sandbox_spec:
+        image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
+        ready_timeout_s: 120
+        entrypoint:
+          - /usr/bin/tini
+          - -s
+          - /run/entry.sh
+        env:
+          DISK_SIZE: 32G
+          RAM_SIZE: 4G
+          CPU_CORES: "4"
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 40

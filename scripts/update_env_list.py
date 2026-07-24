@@ -32,6 +32,7 @@ README_PATH = Path("README.md")
 
 RESOURCES_SERVERS_FOLDER = Path("resources_servers")
 RESPONSES_API_AGENTS_FOLDER = Path("responses_api_agents")
+BENCHMARKS_FOLDER = Path("benchmarks")
 
 
 @dataclass
@@ -224,6 +225,37 @@ def extract_config_metadata(yaml_path: Path, from_agent: bool = False) -> Config
     return ConfigMetadata.from_yaml_data(resource_data, agent_data)
 
 
+def extract_benchmark_metadata(yaml_path: Path) -> tuple[ConfigMetadata, str]:  # pragma: no cover
+    """Combine benchmark-owned datasets with metadata from its referenced agent config."""
+    with yaml_path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    agent_data = visit_agent_datasets(data)
+    resource_data = visit_agent_server(data)
+    display_name = yaml_path.parent.name.replace("_", " ").title()
+
+    for config_path in data.get("config_paths", []):
+        referenced_path = Path(config_path)
+        if not referenced_path.is_file() or "responses_api_agents" not in referenced_path.parts:
+            continue
+        with referenced_path.open() as f:
+            referenced_data = yaml.safe_load(f) or {}
+        referenced_resource = visit_agent_server(referenced_data)
+        if any(
+            (
+                referenced_resource.domain,
+                referenced_resource.description,
+                referenced_resource.value,
+            )
+        ):
+            resource_data = referenced_resource
+            agent_index = referenced_path.parts.index("responses_api_agents") + 1
+            display_name = referenced_path.parts[agent_index].replace("_", " ").title()
+            break
+
+    return ConfigMetadata.from_yaml_data(resource_data, agent_data), display_name
+
+
 def get_training_server_info() -> list[ServerInfo]:  # pragma: no cover
     """Collect training-ready server metadata (skips example_* servers)."""
     training_servers = []
@@ -273,6 +305,33 @@ def get_training_server_info() -> list[ServerInfo]:  # pragma: no cover
                         base_folder=base_folder.name,
                     )
                 )
+
+    if BENCHMARKS_FOLDER.exists():
+        for benchmark_dir in BENCHMARKS_FOLDER.iterdir():
+            if not benchmark_dir.is_dir() or benchmark_dir.name.startswith("example_"):
+                continue
+
+            yaml_file = benchmark_dir / "config.yaml"
+            if not yaml_file.is_file():
+                continue
+
+            yaml_data, display_name = extract_benchmark_metadata(yaml_file)
+            if not {"train", "validation"}.intersection(yaml_data.types):
+                continue
+
+            server_name = benchmark_dir.name
+            training_servers.append(
+                ServerInfo(
+                    name=server_name,
+                    display_name=display_name,
+                    config_metadata=yaml_data,
+                    config_path=f"benchmarks/{server_name}/config.yaml",
+                    config_filename="config.yaml",
+                    readme_path=f"benchmarks/{server_name}/README.md",
+                    yaml_file=yaml_file,
+                    base_folder=BENCHMARKS_FOLDER.name,
+                )
+            )
 
     return training_servers
 

@@ -1,0 +1,53 @@
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Real desktop-computer tasks driven by the OSWorld harness (DesktopEnv + inline evaluator).
+      value: Improve agentic computer-use capabilities (GUI navigation, multi-app workflows, OS-level operations).
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server: null       # set to {type: resources_servers, name: osworld} for remote_docker
+      concurrency: 4
+      provider_name: docker
+      container_image: docker://happysixd/osworld-docker:latest
+      sandbox_provider: null      # named nemo_gym.sandbox config; when set, Sandbox owns VM container lifecycle
+      sandbox_spec: {}            # provider-neutral SandboxSpec; image defaults to container_image when omitted
+      vm_path: null               # optional absolute qcow2 path shared by native Docker and Gym Sandbox backends
+      sandbox_vm_path: null       # deprecated compatibility alias for vm_path
+      sandbox_require_kvm: true
+      sandbox_ready_timeout_s: 600.0
+      sandbox_ready_poll_s: 2.0
+      headless: true
+      screen_width: 1920
+      screen_height: 1080
+      require_a11y_tree: false    # a11y_tree gives precise UI coords from OS AT-SPI — info a human user wouldn't have. Set false for pure-VLM evaluation (matches OSWorld paper's vision-only baseline + OpenAI/Anthropic computer-use benchmarks). Set true if you want max accuracy on small-UI clicks at the cost of much larger prompts (one a11y dump can be 100s of KB of XML, which blows the context window quickly with max_trajectory_length>1).
+      client_password: password  # pragma: allowlist secret
+      enable_proxy: false        # global opt-in; only tasks with proxy: true use it
+      proxy_config_file: null    # local JSON path; PROXY_CONFIG_FILE overrides this value
+      resources_server_token_env: OSWORLD_RESOURCES_TOKEN
+      resources_request_timeout: 900.0
+      resources_connect_timeout: 10.0
+      resources_request_retries: 3
+      max_steps: 15
+      max_trajectory_length: 3
+      sleep_after_execution: 10.0   # Generous post-action wait. pyautogui clicks actuate immediately but page nav/render can take 5-8s under software emulation (TCG) — 1.5s catches mid-render screenshots that look "unchanged" and trigger broken-record re-clicks. Under KVM (hardware-accelerated qemu) 0.5-1.5s usually suffices.
+      cache_dir: cache
+      setup_cache_dir: null       # prepare.py writes an absolute shared asset cache path into env.yaml
+      asset_input_jsonl: null     # prepare.py sets this so ng_run can idempotently fill missing assets
+      max_tokens: 1500
+      temperature: 1.0
+      top_p: null  # null = skip the top_p kwarg entirely (some reasoning models reject it with HTTP 400). Set to e.g. 0.9 for permissive models that accept it.
+      runner_name: gym_pyautogui  # gym_pyautogui preserves the current Gym-built prompt path. Use prompt_agent for OSWorld's native PromptAgent default (screenshot_a11y_tree + computer_13), or explicit prompt_agent_* names for specific observation/action combinations.
+      action_space: null          # null = runner default. Override to pyautogui/computer_13 for compatible runners.
+      observation_type: null      # null = runner default. Override to screenshot/a11y_tree/screenshot_a11y_tree/som for compatible runners.
+      env_class_path: null        # null = runner default DesktopEnv. Custom runners can point at an OSWorld custom env class.
+      agent_class_path: null      # null = runner default agent class.
+      agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
+      mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
+      step_timeout: 60          # per-action subprocess timeout
+      task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
+      docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
+      evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
+      reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention

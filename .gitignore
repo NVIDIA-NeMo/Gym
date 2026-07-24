@@ -144,11 +144,18 @@ celerybeat.pid
 # Environments
 .env
 .venv
+env.yaml
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+docker_vm_data/
+
+# OSWorld machine-local experiment overlays, notes, and cluster helpers.
+benchmarks/osworld/configs/local/
+benchmarks/osworld/docs/local/
+benchmarks/osworld/tools/local/
 
 # VSCode project settings
 .vscode/
@@ -237,6 +244,29 @@ env.yaml
 
 # Backup files
 *.backup
+
+# Local-only OSWorld launchers retained for developer experiments. The public
+# path is prepare.py -> gym env start -> gym eval run --no-serve.
+/benchmarks/osworld/tools/launch_omni_mini_vllm.sh
+/benchmarks/osworld/tools/preflight_osworld_run.py
+/benchmarks/osworld/tools/probe_omni_mini_vllm.py
+/benchmarks/osworld/tools/run_m3_multienv.sh
+/benchmarks/osworld/tools/run_multienv_osworld_agent.sh
+/benchmarks/osworld/tools/run_native_prompt_agent_smoke.sh
+/benchmarks/osworld/tools/run_omni_mini_vllm.sh
+/benchmarks/osworld/tools/bringup_local_host.sh
+/benchmarks/osworld/tools/check_host_prerequisites.sh
+/benchmarks/osworld/tools/check_task_input_parity.py
+/benchmarks/osworld/tools/convert_osworld_tasks.py
+/benchmarks/osworld/tests/test_task_input_parity.py
+
+# Local-only OSWorld profile experiments. Public preparation supports Pointer,
+# Nano Omni, Gym Docker Sandbox, and the pinned native comparison.
+/benchmarks/osworld/configs/decoupled_omni_mini.yaml
+/benchmarks/osworld/configs/osworld_agent_m3.yaml
+/benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml
+/benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml
+/benchmarks/osworld/configs/osworld_remote_docker.yaml
 
 # Claude Code agent runtime artifacts
 **/.claude_node/
