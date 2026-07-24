@@ -464,6 +464,8 @@ def extract_claude_code_observations(
     invocations_by_id: dict[str, AgentInvocation] = {}
     for invocation_id in all_invocation_ids:
         parent = parent_by_invocation.get(invocation_id)
+        if parent is None:
+            gaps.append(_gap("invocation_outcome_unavailable", invocation_id=invocation_id))
         invocations_by_id[invocation_id] = AgentInvocation(
             invocation_id=invocation_id,
             parent_invocation_id=parent[0] if parent else None,
