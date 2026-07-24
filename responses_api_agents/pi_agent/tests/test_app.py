@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -272,7 +273,10 @@ class TestRolloutObservability:
         assert compaction.after_model_call is not None
         assert compaction.before_model_call.response_id == "resp-upstream-1"
         assert compaction.after_model_call.response_id == "resp-upstream-2"
-        assert {gap.code for gap in bundle.gaps} == {"subagent_hierarchy_unavailable"}
+        assert {gap.code for gap in bundle.gaps} == {
+            "invocation_outcome_unavailable",
+            "subagent_hierarchy_unavailable",
+        }
 
     def test_compaction_outcome_uses_native_status(self) -> None:
         events = [
@@ -298,6 +302,32 @@ class TestRolloutObservability:
 
         assert [item.outcome for item in compactions] == ["aborted", "failed"]
 
+    @pytest.mark.parametrize(
+        ("stop_reason", "expected"),
+        [
+            ("stop", "completed"),
+            ("error", "failed"),
+            ("aborted", "incomplete"),
+            ("length", "incomplete"),
+            (None, "unknown"),
+            ("toolUse", "unknown"),
+        ],
+    )
+    def test_agent_end_sets_invocation_status(self, stop_reason, expected) -> None:
+        message = {"role": "assistant"}
+        if stop_reason is not None:
+            message["stopReason"] = stop_reason
+        bundle = _build_pi_observations(
+            [(1.0, {"type": "agent_end", "messages": [message]})],
+            "rollout-1",
+            None,
+            [],
+        )
+
+        [invocation] = _records(bundle, AgentInvocation)
+        assert invocation.status == expected
+        assert any(gap.code == "invocation_outcome_unavailable" for gap in bundle.gaps) is (expected == "unknown")
+
     def test_compaction_join_does_not_skip_unjoinable_model_call(self) -> None:
         model_ref = ModelServerRef(type="responses_api_models", name="policy")
         events = [
@@ -322,6 +352,7 @@ class TestRolloutObservability:
         bundle = _build_pi_observations([], "rollout-1", None, items)
 
         assert {gap.code for gap in bundle.gaps} == {
+            "invocation_outcome_unavailable",
             "model_call_ownership_unavailable",
             "subagent_hierarchy_unavailable",
             "tool_timing_unavailable",
@@ -353,6 +384,7 @@ class TestRolloutObservability:
             *items,
         ]
         assert invocation.model_calls[0].response_id == "resp-upstream-1"
+        assert "no_sandbox_runtime" in {gap.code for gap in episode.observations.gaps}
 
     def test_padding_is_not_reported_as_agent_evidence(self) -> None:
         agent = _make_agent()
