@@ -39,4 +39,5 @@ sbatch \
     --time=04:00:00 \
     --job-name=vllm-$USER \
     --exclusive \
+    --switches=1 \
     scripts/sbatch_base.sh bash -lc "$command"
