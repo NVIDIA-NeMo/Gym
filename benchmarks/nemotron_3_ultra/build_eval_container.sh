@@ -63,11 +63,12 @@ gym eval prepare --config $GYM_CONFIG
 
 gym eval run \
     --config $GYM_CONFIG \
-    +dry_run=true \
+    --no-serve \
+    ++dry_run=true \
+    ++uv_venv_dir=/opt/uv_venvs \
     ++output_jsonl_fpath=dummy.jsonl \
     ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
-    ++uv_venv_dir=/opt/uv_venvs
+    ++split=benchmark
 
 echo ">>> Inner build complete. Container will now be packed into sqsh."
 INNER_BUILD
