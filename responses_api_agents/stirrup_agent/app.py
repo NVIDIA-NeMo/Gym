@@ -1034,19 +1034,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
-    # -- helpers ----------------------------------------------------------
-
-    def _get_model_base_url(self, rollout_id: Optional[str] = None) -> str:
-        from nemo_gym.global_config import get_first_server_config_dict
-        from nemo_gym.server_utils import ServerClient, apply_rollout_prefix
-
-        global_config_dict = ServerClient.load_from_global_config().global_config_dict
-        model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
-        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
-        # apply_rollout_prefix adds the /ng-rollout/<id> capture prefix when a rollout id is supplied
-        # (observability enabled); otherwise it returns the plain host:port URL unchanged.
-        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
-
     # -- /v1/responses ----------------------------------------------------
 
     async def responses(
@@ -1055,7 +1042,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         task_info = self.task_strategy.extract_task_info(body.metadata)
 
         # run() derives rollout_id from the row's task/rollout indices and passes it here.
-        model_base_url = self._get_model_base_url(rollout_id)
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
         if self.config.task == "gdpval":
             system_prompt = None
