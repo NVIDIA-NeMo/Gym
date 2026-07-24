@@ -8,7 +8,8 @@
 # SBATCH_PARTITION=batch \
 # CONTAINER=/path/to/vllm/container \
 # MOUNTS=/shared/fs:/shared/fs \
-# bash scripts/sbatch_eval_with_external_vllm.sh
+# bash scripts/sbatch_eval_with_external_vllm.sh \
+# --config benchmarks/my-benchmark/config.yaml
 # 
 # This script assumes:
 # - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
@@ -52,7 +53,7 @@ vllm serve $MODEL \
 # Assume this is run from Gym repository root.
 source .venv/bin/activate
 
-gym eval prepare --config benchmarks/gpqa/config.yaml +use_cached_prepared_benchmarks=true
+gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 ip=http://\$host:8000/v1
 until curl -s \$ip >/dev/null; do
@@ -61,8 +62,7 @@ done
 
 experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
 gym eval run \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
-    --config benchmarks/gpqa/config.yaml \
+    $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
