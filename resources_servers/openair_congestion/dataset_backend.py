@@ -865,7 +865,7 @@ class DatasetReplayBackend(Backend):
                 history=episode.history,
                 n_cells=max(1, prev_obs.global_.n_cells),
                 n_ues=max(1, prev_obs.global_.n_ues_total),
-                n_ues_by_cell={c.cell_id: len(c.ues) for c in prev_obs.cells},
+                ue_ids_by_cell={cell.cell_id: {ue.ue_id for ue in cell.ues} for cell in prev_obs.cells},
                 now_s=logical_now_s,
             )
             rejected = not gr.accepted

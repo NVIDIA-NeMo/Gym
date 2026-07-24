@@ -352,7 +352,7 @@ class TestRun:
         assert close_calls[0][3] == {"session": "episode-cookie"}
 
     @pytest.mark.asyncio
-    async def test_reset_without_set_cookie_preserves_existing_environment_cookie(self):
+    async def test_inbound_request_cookies_are_not_forwarded_to_environment(self):
         agent = _make_agent(max_steps=2)
         call_log = []
 
@@ -372,9 +372,12 @@ class TestRun:
         with pytest.raises(RuntimeError, match="model server unavailable"):
             await agent.run(req, body)
 
+        reset_calls = [entry for entry in call_log if entry[1] == "/reset"]
         close_calls = [entry for entry in call_log if entry[1] == "/close"]
+        assert len(reset_calls) == 1
+        assert reset_calls[0][3] == {}
         assert len(close_calls) == 1
-        assert close_calls[0][3] == {"session": "existing-cookie"}
+        assert close_calls[0][3] == {}
 
     @pytest.mark.asyncio
     async def test_usage_accumulates_across_turns(self):

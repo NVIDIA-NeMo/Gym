@@ -1100,13 +1100,12 @@ class ReplayEnv:
 
             logical_now_s = float(episode.step_idx)
             prev_obs = episode.trajectory[episode.step_idx]
-            n_ues_by_cell = {cell.cell_id: len(cell.ues) for cell in prev_obs.cells}
             gr = _guardrail.check(
                 action,
                 history=episode.history,
                 n_cells=len(prev_obs.cells),
                 n_ues=max(1, prev_obs.global_.n_ues_total),
-                n_ues_by_cell=n_ues_by_cell,
+                ue_ids_by_cell={cell.cell_id: {ue.ue_id for ue in cell.ues} for cell in prev_obs.cells},
                 now_s=logical_now_s,
             )
             # Never report a synthetic action as accepted unless replay can
@@ -1201,9 +1200,12 @@ class ReplayEnv:
     def render(self, episode_id: str, *, format: str = "ascii") -> Any:
         with self._lock:
             episode = self._episodes.get(episode_id)
-        if episode is None or not episode.trajectory:
+        if episode is None:
             raise KeyError(f"unknown episode_id {episode_id!r}")
-        obs = episode.trajectory[episode.step_idx]
+        with episode.lock:
+            if episode.closed or not episode.trajectory:
+                raise KeyError(f"unknown episode_id {episode_id!r}")
+            obs = episode.trajectory[episode.step_idx]
         if format == "ascii":
             from . import render as _rd
 

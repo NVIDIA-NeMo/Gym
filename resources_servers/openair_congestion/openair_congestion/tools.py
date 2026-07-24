@@ -34,7 +34,7 @@ PRB_MAX = 273  # 100 MHz BW, μ=1, FR1 (3GPP 38.211 Table 4.1.1-2 row μ=1)
 MCS_MAX = 27  # 3GPP 38.214 Table 5.1.3.1-1 (mcs index 0..27 + reserved)
 
 POLICY_VALUES = ("PF", "RR", "MaxCI")
-PRB_CAP_TARGETS = ("ue", "slice")
+PRB_CAP_TARGETS = ("ue",)
 A3_OFFSET_DB_RANGE = (-24.0, 24.0)
 TTT_MS_VALUES = (
     0,
@@ -126,21 +126,21 @@ TOOLS: list[dict[str, Any]] = [
     ),
     _func(
         "set_prb_cap",
-        "Cap the maximum PRBs allocated per scheduling round to a single UE "
-        "or slice. Used to throttle a hog UE that is starving the rest of the "
+        "Cap the maximum PRBs allocated per scheduling round to a single UE. "
+        "Used to throttle a hog UE that is starving the rest of the "
         "cell." + _ACTION_CONNECTIVITY_NOTE,
         {
             "cell_id": _CELL_ID_PROP,
             "target": {
                 "type": "string",
                 "enum": list(PRB_CAP_TARGETS),
-                "description": "Whether the cap applies to a UE or a slice.",
+                "description": "The cap applies to one observed UE.",
             },
             "target_id": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": MAX_UES - 1,
-                "description": "UE id or slice id (0-indexed).",
+                "description": "UE id exactly as listed under the selected cell.",
             },
             "max_prb": {
                 "type": "integer",

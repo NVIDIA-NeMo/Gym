@@ -293,4 +293,47 @@ def test_guardrail_uses_current_topology_after_admission_change():
     env.close(meta.episode_id)
 
     assert info["guardrail_accepted"] is False
-    assert "target_id=1 out of range" in info["rejection_reason"]
+    assert "target_id=1 not present in cell 0" in info["rejection_reason"]
+
+
+def test_globally_numbered_ue_id_listed_in_cell_is_accepted():
+    env = ReplayEnv(pool_size=1, max_steps_default=2)
+    _, meta = env.reset(
+        seed=7001,
+        difficulty=0.8,
+        regime_mix={"prb_exhaustion": 1.0},
+        scenario_id="global-ue-ids",
+        tier="T2",
+        max_steps=2,
+    )
+    episode = env._episodes[meta.episode_id]
+    remapped = []
+    for observation in episode.trajectory:
+        cells = []
+        for cell in observation.cells:
+            offset = cell.cell_id * 8
+            cells.append(
+                cell.model_copy(
+                    update={"ues": [ue.model_copy(update={"ue_id": offset + ue.ue_id}) for ue in cell.ues]}
+                )
+            )
+        remapped.append(observation.model_copy(update={"cells": cells}))
+    episode.trajectory = remapped
+
+    try:
+        _, _, _, info = env.step(
+            meta.episode_id,
+            ToolCall(
+                name="set_prb_cap",
+                arguments={
+                    "cell_id": 2,
+                    "target": "ue",
+                    "target_id": 19,
+                    "max_prb": 200,
+                },
+            ),
+        )
+    finally:
+        env.close(meta.episode_id)
+
+    assert info["guardrail_accepted"] is True

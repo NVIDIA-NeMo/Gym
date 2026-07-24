@@ -79,7 +79,10 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
-        env_cookies = dict(request.cookies)
+        # A rollout starts a fresh resource-server session. Do not forward
+        # caller or reverse-proxy cookies across the internal service boundary;
+        # retain only cookies issued by the resource server itself.
+        env_cookies = {}
         model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(

@@ -804,6 +804,11 @@ class LiveEnv:
                 n_cells=episode.fingerprint.n_cells,
                 n_ues=max(1, episode.fingerprint.n_ues_total),
                 n_ues_by_cell=_ues_by_cell(episode.fingerprint),
+                ue_ids_by_cell=(
+                    {cell.cell_id: {ue.ue_id for ue in cell.ues} for cell in episode.last_obs.cells}
+                    if episode.last_obs is not None
+                    else None
+                ),
                 now_s=float(episode.step_idx),
             )
             gr = _t2_policy_guardrail(episode, action, gr)

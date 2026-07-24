@@ -15,14 +15,15 @@ network-simulator fidelity.
 
 | Area | Checked behavior | Evidence |
 |---|---|---|
-| Action semantics | All eight tools are validated; modeled parameters change deterministic transitions; scheduler, MCS, handover, and UL-power controls expose condition-dependent costs instead of unconditional relief; identical setpoints are idempotent. | `tests/test_replay_action_semantics.py`, `tests/test_reward_correctness.py` |
+| Action semantics | All eight tools are validated; modeled parameters change deterministic transitions; scheduler, MCS, handover, and UL-power controls expose condition-dependent costs instead of unconditional relief; identical setpoints are idempotent. The PRB-cap schema advertises only the supported UE target, and runtime validation uses the UE identifiers actually present in each cell. | `tests/test_guardrail.py`, `tests/test_replay_action_semantics.py`, `tests/test_reward_correctness.py` |
 | Reward contract | Live and replay use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py` |
 | Admission accounting | Requested, admitted, delivered, denied, and forcibly terminated service agree with emitted UE topology. | `tests/test_replay_action_semantics.py`, `tests/test_reward_profiles.py` |
-| Transactionality | Failed reward computation does not partially commit a step; close synchronizes with an in-flight step. | `tests/test_replay_lifecycle.py` |
+| Transactionality | Failed reward computation does not partially commit a step; close and render synchronize with an in-flight step. | `tests/test_replay_lifecycle.py` |
 | Cleanup | Failed backend close stays tracked; a completed agent rollout survives `/close` failure with a structured warning. | `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
 | Model input | Difficulty and regime labels remain evaluator metadata and are absent from rendered/model-facing messages; T2 receives compact requested/admitted/cap decision state through the HTTP path. | `tests/test_render.py`, `tests/test_app.py`, `tests/test_example_artifacts.py` |
 | Model ordering | Compliance requires zero failures; exploratory mode enforces an explicit failure-rate ceiling. Only common usable pairs participate, and adjacent deltas need a positive 95% bootstrap lower bound. | `tests/test_model_sweep.py` |
 | Input integrity | Topology counts and identifiers agree; fractional CSV identifiers fail closed with provenance. | `tests/test_schemas.py`, `tests/test_dataset_ingestion.py` |
+| Boundary hygiene | Gymnasium rollouts forward only resource-server-issued cookies, and legacy KPI failures return a stable public error without the internal exporter endpoint. | `responses_api_agents/gymnasium_agent/tests/test_app.py`, `tests/test_legacy_server_api.py` |
 
 ## Generated evidence
 

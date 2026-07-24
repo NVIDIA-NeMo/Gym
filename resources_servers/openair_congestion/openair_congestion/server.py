@@ -140,12 +140,12 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
                 max_steps=req.max_steps,
             )
         except KpiScrapeError as e:
+            LOG.warning("KPI scrape failed during reset: %s", e)
             raise HTTPException(
                 status_code=503,
                 detail={
                     "error": "kpi_scrape_error",
-                    "message": str(e),
-                    "kpi_url": app.state.env.kpi_url,
+                    "message": "KPI source unavailable",
                 },
             ) from e
         except RuntimeError as e:
@@ -181,12 +181,12 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
                 },
             ) from e
         except KpiScrapeError as e:
+            LOG.warning("KPI scrape failed during step: %s", e)
             raise HTTPException(
                 status_code=503,
                 detail={
                     "error": "kpi_scrape_error",
-                    "message": str(e),
-                    "kpi_url": app.state.env.kpi_url,
+                    "message": "KPI source unavailable",
                 },
             ) from e
         except RuntimeError as e:

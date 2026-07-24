@@ -23,7 +23,7 @@ The agent must return exactly one tool call:
 | Tool | Required arguments | Effect |
 |---|---|---|
 | `set_scheduler_policy` | `cell_id`, `policy` in `{PF, RR, MaxCI}` | Select a per-cell MAC scheduler. |
-| `set_prb_cap` | `cell_id`, `target`, `target_id`, `max_prb` | Cap PRBs for a UE or slice. |
+| `set_prb_cap` | `cell_id`, `target`, `target_id`, `max_prb` | Cap PRBs for one observed UE. |
 | `set_mcs_bounds` | `cell_id`, `mcs_min`, `mcs_max`, `target_bler` | Bound link adaptation. |
 | `set_qos_weights` | `cell_id`, `weights` | Change per-5QI scheduling weights. |
 | `set_admission_policy` | `cell_id`, `accept_threshold_pct`, `slice_reservation` | Change RRC admission policy. |
@@ -33,7 +33,7 @@ The agent must return exactly one tool call:
 
 Tool argument schemas come from `openair_congestion.tools.TOOL_SCHEMA_BY_NAME`. The guardrail rejects unavailable or out-of-range actions and applies the configured rejection cost without crashing the episode. Missing, malformed, unknown, or multiple tool calls violate the protocol: the episode terminates, receives the finite negative `protocol_violation_penalty`, and releases its session immediately.
 
-Replay actions are persistent absolute setpoints rather than fixed tool-name bonuses. Parameter changes therefore produce distinct deterministic transitions, while reapplying an identical setpoint is idempotent. The replay admission-control ledger keeps requested, admitted, delivered, denied, and forcibly terminated service consistent with the emitted UE topology. Non-empty slice reservations are rejected because the bundled synthetic topology does not model slices.
+Replay actions are persistent absolute setpoints rather than fixed tool-name bonuses. Parameter changes therefore produce distinct deterministic transitions, while reapplying an identical setpoint is idempotent. The replay admission-control ledger keeps requested, admitted, delivered, denied, and forcibly terminated service consistent with the emitted UE topology. `set_prb_cap` exposes only UE targeting, and non-empty slice reservations are rejected, because the bundled synthetic topology does not model slices.
 
 ## Reward and verification
 

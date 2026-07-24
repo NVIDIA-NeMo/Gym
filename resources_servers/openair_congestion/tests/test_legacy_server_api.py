@@ -6,6 +6,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from openair_congestion import server
+from openair_congestion.kpi_client import KpiScrapeError
 
 
 class _FakeLiveEnv:
@@ -28,6 +29,18 @@ class _FakeLiveEnv:
                 "snapshot_path": "/tmp/private-run/snapshot.json",
             },
         }
+
+
+class _FailingKpiEnv(_FakeLiveEnv):
+    kpi_url = "http://internal-kpi-exporter.cluster.local:9101/metrics"
+
+    def reset(self, **kwargs):
+        del kwargs
+        raise KpiScrapeError(f"kpi-exporter {self.kpi_url} unreachable")
+
+    def step(self, episode_id, action):
+        del episode_id, action
+        raise KpiScrapeError(f"kpi-exporter {self.kpi_url} returned HTTP 503")
 
 
 @pytest.mark.asyncio
@@ -66,3 +79,28 @@ async def test_close_response_redacts_internal_filesystem_paths():
     assert "work_dir" not in body["summary"]["scenario"]
     assert "snapshot_path" not in body["summary"]["scenario"]
     assert "/tmp/private-run" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "payload"),
+    [
+        ("/reset", {}),
+        ("/step", {"episode_id": "episode-1", "action": {"name": "noop", "arguments": {}}}),
+    ],
+)
+async def test_kpi_errors_do_not_expose_internal_endpoint(route, payload):
+    server._BUILD_REVISION = "test"
+    app = server.create_app(_FailingKpiEnv())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(route, json=payload)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "error": "kpi_scrape_error",
+        "message": "KPI source unavailable",
+    }
+    assert "internal-kpi-exporter" not in response.text

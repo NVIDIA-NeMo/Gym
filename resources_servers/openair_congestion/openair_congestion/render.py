@@ -59,8 +59,8 @@ T2_SYSTEM_PROMPT = (
     '<tool_call>{"name":"set_prb_cap",'
     '"arguments":{"cell_id":0,"target":"ue","target_id":0,'
     '"max_prb":210}}'
-    "</tool_call>. Replace cell_id with 0..2, target_id with a listed UE "
-    "0..7 in that cell, and max_prb with an integer 200..273. Do not emit "
+    "</tool_call>. Replace cell_id with 0..2, target_id with a UE id listed "
+    "under that cell, and max_prb with an integer 200..273. Do not emit "
     "other tools. set_prb_cap is a persistent traffic-side admitted-demand "
     "setpoint, not a real PRB scheduler command; denied service is penalized "
     "and max_prb=273 fully releases a cap. "

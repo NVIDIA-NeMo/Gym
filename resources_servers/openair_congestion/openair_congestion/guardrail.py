@@ -26,7 +26,6 @@ keeps it cheap to call from /step and easy to unit-test exhaustively.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from .schemas import ToolCall
@@ -68,6 +67,7 @@ def check(
     n_cells: int = 2,
     n_ues: int = 4,
     n_ues_by_cell: dict[int, int] | None = None,
+    ue_ids_by_cell: dict[int, set[int]] | None = None,
     now_s: float | None = None,
     rate_limit_s: float = DEFAULT_RATE_LIMIT_S,
 ) -> GuardrailResult:
@@ -96,11 +96,19 @@ def check(
         if target not in PRB_CAP_TARGETS:
             return _reject(f"set_prb_cap: target={target!r} not in {PRB_CAP_TARGETS}")
         target_id = args.get("target_id")
-        if target == "ue" and n_ues_by_cell is not None:
+        if target == "ue" and ue_ids_by_cell is not None:
+            valid_ids = ue_ids_by_cell.get(cell_id, set())
+            if not isinstance(target_id, int) or target_id not in valid_ids:
+                return _reject(
+                    f"set_prb_cap: target_id={target_id!r} not present in cell {cell_id}; "
+                    f"valid ids={sorted(valid_ids)}"
+                )
+            max_id = None
+        elif target == "ue" and n_ues_by_cell is not None:
             max_id = n_ues_by_cell.get(cell_id, 0) - 1
         else:
             max_id = (n_ues if target == "ue" else 8) - 1
-        if not isinstance(target_id, int) or target_id < 0 or target_id > max_id:
+        if max_id is not None and (not isinstance(target_id, int) or target_id < 0 or target_id > max_id):
             return _reject(f"set_prb_cap: target_id={target_id!r} out of range [0,{max_id}]")
         max_prb = args.get("max_prb")
         if not isinstance(max_prb, int) or max_prb < 0 or max_prb > PRB_MAX:
@@ -180,7 +188,7 @@ def check(
 
     if history and rate_limit_s > 0.0:
         if now_s is None:
-            now_s = time.monotonic()
+            raise ValueError("now_s is required when rate-limit history is provided")
         # Look at most-recent entries first; stop after the first older than window.
         for entry in reversed(history):
             if entry.t_s < now_s - rate_limit_s:
