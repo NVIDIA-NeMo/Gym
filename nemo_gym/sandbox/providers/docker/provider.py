@@ -60,6 +60,22 @@ DOCKER_RUNTIME_ERROR_MARKERS = (
 DOCKER_MISSING_CONTAINER_MARKERS = ("no such container", "no such object")
 RESOURCE_USAGE_TIMEOUT_S = 5.0
 HOST_CGROUP_ROOT = Path("/sys/fs/cgroup")
+CONTAINER_CGROUP_V2_USAGE_SCRIPT = """\
+usage_usec=
+if [ -r /sys/fs/cgroup/cpu.stat ]; then
+    while read -r key value _; do
+        if [ "$key" = usage_usec ]; then
+            usage_usec=$value
+            break
+        fi
+    done < /sys/fs/cgroup/cpu.stat
+fi
+memory_peak=
+if [ -r /sys/fs/cgroup/memory.peak ]; then
+    IFS= read -r memory_peak < /sys/fs/cgroup/memory.peak
+fi
+printf 'usage_usec=%s\nmemory_peak=%s\n' "$usage_usec" "$memory_peak"
+"""
 
 
 class DockerCreateError(SandboxCreateError):
@@ -293,6 +309,24 @@ def _read_host_cgroup_usage(
         peak_memory_mib=None if peak_bytes is None else peak_bytes / (1024 * 1024),
         source="docker_host_cgroup_v1",
     )
+
+
+def _parse_container_cgroup_v2_usage(output: str) -> SandboxResourceUsage:
+    values: dict[str, int] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in {"usage_usec", "memory_peak"} and value.isdecimal() and key not in values:
+            values[key] = int(value)
+    if not values:
+        return SandboxResourceUsage()
+    try:
+        return SandboxResourceUsage(
+            cpu_time_s=None if "usage_usec" not in values else values["usage_usec"] / 1_000_000,
+            peak_memory_mib=None if "memory_peak" not in values else values["memory_peak"] / (1024 * 1024),
+            source="docker_container_cgroup_v2",
+        )
+    except (OverflowError, ValueError):
+        return SandboxResourceUsage()
 
 
 class DockerProvider:
@@ -548,7 +582,7 @@ class DockerProvider:
         return _to_sandbox_status(out.strip())
 
     async def resource_usage(self, handle: SandboxHandle) -> SandboxResourceUsage:
-        """Read lifetime CPU and peak memory from a local Linux Docker daemon."""
+        """Read lifetime CPU and peak memory from the container cgroup."""
         inst = handle.raw
         configured_timeout = self._exec_config.default_timeout_s
         timeout_s = (
@@ -572,11 +606,18 @@ class DockerProvider:
                 or int(pid) <= 0
             ):
                 return SandboxResourceUsage()
-            return await asyncio.to_thread(
+            usage = await asyncio.to_thread(
                 _read_host_cgroup_usage,
                 Path(f"/proc/{pid}"),
                 container_id,
             )
+            if usage.cpu_time_s is not None or usage.peak_memory_mib is not None:
+                return usage
+            code, out, _err = await self._run(
+                [self._binary, "exec", inst.name, inst.shell, "-c", CONTAINER_CGROUP_V2_USAGE_SCRIPT],
+                timeout_s=timeout_s,
+            )
+            return _parse_container_cgroup_v2_usage(out) if code == 0 else SandboxResourceUsage()
         except TimeoutError:
             return SandboxResourceUsage()
 

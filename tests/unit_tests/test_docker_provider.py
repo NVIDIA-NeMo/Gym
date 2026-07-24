@@ -280,6 +280,28 @@ def test_read_host_cgroup_usage_returns_unavailable_for_missing_or_unsafe_paths(
     )
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "usage_usec=3250000\nmemory_peak=536870912\n",
+            SandboxResourceUsage(
+                cpu_time_s=3.25,
+                peak_memory_mib=512,
+                source="docker_container_cgroup_v2",
+            ),
+        ),
+        (
+            "usage_usec=invalid\nmemory_peak=1048576\n",
+            SandboxResourceUsage(peak_memory_mib=1, source="docker_container_cgroup_v2"),
+        ),
+        ("usage_usec=\nmemory_peak=\n", SandboxResourceUsage()),
+    ],
+)
+def test_parse_container_cgroup_v2_usage(output: str, expected: SandboxResourceUsage) -> None:
+    assert docker_provider._parse_container_cgroup_v2_usage(output) == expected
+
+
 def test_constructor_requires_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker_provider.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError):
@@ -771,6 +793,42 @@ async def test_resource_usage_reads_container_cgroup(fake_binary: str, monkeypat
             "stdin": None,
         }
     ]
+
+
+async def test_resource_usage_falls_back_to_container_cgroup(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    container_id = "a" * 64
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if argv[1] == "inspect":
+            return 0, f"{container_id} 4321\n", ""
+        return 0, "usage_usec=1250000\nmemory_peak=268435456\n", ""
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    monkeypatch.setattr(
+        docker_provider,
+        "_read_host_cgroup_usage",
+        lambda path, expected_id: SandboxResourceUsage(),
+    )
+
+    assert await provider.resource_usage(_make_handle()) == SandboxResourceUsage(
+        cpu_time_s=1.25,
+        peak_memory_mib=256,
+        source="docker_container_cgroup_v2",
+    )
+    assert rec.calls[1] == {
+        "argv": [
+            FAKE_BINARY,
+            "exec",
+            "nemo-gym-x",
+            "sh",
+            "-c",
+            docker_provider.CONTAINER_CGROUP_V2_USAGE_SCRIPT,
+        ],
+        "timeout_s": docker_provider.RESOURCE_USAGE_TIMEOUT_S,
+        "stdin": None,
+    }
 
 
 @pytest.mark.parametrize(
