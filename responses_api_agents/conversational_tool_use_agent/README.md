@@ -5,7 +5,9 @@ This custom Responses API agent runs full simulated customer-service conversatio
 The complete workflow and shared design documents live with the simulation resource server:
 
 - [Component overview](../../resources_servers/conversational_tool_use_simulation/README.md)
-- [Generation workflow](../../resources_servers/conversational_tool_use_simulation/generation/README.md)
+- [Domain generation](../conversational_tool_use_domain_generation/README.md)
+- [Policy/tool generation](../conversational_tool_use_policy_tool_generation/README.md)
+- [Scenario generation](../conversational_tool_use_scenario_generation/README.md)
 - [Rollout behavior](../../resources_servers/conversational_tool_use_simulation/docs/rollout.md)
 
 It differs from `simple_agent` in one critical way: when the policy model emits a normal assistant message, the rollout

@@ -1,30 +1,30 @@
 # Conversational Tool-Use Simulation
 
-This package contains the Gym environment for generated conversational tool-use tasks and the independent resource
-servers that produce its domain, policy/tool, and scenario artifacts.
+This package contains the Gym environment for generated conversational tool-use tasks. Domain, policy/tool, and
+scenario artifacts are produced by independent Responses API agents.
 
 ## Components
 
 | Component | Implementation | Responsibility |
 | --- | --- | --- |
 | Rollout simulation | `app.py` | Simulate users and tools, maintain session state, and verify trajectories |
-| Domain generation | `generation/domain/app.py` | Generate and deduplicate domain candidates |
-| Policy/tool generation | `generation/policy_tools/app.py` | Generate, refine, validate, and judge policies and tools |
-| Scenario generation | `generation/scenarios/app.py` | Generate and validate customer scenarios |
+| Domain generation | `responses_api_agents/conversational_tool_use_domain_generation` | Generate domain candidates |
+| Policy/tool generation | `responses_api_agents/conversational_tool_use_policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
+| Scenario generation | `responses_api_agents/conversational_tool_use_scenario_generation` | Generate customer scenarios |
 | Policy agent | `responses_api_agents/conversational_tool_use_agent` | Run the policy-model conversation loop |
 
-The generation stages are independent servers connected through shared artifacts:
+The generation agents are connected through standard Gym rollout JSONL and explicit materialization steps:
 
 ```text
-domain JSONL
-  -> per-domain policy.md and tools.jsonl
-  -> per-domain scenario JSONL
-  -> materialized Gym rows
+domain-generation rollouts
+  -> policy/tool-generation inputs and rollouts
+  -> scenario-generation inputs and rollouts
+  -> conversation inputs
   -> policy agent + rollout simulation
 ```
 
-See [generation](generation/README.md) for stage invocation and [rollout behavior](docs/rollout.md) for the session and
-verification contract.
+Each generation agent README documents its input, output, and materializer. See
+[rollout behavior](docs/rollout.md) for the session and verification contract.
 
 ## Rollout Resource Server
 

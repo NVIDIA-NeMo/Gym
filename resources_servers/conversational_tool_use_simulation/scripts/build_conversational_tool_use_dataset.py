@@ -17,7 +17,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     CustomerScenario,
     ToolSignature,
 )
-from resources_servers.conversational_tool_use_simulation.generation.common.quality import (
+from resources_servers.conversational_tool_use_simulation.scripts.quality import (
     ArtifactValidationError,
     detect_leak,
     validate_tool_schema,
