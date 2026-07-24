@@ -82,7 +82,7 @@ sbatch \
     --nodes=$NUM_NODES \
     --gres=gpu:4 \
     --time=04:00:00 \
-    --job-name=gym-vllm-eval-$USER \
+    --job-name=gym-vllm-eval-$EXPERIMENT_NAME-$USER \
     --exclusive \
     --segment=$NUM_NODES \
     scripts/sbatch_base.sh bash -lc "$command"
