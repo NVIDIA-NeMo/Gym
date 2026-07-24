@@ -258,9 +258,83 @@ def prepare_OCRBench_v2(output_fpath: str = "data/OCRBench_v2_validation.jsonl")
     return output_fpath
 
 
+def _nan_to_none(row, key):
+    value = row.get(key)
+    return None if value is None or (isinstance(value, float) and value != value) else value
+
+
+def prepare_OCR_Reasoning(output_fpath: str = "data/OCR_Reasoning_validation.jsonl") -> Path:
+    """Build the Gym JSONL for OCR-Reasoning using the pinned VLMEvalKitMcore library.
+
+    Prompt text comes from the mcore ``OCR_Reasoning.build_prompt`` (question + the
+    language-dependent step-by-step instruction embedding the ``format`` column). Carries
+    everything the reference scorer needs (vlmeval/dataset/utils/ocr_reasoning.py):
+    ``reasoning`` (the reference chain rated by the judge, OcrR_auxeval:102), plus
+    ``question_type``/``answer_type``/``choices``/``answer_option`` read by post_check
+    (:68-94). ``category`` is the ``task`` column — OcrR_acc's per-task breakdown.
+    Nano 3 Omni paper target (arXiv 2604.24954): 54.14 (reasoning-on).
+    """
+    from vlmeval.dataset.image_vqa import OCR_Reasoning
+
+    dataset_name = "OCR_Reasoning"
+
+    dataset = OCR_Reasoning(dataset=dataset_name)
+    data: DataFrame = dataset.data
+
+    print(f"Columns: {data.columns}")
+    print(data.head())
+
+    output_fpath = Path(output_fpath)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_fpath, "wb") as f:
+        for _, vlmevalkit_row in data.iterrows():
+            messages = dataset.build_prompt(vlmevalkit_row)
+            text = "\n".join(m["value"] for m in messages if m["type"] == "text")
+
+            gym_row = {
+                "responses_create_params": {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_image",
+                                    "image_url": f"data:image/jpeg;base64,{vlmevalkit_row['image']}",
+                                    "detail": "high",
+                                },
+                                {
+                                    "type": "input_text",
+                                    "text": text,
+                                },
+                            ],
+                        },
+                    ]
+                },
+                "answer": vlmevalkit_row["answer"],
+                "category": vlmevalkit_row["task"],
+                "benchmark_name": dataset_name,
+                "index": int(vlmevalkit_row["index"]),
+                "question": vlmevalkit_row["question"],
+                # Reference reasoning chain — judged for the reason_score (OcrR_auxeval).
+                "reasoning": vlmevalkit_row["reasoning"],
+                # post_check inputs; `choices` stays the raw TSV string (post_check evals it).
+                "question_type": _nan_to_none(vlmevalkit_row, "question_type"),
+                "answer_type": _nan_to_none(vlmevalkit_row, "answer_type"),
+                "choices": _nan_to_none(vlmevalkit_row, "choices"),
+                "answer_option": _nan_to_none(vlmevalkit_row, "answer_option"),
+                # Prompt-construction metadata, kept for official-parity reconstruction.
+                "language": _nan_to_none(vlmevalkit_row, "language"),
+                "format": _nan_to_none(vlmevalkit_row, "format"),
+            }
+            f.write(orjson.dumps(gym_row) + b"\n")
+
+    return output_fpath
+
+
 if __name__ == "__main__":
     VlmEvalKitResourcesServer.setup_VLMEvalKit()
 
     prepare_OCRBench()
     prepare_MMBench_DEV_EN_V11()
-    # prepare_OCRBench_v2() is opt-in via benchmarks/ocrbench_v2/prepare.py (mcore pin + ~2 GB TSV).
+    # prepare_OCRBench_v2() / prepare_OCR_Reasoning() are opt-in via
+    # benchmarks/ocrbench_v2/prepare.py and benchmarks/ocr_reasoning/prepare.py.

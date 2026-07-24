@@ -331,3 +331,129 @@ class TestOCRBenchV2:
             }
         )
         assert metrics == {"OCRBench_v2_EN": 0.67, "OCRBench_v2_ZH": 0.527}
+
+
+class OcrRFakeJudge:
+    """Routes the two OcrR_auxeval judge stages: the impartial-judge reasoning rating
+    (parsed via [[n]]) and the answer-extraction prompt (on prefetch miss)."""
+
+    def __init__(self, rating_reply: str = "Rating: [[8]]", extraction_reply: str = "42"):
+        self.rating_reply = rating_reply
+        self.extraction_reply = extraction_reply
+        self.rating_calls = 0
+        self.extraction_calls = 0
+
+    def generate(self, prompt, **kwargs):
+        if "impartial judge" in prompt:
+            self.rating_calls += 1
+            return self.rating_reply
+        self.extraction_calls += 1
+        return self.extraction_reply
+
+
+def make_ocr_reasoning_request(
+    text: str,
+    answer: str = "42",
+    answer_type: str = "integer",
+    category: str = "Math Reasoning",
+) -> VLMEvalKitVerifyRequest:
+    return VLMEvalKitVerifyRequest(
+        responses_create_params={
+            "input": [{"role": "user", "content": "What is the total on the receipt?"}],
+        },
+        response=make_response(text),
+        benchmark_name="OCR_Reasoning",
+        category=category,
+        answer=answer,
+        index=9,
+        question="What is the total on the receipt?",
+        reasoning="Add the two line items: 20 + 22 = 42.",
+        question_type=None,
+        answer_type=answer_type,
+        choices=None,
+        answer_option=None,
+    )
+
+
+class TestOCRReasoning:
+    async def test_empty_output_scores_zero(self) -> None:
+        server = make_server(judge_model="fake-judge")
+        server._judge = OcrRFakeJudge()
+        result = await server.verify(make_ocr_reasoning_request(""))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 0.0
+        assert dumped["reason_score"] == 0.0
+        assert server._judge.rating_calls == 0
+
+    async def test_prefetch_hit_with_reason_score(self) -> None:
+        # Exact answer: prefetch succeeds (no extraction call), but the reasoning
+        # rating stage always runs.
+        pytest.importorskip("vlmeval")
+        server = make_server(judge_model="fake-judge")
+        server._judge = OcrRFakeJudge(rating_reply="Rating: [[8]]")
+        result = await server.verify(make_ocr_reasoning_request("42"))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 1.0
+        assert dumped["reason_score"] == 0.8
+        assert dumped["OCR_Reasoning"] == 1.0
+        assert dumped["OCR_Reasoning/Math Reasoning"] == 1.0
+        assert dumped["OCR_Reasoning_RP"] == 0.8
+        assert dumped["OCR_Reasoning_RP/Math Reasoning"] == 0.8
+        assert server._judge.rating_calls == 1
+        assert server._judge.extraction_calls == 0
+
+    async def test_judge_extracts_verbose_answer(self) -> None:
+        # Verbose output misses the integer prefetch; the extraction stage recovers it.
+        pytest.importorskip("vlmeval")
+        server = make_server(judge_model="fake-judge")
+        server._judge = OcrRFakeJudge(rating_reply="Rating: [[6]]", extraction_reply="42")
+        result = await server.verify(make_ocr_reasoning_request("Adding both items gives forty-two (42)."))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 1.0
+        assert dumped["reason_score"] == 0.6
+        assert server._judge.extraction_calls == 1
+
+    async def test_wrong_extracted_answer_scores_zero_keeps_reason_score(self) -> None:
+        pytest.importorskip("vlmeval")
+        server = make_server(judge_model="fake-judge")
+        server._judge = OcrRFakeJudge(rating_reply="Rating: [[3]]", extraction_reply="41")
+        result = await server.verify(make_ocr_reasoning_request("I believe the total is forty-one."))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 0.0
+        assert dumped["reason_score"] == 0.3
+
+    async def test_judge_failure_never_crashes(self, monkeypatch) -> None:
+        # A judge that never emits a [[n]] rating makes the reference OcrR_auxeval crash
+        # (match is None after 6 tries) — verify must swallow it and score 0.
+        pytest.importorskip("vlmeval")
+        import time
+
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+        server = make_server(judge_model="fake-judge")
+        server._judge = OcrRFakeJudge(rating_reply="I cannot rate this.", extraction_reply="42")
+        result = await server.verify(make_ocr_reasoning_request("42"))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 0.0
+        assert dumped["reason_score"] == 0.0
+
+    async def test_no_judge_prefetch_only(self) -> None:
+        # Without a judge the scorer degrades to prefetch-only exact matching and a
+        # zero reasoning score (NOT reference-comparable — documented in the README).
+        pytest.importorskip("vlmeval")
+        server = make_server()
+        result = await server.verify(make_ocr_reasoning_request("42"))
+        dumped = result.model_dump()
+        assert dumped["reward"] == 1.0
+        assert dumped["reason_score"] == 0.0
+
+    def test_key_metrics_include_ocr_reasoning(self) -> None:
+        server = make_server()
+        metrics = server.get_key_metrics(
+            {
+                "mean/OCR_Reasoning": 0.5414,
+                "mean/OCR_Reasoning_RP": 0.6,
+                "mean/OCR_Reasoning/Math Reasoning": 0.4,
+            }
+        )
+        assert metrics == {"mean/OCR_Reasoning": 0.5414}
+

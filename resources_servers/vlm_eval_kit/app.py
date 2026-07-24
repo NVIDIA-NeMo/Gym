@@ -294,6 +294,66 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
 
         return result(reward, ignore)
 
+    async def _score_OCR_Reasoning(self, body: BaseVerifyRequest) -> Dict[str, Any]:
+        # Mirrors the reference OCR-Reasoning scoring (vlmeval/dataset/utils/
+        # ocr_reasoning.py): OcrR_auxeval (:97-123) makes TWO judge stages — (1) an
+        # impartial-judge rating of the model's reasoning vs the reference `reasoning`
+        # column, parsed via [[n]] -> reason_score = n/10; (2) answer extraction, only on
+        # prefetch miss. post_check (:68-94) decides the hit. OcrR_acc (:126) reports the
+        # dual metrics: per-task accuracy AND per-task reasoning score (`_RP` rows) —
+        # mirrored here as OCR_Reasoning/<task> and OCR_Reasoning_RP/<task> keys.
+        # Reference judge role: gpt-4o-mini.
+        # Nano 3 Omni paper target (arXiv 2604.24954): 54.14 (reasoning-on).
+        category = body.category
+
+        def result(reward: float, reason_score: float) -> Dict[str, Any]:
+            return {
+                f"OCR_Reasoning/{category}": reward,
+                f"OCR_Reasoning_RP/{category}": reason_score,
+                "OCR_Reasoning": reward,
+                "OCR_Reasoning_RP": reason_score,
+                "reward": reward,
+                "reason_score": reason_score,
+            }
+
+        prediction = _THINK_BLOCK_RE.sub("", body.response.output_text or "").strip()
+        if not prediction:
+            return result(0.0, 0.0)
+
+        from vlmeval.dataset.utils.ocr_reasoning import OcrR_auxeval, post_check
+
+        line = {
+            "index": body.index,
+            "question": body.question,
+            "answer": body.answer,
+            "reasoning": getattr(body, "reasoning", ""),
+            "question_type": getattr(body, "question_type", None),
+            "answer_type": getattr(body, "answer_type", None),
+            "choices": getattr(body, "choices", None),
+            "answer_option": getattr(body, "answer_option", None),
+            "prediction": prediction,
+        }
+
+        judge = self._get_judge()
+        if judge is None:
+            # Prefetch-only fallback (exact matching); the reasoning score needs a judge,
+            # so it degrades to 0 — reference-comparable runs must configure the judge.
+            reward = float(bool(post_check(line, prefetch=True)))
+            return result(reward, 0.0)
+
+        try:
+            async with self._judge_semaphore:
+                aux = await to_thread(OcrR_auxeval, judge, line)
+            line["res"] = aux["res"]
+            reward = float(bool(post_check(line, prefetch=False)))
+            reason_score = float(aux["reason_score"])
+        except Exception:
+            # OcrR_auxeval crashes when the judge never emits a [[n]] rating (match is
+            # None after 6 tries) — verify must never crash.
+            reward, reason_score = 0.0, 0.0
+
+        return result(reward, reason_score)
+
     async def _score_MMBench_DEV_EN_V11(self, body: BaseVerifyRequest) -> Dict[str, Any]:
         # Reformatted from https://github.com/open-compass/VLMEvalKit/blob/00804217f868058f871f5ff252a7b9623c3475d9/vlmeval/dataset/image_mcq.py#L294
         # Each example is run 4 times and we only output score 1 if all examples are correct.
@@ -374,6 +434,7 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         keys = [
             "mean/OCRBench",
+            "mean/OCR_Reasoning",
             "MMBench_DEV_EN_V11",
             # OCRBench v2 headline numbers are the EN/ZH bucket-averaged aggregates
             # (compute_metrics), NOT the sample-weighted mean/OCRBench_v2.

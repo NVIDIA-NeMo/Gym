@@ -1,0 +1,38 @@
+# OCR-Reasoning (mcore OCR_Reasoning) via the vlm_eval_kit resources server
+# (VLMEvalKitMcore wrapped as a library). Judge-scored, TWO judge stages per sample
+# (vlmeval/dataset/utils/ocr_reasoning.py OcrR_auxeval): (1) impartial-judge rating of
+# the model's reasoning vs the reference chain, parsed via [[n]] -> reason_score = n/10;
+# (2) answer extraction on prefetch miss; post_check decides the hit. FEP-1143 wave 2.
+# Nano 3 Omni paper target (arXiv 2604.24954): 54.14 (reasoning-on).
+config_paths:
+  - resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml
+
+ocr_reasoning_benchmark_resources_server:
+  _inherit_from: vlm_eval_kit_resources_server
+  resources_servers:
+    vlm_eval_kit:
+      # OCR-Reasoning's reproduced numbers were produced against the mcore fork — the
+      # authoritative source for the P00 Omni benchmarks (dual-source pin, same isolated
+      # pattern as OCRBench !402 / MathVista !404 / CharXiv DQ).
+      vlmevalkit_url: https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git
+      vlmevalkit_commit: c0dfe394662232a58a00d08b67d7ade0e091db1c
+      # Reference judge for OCR-Reasoning is gpt-4o-mini; proxy-served (non-ecn) ID.
+      # The judge is REQUIRED (the reasoning rating needs it; prefetch-only degrades to
+      # reason_score 0 and is NOT reference-comparable).
+      # judge_api_key is injected at launch:
+      #   ++ocr_reasoning_benchmark_resources_server.resources_servers.vlm_eval_kit.judge_api_key=$INFERENCE_API_KEY
+      judge_model: us/azure/openai/gpt-4o-mini
+
+ocr_reasoning_benchmark_simple_agent:
+  _inherit_from: vlm_eval_kit_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ocr_reasoning_benchmark_resources_server
+      datasets:
+      - name: ocr_reasoning
+        type: benchmark
+        jsonl_fpath: benchmarks/ocr_reasoning/data/ocr_reasoning_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/ocr_reasoning/prepare.py
+        num_repeats: 1
