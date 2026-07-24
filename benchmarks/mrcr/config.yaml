@@ -25,4 +25,4 @@ mrcr_benchmark_simple_agent:
         # placeholder — it only triggers row duplication for
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
-        num_repeats: 4
+        num_repeats: 1
