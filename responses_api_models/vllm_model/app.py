@@ -63,6 +63,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
+    # When True, if the last input message is an assistant message, forward it to vLLM as a
+    # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
+    # starting a fresh assistant turn. Off by default so default model-server behavior is
+    # unchanged; benchmarks that seed an assistant "answer prefix" (e.g. RULER) opt in via config.
+    continue_final_assistant_message: bool = False
+
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
@@ -249,6 +255,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         metadata_extra_body_str = metadata.get("extra_body", "{}")
         extra_body.update(json.loads(metadata_extra_body_str))
 
+        if (
+            self.config.continue_final_assistant_message
+            and body_dict.get("messages")
+            and body_dict["messages"][-1].get("role") == "assistant"
+        ):
+            body_dict["continue_final_message"] = True
+            body_dict["add_generation_prompt"] = False
+
         if self.config.return_token_id_information:
             body_dict |= dict(
                 logprobs=True,
@@ -433,10 +447,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # See the TODO wrt reasoning_content above
                 choice_dict["message"].pop("reasoning", None)
 
-                # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
-                    [reasoning_content]
-                ) + (choice_dict["message"].get("content") or "")
+                if body_dict.get("continue_final_message", False):
+                    # by default, the response of continue_final_message will split into reasoning.
+                    choice_dict["message"]["content"] = reasoning_content + (choice_dict["message"]["content"] or "")
+                else:
+                    # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
+                    choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                        [reasoning_content]
+                    ) + (choice_dict["message"].get("content") or "")
+
         else:
             # See the TODO wrt reasoning_content above
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (

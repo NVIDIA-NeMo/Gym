@@ -130,8 +130,12 @@ def get_ruler_data(
         if not files_exist:
             subprocess.run(
                 # temporary re-direct to a forked repo with a fix for the hotspot_qa download issue, until merged upstream
+                # `git lfs pull` is required: english_words.json (used by the 'cwe' task) is
+                # LFS-tracked, so a plain clone only fetches the ~132-byte pointer and the task
+                # then fails with a JSONDecodeError when it tries to parse it.
                 "git -C  RULER pull || git clone https://github.com/NVIDIA/RULER && "
-                "cd RULER/scripts/data/synthetic/json && "
+                "cd RULER && git lfs install && git lfs pull && "
+                "cd scripts/data/synthetic/json && "
                 "python download_paulgraham_essay.py && bash download_qa_dataset.sh",
                 check=True,
                 shell=True,

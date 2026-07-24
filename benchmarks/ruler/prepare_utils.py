@@ -29,10 +29,10 @@ DATA_DIR = BENCHMARK_DIR / "data"
 
 
 def prepare(model: str, length: int) -> Path:
-    return prepare_helper(output_name="ruler.jsonl", model=model, length=length)
+    return prepare_helper(output_name="ruler.jsonl", model=model, length=length, add_answer_prefix=True)
 
 
-def prepare_helper(output_name: str, model: str, length: int) -> Path:
+def prepare_helper(output_name: str, model: str, length: int, add_answer_prefix: bool = True) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
@@ -51,7 +51,12 @@ def prepare_helper(output_name: str, model: str, length: int) -> Path:
     if maybe_hf_token:
         env_vars["HF_TOKEN"] = maybe_hf_token
 
-    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model / str(length)
+    # `model` may be an HF repo id (e.g. "nvidia/Model") or a local absolute path
+    # (e.g. "/lustre/.../Model"). Sanitize it into a single path segment so the tmp
+    # dir always lands under BENCHMARK_DIR — otherwise `BENCHMARK_DIR / model` with an
+    # absolute path collapses to the model dir itself (which is typically read-only).
+    model_dirname = model.strip("/").replace("/", "__")
+    tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model_dirname / str(length)
 
     run(
         f"""source .venv/bin/activate \
@@ -78,12 +83,18 @@ def prepare_helper(output_name: str, model: str, length: int) -> Path:
             subset_samples = list(map(json.loads, f))
 
         for sample in subset_samples:
+            answer_prefix = sample["answer_prefix"].strip()
             sample = {
                 "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
                 "outputs": sample["outputs"],
                 "length": sample["length"],
                 "subset": subset_dir.name,
             }
+            if add_answer_prefix:
+                # status is needed in response mode but optional in chat completion mode.
+                sample["responses_create_params"]["input"].append(
+                    {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
+                )
             samples.append(sample)
 
     with output_fpath.open("w") as f:
