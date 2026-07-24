@@ -348,7 +348,10 @@ class TestObservability:
 
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
-        assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
+        assert [gap.code for gap in episode.observations.gaps] == [
+            "observation_capture_failed",
+            "no_sandbox_runtime",
+        ]
 
     def test_run_passes_rollout_id_to_verifier(self) -> None:
         server_client = MagicMock(spec=ServerClient)
