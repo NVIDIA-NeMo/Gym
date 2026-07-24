@@ -541,6 +541,32 @@ class OpenSandboxProvider:
         """Close provider-owned resources."""
         return None
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a descriptor for reattaching to this sandbox by id.
+
+        OpenSandbox sandboxes are reachable by id from any process that has the
+        connection config, so the id alone is enough to reconnect and no sandbox
+        server is needed to share one. ``scope`` is ignored: OpenSandbox has no
+        lease concept of its own.
+        """
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        sandbox_id = str(descriptor["sandbox_id"])
+        timeout_s = self._create.connect_attempt_timeout_s
+        sandbox = await asyncio.wait_for(
+            Sandbox.connect(
+                sandbox_id,
+                connection_config=self._connection_config(request_timeout_s=timeout_s),
+                connect_timeout=timedelta(seconds=timeout_s),
+                skip_health_check=True,
+            ),
+            timeout=timeout_s,
+        )
+        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+
     async def _await_sdk_call(
         self,
         awaitable: Any,
