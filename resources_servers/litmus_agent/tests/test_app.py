@@ -331,6 +331,114 @@ class TestComputeRewardWithMatch:
 
 
 class TestVerify:
+    @pytest.mark.parametrize("use_box_format", [False, True])
+    @pytest.mark.parametrize(
+        ("property_type", "expected_answer", "resolved_answer_type"),
+        [
+            ("count", 5, FLOAT),
+            ("fragment", 2, FLOAT),
+            ("bool", 1, BOOL),
+            ("presence", 0, BOOL),
+        ],
+    )
+    async def test_hf_v01_legacy_rows_use_numeric_exact_policy(
+        self,
+        use_box_format,
+        property_type,
+        expected_answer,
+        resolved_answer_type,
+    ):
+        """Published v0.1 rows have property_type + use_box_format only."""
+        server = _make_server()
+        text = rf"\boxed{{{expected_answer}}}" if use_box_format else f"(({expected_answer}))"
+        result = await server.verify(
+            _make_verify_request(
+                text,
+                expected_answer=expected_answer,
+                property_type=property_type,
+                use_box_format=use_box_format,
+                method="direct",
+                license="CC BY 4.0",
+            )
+        )
+        assert result.reward == 1.0
+        assert result.predicted_value == float(expected_answer)
+        assert result.resolved_answer_type == resolved_answer_type
+        assert result.resolved_reward_rule == "exact"
+
+    @pytest.mark.parametrize(
+        ("text", "expected_answer", "property_type", "use_box_format", "predicted", "reward"),
+        [
+            ("((4.6))", 5, "count", False, 4.6, 1.0),
+            (r"\boxed{2}", 1, "bool", True, 2.0, 0.0),
+            ("((0.4))", 0, "bool", False, 0.4, 1.0),
+        ],
+    )
+    async def test_legacy_numeric_edge_cases_match_historical_scoring(
+        self,
+        text,
+        expected_answer,
+        property_type,
+        use_box_format,
+        predicted,
+        reward,
+    ):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(
+                text,
+                expected_answer=expected_answer,
+                property_type=property_type,
+                use_box_format=use_box_format,
+            )
+        )
+        assert result.predicted_value == predicted
+        assert result.reward == reward
+        assert result.resolved_reward_rule == "exact"
+
+    async def test_legacy_float_keeps_isclose_policy(self):
+        server = _make_server()
+        result = await server.verify(_make_verify_request("((1.0000005))", expected_answer=1.0, property_type="float"))
+        assert result.reward == 1.0
+        assert result.resolved_answer_type == FLOAT
+        assert result.resolved_reward_rule == "isclose"
+
+    async def test_explicit_modern_float_policy_overrides_legacy_property_type(self):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request("((4.6))", expected_answer=5, answer_type=FLOAT, property_type="count")
+        )
+        assert result.reward == 0.0
+        assert result.resolved_reward_rule == "isclose"
+
+    async def test_explicit_modern_bool_parsing_overrides_legacy_property_type(self):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(
+                r"\boxed{2}",
+                expected_answer=1,
+                answer_type=BOOL,
+                property_type="bool",
+                use_box_format=True,
+            )
+        )
+        assert result.predicted_value == 1.0
+        assert result.reward == 1.0
+        assert result.resolved_reward_rule == "bool_eq"
+
+    async def test_explicit_match_overrides_legacy_default(self):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(
+                "((4.6))",
+                expected_answer=5,
+                property_type="count",
+                match={"rule": "isclose"},
+            )
+        )
+        assert result.reward == 0.0
+        assert result.resolved_reward_rule == "isclose"
+
     async def test_correct_numeric_int(self):
         server = _make_server()
         result = await server.verify(
@@ -398,6 +506,7 @@ class TestVerify:
         result = await server.verify(_make_verify_request("((1))", expected_answer="1", property_type="fragment"))
         assert result.reward == 1.0
         assert result.resolved_answer_type == FLOAT
+        assert result.resolved_reward_rule == "exact"
 
     async def test_passthrough_fields_echoed(self):
         server = _make_server()
@@ -675,6 +784,20 @@ class TestCodeExecTool:
             _FakeRequest(session_id="s1"),
             _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT),
         )
+        assert provider.closed == 1 and provider.aclosed == 1
+        assert "s1" not in server._sessions
+
+    async def test_verify_failure_still_cleans_up_session_sandbox(self):
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        provider = _LocalFakeProvider.instances[-1]
+
+        with pytest.raises(ValueError, match="not mappable"):
+            await server._verify_and_cleanup(
+                _FakeRequest(session_id="s1"),
+                _make_verify_request("((3))", expected_answer="3"),
+            )
+
         assert provider.closed == 1 and provider.aclosed == 1
         assert "s1" not in server._sessions
 
