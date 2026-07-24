@@ -38,13 +38,16 @@ Skip if you already have one. Otherwise generate the app, config, and test layou
 gym env init --resources-server my_server
 ```
 
-### 2. Subclass `BaseVerifyResponse` to add `reward_components`
+### 2. Subclass `BaseMultiRewardVerifyResponse`
 
-This is the multi-reward contract: a `{objective_name: score}` dict. Defining it on a subclass (rather than on `BaseVerifyResponse`) keeps every other environment's verify response unchanged.
+`BaseMultiRewardVerifyResponse` defines the shared multi-reward contract: a required `{objective_name: score}` dict. Use the same objective keys for every task in an environment. Environments that only return a scalar reward should continue to use `BaseVerifyResponse`.
 
 ```python
-class MultiRewardResponse(BaseVerifyResponse):
-    reward_components: Dict[str, float] | None = None
+from nemo_gym.base_resources_server import BaseMultiRewardVerifyResponse
+
+
+class MultiRewardResponse(BaseMultiRewardVerifyResponse):
+    pass
 ```
 
 ### 3. Set the scalar `reward`
@@ -113,11 +116,10 @@ The `self._…` helpers (extracting calls, parsing arguments, checking required 
 
 ### 3. Return all three forms
 
-The example's response class adds the `reward_components` dict and the three top-level component fields. The scalar `reward` is already declared on `BaseVerifyResponse`, so it isn't redeclared here — `verify()` computes its value (the sum) in the return below.
+The example's response class inherits the required `reward_components` dict from `BaseMultiRewardVerifyResponse` and adds the three top-level component fields. The scalar `reward` is inherited through `BaseVerifyResponse`, so it isn't redeclared here — `verify()` computes its value (the sum) in the return below.
 
 ```python
-class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
-    reward_components: Dict[str, float] | None = None
+class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):
     correctness: float = 0.0
     schema_valid: float = 0.0
     format: float = 0.0
@@ -165,12 +167,20 @@ gym eval run --no-serve --agent example_tool_call_multireward_simple_agent \
 Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
 
 ```json
-{
-  "reward":       {"mean": 2.6, "min": 1.0, "max": 3.0},
-  "correctness":  {"mean": 0.8, "min": 0.0, "max": 1.0},
-  "schema_valid": {"mean": 1.0, "min": 1.0, "max": 1.0},
-  "format":       {"mean": 0.8, "min": 0.0, "max": 1.0}
-}
+[
+  {
+    "agent_ref": {"name": "example_tool_call_multireward_simple_agent"},
+    "agent_metrics": {
+      "mean/reward": 2.6,
+      "mean/correctness": 0.8,
+      "mean/schema_valid": 1.0,
+      "mean/format": 0.8
+    },
+    "key_metrics": {
+      "mean/reward": 2.6
+    }
+  }
+]
 ```
 
 That breakdown tells you *where* the agent struggles. Above, the model always emits schema-valid calls (`schema_valid` = 1.0) and usually picks the right city (`correctness` = 0.8), but sometimes wraps the call in extra prose (`format` = 0.8) — detail a single conflated score would hide.
