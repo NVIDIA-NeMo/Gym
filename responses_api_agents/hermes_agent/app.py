@@ -448,6 +448,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 source="hermes",
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
+        observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
