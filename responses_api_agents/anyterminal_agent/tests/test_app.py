@@ -13,30 +13,34 @@
 # limitations under the License.
 """Unit tests for anyterminal_agent.
 
-Modeled on anyswe_agent's tests: these exercise pure logic (no Apptainer/Docker) —
-runner-script generation, container discovery, deps-key derivation, setup-script presence,
-and example-data shape. Heavy side effects in model_post_init (deps + harness install) are
-bypassed by calling staticmethods/properties directly rather than constructing the agent.
+Modeled on anyswe_agent's tests: these exercise pure logic (no real Apptainer/Docker) —
+runner-script generation, provider selection, container discovery, deps-key derivation,
+setup-script presence, and example-data shape. Heavy side effects in model_post_init (deps +
+harness install) are bypassed by calling staticmethods/properties directly rather than
+constructing the agent.
 """
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
+from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
+from nemo_gym.sandbox.providers.docker import DockerProvider
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
-    ActiveContainerProcess,
     AnyTerminalAgent,
     AnyTerminalAgentConfig,
     AnyTerminalInstanceConfig,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
+    _build_provider,
+    _format_container,
     _instruction_from_input,
     _read_task_meta,
     _safe_config_json,
@@ -105,42 +109,27 @@ class TestAgentKey:
         assert proc._agent_key == "claude_code_agent"
 
 
-class TestFindContainer:
-    def _stub(self, **cfg_overrides) -> SimpleNamespace:
-        # _find_container only touches self.config.tb_sif_dir; avoid building the whole agent.
-        return SimpleNamespace(config=_config(**cfg_overrides))
+class TestFormatContainer:
+    def test_default_template(self) -> None:
+        assert _format_container(None, "t", "ubuntu:22.04") == "docker://ubuntu:22.04"
 
-    def test_prebuilt_sif_exact_match(self, tmp_path: Path) -> None:
-        sif = tmp_path / "fix-git.sif"
-        sif.write_text("")
-        found = AnyTerminalAgent._find_container(self._stub(tb_sif_dir=str(tmp_path)), "fix-git", "ubuntu:22.04")
-        assert found == str(sif.resolve())
+    def test_list_formatter_uses_first(self) -> None:
+        assert _format_container(["docker://{docker_image}", "unused"], "t", "ubuntu:22.04") == "docker://ubuntu:22.04"
 
-    def test_sif_name_variant_underscore(self, tmp_path: Path) -> None:
-        # Task names with dashes also match an underscored SIF filename.
-        sif = tmp_path / "fix_git.sif"
-        sif.write_text("")
-        found = AnyTerminalAgent._find_container(self._stub(tb_sif_dir=str(tmp_path)), "fix-git", "ubuntu:22.04")
-        assert found == str(sif.resolve())
+    def test_strips_existing_docker_scheme_from_image(self) -> None:
+        assert _format_container("docker://{docker_image}", "t", "docker://ubuntu:22.04") == "docker://ubuntu:22.04"
 
-    def test_falls_back_to_docker_uri_when_no_sif(self, tmp_path: Path) -> None:
-        found = AnyTerminalAgent._find_container(self._stub(tb_sif_dir=str(tmp_path)), "nope", "ubuntu:22.04")
-        assert found == "docker://ubuntu:22.04"
+    def test_task_name_placeholder(self) -> None:
+        assert _format_container("docker://reg/{task_name}", "my-task", "ubuntu:22.04") == "docker://reg/my-task"
 
-    def test_falls_back_to_docker_uri_when_no_sif_dir(self) -> None:
-        found = AnyTerminalAgent._find_container(self._stub(), "nope", "ubuntu:22.04")
-        assert found == "docker://ubuntu:22.04"
-
-    def test_existing_docker_uri_passed_through(self) -> None:
-        found = AnyTerminalAgent._find_container(self._stub(), "nope", "docker://myrepo/img:tag")
-        assert found == "docker://myrepo/img:tag"
+    def test_dotted_path_treated_as_local(self) -> None:
+        assert _format_container("./images/{task_name}.sif", "t", "ubuntu:22.04") == "./images/t.sif"
 
 
 class TestSetupScriptsExist:
     def test_supported_agents_have_deps_scripts(self) -> None:
-        scripts = Path(__file__).parent.parent / "setup_scripts"
-        assert (scripts / "hermes_agent_deps.sh").exists()
-        assert (scripts / "_portable_python.sh").exists()
+        assert (PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh").exists()
+        assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
 
 
 class TestExampleData:
@@ -313,8 +302,16 @@ class TestSafeConfigJson:
         for key in ("my_secret", "auth_token", "password"):
             assert result["agent_kwargs"][key] == "***"
 
+    def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {"connection": {"api_key": "secret"}}},  # pragma: allowlist secret
+        )
+        result = json.loads(_safe_config_json(cfg))
+        assert result["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == "***"
+
     def test_agent_command_str_excluded(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_command_str="apptainer exec ...")
+        cfg = _make_instance_config(tmp_path, agent_command_str="/agent_deps_mount/bin/python ...")
         assert "agent_command_str" not in json.loads(_safe_config_json(cfg))
 
     def test_indent_produces_multiline(self, tmp_path: Path) -> None:
@@ -350,45 +347,50 @@ class TestInstanceConfigProperties:
         assert cfg.instance_id == "my-task"
 
 
-# ── _apptainer_exec ───────────────────────────────────────────────────────────────
+# ── _build_provider ────────────────────────────────────────────────────────────────
 
 
-class TestApptainerExec:
-    def _params(self, **kw) -> AnyTerminalInstanceConfig:
-        defaults = dict(container="docker://ubuntu:22.04", apptainer_memory_limit_mb=32768)
-        defaults.update(kw)
-        return AnyTerminalInstanceConfig.model_construct(**defaults)
+class TestBuildProvider:
+    @pytest.fixture(autouse=True)
+    def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
+        monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda: "/usr/bin/apptainer")
 
-    def test_basic_structure(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(), [], "bash /run.sh")
-        assert "apptainer exec" in cmd
-        assert "docker://ubuntu:22.04" in cmd
-        assert "bash /run.sh" in cmd
+    def test_default_is_docker(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        assert isinstance(_build_provider(cfg), DockerProvider)
 
-    def test_memory_limit_applied(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(apptainer_memory_limit_mb=4096), [], "bash /run.sh")
-        assert f"ulimit -v {4096 * 1024}" in cmd
+    def test_apptainer_binds_are_wired(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, sandbox_provider={"apptainer": {}})
+        provider = _build_provider(cfg)
+        assert isinstance(provider, ApptainerProvider)
+        binds = provider._exec_config.default_binds
+        assert any(str(cfg.persistent_dir) in b and "/trajectories_mount" in b for b in binds)
+        assert any(str(cfg.nemo_gym_root) in b and "/nemo_gym_mount" in b for b in binds)
+        assert any(str(cfg.agent_deps_dir) in b and "/agent_deps_mount" in b for b in binds)
+        assert any(str(cfg.verifier_dir) in b and "/logs/verifier" in b for b in binds)
 
-    def test_no_ulimit_when_limit_zero(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(apptainer_memory_limit_mb=0), [], "bash /run.sh")
-        assert "ulimit" not in cmd
+    def test_apptainer_writable_and_no_home(self, tmp_path: Path) -> None:
+        provider = _build_provider(_make_instance_config(tmp_path, sandbox_provider={"apptainer": {}}))
+        start_args = provider._create_config.extra_start_args
+        assert "--writable-tmpfs" in start_args
+        assert "--no-mount" in start_args and "home" in start_args
+        assert "tmp,bind-paths" not in provider._exec_config.extra_exec_args
 
-    def test_workdir_flag(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(), [], "bash /run.sh", workdir="/workspace")
-        assert "--pwd /workspace" in cmd
+    def test_docker_provider_selected(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, sandbox_provider={"docker": {}})
+        provider = _build_provider(cfg)
+        assert isinstance(provider, DockerProvider)
 
-    def test_no_workdir_by_default(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(), [], "bash /run.sh")
-        assert "--pwd" not in cmd
+    def test_docker_run_args_include_mounts(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, sandbox_provider={"docker": {}})
+        provider = _build_provider(cfg)
+        assert any(str(cfg.persistent_dir) in a for a in provider._create_config.extra_run_args)
+        assert any(str(cfg.verifier_dir) in a for a in provider._create_config.extra_run_args)
 
-    def test_mounts_included(self) -> None:
-        mounts = ["--mount type=bind,src=/src,dst=/dst"]
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(), mounts, "bash /run.sh")
-        assert "--mount type=bind,src=/src,dst=/dst" in cmd
-
-    def test_env_included(self) -> None:
-        cmd = AnyTerminalAgent._apptainer_exec(self._params(), [], "bash /run.sh", env="--env FOO=bar ")
-        assert "--env FOO=bar" in cmd
+    def test_unknown_provider_returned_as_is(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, sandbox_provider={"opensandbox": {"foo": "bar"}})
+        assert _build_provider(cfg) == {"opensandbox": {"foo": "bar"}}
 
 
 # ── _ray_resource_opts ────────────────────────────────────────────────────────────
@@ -471,180 +473,173 @@ class TestGetRunCommand:
             agent_config_class="HermesAgentConfig",
             body=SimpleNamespace(input=[SimpleNamespace(content="the task")]),
             persistent_dir=persistent_dir,
-            tb_agent_timeout=1800,
         )
         cmd = GymAgentHarnessProcessor(config=cfg).get_run_command()
         assert (persistent_dir / "instruction.txt").read_text() == "the task"
         runner = (persistent_dir / "agent_runner.py").read_text()
         assert "HermesAgent" in runner
         assert "HermesAgentConfig" in runner
-        assert "timeout 1800" in cmd
-        assert "/agent_deps_mount/bin/python" in cmd
+        assert cmd == "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
 
 
-# ── _build_agent_cmd ──────────────────────────────────────────────────────────────
+# ── RunTerminalAgent ──────────────────────────────────────────────────────────────
 
 
-class TestBuildAgentCmd:
-    def _stub(self):
-        return SimpleNamespace(_apptainer_exec=AnyTerminalAgent._apptainer_exec)
+def _sandbox_result(return_code: int = 0, error_type: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(stdout="", stderr="", return_code=return_code, error_type=error_type)
 
-    def test_produces_apptainer_command(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path)
-        cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        assert "apptainer exec" in cmd
-        assert "run_script.sh" in cmd
 
-    def test_script_written_to_disk(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path)
-        AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        script = (cfg.persistent_dir / "container_scripts" / "run_script.sh").read_text()
-        assert "agent_spinup_timestamp" in script
-        assert "agent_done" in script
+class TestRunAgentEnv:
+    def test_model_url_included_when_set(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000")
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert env["NGTB_MODEL_URL"] == "http://model:8000"
 
-    def test_model_url_env_when_set(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000/ng-rollout/2-1")
-        cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        assert "NGTB_MODEL_URL=http://model:8000/ng-rollout/2-1" in cmd
-
-    def test_no_model_url_env_when_empty(self, tmp_path: Path) -> None:
+    def test_no_model_url_when_empty(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, model_server_url="")
-        cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        assert "NGTB_MODEL_URL" not in cmd
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert "NGTB_MODEL_URL" not in env
 
-    def test_workdir_passed_when_in_problem_info(self, tmp_path: Path) -> None:
+    def test_sampling_and_kwargs_forwarded(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
             tmp_path,
-            problem_info={
-                "task_name": "t",
-                "task_dir": str(tmp_path),
-                "docker_image": "ubuntu:22.04",
-                "workdir": "/app",
-            },
+            agent_kwargs={"model": "my-model"},
+            body=_make_body(),
         )
-        cmd = AnyTerminalAgent._build_agent_cmd(self._stub(), cfg)
-        assert "--pwd /app" in cmd
-
-
-# ── RunTerminalAgent.process_single_datapoint ────────────────────────────────────
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert env["NGTB_MODEL_NAME"] == "my-model"
+        assert json.loads(env["NGTB_AGENT_KWARGS"]) == {"model": "my-model"}
 
 
 class TestProcessSingleDatapoint:
-    def _mock_container(self, tmp_path: Path, returncode: int = 0):
-        proc = MagicMock()
-        proc.returncode = returncode
-        proc.pid = 99999
-        proc.communicate = AsyncMock(return_value=(b"", b""))
-        proc.wait = AsyncMock()
-        log_file = open(tmp_path / "log.txt", "w")
-        return ActiveContainerProcess.model_construct(
-            process=proc, log_file=log_file, log_file_path=tmp_path / "log.txt"
-        )
+    @pytest.fixture(autouse=True)
+    def _no_real_provider(self):
+        # AsyncSandbox is mocked below, so the provider it's built with is never used —
+        # skip building a real ApptainerProvider (which hard-errors without the binary).
+        with patch("responses_api_agents.anyterminal_agent.app._build_provider", return_value=None):
+            yield
 
     async def test_resolved_when_reward_positive(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
         (cfg.verifier_dir / "reward.txt").write_text("1.0")
-        mock_ctr = self._mock_container(tmp_path)
 
-        runner = RunTerminalAgent(config=cfg)
-        with patch.object(RunTerminalAgent, "_start", new=AsyncMock(return_value=mock_ctr)):
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
             with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
-                result = await runner.process_single_datapoint()
+                result = await RunTerminalAgent(config=cfg).process_single_datapoint()
 
         assert result is True
         assert json.loads(cfg.metrics_fpath.read_text())["resolved"] is True
+        sandbox.stop.assert_awaited_once()
 
     async def test_unresolved_when_no_reward_file(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
-        mock_ctr = self._mock_container(tmp_path)
-
-        runner = RunTerminalAgent(config=cfg)
-        with patch.object(RunTerminalAgent, "_start", new=AsyncMock(return_value=mock_ctr)):
-            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
-                result = await runner.process_single_datapoint()
-
-        assert result is False
-
-    async def test_container_timeout_sets_flag(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path)
-        proc = MagicMock()
-        proc.returncode = None
-        proc.pid = 99999
-        proc.wait = AsyncMock()
-        log_file = open(tmp_path / "log.txt", "w")
-        mock_ctr = ActiveContainerProcess.model_construct(
-            process=proc, log_file=log_file, log_file_path=tmp_path / "log.txt"
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            stop=AsyncMock(),
         )
-
-        runner = RunTerminalAgent(config=cfg)
-        with patch.object(RunTerminalAgent, "_start", new=AsyncMock(return_value=mock_ctr)):
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
             with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
-                with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
-                    with patch("os.killpg"), patch("os.getpgid", return_value=99999):
-                        result = await runner.process_single_datapoint()
+                result = await RunTerminalAgent(config=cfg).process_single_datapoint()
 
         assert result is False
-        assert json.loads(cfg.metrics_fpath.read_text())["container_timed_out"] is True
 
-    async def test_timing_files_parsed(self, tmp_path: Path) -> None:
-        import time as _time
-
+    async def test_agent_timeout_sets_flag_and_masks(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
-        spinup = _time.time()
-        (cfg.persistent_dir / "agent_spinup_timestamp").write_text(str(spinup))
-        (cfg.persistent_dir / "eval_start_timestamp").write_text(str(spinup + 30.0))
-        mock_ctr = self._mock_container(tmp_path)
-
-        runner = RunTerminalAgent(config=cfg)
-        with patch.object(RunTerminalAgent, "_start", new=AsyncMock(return_value=mock_ctr)):
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=124, error_type="timeout")),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
             with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
-                await runner.process_single_datapoint()
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
-        assert metrics["agent_run_time"] == pytest.approx(30.0, abs=1.0)
+        assert metrics["agent_timed_out"] is True
+        assert metrics["mask_sample"] is True
 
-    async def test_nonzero_exit_logs_output(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
-        mock_ctr = self._mock_container(tmp_path, returncode=1)
-        (tmp_path / "log.txt").write_text("something went wrong")
+        sandbox = SimpleNamespace(
+            start=AsyncMock(side_effect=RuntimeError("boom")),
+            exec=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            result = await RunTerminalAgent(config=cfg).process_single_datapoint()
 
-        runner = RunTerminalAgent(config=cfg)
-        with patch.object(RunTerminalAgent, "_start", new=AsyncMock(return_value=mock_ctr)):
+        assert result is False
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["sandbox_failed"] is True
+        assert metrics["mask_sample"] is True
+        sandbox.stop.assert_awaited_once()
+
+    async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
+        archive = tmp_path / "deps.tar.gz"
+        archive.write_bytes(b"deps")
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            agent_deps_archive=archive,
+        )
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            upload=AsyncMock(),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with (
+                patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock()),
+                patch.object(RunTerminalAgent, "_stage_remote_tests", new=AsyncMock()) as stage_tests,
+                patch.object(RunTerminalAgent, "_collect_remote_outputs", new=AsyncMock()) as collect,
+            ):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        uploaded = {call.args[1] for call in sandbox.upload.await_args_list}
+        assert "/trajectories_mount/instruction.txt" in uploaded
+        assert "/trajectories_mount/agent_runner.py" in uploaded
+        assert "/tmp/anyterminal-agent-deps.tar.gz" in uploaded
+        stage_tests.assert_awaited_once()
+        collect.assert_awaited_once()
+
+    async def test_stops_sandbox_even_on_eval_timeout(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        # First exec (agent) succeeds, second exec (eval) times out.
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(side_effect=[_sandbox_result(), _sandbox_result(return_code=124, error_type="timeout")]),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
             with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
-                await runner.process_single_datapoint()
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
 
-        assert "container exit 1" in capsys.readouterr().out
-
-
-# ── RunTerminalAgent._start ───────────────────────────────────────────────────────
-
-
-class TestStart:
-    async def test_creates_log_file_and_returns_container(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path)
-        runner = RunTerminalAgent(config=cfg)
-        ctr = await runner._start("echo hello")
-        await ctr.process.wait()
-        ctr.log_file.close()
-        assert ctr.log_file_path.exists()
-        assert (cfg.persistent_dir / "apptainer_logs").is_dir()
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["container_timed_out"] is True
+        sandbox.stop.assert_awaited_once()
 
 
 # ── RunTerminalAgent._stage_tests ────────────────────────────────────────────────
 
 
 class TestStageTests:
-    async def test_copies_tests_and_signals_ready(self, tmp_path: Path) -> None:
+    async def test_copies_tests(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
         (cfg.persistent_dir / "staging").mkdir(parents=True, exist_ok=True)
         tests_src = Path(cfg.problem_info["task_dir"]) / "tests"
         tests_src.mkdir()
         (tests_src / "test.sh").write_text("#!/bin/bash")
-        (cfg.persistent_dir / "agent_done").touch()
 
         await RunTerminalAgent(config=cfg)._stage_tests(cfg)
 
-        assert (cfg.persistent_dir / "tests_ready").exists()
         assert (cfg.persistent_dir / "staging" / "tests" / "test.sh").exists()
 
     async def test_removes_stale_staging_before_copy(self, tmp_path: Path) -> None:
@@ -655,7 +650,6 @@ class TestStageTests:
         tests_src = Path(cfg.problem_info["task_dir"]) / "tests"
         tests_src.mkdir()
         (tests_src / "fresh.sh").write_text("new")
-        (cfg.persistent_dir / "agent_done").touch()
 
         await RunTerminalAgent(config=cfg)._stage_tests(cfg)
 

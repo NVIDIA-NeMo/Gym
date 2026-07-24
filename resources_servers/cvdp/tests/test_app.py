@@ -19,20 +19,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
     CVDPResourcesServerConfig,
-    _apply_substitutions,
-    _build_bind_args,
-    _build_command,
-    _build_env_args,
-    _build_runtime_tmp_env_args,
-    _load_dot_env,
-    _parse_compose_service,
     _parse_model_response,
 )
 from resources_servers.cvdp.cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
+from resources_servers.cvdp.testbench_runner import (
+    _apply_substitutions,
+    _build_binds,
+    _build_command,
+    _build_env,
+    _build_runtime_tmp_env,
+    _load_dot_env,
+    _parse_compose_service,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -219,83 +222,8 @@ class TestParseComposeService:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: _build_bind_args
+# Unit tests: _load_dot_env
 # ---------------------------------------------------------------------------
-
-
-class TestBuildBindArgs:
-    def test_includes_code_mounts(self):
-        args = _build_bind_args("/tmp/work", [])
-        assert "--bind" in args
-        assert "/tmp/work/rtl:/code/rtl" in args
-        assert "/tmp/work/rundir:/code/rundir" in args
-        assert "/tmp/work/src:/code/src" in args
-
-    def test_includes_compose_volumes(self):
-        args = _build_bind_args("/tmp/work", ["./src/:/src/:ro"])
-        # Compose volume should be resolved relative to workdir
-        assert any("/src/:ro" in a for a in args)
-
-    def test_skips_code_volumes_from_compose(self):
-        args = _build_bind_args("/tmp/work", ["./rtl:/code/rtl:ro"])
-        # The /code/rtl from compose should be skipped (we mount it ourselves)
-        code_rtl_compose = [a for a in args if a == "./rtl:/code/rtl:ro"]
-        assert len(code_rtl_compose) == 0
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: _build_env_args
-# ---------------------------------------------------------------------------
-
-
-class TestBuildEnvArgs:
-    def test_empty_environment_returns_empty(self):
-        args = _build_env_args({})
-        assert args == []
-
-    def test_dict_environment(self):
-        args = _build_env_args({"SIM": "icarus", "TOPLEVEL": "foo"})
-        assert "SIM=icarus" in args
-        assert "TOPLEVEL=foo" in args
-
-    def test_list_environment(self):
-        args = _build_env_args(["SIM=icarus", "TOPLEVEL=foo"])
-        assert "SIM=icarus" in args
-        assert "TOPLEVEL=foo" in args
-
-    def test_dot_env_vars_included(self):
-        dot_env = {"VERILOG_SOURCES": "/code/rtl/foo.sv", "SIM": "icarus"}
-        args = _build_env_args({}, dot_env)
-        assert "VERILOG_SOURCES=/code/rtl/foo.sv" in args
-        assert "SIM=icarus" in args
-
-    def test_compose_env_overrides_dot_env(self):
-        dot_env = {"SIM": "icarus"}
-        args = _build_env_args({"SIM": "verilator"}, dot_env)
-        # dot_env SIM comes first, then compose SIM overrides
-        sim_values = [a for a in args if a.startswith("SIM=")]
-        assert sim_values[-1] == "SIM=verilator"
-
-
-class TestBuildRuntimeTmpEnvArgs:
-    def test_emits_expected_env_flags(self):
-        args = _build_runtime_tmp_env_args("/tmp")
-        # Pairs of "--env" "KEY=value" — assert each expected pair appears.
-        flags = [args[i + 1] for i in range(0, len(args), 2) if args[i] == "--env"]
-        assert "TMPDIR=/tmp" in flags
-        assert "TMP=/tmp" in flags
-        assert "TEMP=/tmp" in flags
-        assert "TEMPDIR=/tmp" in flags
-        assert "XCELIUM_TMPDIR=/tmp" in flags
-        assert "CDS_LOCK=/tmp/.cdslock" in flags
-        assert "JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/tmp" in flags
-
-    def test_uses_custom_path(self):
-        args = _build_runtime_tmp_env_args("/scratch/run/tmp")
-        flags = [args[i + 1] for i in range(0, len(args), 2) if args[i] == "--env"]
-        assert "TMPDIR=/scratch/run/tmp" in flags
-        assert "CDS_LOCK=/scratch/run/tmp/.cdslock" in flags
-        assert "JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/scratch/run/tmp" in flags
 
 
 class TestLoadDotEnv:
@@ -363,8 +291,8 @@ class TestCVDPServerVerify:
     async def test_verify_plain_text_goes_to_harness(self):
         body_dict = _make_body(output_text="I am unable to generate this design.")
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(1, "FAILED", []),
         ):
@@ -377,8 +305,8 @@ class TestCVDPServerVerify:
     async def test_verify_harness_pass_returns_one_reward(self):
         body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
@@ -391,8 +319,8 @@ class TestCVDPServerVerify:
     async def test_verify_harness_fail_returns_zero_reward(self):
         body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(1, "FAILED: assertion error", [{"service": "direct", "exit_code": 1, "stderr": "FAILED"}]),
         ):
@@ -404,8 +332,8 @@ class TestCVDPServerVerify:
     async def test_verify_harness_timeout_returns_zero_reward(self):
         body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(-1, "apptainer exec timed out after 30s", []),
         ):
@@ -436,8 +364,8 @@ class TestCVDPServerVerify:
             target_files=["rtl/a.sv", "rtl/b.sv"],
         )
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
@@ -590,8 +518,8 @@ class TestCVDPServerVerifySubjective:
         body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
         body_dict["verifier_metadata"]["categories"] = ["cid003", "medium"]
         with patch.object(
-            self.server,
-            "_run_harness",
+            self.server._harness,
+            "run",
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
@@ -619,7 +547,7 @@ class TestApptainerHarness:
 
     @pytest.mark.asyncio
     async def test_missing_compose_returns_error_exit_code(self):
-        exit_code, stderr, services = await self.server._run_harness(
+        exit_code, stderr, services = await self.server._harness.run(
             rtl_files={"rtl/foo.sv": SAMPLE_RTL},
             harness_files={},  # no compose file
             task_id="test",
@@ -637,3 +565,203 @@ def _make_request(body_dict: dict):
     from resources_servers.cvdp.app import CVDPVerifyRequest
 
     return CVDPVerifyRequest.model_validate(body_dict)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: agentic rtl_files path (grade files written on disk)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyConsumesRtlFiles:
+    def setup_method(self):
+        self.server = _make_server()
+
+    @pytest.mark.asyncio
+    async def test_rtl_files_take_precedence_over_text_parse(self):
+        # Model chat text says one thing; the agent reports different files on
+        # disk. The on-disk files must win.
+        body_dict = _make_body(output_text="```systemverilog\nmodule from_text;\nendmodule\n```")
+        body_dict["rtl_files"] = {"rtl/foo.sv": "module from_disk;\nendmodule"}
+        captured = {}
+
+        async def fake_harness(*, rtl_files, harness_files, task_id, context_files=None):
+            captured["rtl_files"] = rtl_files
+            return (0, "", [])
+
+        with patch.object(self.server._harness, "run", side_effect=fake_harness):
+            result = await self.server.verify(_make_request(body_dict))
+
+        assert result.reward == 1.0
+        assert result.extracted_rtl == {"rtl/foo.sv": "module from_disk;\nendmodule"}
+        assert captured["rtl_files"] == {"rtl/foo.sv": "module from_disk;\nendmodule"}
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_text_parse_without_rtl_files(self):
+        body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
+        # No rtl_files key -> text parsing path.
+        with patch.object(self.server._harness, "run", new_callable=AsyncMock, return_value=(0, "", [])):
+            result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == 1.0
+        assert "module foo" in result.extracted_rtl["rtl/foo.sv"]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: provider-facing bind/env helpers
+# ---------------------------------------------------------------------------
+
+
+class TestBuildBinds:
+    def test_includes_code_mounts(self):
+        binds = _build_binds("/tmp/work", [])
+        assert "/tmp/work/rtl:/code/rtl" in binds
+        assert "/tmp/work/rundir:/code/rundir" in binds
+        assert "/tmp/work/src:/code/src" in binds
+
+    def test_includes_compose_volumes_resolved(self):
+        binds = _build_binds("/tmp/work", ["./extra:/data:ro"])
+        assert "/tmp/work/extra:/data:ro" in binds
+
+    def test_skips_code_volumes_from_compose(self):
+        binds = _build_binds("/tmp/work", ["./rtl:/code/rtl:ro"])
+        assert all("/code/rtl:ro" not in b or b == "/tmp/work/rtl:/code/rtl" for b in binds)
+
+
+class TestBuildEnv:
+    def test_dict_environment(self):
+        env = _build_env({"SIM": "icarus"})
+        assert env["SIM"] == "icarus"
+
+    def test_list_environment(self):
+        env = _build_env(["SIM=icarus", "TOPLEVEL=foo"])
+        assert env == {"SIM": "icarus", "TOPLEVEL": "foo"}
+
+    def test_compose_overrides_dot_env(self):
+        env = _build_env({"SIM": "verilator"}, {"SIM": "icarus", "X": "1"})
+        assert env["SIM"] == "verilator"
+        assert env["X"] == "1"
+
+
+class TestBuildRuntimeTmpEnv:
+    def test_keys(self):
+        env = _build_runtime_tmp_env("/scratch/tmp")
+        assert env["TMPDIR"] == "/scratch/tmp"
+        assert env["CDS_LOCK"] == "/scratch/tmp/.cdslock"
+        assert env["JAVA_TOOL_OPTIONS"] == "-Djava.io.tmpdir=/scratch/tmp"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _run_service runs through the Apptainer provider
+# ---------------------------------------------------------------------------
+
+
+class _FakeHandle:
+    sandbox_id = "inst-fake"
+
+
+class _FakeProvider:
+    def __init__(self, exec_result, create_error=None):
+        self._exec_result = exec_result
+        self._create_error = create_error
+        self.created = []
+        self.execs = []
+        self.closed = []
+
+    async def create(self, spec):
+        if self._create_error is not None:
+            raise self._create_error
+        self.created.append(spec)
+        return _FakeHandle()
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None):
+        self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s})
+        return self._exec_result
+
+    async def close(self, handle):
+        self.closed.append(handle)
+
+
+_COMPOSE_WITH_CMD = """
+services:
+  direct:
+    image: ghcr.io/hdl/sim/osvb
+    volumes:
+      - ./extra:/data:ro
+    working_dir: /code/rundir
+    command: /bin/sh -c "echo hi"
+"""
+
+_COMPOSE_NO_CMD = """
+services:
+  direct:
+    image: ghcr.io/hdl/sim/osvb
+    working_dir: /code/rundir
+"""
+
+
+class TestRunServiceProvider:
+    def setup_method(self):
+        self.server = _make_server()
+
+    async def _run(self, tmp_path, fake, compose):
+        with (
+            patch.object(self.server._harness, "_ensure_sif", new_callable=AsyncMock, return_value="/cache/img.sif"),
+            patch.object(self.server._harness, "_get_provider", new_callable=AsyncMock, return_value=fake),
+        ):
+            return await self.server._harness._run_service(str(tmp_path), "direct", compose)
+
+    @pytest.mark.asyncio
+    async def test_create_exec_close_and_payload(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0))
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+
+        assert exit_code == 0
+        assert output == "hi\n"
+        # create got the cached SIF and the workspace + compose binds.
+        spec = fake.created[0]
+        assert spec.image == "/cache/img.sif"
+        binds = spec.provider_options["binds"]
+        assert any(b.endswith(":/code/rtl") for b in binds)
+        assert any(b.endswith(":/data:ro") for b in binds)
+        # exec wraps the command with HOME export, sets cwd + timeout.
+        call = fake.execs[0]
+        assert "export HOME=/code/rundir" in call["command"]
+        assert "echo hi" in call["command"]
+        assert call["cwd"] == "/code/rundir"
+        assert call["timeout_s"] == 30
+        # instance is always torn down.
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_command_uses_runscript(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
+        assert "/.singularity.d/runscript" in fake.execs[0]["command"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_maps_to_negative_one(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"))
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == -1
+        assert "timed out after 30s" in output
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_failure_returns_error(self, tmp_path):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="", stderr="", return_code=0),
+            create_error=SandboxCreateError("boom"),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 1
+        assert "instance start failed" in output
+        assert fake.execs == []
+        assert fake.closed == []
+
+    @pytest.mark.asyncio
+    async def test_tmp_bind_path_added(self, tmp_path):
+        self.server.config.container_tmp_bind_path = "/container/tmp"
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        spec = fake.created[0]
+        assert any(b.endswith(":/container/tmp") for b in spec.provider_options["binds"])
+        assert fake.execs[0]["env"]["TMPDIR"] == "/container/tmp"

@@ -12,6 +12,7 @@ All third-party software is used as obtained, without modification, unless other
 | **Datasets** | Dataset loading library | Apache-2.0 | Hugging Face | https://github.com/huggingface/datasets |
 | **FastAPI** | Python web framework | MIT | Sebastián Ramírez | https://github.com/tiangolo/fastapi |
 | **Hydra-core** | Configuration management | MIT | Facebook Research | https://github.com/facebookresearch/hydra |
+| **Harvey LAB** | Legal agent benchmark and document skills (modified runtime, pinned at `f46ef86e4788545622db25dcffa3aebb7a139929`) | MIT | Harvey AI | https://github.com/harveyai/harvey-labs |
 | **MLflow** | Experiment tracking | Apache-2.0 | Databricks Inc. | https://github.com/mlflow/mlflow |
 | **Math-Verify** | Math reasoning verifier | Apache-2.0 | Hugging Face | https://github.com/huggingface/Math-Verify |
 | **MCP Python SDK** | Model Context Protocol SDK | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/python-sdk |
