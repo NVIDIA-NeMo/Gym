@@ -1,4 +1,27 @@
 #!/bin/bash
+# 
+# Example run:
+# MODEL=/path/to/model \
+# EXPERIMENT_NAME=my-experiment-name \
+# NUM_NODES=4 \
+# SBATCH_ACCOUNT=my-slurm-account \
+# SBATCH_PARTITION=batch \
+# CONTAINER=/path/to/vllm/container \
+# MOUNTS=/shared/fs:/shared/fs \
+# bash scripts/sbatch_eval_with_external_vllm.sh
+# 
+# This script assumes:
+# - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
+# - Nemotron 3 Ultra configs e.g. with the parser configs.
+# - This is run from a NeMo Gym repository root with a valid NeMo Gym environment found at .venv.
+
+set -euo pipefail
+
+# Input arguments and validation
+EXPERIMENT_NAME=$EXPERIMENT_NAME
+NUM_NODES=$NUM_NODES
+CONTAINER=$CONTAINER
+MOUNTS=$MOUNTS
 
 command=$(cat <<EOF
 set -euo pipefail
@@ -9,7 +32,7 @@ vllm serve $MODEL \
     --gpu-memory-utilization 0.9 \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
-    --data-parallel-size 4 \
+    --data-parallel-size $NUM_NODES \
     --data-parallel-size-local 1 \
     --tensor-parallel-size 4 \
     --enable-auto-tool-choice \
@@ -35,7 +58,7 @@ until curl -s \$ip >/dev/null; do
     sleep 5
 done
 
-experiment_name=gpqa-\$(date +%Y%m%d_%H%M%S)
+experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
 gym eval run \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config benchmarks/gpqa/config.yaml \
@@ -54,15 +77,11 @@ EOF
 )
 
 # --switches=1 otherwise the engine will hang on the second or third engine step.
-CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.22.1___with_ray.sqsh \
-MOUNTS=/lustre:/lustre \
 sbatch \
-    --nodes=4 \
-    --account=nemotron_n4_post \
-    --partition=batch \
+    --nodes=$NUM_NODES \
     --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=gym-vllm-eval-$USER \
     --exclusive \
-    --segment=4 \
+    --segment=$NUM_NODES \
     scripts/sbatch_base.sh bash -lc "$command"
