@@ -484,6 +484,8 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+            persisted_rows = list(rows)
+            persisted_results = list(results)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -498,6 +500,8 @@ class RolloutCollectionHelper(BaseModel):
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
+            persisted_rows: List[Dict] = []
+            persisted_results: List[Dict] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -567,6 +571,8 @@ class RolloutCollectionHelper(BaseModel):
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
                 results_file.flush()
+                persisted_rows.append(row)
+                persisted_results.append(result)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -594,8 +600,12 @@ class RolloutCollectionHelper(BaseModel):
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        # Compute and write aggregate metrics via /aggregate_metrics using only the
+        # rows written to the main rollouts jsonl so runtime aggregation matches
+        # `gym eval aggregate`.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -604,7 +614,9 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                persisted_results, persisted_rows, output_fpath
+            )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
