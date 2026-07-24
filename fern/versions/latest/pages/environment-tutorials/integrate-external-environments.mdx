@@ -1,68 +1,115 @@
 ---
-title: "Integrate external libraries"
-description: ""
+title: "Integrate External Environment Frameworks"
+description: "Choose the correct Gym adapter seam for environment frameworks, harnesses, and end-to-end runners."
 position: 7
 ---
-Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
 
-Integrating external training environments, benchmarks, or agents into a NeMo Gym environment requires additional considerations beyond native NeMo Gym environments. We provide a rough template of integration form factor below and best practices for ensuring that the integration is correct.
+External projects use the word *environment* for different boundaries. Some expose reset, actions, observations, state, and reward independently of an agent. Others own the agent harness, sandbox, episode loop, and scoring as one end-to-end runner.
 
-## Integration form factor
+Choose the Gym integration seam from those runtime responsibilities, not from the upstream project's terminology.
 
-1. Because external training environments, benchmarks, or agents include their own rollout orchestration logic (that is, coordinating model and tool calls) and may sometimes return their own reward, NeMo Gym agent servers are the appropriate level to integrate at.  
-2. You can add a dependency from your NeMo Gym agent server to the third-party library by adding it to the requirements.txt. If your dependency needs are more complicated beyond installing pip packages or GitHub repositories, consider using setup.py and pyproject.toml.  
-3. After you add a dependency, you can import it in app.py like a normal Python script.  
-4. You can run the `gym env test` command to run tests on your agent server. Refer to the [gym env test CLI reference](/reference/cli-commands#gym-env-test) for details.   
-5. Typically you can just wrap the external library in the `/run` function and omit the `/responses` function.  
-6. In the `/run` function before calling into the third-party library, you will need to preprocess from NeMo Gym schema into a config for the external library.  
-7. In the `/run` function after calling into the third-party library, you will need to postprocess from the external library result into a NeMo Gym response.
+## Map the upstream contract
 
-## Best practices
+Before implementing an adapter, identify:
 
-1. Technical design  
-   1. Follow NeMo Gym async first-party server design: the `/run` endpoint should be async to maximize efficiency.  
-      1. Avoid using extra threads or processes unless absolutely necessary. If you need to scale, use Ray workers and await the ray.remote call.  
-      2. For example, a single NeMo Gym instance that consists of three FastAPI server instances can handle 65,000 concurrent math rollouts without crashing and is not terribly inefficient.  
-   2. Use the [NeMo Gym custom OpenAI client](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py) rather than other popular LLM clients including OpenAI, Anthropic, and LiteLLM.  
-      1. The NeMo Gym OpenAI client has been meticulously designed to scale.
-      2. Other LLM clients (such as LiteLLM) often preprocess or postprocess the inputs and outputs, making it difficult to understand and control the flow of information.  
-      3. Propagate cookies from the incoming request through all downstream calls (see [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py) for the pattern).  
-   3. Use Pydantic models for checking the data format wherever necessary.  
-2. Rollout creation  
-   1. During training, NeMo Gym models return additional fields on response messages or output items: [`prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py).  
-   2. When constructing the messages or input items for the next model call in multi-step or multi-turn scenarios, propagate this information from the previous model response.  
-3. Delivery form factor  
-   1. Make a PR to NeMo Gym main.  
-   2. Code should run locally with no external APIs present unless absolutely necessary as part of the environment design (for example, online search).  
-   3. Variables are passed through NeMo Gym config and not through environment variables, including OpenAI base URL, API key, and so on.  
-   4. Code must be runnable on Linux machines (that is, any executables must be created for Linux).  
-4. Functional requirements  
-   1. Errors popping up due to failure in tool execution by the environment or due to the model issuing incorrect tool calls or arguments need to be propagated back to the model (that is, should not throw errors and crash the env and training).  
-   2. We plan to do large-scale training with these environments. As such we need it to support anywhere from 4,000 to 65,000 concurrent requests without crashing. Usually slamming the endpoint with 2,000 concurrent requests is enough to test the efficiency scaling of the environment.  
-   3. You should be able to run an entire training run without any crashes.
+- how tasks are discovered and identified;
+- reset and per-episode lifecycle;
+- action/tool and observation schemas;
+- whether the framework owns the model/agent loop;
+- termination conditions;
+- whether rewards are terminal values, per-step deltas, cumulative values, or separate scorer results;
+- verifier ownership;
+- process, sandbox, and concurrency model;
+- trajectory representation and model-call metadata;
+- plugin/dependency installation.
 
-## Ensuring proper token ID handling in custom client calls
-During training time, NeMo Gym keeps track of the ground truth prompt token ids, generation token ids, and generation log probs for downstream consumption by the RL framework. As a result, we need to add a few fields to request and response schemas in order to properly facilitate this. This usually does not matter if you are using 100% NeMo Gym, but in certain situations you may need or want to use a separate client (such as LiteLLM, your own OpenAI client, and so on) to call model endpoints.
+Record any mapping that would be lossy.
 
-For Chat Completions, outside of training, an Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    ...
-)
-```
-During training, a Chat Completions Assistant message will look like:
-```python
-ChatCompletionMessage(
-    content="<think>I'm thinking</think>Hi there!",
-    tool_calls=[{...}, {...}],
-    prompt_token_ids=[...],  # List[int]
-    generation_token_ids=[...],  # List[int]
-    generation_log_probs=[...],  # List[float]
-    ...
-)
-```
-You must ensure that when you make a request with your custom client, these three extra fields (`prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`) are passed through correctly on a message level. This also applies to the response: you need to ensure that your custom client correctly returns these three extra fields.
+## Choose the integration seam
 
-The same applies to Responses-compatible APIs.
+### Resources Server adapter
+
+Use a Resources Server when the external framework exposes environment behavior independently of the policy loop:
+
+- reset creates isolated state;
+- actions or tools advance that state;
+- observations return to whichever agent is connected;
+- reward or verification can be produced without requiring the upstream harness.
+
+This preserves Gym's ability to pair the same environment with different agents and models.
+
+[`resources_servers/openenv/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) is the reference. It wraps OpenEnv reset/step behavior, creates one upstream environment instance per Gym session, exposes either MCP tools or `/step`, and translates upstream reward into `verify()`.
+
+<Warning>
+Define reward semantics explicitly. The OpenEnv adapter currently documents that summing observations is valid only for per-step deltas or terminal-only rewards; it is wrong for cumulative rewards.
+</Warning>
+
+### Agent Server adapter
+
+Use an Agent Server when the framework owns a harness or an inseparable end-to-end episode runner:
+
+- the framework decides when and how to call the model;
+- its tools/sandbox are coupled to that harness;
+- its own runner controls termination and scoring;
+- splitting it would change benchmark semantics.
+
+Wrap the runner in an async `/run` endpoint. Convert the Gym task row to upstream input, execute the episode, and translate trajectory, usage, and reward into `BaseVerifyResponse`.
+
+Reference integrations:
+
+- [`responses_api_agents/harbor_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) wraps Harbor agents, environments, jobs, artifacts, and verifier results.
+- [`responses_api_agents/verifiers_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) wraps Prime Intellect Verifiers environments whose `run()` owns the policy loop.
+
+### Split adapter
+
+Use both seams only when the framework has a stable environment API worth sharing independently and a separate framework-specific harness. Define one owner for reset/state/reward and one schema boundary between the two servers. Do not duplicate tools or score the same episode twice.
+
+## Adapter requirements
+
+### Configuration and dependencies
+
+- Keep framework/environment selection in typed Gym config.
+- Put server dependencies in its `requirements.txt` and pin versions needed for compatibility.
+- Document plugin installation and use a separate preparation environment when dependency resolution conflicts with Gym.
+- Pass reproducible runtime settings through Gym config. Keep secrets in supported local secret configuration.
+- Support Linux.
+
+### Schema and lifecycle
+
+- Preserve upstream task IDs and deterministic reset inputs.
+- Validate input and output conversion with Pydantic models.
+- Create isolated upstream state per Gym session.
+- Propagate Gym cookies across every stateful call.
+- Define startup, readiness, cancellation, normal shutdown, forced termination, and artifact cleanup.
+- Return model-caused tool errors to the agent when the upstream contract permits recovery; do not hide infrastructure failures as reward zero.
+
+### Model calls and training metadata
+
+Route model calls through the configured Gym Model Server when online training is required. Gym model responses carry:
+
+- `prompt_token_ids`
+- `generation_token_ids`
+- `generation_log_probs`
+
+Preserve these fields on assistant messages or Responses API output items when constructing the next multi-step request and when returning the completed trajectory. Dropping them can cause retokenization errors or make the rollout unusable for training.
+
+Use `NeMoGymAsyncOpenAI` or a compatible upstream client that explicitly preserves these fields. See [OpenAI-compatible HTTP server and on-policy correction](/contribute/rl-framework-integration/openai-compatible-http-server-on-policy-correction).
+
+### Async and scale
+
+Keep `/run` and Resources Server endpoints async. Await Ray object references directly and avoid blocking the event loop. Use Gym's aiohttp-based clients and explicit cookie propagation.
+
+See [Async patterns and performance](/infrastructure/async-patterns-and-performance) for HTTP client selection, third-party transport adapters, process lifecycle, and load testing.
+
+## Validate the adapter
+
+1. Contract-test reset, action/tool conversion, observations, termination, reward, and cleanup.
+2. Exercise at least two upstream environments with different schemas when the framework supports them.
+3. Run identical tasks upstream and through Gym.
+4. Compare task counts, terminal state, trajectories, per-task rewards, and aggregate metrics.
+5. Test concurrent sessions for state leakage.
+6. Run a Gym evaluation smoke test.
+7. If online RL is a goal, verify token IDs and log probabilities with the target training framework.
+8. Document supported capabilities and known incompatibilities.
+
+A reusable framework adapter is successful when another compatible upstream environment can be enabled primarily through configuration and data rather than a new Python wrapper.

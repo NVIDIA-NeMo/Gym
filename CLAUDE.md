@@ -6,18 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. It provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments. All components are composable and modular — bring your own agent, model, or environment and integrate with Gym where you need it.
 
-An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (per-task execution context).
+An environment defines the world an agent acts in: tasks, environment-owned tools and state, and verification. The model and agent harness interact with the environment but are outside that conceptual boundary. A runnable config under `environments/` composes the environment pieces with an Agent Server and Model Server.
 
 ## Architecture
 
-Environments decompose into four concepts:
+Gym maps the environment and its external actors to these components:
 
-| Concept | NeMo Gym Component |
+| Role | NeMo Gym Component |
 |---------|-------------------|
-| Dataset | JSONL: one row per task |
-| Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
-| Verifier + State | FastAPI Resources Server (`resources_servers/`) |
-| Model | FastAPI Model Server (`responses_api_models/`) or your own |
+| Environment tasks | JSONL: one row per task |
+| Environment tools, verifier, and state | FastAPI Resources Server (`resources_servers/`) |
+| Interacting agent harness | FastAPI Agent Server (`responses_api_agents/`) |
+| Model used by the agent | FastAPI Model Server (`responses_api_models/`) or your own |
 
 Base class hierarchy:
 ```
@@ -32,13 +32,13 @@ For full architecture and concepts (environments, training approaches, verificat
 
 ## Creating Environments
 
-The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:
+The typical workflow is to create an environment tailored to your evaluation or training task, then package it with an agent and model:
 
-1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
+1. **Tasks/dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and task-specific privileged fields passed to the verifier.
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
-3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
+3. **Agent Harness** — reuse a built-in external actor (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
-5. **YAML config** — wires the resources server, agent, and model server together
+5. **Runnable YAML config** — wires datasets and the Resources Server to the Agent Server and Model Server
 
 For guidance on how to build environments, see `fern/versions/latest/pages/environment-tutorials/`. For evaluation, see `fern/versions/latest/pages/get-started/quickstart.mdx`. For training framework integrations, see `fern/versions/latest/pages/training-tutorials/`.
 

@@ -1,0 +1,135 @@
+---
+title: "Async Patterns and Performance"
+description: "Choose Gym HTTP clients, preserve event-loop concurrency, and diagnose scale failures."
+position: 2
+---
+
+NeMo Gym runs large rollout batches through several asynchronous servers. Performance depends on keeping the event loop unblocked, sharing efficient HTTP connections, and bounding only the resources that are actually scarce.
+
+## HTTP client decision tree
+
+Use the narrowest Gym abstraction that fits the call:
+
+| Situation | Use |
+|---|---|
+| A Gym server calls another configured Gym server by instance name | `self.server_client.get/post/request(...)` |
+| Low-level async HTTP without Gym service discovery | `nemo_gym.server_utils.request(...)` |
+| Responses API or OpenAI-style model calls, including Gym training metadata | `NeMoGymAsyncOpenAI` |
+| A third-party SDK hard-codes an httpx-like client interface | An aiohttp-backed compatibility adapter |
+
+All four paths should ultimately use Gym's shared aiohttp client. Do not create a new HTTP session per request.
+
+<Warning>
+Do not introduce `httpx.AsyncClient` into a high-concurrency Gym request path. Its connection-pool behavior caused severe queueing at rollout scale. See [aiohttp vs httpx](/infrastructure/engineering-notes/aiohttp-vs-httpx) for the incident and rationale.
+</Warning>
+
+### `ServerClient`
+
+Use `ServerClient` inside Resources, Agent, and Model Servers. It resolves a configured server name, serializes Pydantic request bodies, and uses Gym's internal retry and connection-pool behavior.
+
+```python
+response = await self.server_client.post(
+    server_name=self.config.resources_server.name,
+    url_path="/verify",
+    json=verify_request,
+    cookies=request.cookies,
+)
+```
+
+Propagate cookies across `seed_session`, tool calls, and `verify` for stateful rollouts.
+
+### Low-level `request()`
+
+Use `nemo_gym.server_utils.request()` when no configured server instance applies, such as an external HTTP API. It uses the process-wide aiohttp client.
+
+### `NeMoGymAsyncOpenAI`
+
+Use `NeMoGymAsyncOpenAI` when the call needs Responses API semantics or Gym's training fields. Configure its base URL from the Gym model-server reference rather than bypassing service discovery with an unrelated provider client.
+
+### Adapting a third-party client
+
+When a library expects its own client object, implement only the interface it consumes and delegate network calls to `nemo_gym.server_utils.request()`. [`TavilySearchAIOHTTPClient`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/app.py) is the reference pattern: it preserves the library-facing method shape while replacing the transport.
+
+## Keep async handlers non-blocking
+
+Audit every operation reached from an `async def` endpoint:
+
+- await network I/O;
+- use asynchronous subprocess APIs where possible;
+- move unavoidable blocking library calls to a bounded executor or isolated worker;
+- avoid large synchronous file operations and CPU-heavy parsing on the event loop;
+- preserve cancellation and timeout behavior through nested calls.
+
+Adding `async def` does not make a synchronous dependency non-blocking.
+
+## Ray from async code
+
+Ray object references are directly awaitable in supported Gym configurations:
+
+```python
+result = await worker.remote(payload)
+```
+
+Do not call `ray.get()` in an async request handler. It blocks the event loop and serializes unrelated requests. Use a legacy `run_in_executor` bridge only when the exact Ray boundary you are integrating is not awaitable, and test that assumption against the installed version.
+
+Keep Ray temporary and working-directory paths short. Unix-domain sockets have a platform path-length limit (commonly 107 usable bytes on Linux); deeply nested checkout or worktree paths can make Ray startup fail before application code runs.
+
+## Subprocess and sidecar patterns
+
+Prefer asynchronous subprocesses for normal command execution. Some workloads require stronger isolation:
+
+- [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/math_with_code/app.py) uses a dedicated `multiprocessing.Process` and `SIGALRM` because arbitrary executed code needs a hard process boundary and timeout.
+- [`ns_tools`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/ns_tools/app.py) owns a long-lived tool sidecar. It starts the process, waits for readiness, connects shutdown to the FastAPI lifespan, and terminates or kills the child when cleanup is required.
+
+For every child process, define startup failure, readiness, cancellation, normal shutdown, forced termination, and log handling. A process that survives its server is a resource leak.
+
+## Semaphore sizing
+
+Use a semaphore around a measured scarce resource, not around the whole server:
+
+- subprocess or sandbox slots;
+- judge-provider quota;
+- browser instances;
+- a non-thread-safe library;
+- bounded CPU or memory capacity.
+
+Size it empirically:
+
+1. measure per-operation CPU, memory, file descriptors, sockets, and downstream quota;
+2. begin below the first hard limit;
+3. ramp concurrency while recording throughput, queue time, p95/p99 latency, errors, and memory;
+4. stop increasing when throughput plateaus or tail latency/errors rise;
+5. leave operational headroom and document the selected value.
+
+A global semaphore that merely hides an inefficient HTTP pool is not a fix.
+
+## Cookies and session state
+
+Gym's shared aiohttp client uses `DummyCookieJar`, so it does not persist response cookies globally. This prevents one concurrent rollout from contaminating another. Stateful call chains must propagate the relevant response cookies explicitly, as `responses_api_agents/simple_agent/app.py` does.
+
+Missing cookie propagation can look like random verification failure at concurrency because tool and verifier calls no longer address the seeded session.
+
+## Diagnose scale failures
+
+Ramp concurrency instead of jumping directly to the target and classify the first saturation point:
+
+| Symptom | Check first |
+|---|---|
+| High CPU with requests queued before network I/O | blocking event-loop work or httpx/httpcore pool behavior |
+| `Too many open files`, connection failures | file-descriptor limits, leaked responses/sockets, connector settings |
+| Throughput flat while latency rises | downstream capacity, an overbroad semaphore, worker starvation |
+| Ray fails during startup in a deep checkout | Unix socket path length |
+| Correct at low concurrency, wrong state at high concurrency | cookie propagation and shared mutable session state |
+| Port remains occupied after shutdown | sidecar/process lifecycle |
+| Memory grows after requests finish | retained tasks, responses, process handles, or session state |
+
+Change one condition at a time. Report hardware, software versions, request count, concurrency, throughput, p50/p95/p99 latency, error counts, and cleanup state.
+
+## Validation checklist
+
+- Unit-test timeout, cancellation, and cleanup paths.
+- Confirm downstream response bodies are consumed or released.
+- Confirm stateful sessions remain isolated.
+- Run a representative concurrency ramp.
+- Check process, task, socket, and memory counts after the run.
+- Compare throughput and tail latency before and after the change.

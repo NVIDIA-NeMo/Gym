@@ -1,6 +1,6 @@
 ---
 title: "Environments"
-description: "Environments decompose into dataset, agent harness, verifier, and state — unifying evaluation, agent optimization, and training."
+description: "Environments provide tasks, interactive tools and state, and verification for evaluation and training."
 position: 1.5
 ---
 
@@ -14,29 +14,33 @@ position: 1.5
 
 The term *environment* comes from reinforcement learning, where it describes the world an agent interacts with. The agent takes actions, the environment returns observations and a reward, and the cycle repeats. Historically, the word "Gym" refers to a collection of RL training environments, which inspired the naming of NeMo Gym.
 
-The concept is the same today but the usage of environments has expanded beyond RL to include much more, such as model evaluation, agent evaluation, agent harness optimization, and synthetic data generation.
+The concept is the same today, but environments are now used for model evaluation, agent evaluation, agent-harness optimization, training, and synthetic data generation.
 
-Accordingly, an environment contains everything required for an agent to complete a task:
-- Dataset
-- Agent Harness
-- Verifier
-- State
+An environment defines the world an agent acts in:
 
-The model powering the agent is external to the environment. It generates a response (actions), which the environment processes. The environment updates its internal state, returns observations (tool results, error messages, state changes), and produces a reward (a numerical score of how well the agent performed).
+- **Tasks** — prompts plus task-specific setup and privileged verification metadata
+- **Tools and state** — the actions available to the agent and the per-rollout world those actions can change
+- **Verification** — the logic that evaluates the result and produces a reward
+
+The model and agent harness are external actors. The harness turns model outputs into actions, sends those actions to the environment, receives observations, and decides when the attempt is complete.
+
+<Note>
+In NeMo Gym, a runnable config under `environments/` composes an environment's datasets and Resources Server with an Agent Server and Model Server. That packaging makes an experiment easy to run; it does not make the agent harness part of the environment boundary.
+</Note>
 
 ## Anatomy of an Environment
 
-### Dataset
+### Tasks and datasets
 
-A collection of tasks (prompts for the agent to solve), along with metadata and privileged information necessary for scoring each task attempt. Each task defines a problem for the model: e.g. a coding issue to fix, a math problem to solve, a tool-calling scenario to navigate.
+A task is a prompt for the agent to solve together with environment setup and privileged information needed to score the attempt. A dataset is a collection of tasks: for example, coding issues to fix, math problems to solve, or tool-calling scenarios to navigate.
 
 Tasks can vary structurally: single-turn question answering, multi-step tool use, multi-turn dialogue, agentic workflows with sandboxed execution, and more.
 
-### Agent Harness
+### Tools and state
 
-Agent = model + agent harness. The agent harness defines how the model interacts with the environment. Language models perform stateless inference; the harness is what turns a model into an agent — it loops model calls, routes tool use, manages context, and decides when the task is done.
+Tools expose the actions an agent can take in the environment. State records how the world changes during one task attempt. Each attempt starts from clean state so attempts remain independent and rewards are attributable to that agent's actions.
 
-Harnesses exist on a spectrum. A simple harness just loops model calls until the task is complete. Other harnesses like Claude Code or OpenClaw include tools, planning, memory, self-correction, skills and more.
+Some environments have minimal state, such as math answer verification. Others have rich state that evolves across turns: file systems being modified, databases being updated, code repositories being patched, or game boards advancing.
 
 ### Verifier
 
@@ -49,11 +53,11 @@ The verifier is used for both evaluation and training:
 - **For evaluation**: verifier scores become benchmark metrics (e.g. accuracy, pass@1, pass@k).
 - **For training**: the same scores become the reward signal that drives reinforcement learning.
 
-### State
+### Agent harnesses interact with environments
 
-Per-task state that changes as the agent takes actions. Each task attempt starts from a clean state, this ensures attempts are independent and rewards are attributable to the agent's actions on that task.
+Agent = model + agent harness. Language models perform stateless inference; the harness turns a model into an agent by looping model calls, routing tool use, managing context, and deciding when the task is done.
 
-Some environments have minimal state (e.g., math — just input and output). Others have rich state that evolves across turns: file systems being modified, databases being updated, code repositories being patched, game boards advancing.
+Harnesses exist on a spectrum. A simple harness loops model calls and routes environment tool calls. Harnesses such as Claude Code or OpenClaw can also bring agent-owned tools, planning, memory, self-correction, and skills. Those capabilities affect how the agent behaves, but remain separate from environment-owned tools and state.
 
 Runtimes and sandboxes host and run the environment. A runtime is the execution infrastructure (e.g. local process, Docker, Apptainer). A sandbox is a runtime with isolated execution — for example, a container per episode — providing security boundaries when the agent can execute arbitrary code.
 
