@@ -75,7 +75,7 @@ policy-visible tool message.
 
 ## Dataset Examples
 
-The checked-in one-row examples are `data/example.jsonl` and `data/example_parallel_tool_calls.jsonl`. They are
+The checked-in five-row examples are `data/example.jsonl` and `data/example_parallel_tool_calls.jsonl`. They are
 generated from raw per-domain seed artifacts, not from chat-training JSONLs that may contain literal DSML tool-call
 leakage.
 
@@ -87,13 +87,13 @@ uv run python resources_servers/synthetic_tool_use_simulation/scripts/build_synt
   --dataset-name example \
   --output-path resources_servers/synthetic_tool_use_simulation/data/example.jsonl \
   --report-path /tmp/synthetic_tool_use_example.report.json \
-  --max-rows 1
+  --max-rows 5
 
 uv run python resources_servers/synthetic_tool_use_simulation/scripts/build_synthetic_tool_use_dataset.py \
   --dataset-name example_parallel_tool_calls \
   --output-path resources_servers/synthetic_tool_use_simulation/data/example_parallel_tool_calls.jsonl \
   --report-path /tmp/synthetic_tool_use_example_parallel_tool_calls.report.json \
-  --max-rows 1 \
+  --max-rows 5 \
   --parallel-tool-calls
 ```
 

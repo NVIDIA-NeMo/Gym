@@ -63,19 +63,19 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 RESOURCE_SERVERS_DIR = PIPELINE_DIR.parent
 
 PROMPT_SHA256 = {
-    "customer_scenario_collection_schema.json": "b0a4d8385fbda3b77d8d9626bc5998f1d5e62a2f75a225c3f6198a663aa5991e",
-    "domain_generation.txt": "f90c8b57ed564fb8c918b4d2c2d9dc4da537285fe8bcc56500db168a54200211",
-    "cohesion_judge.txt": "a0070c4d9688df277c5f65e2b3a22112a1dea2b4f02c173ff4758529f4d912d9",
-    "general_policy.txt": "4da0ed416c152dffd975b46e480c3e83843b6bfe037c2222dc70cb5e471bad88",
-    "general_policy_refine.txt": "cbe16bf60332a12a03083758fe31dafd5cb779abebf29214ef1315de526b8c1b",
-    "general_tools.txt": "5b8af59584760ce76523286ef17865f5b195385afeb3494fcd867cd41d90b17a",
-    "golden_judge.txt": "ca5ce1481ff65e3f913dce4f225598f50180241edac0f6317dfaa6a896441977",
-    "proactive_policy.txt": "00c93189b9411fabde7439a5fdf36d14412e473e6b8851824043a7e4c74109be",
-    "proactive_policy_refine.txt": "544fce4d3fc534634f04db0e2e01d7a5691612d01b6f3abd9bc27d039e88d9d5",
-    "proactive_tools.txt": "2fd77edd5d5fdc99beceb58aede864b2a41ef3fecef102eb5b0a3c7bc1a7895d",
-    "tools_refine.txt": "38965e0f6909b3799863153aab6980ef694da5128145a5aa4ff88bbbe2782738",
-    "scenario_system.txt": "9b799cf3bd1110e9d637ca4db718f68d626c90943ecf5bcbf2ad808a511f3d90",
-    "scenario_user.txt": "cad5e03e2ad1365c919da4520af339a0616ec0954a29e415779244df13b73cbd",
+    "customer_scenario_collection_schema.json": "b0a4d8385fbda3b77d8d9626bc5998f1d5e62a2f75a225c3f6198a663aa5991e",  # pragma: allowlist secret
+    "domain_generation.txt": "f90c8b57ed564fb8c918b4d2c2d9dc4da537285fe8bcc56500db168a54200211",  # pragma: allowlist secret
+    "cohesion_judge.txt": "a0070c4d9688df277c5f65e2b3a22112a1dea2b4f02c173ff4758529f4d912d9",  # pragma: allowlist secret
+    "general_policy.txt": "4da0ed416c152dffd975b46e480c3e83843b6bfe037c2222dc70cb5e471bad88",  # pragma: allowlist secret
+    "general_policy_refine.txt": "cbe16bf60332a12a03083758fe31dafd5cb779abebf29214ef1315de526b8c1b",  # pragma: allowlist secret
+    "general_tools.txt": "5b8af59584760ce76523286ef17865f5b195385afeb3494fcd867cd41d90b17a",  # pragma: allowlist secret
+    "golden_judge.txt": "ca5ce1481ff65e3f913dce4f225598f50180241edac0f6317dfaa6a896441977",  # pragma: allowlist secret
+    "proactive_policy.txt": "00c93189b9411fabde7439a5fdf36d14412e473e6b8851824043a7e4c74109be",  # pragma: allowlist secret
+    "proactive_policy_refine.txt": "544fce4d3fc534634f04db0e2e01d7a5691612d01b6f3abd9bc27d039e88d9d5",  # pragma: allowlist secret
+    "proactive_tools.txt": "2fd77edd5d5fdc99beceb58aede864b2a41ef3fecef102eb5b0a3c7bc1a7895d",  # pragma: allowlist secret
+    "tools_refine.txt": "38965e0f6909b3799863153aab6980ef694da5128145a5aa4ff88bbbe2782738",  # pragma: allowlist secret
+    "scenario_system.txt": "9b799cf3bd1110e9d637ca4db718f68d626c90943ecf5bcbf2ad808a511f3d90",  # pragma: allowlist secret
+    "scenario_user.txt": "cad5e03e2ad1365c919da4520af339a0616ec0954a29e415779244df13b73cbd",  # pragma: allowlist secret
 }
 
 
@@ -271,7 +271,10 @@ def test_generation_assets_are_stable_and_loadable() -> None:
             digest.update(b"\0")
             digest.update(path.read_bytes())
             digest.update(b"\0")
-    assert digest.hexdigest() == "4878085c98451c785b8f71793611c14992836403c74dd8aaf74d0ab8a1c83124"
+    expected_golden_digest = (
+        "4878085c98451c785b8f71793611c14992836403c74dd8aaf74d0ab8a1c83124"  # pragma: allowlist secret
+    )
+    assert digest.hexdigest() == expected_golden_digest
 
     schema = scenario_schema_json()
     assert schema == generated_scenario_schema_json()
@@ -282,9 +285,10 @@ def test_generation_assets_are_stable_and_loadable() -> None:
         scenario_count=80,
         scenarios_schema=schema,
     )
-    assert hashlib.sha256(rendered_user.encode()).hexdigest() == (
-        "75e348ec36ea5b3d321362279b5ebd0e9a2940a5c00a456ece1ebb514ca02b65"
+    expected_rendered_user_digest = (
+        "75e348ec36ea5b3d321362279b5ebd0e9a2940a5c00a456ece1ebb514ca02b65"  # pragma: allowlist secret
     )
+    assert hashlib.sha256(rendered_user.encode()).hexdigest() == expected_rendered_user_digest
 
     assert load_domain_prompt() == DOMAIN_PROMPT_PATH.read_text().strip()
     assert scenario_prompts.system == (SCENARIO_PROMPTS_DIR / "scenario_system.txt").read_text().strip()
