@@ -16,10 +16,8 @@
 
 Each task's gold answer and routing metadata ride at the ROW TOP LEVEL (``task``,
 ``domain``, ``setting``, ``instruction``, ``answer`` — mirroring rolemrc /
-ragtruth so they survive the nel ``gym://...protocol=native`` driver, which
-drops nested objects); ``verify()`` dispatches to the matching scorer by
-``task`` (falling back to a nested ``verifier_metadata`` dict for the
-gym-native rollout path):
+ragtruth); ``verify()`` dispatches to the matching scorer by ``task`` (falling
+back to a nested ``verifier_metadata`` dict when top-level fields are absent):
 
 * ``verb-extract``   — word-level F1 (strict + loose), reward = mean.
 * ``translation``    — ROUGE-L f-measure (strict + loose), reward = mean.
@@ -124,10 +122,10 @@ def _strip_think(text: str) -> str:
 def _decode_answer(answer: Any) -> Any:
     """Recover the gold answer, JSON-decoding it when it arrives as a string.
 
-    ``prepare_iheval`` JSON-encodes ``answer`` so the (dict/list) gold survives
-    the nel ``gym://...protocol=native`` driver, which forwards only scalar
-    top-level fields. A raw object (gym-native rollout path) is returned as-is;
-    a plain-string gold that is not valid JSON is returned unchanged.
+    ``prepare_iheval`` JSON-encodes ``answer`` when the gold is a dict/list
+    (safety, rule-following, get-webpage tasks) so it travels as a scalar
+    top-level field. A raw object is returned as-is; a plain-string gold that
+    is not valid JSON is returned unchanged.
     """
     if not isinstance(answer, str):
         return answer
@@ -684,10 +682,8 @@ class IHEvalRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # Routing/gold fields ride at the ROW TOP LEVEL (mirroring rolemrc /
-    # ragtruth) so they survive the nemo-evaluator ``gym://...protocol=native``
-    # driver, which forwards a row's top-level fields onto ``/verify`` but drops
-    # any nested object. ``verifier_metadata`` is kept as a fallback for the
-    # gym-native rollout path (which does forward the nested dict).
+    # ragtruth). ``verifier_metadata`` is kept as a fallback for datasets that
+    # use the nested form.
     id: Any = None
     task: str = ""
     domain: str = ""
@@ -718,8 +714,7 @@ class IHEvalResourcesServer(SimpleResourcesServer):
         return super().setup_webserver()
 
     async def verify(self, body: IHEvalVerifyRequest) -> IHEvalVerifyResponse:
-        # Prefer top-level fields (survive the nel native driver); fall back to
-        # a nested verifier_metadata dict for the gym-native rollout path.
+        # Prefer top-level fields; fall back to a nested verifier_metadata dict.
         meta = body.verifier_metadata or {}
         task = str(body.task or meta.get("task", ""))
         setting = str(body.setting or meta.get("setting", ""))

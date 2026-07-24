@@ -23,13 +23,13 @@ Writes:
 
 Why a conflict-only dataset
 ---------------------------
-The nemo-evaluator (``nel``) driver "owns the loop": its headline metric is a
-plain per-row ``mean_reward`` over the whole dataset — it never calls the Gym
-server's ``compute_metrics``/``get_key_metrics``, so the aggregate conflict
-``result_score`` that ``app.py`` computes does not surface in a ``nel eval run``.
+The gym driver "owns the loop": its headline metric is a plain per-row
+``mean_reward`` over the whole dataset — it never calls the Gym server's
+``compute_metrics``/``get_key_metrics``, so the aggregate conflict
+``result_score`` that ``app.py`` computes does not surface in a plain eval run.
 IHEval's headline is the **conflict** setting (instruction hierarchy is what the
 conflict setting stresses), so ``test_conflict.jsonl`` restricts the dataset to
-the ``conflict/*`` rows; NEL's per-row ``mean_reward`` over that file IS the
+the ``conflict/*`` rows; the per-row ``mean_reward`` over that file IS the
 average conflict score. (Row counts differ across tasks, so this is a per-row
 mean, not the task-macro average of upstream ``average_final_score.py`` — that
 exact number still comes from the gym-native ``compute_metrics`` path over the
@@ -37,13 +37,11 @@ full ``test.jsonl``.)
 
 Why Chat-Completions shape
 --------------------------
-IHEval is driven by the nemo-evaluator ``simple`` solver via the
-``gym://...protocol=native`` scheme. The solver forwards
-``responses_create_params.input`` and ``responses_create_params.tools``
-**verbatim** to the vLLM ``/chat/completions`` endpoint — there is no
-Responses→Chat conversion on that path. So the dataset must already be
-Chat-Completions-shaped, or the native tool-use rows 400 ("tools.0.function:
-Field required").
+IHEval uses ``simple_agent``, which passes ``responses_create_params.input``
+and ``responses_create_params.tools`` directly to the model's
+``/chat/completions`` endpoint without Responses→Chat conversion. The dataset
+must already be Chat-Completions-shaped, or the tool-use rows fail validation
+("tools.0.function: Field required").
 
 This reproduces the upstream benchmark's own request builder exactly, so the
 prompt the model sees is byte-for-byte what upstream IHEval sends:
@@ -58,8 +56,7 @@ prompt the model sees is byte-for-byte what upstream IHEval sends:
 The assembled chat ``messages`` go into ``responses_create_params.input`` and
 the tool ``definition`` into ``responses_create_params.tools`` (both already the
 shape vLLM chat accepts). Routing/gold fields ride at the ROW TOP LEVEL
-(``task``, ``domain``, ``setting``, ``instruction``, ``answer``) so they survive
-the native driver, which forwards top-level scalars but drops nested objects;
+(``task``, ``domain``, ``setting``, ``instruction``, ``answer``);
 ``answer`` is JSON-encoded and ``verify()`` JSON-decodes it (see app.py
 ``_decode_answer``).
 
@@ -269,10 +266,8 @@ def _to_task(row: Dict[str, Any], domain: str, task: str) -> Dict[str, Any]:
     if tools is not None:
         params["tools"] = tools
 
-    # Routing/gold fields ride at the ROW TOP LEVEL so they survive the
-    # nemo-evaluator ``gym://...protocol=native`` driver, which forwards
-    # top-level SCALARS but drops nested objects. ``answer`` is a dict/list for
-    # safety, rule-following and get-webpage, so JSON-encode it; verify()
+    # Routing/gold fields ride at the ROW TOP LEVEL. ``answer`` is a dict/list
+    # for safety, rule-following and get-webpage, so JSON-encode it; verify()
     # JSON-decodes via ``_decode_answer``.
     return {
         "responses_create_params": params,
@@ -321,7 +316,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     _write_jsonl(_DATA_DIR / "example.jsonl", example_rows)
     if not args.example_only:
         _write_jsonl(_DATA_DIR / "test.jsonl", all_rows)
-        # Conflict-only subset: NEL's per-row mean_reward over this file is the
+        # Conflict-only subset: per-row mean_reward over this file is the
         # average conflict score (see module docstring).
         conflict_rows = [t for t in all_rows if _setting_category(t["setting"]) == "conflict"]
         _write_jsonl(_DATA_DIR / "test_conflict.jsonl", conflict_rows)

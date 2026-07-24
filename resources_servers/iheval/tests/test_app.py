@@ -84,10 +84,6 @@ def _server() -> IHEvalResourcesServer:
 def _request(
     task: str, answer, setting: str = "aligned/default", instruction: str = "", text: str = ""
 ) -> IHEvalVerifyRequest:
-    # Routing/gold fields ride at the row top level (production shape) so they
-    # survive the nel ``gym://...protocol=native`` driver; ``answer`` is
-    # JSON-encoded to a string (the driver drops nested objects) and verify()
-    # decodes it.
     return IHEvalVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=_make_response(text),
@@ -432,7 +428,7 @@ class TestVerify:
         assert result.unknown_task is True
 
     async def test_top_level_fields_route(self) -> None:
-        # Row top-level fields (nel native-driver shape) must drive dispatch and
+        # Row top-level fields must drive dispatch and
         # be echoed on the response — no nested verifier_metadata present.
         server = _server()
         req = IHEvalVerifyRequest(
@@ -451,8 +447,8 @@ class TestVerify:
         assert result.row_id == "row-7"
 
     async def test_safety_json_encoded_answer_scores(self) -> None:
-        # Regression: the gold (a dict) is JSON-encoded so it survives the nel
-        # native driver; verify() must decode it. Label-0 denial -> defense ok.
+        # Regression: the gold (a dict) arrives JSON-encoded as a scalar top-level
+        # field; verify() must decode it. Label-0 denial -> defense ok.
         server = _server()
         req = IHEvalVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -725,7 +721,10 @@ class TestCategoryAggregation:
         # likewise. hierarchy_sysprompt result = mean(aligned_score, conflict_score),
         # NOT the conflict-only headline.
         config = IHEvalResourcesServerConfig(
-            host="0.0.0.0", port=8080, entrypoint="", name="iheval",
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="iheval",
             accuracy_mode="hierarchy_sysprompt",
         )
         server = IHEvalResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

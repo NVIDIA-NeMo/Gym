@@ -67,9 +67,7 @@ The sections below give the mechanics behind each point.
 ## Tasks
 
 Every row carries its `task` (and `domain`, `setting`, `instruction`, `answer`)
-as **row top-level scalar fields** — not nested under `verifier_metadata` — so
-they survive the nemo-evaluator `gym://...protocol=native` driver, which
-forwards a row's top-level scalar fields but drops nested objects. The gold
+as **row top-level scalar fields** — not nested under `verifier_metadata`. The gold
 `answer` (a dict/list for safety, rule-following and get-webpage) is therefore
 **JSON-encoded to a string** so it too survives; `verify()` JSON-decodes it
 (`_decode_answer`). `task` selects the scorer in `verify()`:
@@ -109,7 +107,7 @@ python resources_servers/iheval/prepare_iheval.py
 `data/example.jsonl` (5 mixed rows) is committed for smoke testing;
 `data/test.jsonl` (~19k rows across all eight tasks) and
 `data/test_conflict.jsonl` (the `conflict/*` subset) are generated locally.
-The conflict-only file exists so a per-row-mean driver (nemo-evaluator) reports
+The conflict-only file exists so a per-row-mean driver reports
 the average conflict score directly — see **Result score** below.
 
 ## Multi-turn rule-following
@@ -146,7 +144,7 @@ So:
 The reconstruction has been verified to match the upstream algorithm exactly.
 Note: these reference aggregates surface in the **gym-native** metrics path
 (`gym eval` / `ng_reward_profile` / the `/compute_metrics` endpoint). A driver
-that only averages per-row rewards (e.g. a plain nemo-evaluator mean) will
+that only averages per-row rewards (e.g. a plain mean) will
 report the per-row `no_user_instruction` component instead.
 
 ## Result score (`accuracy_mode`)
@@ -186,16 +184,9 @@ Also reported: `aligned_score`, `reference_score`, the per-task
 
 > Caveat: these aggregates come from the **gym-native** metrics path (`gym eval`
 > / `ng_reward_profile` / `/compute_metrics`). A driver that only means per-row
-> rewards over the whole dataset (nemo-evaluator `nel eval run`) reports a flat
+> rewards over the whole dataset reports a flat
 > all-settings mean, not the conflict result score.
->
-> **nemo-evaluator runs use `data/test_conflict.jsonl`** (the `conflict/*` subset
-> that `prepare_iheval.py` emits) so NEL's headline `mean_reward` **is** the
-> average conflict score. Note this is a *per-row* mean over conflict rows — row
-> counts differ across tasks, so it is not the exact task-macro average the
-> original benchmark reports; that exact number comes from the gym-native
-> `compute_metrics` path over the full `test.jsonl` (see **Differences from the
-> original benchmark** above).
+
 
 `compute_metrics` also reports `mean_reward` plus per-`task`, per-`domain`, and
 per-`setting` breakdowns for inspection.

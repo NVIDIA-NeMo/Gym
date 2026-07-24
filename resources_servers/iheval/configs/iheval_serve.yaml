@@ -2,8 +2,8 @@
 #
 # All IHEval scorers are rule-based (F1 / ROUGE / IFEval / TensorTrust), so the
 # verify() path needs no model — unlike rolemrc's judge mode. This config is
-# used by the nemo-evaluator `gym://...protocol=native` flow, where the eval
-# driver owns generation and only calls the resources server's /verify.
+# used when the caller owns generation and calls only the resources server's
+# /verify endpoint.
 iheval:
   resources_servers:
     iheval:
