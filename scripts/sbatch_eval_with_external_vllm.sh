@@ -52,7 +52,7 @@ gym eval run \
     ++policy_base_url=\$ip \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++global_aiohttp_connector_limit_per_host=16384
+    ++global_aiohttp_connector_limit_per_host=512
 
 EOF
 )
