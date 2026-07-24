@@ -22,6 +22,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -103,9 +104,6 @@ class TestIterRefRepeatDirs:
 
 
 class TestApp:
-    def test_rollout_id_is_absent_when_correlation_is_disabled(self) -> None:
-        assert "rollout_id" not in _verify_request().model_dump()
-
     def test_sanity_rubric(self) -> None:
         _server(reward_mode="rubric")
 
@@ -244,9 +242,10 @@ class TestApp:
             captured.update(kwargs)
             return 0.5, {"overall_score": 0.5}
 
-        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], rollout_id="7-3")
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
 
         with (
+            rollout_context("7-3"),
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):

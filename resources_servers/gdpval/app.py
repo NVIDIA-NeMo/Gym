@@ -41,7 +41,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import apply_rollout_prefix, get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -234,7 +235,6 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class GDPValVerifyRequest(BaseVerifyRequest):
-    rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     task_id: str
     sector: Optional[str] = None
     occupation: Optional[str] = None
@@ -325,7 +325,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             JudgePanelMember(create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}))
         ]
 
-    def _resolve_judges(self, rollout_id: Optional[str] = None) -> List[ResolvedJudge]:
+    def _resolve_judges(self) -> List[ResolvedJudge]:
         """Resolve the (always non-empty) panel to concrete upstream coordinates.
 
         Every judge — including the single-judge special case (see
@@ -338,7 +338,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         legacy_overrides = dict(self.config.judge_responses_create_params_overrides or {})
 
         def _url(server: ModelServerRef) -> str:
-            return apply_rollout_prefix(get_server_url(server.name), rollout_id) + "/v1"
+            return apply_rollout_prefix(get_server_url(server.name), current_rollout_id()) + "/v1"
 
         judges: List[ResolvedJudge] = []
         for i, member in enumerate(self._effective_panel()):
@@ -374,7 +374,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 invalid_judge_response=True,
             )
 
-        judges = self._resolve_judges(body.rollout_id)
+        judges = self._resolve_judges()
         # Route tasks with audio/video deliverables to the AV-capable judge(s) —
         # most judges can't read those modalities natively.
         if dir_contains_audio_video(body.deliverables_dir):
@@ -535,7 +535,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # Build the judge panel. Members may share a single proxy server (so we
         # reuse one OpenAI client per distinct upstream) and differ only by model
         # + reasoning settings. run_trials samples one member per trial.
-        resolved_judges = self._resolve_judges(body.rollout_id)
+        resolved_judges = self._resolve_judges()
         client_cache: Dict[tuple, Any] = {}
 
         def _client_for(judge: ResolvedJudge) -> Any:
