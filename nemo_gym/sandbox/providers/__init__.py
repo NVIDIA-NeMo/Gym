@@ -15,6 +15,7 @@
 """Sandbox provider registry."""
 
 from nemo_gym.sandbox.providers.base import (
+    ConnectableProvider,
     ExecResult,
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -34,6 +35,7 @@ from nemo_gym.sandbox.providers.registry import (
 
 
 __all__ = [
+    "ConnectableProvider",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

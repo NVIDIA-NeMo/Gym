@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers import (
+    ConnectableProvider,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
@@ -130,6 +131,41 @@ class AsyncSandbox:
         finally:
             await self._provider.aclose()
             self._closed = True
+
+    async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a JSON descriptor another process can rebuild this box from.
+
+        Requires a provider that supports the connect capability (the remote
+        provider, or an external-control-plane provider such as OpenSandbox). For
+        the remote provider, ``scope`` mints a co-lease (``scope="operate"``).
+        """
+        provider = self._provider
+        if not isinstance(provider, ConnectableProvider):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise RuntimeError(f"provider {name!r} does not support serialize()/connect()")
+        descriptor = await provider.serialize_handle(self._require_handle(), scope=scope)
+        # Carry the working directory so a reattached sandbox lands in the same
+        # place, even for providers whose descriptor does not include it (the
+        # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
+        if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
+            descriptor = {**descriptor, "workdir": self._spec.workdir}
+        return descriptor
+
+    @classmethod
+    async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
+        """Rebuild a sandbox in this process from a descriptor produced by
+        :meth:`serialize`, using ``provider`` (which must support connect)."""
+        if not isinstance(provider, ConnectableProvider):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise RuntimeError(f"provider {name!r} does not support serialize()/connect()")
+        if not isinstance(descriptor, Mapping) and hasattr(descriptor, "to_dict"):
+            descriptor = descriptor.to_dict()
+        handle = await provider.connect(descriptor)
+        workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
+        sandbox = cls(provider, SandboxSpec(workdir=workdir))
+        sandbox._handle = handle
+        sandbox._stopped = False
+        return sandbox
 
     async def __aenter__(self) -> "AsyncSandbox":
         return self
