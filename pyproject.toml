@@ -249,6 +249,11 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.9",
 
+    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
+    # Updated: Mon Jul 13, 2026 with openshell>=0.0.82
+    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
+    "openshell>=0.0.82",
+
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",
