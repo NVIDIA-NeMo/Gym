@@ -25,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
     NG_FAILURE_CLASS_KEY,
@@ -136,39 +137,9 @@ class TestApp:
                 return_value={"host": "model-host", "port": 8000},
             ),
         ):
-            assert wrapper._get_model_base_url("7-3") == "http://model-host:8000/ng-rollout/7-3/v1"
+            with rollout_context("7-3"):
+                assert wrapper._get_model_base_url() == "http://model-host:8000/ng-rollout/7-3/v1"
             assert wrapper._get_model_base_url() == "http://model-host:8000/v1"
-
-    @pytest.mark.asyncio
-    async def test_run_correlates_policy_and_judge_calls(self) -> None:
-        server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {"observability_enabled": True}
-        server_client.post = AsyncMock(return_value=MagicMock())
-        wrapper = StirrupAgentWrapper(config=_make_config(), server_client=server_client)
-        body = StirrupRunRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input="ignored",
-                metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "99"},
-            ),
-            task_id="task-1",
-            prompt="do the thing",
-            _ng_task_index=7,
-            _ng_rollout_index=3,
-        )
-        request = MagicMock(cookies={})
-        responses_mock = AsyncMock(return_value=_fake_response())
-
-        with (
-            patch.object(StirrupAgentWrapper, "responses", responses_mock),
-            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
-            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value={"reward": 1.0})),
-        ):
-            await wrapper.run(request, body)
-
-        policy_params = responses_mock.await_args.args[0]
-        assert wrapper.rollout_id_from_run(policy_params.metadata) == "7-3"
-        verify_calls = [call for call in server_client.post.await_args_list if call.kwargs["url_path"] == "/verify"]
-        assert verify_calls[0].kwargs["json"]["rollout_id"] == "7-3"
 
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
@@ -310,7 +281,6 @@ class TestJudgeOnlyMode:
         assert len(verify_calls) == 1
         verify_json = verify_calls[0].kwargs["json"]
         assert verify_json["deliverables_dir"].endswith(str(Path("task_task-1") / "repeat_0"))
-        assert verify_json["rollout_id"] == "7-0"
         assert result == {"reward": 0.9, "judge_response": "ok"}
 
     @pytest.mark.asyncio

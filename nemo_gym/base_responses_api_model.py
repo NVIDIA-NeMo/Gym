@@ -36,7 +36,7 @@ import re
 import time
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterator, Mapping, Optional
 from uuid import uuid4
 
 import orjson
@@ -66,6 +66,67 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+_NORMALIZED_CAPTURE_RESPONSE_SCOPE_KEY = "nemo_gym.normalized_capture_response"
+
+
+class _ChatCompletionsWireParams(NeMoGymChatCompletionCreateParamsNonStreaming):
+    """Wire shape accepted by the shared Chat Completions route."""
+
+    stream: Optional[bool] = None
+
+
+def _chat_completion_to_sse(response: NeMoGymChatCompletion, *, include_usage: bool) -> Iterator[str]:
+    """Emit a completed Chat Completions response as protocol-compatible SSE chunks."""
+    data = response.model_dump(mode="json", exclude_none=True)
+    chunk_base = {
+        "id": data["id"],
+        "object": "chat.completion.chunk",
+        "created": data["created"],
+        "model": data["model"],
+    }
+    for key in ("service_tier", "system_fingerprint"):
+        if key in data:
+            chunk_base[key] = data[key]
+
+    def _event(**fields: Any) -> str:
+        return f"data: {orjson.dumps({**chunk_base, **fields}).decode()}\n\n"
+
+    for choice in data["choices"]:
+        message = choice["message"]
+        delta = {"role": message["role"]}
+        for key in ("content", "refusal", "reasoning_content", "reasoning"):
+            if key in message:
+                delta[key] = message[key]
+        if message.get("tool_calls"):
+            delta["tool_calls"] = [
+                {**tool_call, "index": index} for index, tool_call in enumerate(message["tool_calls"])
+            ]
+
+        index = choice["index"]
+        yield _event(
+            choices=[
+                {
+                    "index": index,
+                    "delta": delta,
+                    "finish_reason": None,
+                    "logprobs": choice.get("logprobs"),
+                }
+            ]
+        )
+        yield _event(
+            choices=[
+                {
+                    "index": index,
+                    "delta": {},
+                    "finish_reason": choice["finish_reason"],
+                    "logprobs": None,
+                }
+            ]
+        )
+
+    if include_usage:
+        yield _event(choices=[], usage=data.get("usage"))
+    yield "data: [DONE]\n\n"
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
@@ -84,7 +145,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         install_model_call_capture(app, capture_config, model_server_name=self.config.name)
 
-        app.post("/v1/chat/completions")(self.chat_completions)
+        app.post("/v1/chat/completions")(self._chat_completions_wire)
 
         app.post("/v1/responses")(self.responses)
 
@@ -135,6 +196,33 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if "request" in inspect.signature(self.responses).parameters:
             return await self.responses(request=request, body=params)
         return await self.responses(body=params)
+
+    async def _chat_completions_wire(self, request: Request, body: _ChatCompletionsWireParams = Body()) -> Any:
+        payload = body.model_dump(exclude_unset=True)
+        streaming = body.stream is True
+        if streaming:
+            payload["stream"] = False
+            payload.pop("stream_options", None)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        response = await self._invoke_chat_completions(request, params)
+        if not streaming:
+            return response
+
+        # The synthetic stream may omit usage at the caller's request. Keep the complete normalized
+        # response in this request's ASGI scope so capture does not lose data that the model returned.
+        request.scope[_NORMALIZED_CAPTURE_RESPONSE_SCOPE_KEY] = response.model_dump(mode="json", exclude_none=True)
+        stream_options = body.stream_options or {}
+        return StreamingResponse(
+            _chat_completion_to_sse(response, include_usage=bool(stream_options.get("include_usage"))),
+            media_type="text/event-stream",
+        )
+
+    async def _invoke_chat_completions(
+        self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        if "request" in inspect.signature(self.chat_completions).parameters:
+            return await self.chat_completions(request=request, body=params)
+        return await self.chat_completions(body=params)
 
 
 # --- Capture configuration + rollout-keyed storage ---
@@ -714,34 +802,49 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
 
 def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """Rebuild a Chat Completions response from streamed chunks."""
-    content_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    tool_calls: dict[int, dict[str, Any]] = {}
+    choices: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
     response_id: Optional[str] = None
-    role = "assistant"
-    finish_reason: Optional[str] = None
-    saw_choice = False
+    created: Optional[int] = None
+    service_tier: Optional[str] = None
+    system_fingerprint: Optional[str] = None
     for chunk in events:
         model = chunk.get("model") or model
         if isinstance(chunk.get("id"), str):
             response_id = chunk["id"]
+        if isinstance(chunk.get("created"), int):
+            created = chunk["created"]
+        service_tier = chunk.get("service_tier") or service_tier
+        system_fingerprint = chunk.get("system_fingerprint") or system_fingerprint
         if chunk.get("usage"):
             usage = chunk["usage"]
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
-            saw_choice = True
+            index = choice.get("index", 0)
+            state = choices.setdefault(
+                index,
+                {
+                    "role": "assistant",
+                    "content": [],
+                    "reasoning_content": [],
+                    "tool_calls": {},
+                    "finish_reason": None,
+                    "logprobs": None,
+                },
+            )
             delta = choice.get("delta") or {}
-            role = delta.get("role") or role
-            if delta.get("content"):
-                content_parts.append(delta["content"])
+            state["role"] = delta.get("role") or state["role"]
+            if isinstance(delta.get("content"), str):
+                state["content"].append(delta["content"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-            if reasoning:
-                reasoning_parts.append(reasoning)
+            if isinstance(reasoning, str):
+                state["reasoning_content"].append(reasoning)
+            if "refusal" in delta:
+                state["refusal"] = delta["refusal"]
             for tc in delta.get("tool_calls") or []:
-                slot = tool_calls.setdefault(
+                slot = state["tool_calls"].setdefault(
                     tc.get("index", 0), {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
                 )
                 if tc.get("id"):
@@ -752,21 +855,44 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
             if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-    if not saw_choice:
+                state["finish_reason"] = choice["finish_reason"]
+            if choice.get("logprobs") is not None:
+                state["logprobs"] = choice["logprobs"]
+    if not choices:
         return None
-    message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
-    if reasoning_parts:
-        message["reasoning_content"] = "".join(reasoning_parts)
-    if tool_calls:
-        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+
+    reconstructed_choices = []
+    for index in sorted(choices):
+        state = choices[index]
+        message: dict[str, Any] = {"role": state["role"], "content": "".join(state["content"]) or None}
+        if state["reasoning_content"]:
+            message["reasoning_content"] = "".join(state["reasoning_content"])
+        if "refusal" in state:
+            message["refusal"] = state["refusal"]
+        if state["tool_calls"]:
+            message["tool_calls"] = [state["tool_calls"][i] for i in sorted(state["tool_calls"])]
+        reconstructed_choices.append(
+            {
+                "index": index,
+                "message": message,
+                "finish_reason": state["finish_reason"],
+                "logprobs": state["logprobs"],
+            }
+        )
+
     result: dict[str, Any] = {
         "object": "chat.completion",
         "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "choices": reconstructed_choices,
     }
     if response_id is not None:
         result["id"] = response_id
+    if created is not None:
+        result["created"] = created
+    if service_tier is not None:
+        result["service_tier"] = service_tier
+    if system_fingerprint is not None:
+        result["system_fingerprint"] = system_fingerprint
     if usage:
         result["usage"] = usage
     return result
@@ -955,6 +1081,12 @@ class _CaptureMiddleware:
             await self._app(scope, _receive, _send)
         except Exception as exc:
             completed_at = time.time()
+            upstream_status = state["status"] or getattr(exc, "status", None)
+            upstream_body = bytes(state["body"]) or getattr(exc, "response_content", b"")
+            if isinstance(upstream_body, str):
+                upstream_body = upstream_body.encode()
+            error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
+            error_category = error_category or _classify_exception(exc)
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -968,11 +1100,11 @@ class _CaptureMiddleware:
                     started_at=started_at,
                     completed_at=completed_at,
                     response_body=None,
-                    status_code=state["status"],
-                    error_category=_classify_exception(exc),
+                    status_code=upstream_status,
+                    error_category=error_category,
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
-                    response_raw=(bytes(state["body"]).decode("utf-8", errors="replace") if state["body"] else None),
+                    response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -993,8 +1125,9 @@ class _CaptureMiddleware:
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
             # malformed body can never surface as an ASGI error after the response was already sent.
-            response_body = None
-            if body_bytes:
+            normalized_response = scope.get(_NORMALIZED_CAPTURE_RESPONSE_SCOPE_KEY)
+            response_body = normalized_response if isinstance(normalized_response, dict) else None
+            if response_body is None and body_bytes:
                 try:
                     response_body = (
                         _reconstruct_streamed_response(body_bytes, dialect) if streaming else json.loads(body_bytes)
