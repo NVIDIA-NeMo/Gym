@@ -936,7 +936,9 @@ _TASK_METADATA_FIELDS = (
     "rubric_json",
     "rubric_pretty",
     "instance_id",
+    "_ng_task_index",
     "_ng_rollout_index",
+    "_ng_attempt_index",
 )
 
 
@@ -1039,9 +1041,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         task_info = self.task_strategy.extract_task_info(body.metadata)
 
-        # resolve_model_base_url adds the /ng-rollout/<id> prefix when observability is enabled and
-        # the body carries task/rollout indices; otherwise it returns the plain host:port/v1 URL.
-        model_base_url = self.resolve_model_base_url(self.config.model_server.name, self.rollout_id_from_run(body))
+        # run() moves the row's task/rollout indices into metadata, so the capture rollout id is
+        # read from there (not the top-level body). resolve_model_base_url adds the /ng-rollout/<id>
+        # prefix when observability is enabled; otherwise it returns the plain host:port/v1 URL.
+        rollout_id = self.rollout_id_from_run(body.metadata or {})
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
         if self.config.task == "gdpval":
             system_prompt = None
