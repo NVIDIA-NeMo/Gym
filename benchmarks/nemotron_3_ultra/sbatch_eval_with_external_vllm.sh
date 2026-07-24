@@ -8,7 +8,7 @@
 # SBATCH_PARTITION=batch \
 # CONTAINER=/path/to/vllm/container \
 # MOUNTS=/shared/fs:/shared/fs \
-# bash scripts/sbatch_eval_with_external_vllm.sh \
+# bash benchmarks/nemotron_3_ultra/sbatch_eval_with_external_vllm.sh \
 # --config benchmarks/my-benchmark/config.yaml
 # 
 # This script assumes:
