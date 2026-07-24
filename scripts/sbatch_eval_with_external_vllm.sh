@@ -68,5 +68,5 @@ sbatch \
     --time=04:00:00 \
     --job-name=gym-vllm-eval-$USER \
     --exclusive \
-    --switches=1 \
+    --segment=4 \
     scripts/sbatch_base.sh bash -lc "$command"
