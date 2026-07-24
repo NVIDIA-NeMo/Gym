@@ -8,7 +8,7 @@
 # SBATCH_PARTITION=batch \
 # INPUT_CONTAINER=/path/to/vllm/container \
 # OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
-# MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml \
+# MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml,/path/to/config.yaml:/opt/Gym/config.yaml \
 # GYM_CONFIG=benchmarks/nemotron_3_ultra/eval_container_config.yaml \
 # sbatch --gres=gpu:4 \
 #   benchmarks/nemotron_3_ultra/build_eval_container.sh
