@@ -19,6 +19,9 @@ math_with_judge_opencode_agent:
       resources_server:
         type: resources_servers
         name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
       concurrency: 8
       command: opencode
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
