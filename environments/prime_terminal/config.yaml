@@ -1,0 +1,94 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      domain: agent
+      description: 30 terminal task samples through Harbor and OpenSandbox.
+      value: Terminal use.
+      concurrency: 32
+      harbor_ray_task_num_cpus: 0.25
+
+      datasets:
+        - name: terminal_all_opensandbox
+          type: validation
+          jsonl_fpath: environments/prime_terminal/data/validation.jsonl
+          license: TBD
+
+      harbor_datasets:
+        terminal_all_opensandbox:
+          local_dataset_path: environments/prime_terminal/data/tasks
+          workdir: /app
+
+      harbor_agent_name: null
+      harbor_agent_import_path: custom_agents.terminus_2_nemo_gym:Terminus2NemoGym
+      harbor_agent_kwargs:
+        max_turns: 30
+        nemo_model_server_timeout_sec: 2400
+        interleaved_thinking: true
+        enable_summarize: false
+        collect_rollout_details: true
+        trajectory_config:
+          raw_content: true
+        model_info:
+          max_input_tokens: 49152
+          max_output_tokens: 49152
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: null
+      harbor_environment_import_path: custom_envs.nemo_gym_sandbox.uploaded_environment:UploadedNemoGymSandboxEnvironment
+      harbor_environment_kwargs:
+        sandbox_provider:
+          default_metadata:
+            sandbox-api: opensandbox-sdk
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_DOMAIN}
+              api_key: ${oc.env:OPENSANDBOX_API_KEY}
+              protocol: http
+              request_timeout_s: 300
+              use_server_proxy: true
+            create:
+              request_timeout_s: 1200
+              timeout_s: 1200
+              skip_health_check: true
+              retries: 3
+              retry_delay_s: 5.0
+              retry_max_delay_s: 60.0
+            probe:
+              timeout_s: 60
+              deadline_s: 300
+              stable_count: 2
+              stable_delay_s: 1.0
+            operations:
+              retries: 3
+              retry_delay_s: 1.0
+              retry_max_delay_s: 30.0
+              command_retries: 3
+              close_timeout_s: 30
+        sandbox_metadata:
+          harbor-benchmark: prime-terminal
+        sandbox_env:
+          TZ: UTC
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+          DEBIAN_FRONTEND: noninteractive
+          PIP_NO_CACHE_DIR: "1"
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        sandbox_ttl_s: 7200
+        sandbox_ready_timeout_s: 1200
+        default_exec_timeout_s: 600
+        workdir: /app
+        upload_environment_dir: true
+        upload_target_dir: /app
+        sandbox_setup_timeout_s: 3600
+        sandbox_setup_command: bash /app/setup_opensandbox.sh
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      harbor_agent_max_timeout: 3600
+      harbor_verifier_max_timeout: 600
+      harbor_timeout_multiplier: 1.0
+      harbor_jobs_dir: responses_api_agents/harbor_agent/jobs

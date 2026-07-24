@@ -296,6 +296,10 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             width = int(self.task_env_config.cpus or 0)
             if width > 0:
                 command = f"{_cpu_pin_prefix(width)} {command}"
+        if env:
+            assignments = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items())
+            command = f"env {assignments} {command}"
+            env = None
         result = await self._require_sandbox().exec(
             command,
             cwd=cwd,

@@ -22,6 +22,9 @@ from harbor.models.trial.paths import TrialPaths
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus, register_provider
 from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import NemoGymSandboxEnvironment
+from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.uploaded_environment import (
+    UploadedNemoGymSandboxEnvironment,
+)
 
 
 PROVIDER_NAME = "nemo_gym_sandbox_test_provider"
@@ -203,18 +206,23 @@ class TestStartStop:
 
 class TestExec:
     @pytest.mark.asyncio
-    async def test_exec_passthrough_and_result_mapping(self, tmp_path):
+    async def test_exec_scopes_environment_to_command_and_maps_result(self, tmp_path):
         env = _make_environment(tmp_path)
         await env.start(force_build=False)
         provider = _provider()
         provider.queue_exec_result(SandboxExecResult(stdout="out", stderr="err", return_code=7))
 
-        result = await env.exec("echo hi", cwd="/app", env={"A": "1"}, timeout_sec=42)
+        result = await env.exec(
+            "echo hi",
+            cwd="/app",
+            env={"A": "value with space"},
+            timeout_sec=42,
+        )
         assert (result.stdout, result.stderr, result.return_code) == ("out", "err", 7)
         call = provider.exec_calls[-1]
-        assert call["command"] == "echo hi"
+        assert call["command"] == "env 'A=value with space' echo hi"
         assert call["cwd"] == "/app"
-        assert call["env"] == {"A": "1"}
+        assert call["env"] is None
         assert call["timeout_s"] == 42
 
     @pytest.mark.asyncio
@@ -395,3 +403,37 @@ class TestFileTransfer:
         target = tmp_path / "verifier-out"
         await env.download_dir("/logs/verifier", target)
         assert (target / "reward.txt").read_bytes() == b"1.0"
+
+
+class TestUploadedEnvironment:
+    @pytest.mark.asyncio
+    async def test_start_uploads_task_environment_and_defaults_workdir(self, tmp_path):
+        environment_dir = tmp_path / "task" / "environment"
+        environment_dir.mkdir(parents=True)
+        (environment_dir / "setup.sh").write_text("echo ready\n", encoding="utf-8")
+        trial_dir = tmp_path / "trial"
+        trial_dir.mkdir()
+        env = UploadedNemoGymSandboxEnvironment(
+            environment_dir=environment_dir,
+            environment_name="uploaded-task",
+            session_id="uploaded-task__trial-1",
+            trial_paths=TrialPaths(trial_dir=trial_dir),
+            task_env_config=TaskEnvironmentConfig(docker_image="docker.io/example/task:1.0"),
+            sandbox_provider={PROVIDER_NAME: {}},
+            exec_shell=None,
+            upload_target_dir="/tmp/task-environment",
+            workdir="/app",
+        )
+
+        await env.start(force_build=False)
+        provider = _provider()
+        assert provider.created_specs[0].workdir == "/"
+        assert any(call["command"] == "mkdir -p /app /tmp/task-environment" for call in provider.exec_calls)
+        assert any(
+            "tar -xzf" in call["command"]
+            and "-C /tmp/task-environment" in call["command"]
+            for call in provider.exec_calls
+        )
+
+        await env.exec("pwd")
+        assert provider.exec_calls[-1]["cwd"] == "/app"

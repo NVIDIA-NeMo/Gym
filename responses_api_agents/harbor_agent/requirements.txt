@@ -1,2 +1,4 @@
 -e nemo-gym[dev] @ ../../
 harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573
+opensandbox>=0.1.9
+tenacity>=9.1.4

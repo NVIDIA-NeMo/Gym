@@ -1,0 +1,37 @@
+#!/bin/bash
+# Read one Worldsims page through the task proxy.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: browser_open URL" >&2
+  exit 2
+fi
+
+status=/tmp/worldsims_harbor_local_status.json
+test -s "$status"
+
+readarray -t browser_config < <(
+  python3 - "$status" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    status = json.load(handle)
+print(status["proxy"])
+print(status["ca_spki"])
+PY
+)
+
+exec chromium \
+  --headless \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-dev-shm-usage \
+  --window-size=1440,900 \
+  --proxy-server="${browser_config[0]}" \
+  '--proxy-bypass-list=<-loopback>' \
+  --ignore-certificate-errors \
+  --ignore-certificate-errors-spki-list="${browser_config[1]}" \
+  --dump-dom \
+  "$1" \
+  2>/tmp/browser_open_chromium.stderr
