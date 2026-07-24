@@ -46,7 +46,7 @@ rm -rf /var/lib/apt/lists/*
 
 cd /opt
 # Reuse the vLLM container's python3 so we strongly align the Python versions across vLLM and Gym.
-uv venv --python $(which python3) Gym_venv
+uv venv --python \$(which python3) Gym_venv
 source Gym_venv/bin/activate
 
 git clone $NEMO_GYM_GIT_URL Gym
