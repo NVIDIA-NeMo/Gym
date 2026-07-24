@@ -41,9 +41,9 @@ from typing import Any, Dict, List
 from pydantic import Field
 
 from nemo_gym.base_resources_server import (
+    BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
-    BaseMultiRewardVerifyResponse,
     SimpleResourcesServer,
 )
 
