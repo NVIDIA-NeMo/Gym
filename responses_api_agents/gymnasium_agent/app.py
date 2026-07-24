@@ -15,6 +15,8 @@
 
 """Agent for GymnasiumServer resources servers (resources_servers.gymnasium) which implements the Gymnasium API."""
 
+import logging
+
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field
 
@@ -33,6 +35,9 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -74,7 +79,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
-        env_cookies = request.cookies
+        env_cookies = dict(request.cookies)
         model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(
@@ -84,8 +89,64 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             cookies=env_cookies,
         )
         await raise_for_status(reset_resp)
-        reset_data = EnvResetResponse.model_validate(await get_response_json(reset_resp))
-        env_cookies = reset_resp.cookies
+        if reset_resp.cookies:
+            env_cookies.update(reset_resp.cookies)
+
+        try:
+            # A successful reset owns a stateful server slot even if response
+            # decoding or schema validation fails, so validation belongs
+            # inside the same cleanup boundary as the rollout itself.
+            reset_data = EnvResetResponse.model_validate(await get_response_json(reset_resp))
+            result = await self._run_open_episode(body, model_url_path, reset_data, env_cookies)
+        except BaseException:
+            # Preserve the original model/transport/cancellation failure.  A
+            # failed best-effort close is logged here; the
+            # resource server's own budget and orphan reaper remain the final
+            # safety net.
+            try:
+                close_resp = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/close",
+                    json={},
+                    cookies=env_cookies,
+                )
+                await raise_for_status(close_resp)
+            except Exception:
+                _LOGGER.exception("Failed to close Gymnasium environment after rollout error")
+            raise
+
+        try:
+            close_resp = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close",
+                json={},
+                cookies=env_cookies,
+            )
+            await raise_for_status(close_resp)
+        except Exception as exc:
+            _LOGGER.exception("Completed Gymnasium rollout, but environment cleanup failed")
+            result = result.model_copy(
+                update={
+                    "info": {
+                        **(result.info or {}),
+                        "cleanup_warning": {
+                            "operation": "close",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    }
+                }
+            )
+        return result
+
+    async def _run_open_episode(
+        self,
+        body: GymnasiumAgentRunRequest,
+        model_url_path: str,
+        reset_data: EnvResetResponse,
+        env_cookies,
+    ) -> GymnasiumRunResponse:
+        """Drive an already-reset episode; :meth:`run` owns its cleanup."""
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
@@ -130,7 +191,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
             total_reward += step_data.reward
-            env_cookies = step_resp.cookies
+            if step_resp.cookies:
+                env_cookies.update(step_resp.cookies)
 
             if step_data.terminated or step_data.truncated:
                 finished = True

@@ -54,6 +54,26 @@ class EnvStepResponse(BaseModel):
     info: dict = {}
 
 
+class EnvCloseRequest(BaseModel):
+    """Cookie-scoped explicit-close request for stateful Gymnasium servers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EnvCloseResponse(BaseModel):
+    """Idempotent explicit-close response.
+
+    The generic base cannot know an environment's release summary, but an
+    environment can override :meth:`explicit_close` and return one under
+    ``summary``.  ``already_closed`` lets a client safely put this call in a
+    ``finally`` block without silently opening/resetting another episode.
+    """
+
+    ok: bool = True
+    already_closed: bool = False
+    summary: dict = {}
+
+
 def extract_text(response: NeMoGymResponse) -> str:
     """Extract all text content from a NeMoGymResponse."""
     parts = []
@@ -83,6 +103,7 @@ class GymnasiumServer(SimpleResourcesServer):
         app.add_middleware(RolloutContextMiddleware)
         app.post("/reset")(self._reset_endpoint)
         app.post("/step")(self._step_endpoint)
+        app.post("/close")(self._close_endpoint)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
@@ -98,6 +119,14 @@ class GymnasiumServer(SimpleResourcesServer):
             await self.close_session(session_id)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
+    async def _close_endpoint(self, body: EnvCloseRequest, request: Request) -> EnvCloseResponse:
+        """Release the session-owned environment without issuing a reset."""
+
+        del body  # Explicit schema validation is the endpoint's only use.
+        session_id = request.session.get(SESSION_ID_KEY)
+        payload = await self.explicit_close(session_id)
+        return EnvCloseResponse(**payload)
+
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         return None, {}
 
@@ -108,6 +137,13 @@ class GymnasiumServer(SimpleResourcesServer):
 
     async def close_session(self, session_id: Optional[str]) -> None:
         self.session_state.pop(session_id, None)
+
+    async def explicit_close(self, session_id: Optional[str]) -> dict:
+        """Close once, with a safe generic response for simple environments."""
+
+        already_closed = session_id not in self.session_state
+        await self.close_session(session_id)
+        return {"ok": True, "already_closed": already_closed, "summary": {}}
 
     @staticmethod
     def tool_output(call: NeMoGymResponseFunctionToolCall, result: Any) -> dict:

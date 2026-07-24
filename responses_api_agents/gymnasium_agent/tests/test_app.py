@@ -91,12 +91,25 @@ class _FakeHttpResp:
         return None
 
 
+class _FailedHttpResp(_FakeHttpResp):
+    def __init__(self, payload: dict, *, message: str):
+        super().__init__(payload)
+        self.ok = False
+        self.status = 500
+        self._message = message
+
+    def raise_for_status(self):
+        raise RuntimeError(self._message)
+
+
 def _wire_mock_client(agent, responses_per_url):
     """Wire agent.server_client.post to return payloads keyed by url_path."""
     call_log = []
 
     async def _post(server_name, url_path, json=None, cookies=None, **kw):
         call_log.append((server_name, url_path, json))
+        if url_path == "/close" and url_path not in responses_per_url:
+            return _FakeHttpResp({"ok": True, "already_closed": True, "summary": {}})
         payload = responses_per_url[url_path].pop(0)
         return _FakeHttpResp(payload)
 
@@ -137,6 +150,7 @@ class TestRun:
             "/reset": [{"observation": "go", "info": {}}],
             model_path: [_model_response("move A")],
             "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+            "/close": [{"ok": True, "already_closed": True, "summary": {}}],
         }
         seen = []
 
@@ -160,6 +174,44 @@ class TestRun:
         assert urls.count("/step") == 1
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+
+    @pytest.mark.asyncio
+    async def test_successful_rollout_survives_close_http_failure(self):
+        agent = _make_agent()
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            "/v1/responses": [_model_response("move A")],
+            "/step": [
+                {
+                    "observation": None,
+                    "reward": 1.25,
+                    "terminated": True,
+                    "truncated": False,
+                    "info": {"step_idx": 1},
+                }
+            ],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            if url_path == "/close":
+                return _FailedHttpResp(
+                    {"error": "close unavailable"},
+                    message="close failure",
+                )
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+
+        result = await agent.run(req, body)
+
+        assert result.reward == pytest.approx(1.25)
+        assert result.terminated is True
+        assert result.info["step_idx"] == 1
+        assert result.info["cleanup_warning"]["operation"] == "close"
+        assert result.info["cleanup_warning"]["error_type"] == "RuntimeError"
 
     @pytest.mark.asyncio
     async def test_no_rollout_prefix_when_observability_disabled(self):
@@ -225,7 +277,7 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_max_steps_sets_truncated(self):
         agent = _make_agent(max_steps=2)
-        _wire_mock_client(
+        call_log = _wire_mock_client(
             agent,
             {
                 "/reset": [{"observation": None, "info": {}}],
@@ -234,6 +286,7 @@ class TestRun:
                     {"observation": "obs-1", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
                     {"observation": "obs-2", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
                 ],
+                "/close": [{"ok": True, "already_closed": False, "summary": {}}],
             },
         )
         req = MagicMock()
@@ -242,6 +295,86 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.truncated is True
         assert result.terminated is False
+        assert [url for _server, url, _json in call_log].count("/close") == 1
+
+    @pytest.mark.asyncio
+    async def test_model_failure_after_reset_still_closes_environment(self):
+        agent = _make_agent(max_steps=2)
+        call_log = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            call_log.append((server_name, url_path, json, cookies))
+            if url_path == "/reset":
+                response = _FakeHttpResp({"observation": "start", "info": {}})
+                response.cookies = {"session": "episode-cookie"}
+                return response
+            if url_path == "/close":
+                return _FakeHttpResp({"ok": True, "already_closed": False, "summary": {}})
+            raise RuntimeError("model server unavailable")
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+
+        with pytest.raises(RuntimeError, match="model server unavailable"):
+            await agent.run(req, body)
+
+        close_calls = [entry for entry in call_log if entry[1] == "/close"]
+        assert len(close_calls) == 1
+        assert close_calls[0][3] == {"session": "episode-cookie"}
+
+    @pytest.mark.asyncio
+    async def test_malformed_reset_response_still_closes_environment(self):
+        agent = _make_agent(max_steps=2)
+        call_log = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            call_log.append((server_name, url_path, json, cookies))
+            if url_path == "/reset":
+                response = _FakeHttpResp({"observation": {"not": "text"}, "info": {}})
+                response.cookies = {"session": "episode-cookie"}
+                return response
+            if url_path == "/close":
+                return _FakeHttpResp({"ok": True, "already_closed": False, "summary": {}})
+            raise AssertionError(f"unexpected request: {url_path}")
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+
+        with pytest.raises(Exception):
+            await agent.run(req, body)
+
+        close_calls = [entry for entry in call_log if entry[1] == "/close"]
+        assert len(close_calls) == 1
+        assert close_calls[0][3] == {"session": "episode-cookie"}
+
+    @pytest.mark.asyncio
+    async def test_reset_without_set_cookie_preserves_existing_environment_cookie(self):
+        agent = _make_agent(max_steps=2)
+        call_log = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            call_log.append((server_name, url_path, json, cookies))
+            if url_path == "/reset":
+                return _FakeHttpResp({"observation": "start", "info": {}})
+            if url_path == "/close":
+                return _FakeHttpResp({"ok": True, "already_closed": False, "summary": {}})
+            raise RuntimeError("model server unavailable")
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {"session": "existing-cookie"}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+
+        with pytest.raises(RuntimeError, match="model server unavailable"):
+            await agent.run(req, body)
+
+        close_calls = [entry for entry in call_log if entry[1] == "/close"]
+        assert len(close_calls) == 1
+        assert close_calls[0][3] == {"session": "existing-cookie"}
 
     @pytest.mark.asyncio
     async def test_usage_accumulates_across_turns(self):

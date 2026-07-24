@@ -1,0 +1,18 @@
+[
+  {
+    "label": "frontier",
+    "model": "replace-with-frontier-model-id",
+    "base_url": "https://frontier-api.example.invalid/v1",
+    "api_key_env": "FRONTIER_MODEL_API_KEY",
+    "temperature": 0.2,
+    "capability_rank": 2
+  },
+  {
+    "label": "qwen3-1.7b",
+    "model": "replace-with-small-model-id",
+    "base_url": "https://small-model-api.example.invalid/v1",
+    "api_key_env": "SMALL_MODEL_API_KEY",
+    "temperature": 0.2,
+    "capability_rank": 1
+  }
+]
