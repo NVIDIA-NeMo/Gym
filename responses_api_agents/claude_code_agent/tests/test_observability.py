@@ -172,7 +172,7 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     assert timings["tool-child"].duration_ms == pytest.approx(3000)
     assert timings["tool-grandchild"].duration_ms == pytest.approx(1000)
     assert all(tool.timing_source == "artifact" for tool in timings.values())
-    assert bundle.gaps == []
+    assert [(gap.code, gap.invocation_id) for gap in bundle.gaps] == [("invocation_outcome_unavailable", session)]
 
 
 def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:

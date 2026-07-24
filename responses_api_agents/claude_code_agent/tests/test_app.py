@@ -355,6 +355,7 @@ class TestObservability:
         invocation = next(record for record in observations.records if isinstance(record, AgentInvocation))
         assert invocation.invocation_id == "session-1"
         assert invocation.model_calls[0].response_id == "msg-1"
+        assert "no_sandbox_runtime" in {gap.code for gap in observations.gaps}
         assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
 
 

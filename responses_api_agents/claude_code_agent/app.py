@@ -622,6 +622,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
+        observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:

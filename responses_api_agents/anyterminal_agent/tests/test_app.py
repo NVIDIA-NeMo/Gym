@@ -34,6 +34,7 @@ from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
+    ObservationGap,
     SandboxObservation,
     ToolCallObservation,
 )
@@ -717,6 +718,7 @@ class TestObservationRoundTrip:
                     completed_at=4.0,
                 ),
             ],
+            gaps=[ObservationGap(code="no_sandbox_runtime")],
         )
         instance = _make_instance_config(tmp_path, observability_enabled=True)
         response = self._response(

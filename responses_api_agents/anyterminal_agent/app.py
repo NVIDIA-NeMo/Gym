@@ -823,6 +823,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 sandbox_observations = _terminal_sandbox_observations(metrics, instance_config.agent_run_id)
                 observations.records.extend(sandbox_observations)
                 if sandbox_observations:
+                    observations.gaps = [gap for gap in observations.gaps if gap.code != "no_sandbox_runtime"]
                     link_tool_calls_to_sandbox(observations, instance_config.agent_run_id)
                     observations.gaps.extend(
                         [
