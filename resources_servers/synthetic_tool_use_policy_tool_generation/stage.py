@@ -9,6 +9,8 @@ import json
 import random
 from typing import Any
 
+from json_repair import loads as json_repair_loads
+
 from resources_servers.synthetic_tool_use.common.artifacts import RunArtifactStore
 from resources_servers.synthetic_tool_use.common.clients import (
     AsyncTextGenerator,
@@ -17,7 +19,6 @@ from resources_servers.synthetic_tool_use.common.clients import (
 from resources_servers.synthetic_tool_use.common.models import SeedGenerationConfig, StageState
 from resources_servers.synthetic_tool_use.common.parsing import (
     extract_tag,
-    parse_json_value,
 )
 from resources_servers.synthetic_tool_use.common.quality import (
     ArtifactValidationError,
@@ -46,11 +47,32 @@ def _parse_judgment(text: str) -> Any:
         return True
     if lowered == "false":
         return False
-    return parse_json_value(value)
+    return json_repair_loads(value)
+
+
+def _parse_comparison_index(text: str) -> int:
+    judgment = _parse_judgment(text)
+    if isinstance(judgment, dict):
+        judgment = judgment.get("index", judgment.get("worst_index"))
+    if isinstance(judgment, bool):
+        judgment = None
+    try:
+        index = int(judgment)
+    except (TypeError, ValueError) as exc:
+        raise ArtifactValidationError(
+            "invalid_judge_response",
+            f"golden comparison judgment must identify candidate index 0 or 1; got {judgment!r}",
+        ) from exc
+    if index not in (0, 1):
+        raise ArtifactValidationError(
+            "invalid_judge_response",
+            f"golden comparison judgment must identify candidate index 0 or 1; got {index}",
+        )
+    return index
 
 
 def _parse_tools(text: str) -> list[Any]:
-    tools = [json.loads(line) for line in text.strip().splitlines() if line.strip()]
+    tools = [json_repair_loads(line) for line in text.strip().splitlines() if line.strip()]
     if not tools:
         raise ValueError("response contains no JSONL tool objects")
     return tools
@@ -269,10 +291,7 @@ class PolicyToolsGenerationStage:
         comparisons = []
         generated_losses = 0
         for response, (prompt, generated_index) in zip(responses, prompt_targets, strict=True):
-            judgment = _parse_judgment(response.text)
-            if isinstance(judgment, dict):
-                judgment = judgment.get("index", judgment.get("worst_index"))
-            judged_index = int(judgment)
+            judged_index = _parse_comparison_index(response.text)
             generated_lost = judged_index == generated_index
             generated_losses += int(generated_lost)
             comparisons.append(

@@ -36,7 +36,12 @@ from resources_servers.synthetic_tool_use.common.quality import (
 from resources_servers.synthetic_tool_use_domain_generation.assets import DOMAIN_PROMPT_PATH, load_domain_prompt
 from resources_servers.synthetic_tool_use_domain_generation.stage import DomainGenerationStage
 from resources_servers.synthetic_tool_use_policy_tool_generation import profiles as policy_profiles
-from resources_servers.synthetic_tool_use_policy_tool_generation.stage import PolicyToolsGenerationStage
+from resources_servers.synthetic_tool_use_policy_tool_generation.stage import (
+    PolicyToolsGenerationStage,
+    _parse_comparison_index,
+    _parse_judgment,
+    _parse_tools,
+)
 from resources_servers.synthetic_tool_use_scenario_generation import assets as scenario_assets
 from resources_servers.synthetic_tool_use_scenario_generation.schema import (
     generated_scenario_schema_json,
@@ -189,6 +194,40 @@ def test_parsing_supports_tags_fences_arrays_and_jsonl() -> None:
     assert parse_json_or_jsonl(json.dumps([tool()])) == [tool()]
     second_tool = {**tool(), "name": "second"}
     assert parse_json_or_jsonl(json.dumps(tool()) + "\n" + json.dumps(second_tool))[1]["name"] == "second"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("<judgment>0</judgment>", 0),
+        ('<judgment>{"index": 1}</judgment>', 1),
+        ('<judgment>{"worst_index": "0"}</judgment>', 0),
+    ],
+)
+def test_golden_comparison_judgment_parses_candidate_index(response: str, expected: int) -> None:
+    assert _parse_comparison_index(response) == expected
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "<judgment>null</judgment>",
+        "<judgment>true</judgment>",
+        "<judgment>2</judgment>",
+        '<judgment>{"accepted": true}</judgment>',
+    ],
+)
+def test_golden_comparison_judgment_rejects_invalid_index(response: str) -> None:
+    with pytest.raises(ArtifactValidationError, match="candidate index 0 or 1") as exc_info:
+        _parse_comparison_index(response)
+    assert exc_info.value.reason == "invalid_judge_response"
+
+
+def test_policy_tool_parsing_repairs_model_json() -> None:
+    assert _parse_judgment("<judgment>{accepted: true}</judgment>") == {"accepted": True}
+
+    malformed_tool = json.dumps(tool()).replace('"name"', "name", 1)
+    assert _parse_tools(malformed_tool) == [tool()]
 
 
 def test_tool_validation_rejects_duplicate_names() -> None:
