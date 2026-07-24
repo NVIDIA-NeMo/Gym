@@ -2,6 +2,17 @@
 # Adds a turn_logging_agent alongside the standard stack; collect with
 #   ng_collect_rollouts +agent_name=enterpriseops_gym_turn_logging_agent ...
 # then export via export_eval_telemetry.py.
+# The metadata block below re-states the inherited server's metadata so the
+# README environment-table generator (scripts/update_env_list.py) can render
+# this config's row; it merges as a no-op over the base config.
+enterpriseops_gym:
+  resources_servers:
+    enterpriseops_gym:
+      domain: agent
+      verified: false
+      description: EnterpriseOps-Gym benchmark with per-turn telemetry logging (timings, token usage incl. cache hits, tool latencies)
+      value: Improve stateful multi-step enterprise planning and tool use
+
 config_paths:
   - resources_servers/enterpriseops_gym/configs/enterpriseops_gym.yaml
 
