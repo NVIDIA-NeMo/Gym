@@ -22,8 +22,10 @@ so a rerun of the same task lands on the same judges and the result is
 reproducible.
 
 Tasks whose deliverables/references carry audio or video files are instead
-*routed* to the AV-capable subset of the panel (:func:`select_av_judges`), since
-most judges can't read those modalities natively.
+*routed* per-modality to the judges that read that modality (audio and video are
+tracked separately via :func:`dir_media_modalities` and each member's
+``handles_audio`` / ``handles_video`` flags), since most judges can't read those
+modalities natively — and some (e.g. MiniMax-M3) read video but not audio.
 
 This module is intentionally connection-agnostic: a :class:`ResolvedJudge`
 carries only the upstream coordinates (base URL / model / api key / create
@@ -39,7 +41,7 @@ import random
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Sequence, TypeVar, Union
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, TypeVar, Union
 
 
 @dataclass
@@ -56,34 +58,42 @@ class ResolvedJudge:
     name: str
     base_url: str
     model: str
-    api_key: str = "dummy"
+    api_key: str = "sk-dummy"
     create_overrides: Dict[str, Any] = field(default_factory=dict)
     weight: float = 1.0
-    # True for a member that natively reads audio/video (e.g. Gemini 3.1 Pro
-    # Preview). Tasks whose content carries those modalities are routed to the
-    # capable members via :func:`select_av_judges`.
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked SEPARATELY because a judge may read
+    # one but not the other:
+    #   - Gemini (e.g. Gemini 3.1 Pro Preview): audio AND video.
+    #   - self-hosted MiniMax-M3: video ONLY (its config has no audio tower).
+    #   - GPT / Claude: neither.
+    # Tasks are routed to capable members per modality (see the resources
+    # server's routing).
+    handles_audio: bool = False
+    handles_video: bool = False
 
 
 class _HasWeight(Protocol):
     name: str
+    model: str
     weight: float
 
 
 class _HasAV(Protocol):
     name: str
-    handles_audio_video: bool
+    handles_audio: bool
+    handles_video: bool
 
 
 _J = TypeVar("_J", bound=_HasWeight)
 _A = TypeVar("_A", bound=_HasAV)
 
 
-# Extensions the frontier judges cannot read as plain text — a task carrying any
-# of these is routed to an AV-capable panel member. Kept lowercase, dot-prefixed.
-_AUDIO_VIDEO_EXTS = frozenset(
+# Media extensions the frontier judges cannot read as plain text. Audio and video
+# are kept as SEPARATE sets because judge capability is per-modality (e.g. MiniMax-M3
+# reads video but not audio) — a task is routed per the modalities it actually
+# contains. Kept lowercase, dot-prefixed.
+_AUDIO_EXTS = frozenset(
     {
-        # audio
         ".mp3",
         ".wav",
         ".m4a",
@@ -95,7 +105,10 @@ _AUDIO_VIDEO_EXTS = frozenset(
         ".wma",
         ".aiff",
         ".aif",
-        # video
+    }
+)
+_VIDEO_EXTS = frozenset(
+    {
         ".mp4",
         ".m4v",
         ".mov",
@@ -109,18 +122,20 @@ _AUDIO_VIDEO_EXTS = frozenset(
         ".3gp",
     }
 )
+_AUDIO_VIDEO_EXTS = _AUDIO_EXTS | _VIDEO_EXTS
 
 
-def make_rng(seed: Optional[int], *parts: str) -> random.Random:
+def make_rng(seed: Optional[int], *parts: Any) -> random.Random:
     """Return a ``random.Random`` seeded deterministically from *seed* + *parts*.
 
     Used to make per-comparison judge sampling reproducible: callers seed with
     a stable identity (e.g. the task id and reference repeat) so the same task
     always draws the same judges across reruns. When *seed* is ``None`` the
     parts alone determine the stream (still reproducible per task); pass no
-    parts for a fully fresh stream.
+    parts for a fully fresh stream. Parts may be any value — they are stringified
+    before hashing, so ints/enums work as identity components too.
     """
-    payload = "|".join([repr(seed), *parts])
+    payload = "|".join([repr(seed), *(str(p) for p in parts)])
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return random.Random(int(digest[:16], 16))
 
@@ -160,46 +175,89 @@ def merge_create_kwargs(base: Dict[str, Any], overrides: Optional[Dict[str, Any]
 
 def panel_summary(judges: Sequence[_HasWeight]) -> List[Dict[str, Any]]:
     """A small JSON-friendly description of the panel for verify responses."""
-    return [{"name": j.name, "weight": j.weight} for j in judges]
+    return [{"name": j.name, "model": j.model, "weight": j.weight} for j in judges]
 
 
-def _has_av_ext(name: str) -> bool:
+def is_audio_file(name: str) -> bool:
+    return Path(name).suffix.lower() in _AUDIO_EXTS
+
+
+def is_video_file(name: str) -> bool:
+    return Path(name).suffix.lower() in _VIDEO_EXTS
+
+
+def is_audio_video_file(name: str) -> bool:
     return Path(name).suffix.lower() in _AUDIO_VIDEO_EXTS
+
+
+def _has_av_ext(name: str) -> bool:  # backwards-compat alias
+    return is_audio_video_file(name)
+
+
+def dir_media_modalities(dir_path: Optional[Union[str, Path]]) -> Set[str]:
+    """The set of media modalities present under *dir_path* (recursively).
+
+    Returns a subset of ``{"audio", "video"}``. Audio and video are reported
+    separately so callers can route per-modality (a judge may read video but not
+    audio). Zip archives are peeked into — a deliverable is often shipped as a
+    single ``.zip`` whose members include the media. A missing/None path or an
+    unreadable archive contributes nothing rather than raising.
+    """
+    modalities: Set[str] = set()
+    if not dir_path:
+        return modalities
+    root = Path(dir_path)
+    if not root.is_dir():
+        # Allow a single-file path (used by tests / single-deliverable checks).
+        if root.is_file():
+            if is_audio_file(root.name):
+                modalities.add("audio")
+            if is_video_file(root.name):
+                modalities.add("video")
+        return modalities
+
+    def _classify(name: str) -> None:
+        if is_audio_file(name):
+            modalities.add("audio")
+        if is_video_file(name):
+            modalities.add("video")
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        _classify(path.name)
+        if path.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    for member in zf.namelist():
+                        _classify(member)
+            except (zipfile.BadZipFile, OSError):
+                continue
+        if modalities == {"audio", "video"}:
+            break
+    return modalities
 
 
 def dir_contains_audio_video(dir_path: Optional[Union[str, Path]]) -> bool:
     """True when *dir_path* holds any audio/video file (recursively).
 
-    Zip archives are peeked into — a deliverable is often shipped as a single
-    ``.zip`` whose members include the media. A missing/None path or an
-    unreadable archive is treated as "no AV" rather than raising.
+    Thin wrapper over :func:`dir_media_modalities` for callers that only need a
+    boolean. A single-file path is also accepted.
     """
-    if not dir_path:
+    if dir_path is None:
         return False
     root = Path(dir_path)
-    if not root.is_dir():
-        return False
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if _has_av_ext(path.name):
-            return True
-        if path.suffix.lower() == ".zip":
-            try:
-                with zipfile.ZipFile(path) as zf:
-                    if any(_has_av_ext(member) for member in zf.namelist()):
-                        return True
-            except (zipfile.BadZipFile, OSError):
-                continue
-    return False
+    if root.is_file():
+        return is_audio_video_file(root.name)
+    return bool(dir_media_modalities(dir_path))
 
 
 def select_av_judges(judges: Sequence[_A]) -> List[_A]:
     """The AV-capable subset of *judges*, or the full panel as a fallback.
 
-    When no member advertises ``handles_audio_video`` we return every judge so
-    downstream sampling still has a non-empty panel to draw from (grading with a
-    text-only judge beats failing the task outright).
+    "AV-capable" means a member reads audio OR video. When no member reads either
+    we return every judge so downstream sampling still has a non-empty panel to
+    draw from (grading with a text-only judge beats failing the task outright).
     """
-    capable = [j for j in judges if getattr(j, "handles_audio_video", False)]
+    capable = [j for j in judges if getattr(j, "handles_audio", False) or getattr(j, "handles_video", False)]
     return capable if capable else list(judges)

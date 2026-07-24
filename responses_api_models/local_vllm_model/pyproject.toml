@@ -21,7 +21,12 @@ requires-python = ">=3.12"
 
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["setuptools>=61", "setuptools-scm"]
+# NOTE: setuptools-scm is intentionally NOT required here. This package has a
+# static version and an explicit packages.find, so it does not need scm's VCS
+# file-finder — and on large repos on networked filesystems (e.g. Lustre) that
+# finder shells out to `git ls-files --recurse-submodules` across the whole Gym
+# tree, which times out (40s) and fails the per-server venv build.
+requires = ["setuptools>=61"]
 
 [tool.setuptools.packages.find]
 where = [".."]

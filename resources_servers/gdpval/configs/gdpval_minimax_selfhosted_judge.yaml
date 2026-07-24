@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPVal judge overlay: use a LOCAL, SELF-HOSTED, MULTIMODAL MiniMax-M3 judge.
+# You run the vLLM server yourself (from the vendor's `vllm/vllm-openai:minimax-m3`
+# container); gym does NOT spawn it — gym just talks to your endpoint over its
+# OpenAI-compatible /v1 route. MiniMax-M3 reads images AND video (it has no audio
+# tower), so it scores every GDPVal deliverable modality except audio with no
+# third-party inference API.
+#
+# WHY SERVE IT YOURSELF INSTEAD OF LETTING GYM SPAWN IT?
+#   The bundled `vllm/models/minimax_m3/nvidia/` plugin hardcodes FlashInfer
+#   CuTe-DSL kernels (gemma_rmsnorm, fused MoE, MLA) with no fallback. On
+#   Blackwell/GB200 those kernels hit the nvidia-cutlass-dsl 4.5.2 JIT bug
+#   (`Expected an MLIR object (got OpResultList)`, vllm#45392) and abort engine
+#   startup during the profiling pass. The plugin is designed to run inside the
+#   vendor container, where the FlashInfer/cutlass-dsl/CUDA combo is matched and
+#   the kernels JIT cleanly. Reproducing that inside a gym-built venv is fighting
+#   its design, so we run the container ourselves and gym connects to it.
+#   (The gym-spawned attempt is preserved for reference in
+#   gdpval_minimax_local_judge.yaml + the standalone local_vllm_model config, but
+#   it does NOT currently start on GB200.)
+#
+# STEP 1 — serve MiniMax-M3 yourself from the vendor container. NVIDIA users
+# should use the internal serving workflow maintained separately from Gym. Use
+# one single-node TP=4 instance, or independent single-node TP=4 replicas for
+# data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
+# cross-node MXFP8 all-reduce path can produce garbage logits despite a clean
+# startup. Confirm the endpoint from the gym host:
+#   curl -s http://<judge-host>:5000/v1/models
+#
+# STEP 2 — run GDPVal with gym pointing at your endpoint. Chain this overlay
+# AFTER the benchmark config and export the endpoint:
+#
+#   export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
+#   gym eval run --benchmark gdpval --model-type vllm_model \
+#     --config resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml \
+#     --split benchmark --output results/gdpval_minimax_judge.jsonl
+#
+# What it does:
+#   1. Repoints the benchmark's existing `gdpval_judge_model` OpenAI proxy at your
+#      endpoint (no GPU used by gym for the judge — it is a thin HTTP proxy). No
+#      new model server is defined, so nothing extra boots.
+#   2. Disables the frontier panel (`judge_panel: null`) so scoring uses the
+#      single MiniMax-M3 judge, switches deliverable presentation to
+#      `images_and_text` (PDFs/Office docs → page images + extracted text, since
+#      a VLM can't decode a raw application/pdf data URL), and keeps VIDEO as
+#      native media (`judge_handles_video: true`) because M3 reads video. M3 has
+#      NO audio tower, so `judge_handles_audio` stays false and audio deliverables
+#      are dropped with a warning (video/images/text still graded).
+
+# --- Repoint the judge proxy at your self-hosted MiniMax-M3 endpoint ---------
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      # Your MiniMax-M3 server's OpenAI-compatible endpoint. Must include /v1.
+      openai_base_url: ${oc.env:MINIMAX_BASE_URL,http://127.0.0.1:8000/v1}
+      # vLLM ignores the key by default; any non-empty string works.
+      openai_api_key: ${oc.env:MINIMAX_API_KEY,dummy}
+      # Must match the server's --served-model-name (defaults to the HF id).
+      openai_model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+      openai_default_headers: {}
+
+# --- Point the GDPVal resources server at that single self-hosted judge ------
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      verified: false
+      # Keep judge_model_server on the default `gdpval_judge_model` proxy, which
+      # we repointed at your endpoint above.
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      # The judge model id must match the server's served model name.
+      judge_responses_create_params_overrides:
+        model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+      # Disable the frontier panel so scoring uses the single MiniMax-M3 judge
+      # from judge_model_server (+ the overrides above).
+      judge_panel: null
+      # Present PDFs/Office docs as rasterized page images + extracted text —
+      # a VLM cannot decode an application/pdf data URL.
+      judge_media_mode: images_and_text
+      judge_pdf_render_dpi: 144
+      # Conservative page cap: many high-DPI page images can exhaust a VLM's
+      # context far sooner than a hosted frontier judge. Raise if your
+      # deliverables are short and you have context headroom.
+      judge_pdf_max_pages: 30
+      judge_pdf_include_text: true
+      # MiniMax-M3 reads VIDEO → forward video deliverables to the judge as
+      # standard vLLM video_url blocks (not filename-only stubs). M3 has no audio
+      # tower, so leave judge_handles_audio false: audio deliverables are dropped
+      # with a warning and the rest (video/images/text) is still graded.
+      judge_handles_video: true
+      judge_handles_audio: false
+      # If a task carries VIDEO but no judge can read it, "warn" grades with the
+      # video-blind judge and logs that the scores are unreliable (default). Set
+      # "error" to fail such tasks hard instead. (Here M3 reads video, so this
+      # guard never trips.) Audio is always handled leniently — dropped + warned.
+      on_missing_av_judge: warn
