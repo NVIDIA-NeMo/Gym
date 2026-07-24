@@ -1,0 +1,5 @@
+# Full scenario split built by prepare_toolsandbox.py (one row per scenario
+# index). Only the committed example.jsonl smoke sample is tracked.
+test_toolsandbox.jsonl
+*train.jsonl
+*validation.jsonl

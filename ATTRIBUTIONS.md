@@ -34,6 +34,36 @@ All third-party software is used as obtained, without modification, unless other
 
 ---
 
+## 📦 Vendored Components (modified)
+
+The following third-party source is **vendored** (a copy is checked into this
+repository) and has been **modified** by NVIDIA. Each modified file retains its
+original upstream copyright header verbatim and adds an NVIDIA modifications
+block:
+
+```text
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+```
+
+Because this repository is licensed under **Apache-2.0**, all NVIDIA
+modifications to the vendored sources are licensed under Apache-2.0. The
+original upstream-authored portions remain subject to their upstream license
+(reproduced in full below and kept in-tree at the paths listed under each
+component). NVIDIA does not relicense the upstream work — only NVIDIA's own
+changes are placed under Apache-2.0.
+
+| Component | Type | License | Author / Copyright | URL |
+|------------|------|----------|--------------------|-----|
+| **ToolSandbox** | Tool-use benchmark (scenarios, tools, sandbox, scoring) | Original: Apple MIT License (see full text below). NVIDIA modifications: Apache-2.0 | Copyright (C) 2024 Apple Inc.; Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES | https://github.com/apple/ToolSandbox |
+
+- Vendored at: `resources_servers/toolsandbox/tool_sandbox/`
+- Upstream license: reproduced in full in the section below
+- Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
+- Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
+
+---
+
 ## ⚖️ License Text References
 
 All license texts are available online:
@@ -263,6 +293,65 @@ The copy is attached below.
 
     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+```
+
+---
+
+### Apple MIT License
+
+### ToolSandbox
+
+Applies to the vendored `resources_servers/toolsandbox/tool_sandbox/` sources.
+Reproduced verbatim from the upstream repository; subcomponent notices are in
+its `ACKNOWLEDGEMENTS` file.
+
+```text
+Copyright (C) 2024 Apple Inc. All Rights Reserved.
+
+IMPORTANT:  This Apple software is supplied to you by Apple
+Inc. ("Apple") in consideration of your agreement to the following
+terms, and your use, installation, modification or redistribution of
+this Apple software constitutes acceptance of these terms.  If you do
+not agree with these terms, please do not use, install, modify or
+redistribute this Apple software.
+
+In consideration of your agreement to abide by the following terms, and
+subject to these terms, Apple grants you a personal, non-exclusive
+license, under Apple's copyrights in this original Apple software (the
+"Apple Software"), to use, reproduce, modify and redistribute the Apple
+Software, with or without modifications, in source and/or binary forms;
+provided that if you redistribute the Apple Software in its entirety and
+without modifications, you must retain this notice and the following
+text and disclaimers in all such redistributions of the Apple Software.
+Neither the name, trademarks, service marks or logos of Apple Inc. may
+be used to endorse or promote products derived from the Apple Software
+without specific prior written permission from Apple.  Except as
+expressly stated in this notice, no other rights or licenses, express or
+implied, are granted by Apple herein, including but not limited to any
+patent rights that may be infringed by your derivative works or by other
+works in which the Apple Software may be incorporated.
+
+The Apple Software is provided by Apple on an "AS IS" basis.  APPLE
+MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION
+THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND
+OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS.
+
+IN NO EVENT SHALL APPLE BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL
+OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION,
+MODIFICATION AND/OR DISTRIBUTION OF THE APPLE SOFTWARE, HOWEVER CAUSED
+AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE),
+STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+-------------------------------------------------------------------------------
+SOFTWARE DISTRIBUTED WITH TOOLSANDBOX:
+
+The ToolSandbox software includes a number of subcomponents with separate
+copyright notices and license terms - please see the file ACKNOWLEDGEMENTS.
+-------------------------------------------------------------------------------
 ```
 
 ---

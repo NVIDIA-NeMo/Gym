@@ -574,6 +574,8 @@ exclude = [
 # Files to completely ignore
 extend-exclude = [
     "*.ipynb",
+    # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
+    "resources_servers/toolsandbox/tool_sandbox",
 ]
 [tool.ruff.lint]
 # Configure linting rules
