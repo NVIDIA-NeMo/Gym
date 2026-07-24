@@ -56,7 +56,7 @@ vllm serve $MODEL \
     --port 8000 &
 
 # Activate environment and cd into Gym
-source Gym_venv/bin/activate
+source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
