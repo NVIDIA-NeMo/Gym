@@ -370,7 +370,10 @@ class TestRolloutObservability:
         assert tool_call.status == "completed"
         assert tool_call.duration_ms == 250
         assert tool_call.timing_source == "artifact"
-        assert {gap.code for gap in observations.gaps} == {"model_call_ownership_unavailable"}
+        assert {gap.code for gap in observations.gaps} == {
+            "model_call_ownership_unavailable",
+            "no_sandbox_runtime",
+        }
 
     def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
         _, usage = parse_opencode_session(tmp_path / "missing.db")

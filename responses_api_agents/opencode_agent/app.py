@@ -644,6 +644,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
             collect_observations=collect_observations,
         )
+        if collect_observations:
+            observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
 
         if collect_observations:
             root = next(
