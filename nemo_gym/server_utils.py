@@ -64,6 +64,7 @@ from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -71,6 +72,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -330,10 +332,34 @@ class ServerClient(BaseModel):
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
 
+        json_obj = kwargs.get("json")
         if "json" in kwargs:
-            json_obj = kwargs["json"]
             if isinstance(json_obj, BaseModel):
-                kwargs["json"] = json_obj.model_dump(exclude_unset=True)
+                json_obj = json_obj.model_dump(exclude_unset=True)
+                kwargs["json"] = json_obj
+
+        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        server_entry = self.global_config_dict.get(server_name)
+        rollout_id = current_rollout_id()
+        if (
+            observability_enabled
+            and server_entry is not None
+            and "resources_servers" in server_entry
+            and url_path == "/verify"
+        ):
+            rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
+            if rollout_id is not None:
+                url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+
+        if (
+            rollout_id is not None
+            and observability_enabled
+            and server_entry is not None
+            and "responses_api_models" in server_entry
+            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
+            and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
+        ):
+            url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
