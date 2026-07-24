@@ -8,7 +8,7 @@
 # SBATCH_PARTITION=batch \
 # INPUT_CONTAINER=/path/to/vllm/container \
 # OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
-# MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml,/path/to/config.yaml:/opt/Gym/config.yaml \
+# MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml:x-create=file,/path/to/config.yaml:/opt/Gym/config.yaml:x-create=file \
 # GYM_CONFIG=benchmarks/nemotron_3_ultra/eval_container_config.yaml \
 # sbatch --gres=gpu:4 \
 #   benchmarks/nemotron_3_ultra/build_eval_container.sh
@@ -44,8 +44,13 @@ cd /opt
 uv venv --python \$(which python3) Gym_venv
 source Gym_venv/bin/activate
 
-git clone $NEMO_GYM_GIT_URL Gym
+# We use this flow to support use cases where env.yaml, etc config files are mounted
+# In these cases, git clone throws a non-empty directory error.
+mkdir -p Gym
 cd Gym
+git init
+git remote add origin $NEMO_GYM_GIT_URL
+git fetch
 git checkout $NEMO_GYM_GIT_REF
 
 uv sync --active
