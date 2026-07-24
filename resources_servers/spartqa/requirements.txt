@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# SpartQA scoring is pure-stdlib (re/string) — no extra runtime dependencies.
+# Building the dataset (prepare_spartqa.py) additionally needs `datasets` (HF),
+# used only at prep time.

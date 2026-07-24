@@ -1,0 +1,29 @@
+spartqa:
+  resources_servers:
+    spartqa:
+      entrypoint: app.py
+      domain: reasoning
+      verified: false
+      description: SpartQA spatial-reasoning answer generation; reward = 1 on an exact-or-answer-containing match against any accepted answer phrase.
+      value: Improve spatial and relational reasoning over described scenes.
+
+spartqa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: spartqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/spartqa/data/example.jsonl
+        license: CC-BY-SA-4.0
+      # Build the test split with `python resources_servers/spartqa/prepare_spartqa.py`.
+      - name: test
+        type: validation
+        jsonl_fpath: resources_servers/spartqa/data/spartqa_test.jsonl
+        license: CC-BY-SA-4.0
