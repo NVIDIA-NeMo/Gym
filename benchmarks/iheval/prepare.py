@@ -16,8 +16,7 @@
 
 The IHEval resources server ships ``resources_servers/iheval/prepare_iheval.py``,
 which builds ``data/test.jsonl`` (the whole dataset, all tasks/settings) in
-**Chat-Completions** shape — the shape the nemo-evaluator ``gym://...protocol=native``
-driver forwards verbatim to ``/chat/completions``.
+**Chat-Completions** shape (forwarded verbatim to ``/chat/completions``).
 
 The gym-native agent path is different: ``simple_agent`` POSTs to ``/v1/responses``
 and speaks the **Responses API** (``function_call`` / ``function_call_output``

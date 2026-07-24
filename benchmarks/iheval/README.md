@@ -9,8 +9,8 @@ This entry runs IHEval through the **gym-native** eval path against the
 **whole** dataset and reports the exact upstream headline — the task-macro
 **hierarchy** `result_score` (aggregate conflict score) — computed by the
 `iheval` resources server's `compute_metrics` and surfaced via `get_key_metrics`.
-A per-row-mean driver (e.g. nemo-evaluator `nel eval run`) cannot produce this
-number; only the gym-native `compute_metrics` path does.
+A plain per-row-mean eval cannot produce this number; only the gym-native
+`compute_metrics` path does.
 
 ## Relationship to the resources server
 
@@ -21,8 +21,8 @@ supplies data and wiring; it chains to `resources_servers/iheval/configs/iheval.
 ## Data shape
 
 `resources_servers/iheval/prepare_iheval.py` builds the whole dataset
-(`data/test.jsonl`, all tasks/settings) in **Chat-Completions** shape for the
-`gym://...protocol=native` driver. The gym-native `simple_agent` speaks the
+(`data/test.jsonl`, all tasks/settings) in **Chat-Completions** shape. The
+gym-native `simple_agent` speaks the
 **Responses API** (`/v1/responses`), so `prepare.py` here re-shapes the tool-use
 rows (`get-webpage`, `slack-user`) to Responses items
 (`function_call` / `function_call_output`, top-level function tools). All other
