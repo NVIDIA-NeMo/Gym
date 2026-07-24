@@ -52,11 +52,12 @@ gym eval run \
     ++policy_base_url=\$ip \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++global_aiohttp_connector_limit_per_host=512
+    ++global_aiohttp_connector_limit_per_host=16384
 
 EOF
 )
 
+# --switches=1 otherwise the engine will hang on the second or third engine step.
 CONTAINER=/lustre/fs1/portfolios/nemotron/projects/nemotron_evals_dev/users/bxyu/vllm/vllm-openai:v0.22.1___with_ray.sqsh \
 MOUNTS=/lustre:/lustre \
 sbatch \
@@ -67,4 +68,5 @@ sbatch \
     --time=04:00:00 \
     --job-name=gym-vllm-eval-$USER \
     --exclusive \
+    --switches=1 \
     scripts/sbatch_base.sh bash -lc "$command"
