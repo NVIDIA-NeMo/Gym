@@ -26,7 +26,8 @@ the README for the column contract of each):
 - KPI snapshots: one row per timestep with nested ``cells[]`` / ``ues[]``
   telemetry. Missing optional KPI fields are synthesized with the same
   heuristics the live env uses (``openair_congestion/env.py``), so a sparse
-  dataset still yields the stable training shape.
+  dataset still yields the stable observation contract used by diagnostics and
+  conversion tooling.
 - GRPO rollout traces: one row per policy step carrying a
   ``reward_measurements`` dict (the aggregates emitted by
   ``rewards.compute_breakdown``). Each trace row is reconstructed into a
@@ -695,7 +696,7 @@ class DatasetReplayBackend(Backend):
     def __init__(
         self,
         *,
-        dataset_path: str = "data/dataset/provided.jsonl",
+        dataset_path: str = "data/fixtures/sample_provided.jsonl",
         pool_size: int = 32,
         max_steps_default: int = 60,
         cell_capacity_mbps: float = 60.0,
@@ -896,8 +897,9 @@ class DatasetReplayBackend(Backend):
                 if len(next_history) > 64:
                     next_history = next_history[-32:]
 
-            # Stamp agent_aux so renderer / SFT / GRPO see the same shape as
-            # the other backends.
+            # Stamp agent_aux so diagnostic consumers see the same observation
+            # shape as the other backends. Schema compatibility does not make
+            # prerecorded transitions causal or training-usable.
             aux = AgentAux(
                 last_action=LastActionEcho(name=tool_call.name, arguments=tool_call.arguments),
                 last_reward=reward,

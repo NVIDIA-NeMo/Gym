@@ -126,7 +126,7 @@ class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
     # rollout traces; see dataset_backend.py) instead of synthesizing
     # trajectories. cell_capacity_mbps feeds the reward's throughput
     # normalizer; trace episodes recording cell_capacity_mbps_total override it.
-    dataset_path: str = "data/dataset/provided.jsonl"
+    dataset_path: str = "data/fixtures/sample_provided.jsonl"
     cell_capacity_mbps: float = 60.0
     # Truncation-budget fallback for task rows that omit max_steps. Must not
     # exceed the gymnasium_agent's max_steps in the yaml: the agent truncates

@@ -226,7 +226,7 @@ def select_backend(config: Any) -> Backend:
         )
 
         return DatasetReplayBackend(
-            dataset_path=getattr(config, "dataset_path", "data/dataset/provided.jsonl"),
+            dataset_path=getattr(config, "dataset_path", "data/fixtures/sample_provided.jsonl"),
             pool_size=getattr(config, "pool_size", 32),
             max_steps_default=getattr(config, "max_steps_default", 60),
             cell_capacity_mbps=getattr(config, "cell_capacity_mbps", 60.0),

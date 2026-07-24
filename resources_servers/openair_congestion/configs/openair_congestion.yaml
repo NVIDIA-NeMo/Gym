@@ -42,7 +42,7 @@ openair_congestion:
       # reward throughput normalizer; trace episodes recording
       # cell_capacity_mbps_total override it.
       # backend: dataset_replay
-      # dataset_path: data/dataset/provided.jsonl
+      # dataset_path: data/fixtures/sample_provided.jsonl
       # cell_capacity_mbps: 60.0
       # reward_weights must match the profile the dataset was recorded under;
       # openair_v2_measured runs zero the synthetic-proxy terms:

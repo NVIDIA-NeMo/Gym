@@ -725,6 +725,16 @@ class TestDatasetReplayBackend:
 
 
 class TestSelectBackend:
+    def test_default_dataset_replay_path_is_checked_in(self, monkeypatch):
+        monkeypatch.delenv("OPENAIR_CONGESTION_BACKEND", raising=False)
+        resource_dir = Path(__file__).resolve().parent.parent
+        monkeypatch.chdir(resource_dir)
+
+        backend = select_backend(SimpleNamespace(backend="dataset_replay"))
+
+        assert backend.dataset_path == Path("data/fixtures/sample_provided.jsonl")
+        assert backend.dataset_path.is_file()
+
     def test_config_only_switch(self, monkeypatch):
         monkeypatch.delenv("OPENAIR_CONGESTION_BACKEND", raising=False)
         config = SimpleNamespace(

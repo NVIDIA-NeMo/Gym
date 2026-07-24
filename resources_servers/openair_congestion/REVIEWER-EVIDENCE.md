@@ -1,8 +1,8 @@
 # OpenAir Congestion Reviewer Evidence
 
-This file is the review map for the self-contained OpenAir congestion-control
-resource server. It distinguishes code-level evidence checked into this branch
-from empirical evidence that must be produced against external model endpoints.
+This file is the review map for the OpenAir congestion-control contribution.
+It distinguishes code-level evidence checked into this branch from empirical
+evidence that must be produced against external model endpoints.
 
 ## Intended claim
 
@@ -10,6 +10,24 @@ The contribution provides a deterministic, parameter-aware synthetic
 environment for testing the NeMo Gym resource-server contract and controlled
 policy comparisons. It does not claim live OAI/FlexRIC actuation or physical
 network-simulator fidelity.
+
+## Review scope
+
+The contribution is centered on `resources_servers/openair_congestion/`, but
+the PR is not limited to that directory. Reviewers should also inspect:
+
+- `resources_servers/gymnasium/base.py`, `__init__.py`, and tests for the
+  explicit-close request/response and endpoint used by stateful environments;
+- `responses_api_agents/gymnasium_agent/app.py` and tests for resource-issued
+  cookie isolation, deterministic cleanup, and preservation of completed
+  rollouts when close reports a warning;
+- the root `README.md` environment registration; and
+- Fern tutorial navigation plus
+  `environment-tutorials/openair-congestion.mdx`.
+
+Those shared changes are narrow framework support for the stateful resource
+contract, not evidence that the OpenAir environment is already accepted
+upstream.
 
 ## Correctness evidence
 
@@ -24,6 +42,25 @@ network-simulator fidelity.
 | Model ordering | Compliance requires zero failures; exploratory mode enforces an explicit failure-rate ceiling. Only common usable pairs participate, and adjacent deltas need a positive 95% bootstrap lower bound. | `tests/test_model_sweep.py` |
 | Input integrity | Topology counts and identifiers agree; fractional CSV identifiers fail closed with provenance. | `tests/test_schemas.py`, `tests/test_dataset_ingestion.py` |
 | Boundary hygiene | Gymnasium rollouts forward only resource-server-issued cookies, and legacy KPI failures return a stable public error without the internal exporter endpoint. | `responses_api_agents/gymnasium_agent/tests/test_app.py`, `tests/test_legacy_server_api.py` |
+| Recorded-data boundary | The checked-in dataset fixture is the default diagnostic input; recorded actions do not change prerecorded next observations; backend metadata marks these rollouts non-causal and not training-usable. | `dataset_backend.py`, `tests/test_dataset_ingestion.py`, `README.md`, Fern tutorial |
+
+## First-user workflow
+
+The README and Fern tutorial now show:
+
+- the canonical KPI fields and one model-facing measurement example;
+- an exact checked-in and custom JSONL location;
+- the `backend` and `dataset_path` settings and diagnostic commands;
+- extension checklists for KPIs and tools;
+- hosted-policy evaluation versus NeMo RL trainable-model configuration;
+- checkpoint evaluation through a compatible model server; and
+- the distinction between causal synthetic `replay`, diagnostic
+  `dataset_replay`, and the nonexistent live OAI/FlexRIC backend.
+
+The custom-data workflow intentionally does not claim that recorded
+before/action/after rows create counterfactual transitions or a valid on-policy
+GRPO environment.
+
 
 ## Generated evidence
 
