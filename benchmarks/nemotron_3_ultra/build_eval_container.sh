@@ -59,10 +59,10 @@ git checkout $NEMO_GYM_GIT_REF
 uv sync --active
 uv pip install "\$ray_dependency"
 
-gym eval prepare $GYM_CONFIG
+gym eval prepare --config $GYM_CONFIG
 
 gym eval run \
-    $GYM_CONFIG \
+    --config $GYM_CONFIG \
     ++uv_venv_dir=/opt/uv_venvs \
     ++dry_run=true
 
