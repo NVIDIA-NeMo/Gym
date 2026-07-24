@@ -45,6 +45,7 @@ vllm serve $MODEL \
 EOF
 )
 
+# --segment > 0 otherwise the engine will hang on the second or third engine step.
 CONTAINER=$CONTAINER \
 MOUNTS=$MOUNTS \
 sbatch \

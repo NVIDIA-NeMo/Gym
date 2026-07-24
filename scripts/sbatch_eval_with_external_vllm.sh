@@ -77,7 +77,7 @@ gym eval run \
 EOF
 )
 
-# --switches=1 otherwise the engine will hang on the second or third engine step.
+# --segment > 0 otherwise the engine will hang on the second or third engine step.
 sbatch \
     --nodes=$NUM_NODES \
     --gres=gpu:4 \
