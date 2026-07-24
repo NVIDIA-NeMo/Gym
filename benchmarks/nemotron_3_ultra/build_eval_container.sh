@@ -31,6 +31,9 @@ srun --nodes=1 --ntasks=1 \
     bash -s <<INNER_BUILD
 set -euo pipefail
 
+# Hardlink, not clone
+export UV_LINK_MODE=hardlink
+
 ray_dependency="ray[default]==2.55.1"
 uv pip install --system "\$ray_dependency"
 
