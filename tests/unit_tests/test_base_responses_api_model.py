@@ -49,6 +49,7 @@ class TestBaseResponsesAPIModel:
         BaseResponsesAPIModel(config=config)
         assert "observability_enabled" not in BaseResponsesAPIModelConfig.model_fields
         assert "model_call_capture_dir" not in BaseResponsesAPIModelConfig.model_fields
+        assert "model_call_capture_mode" not in BaseResponsesAPIModelConfig.model_fields
 
     def test_SimpleResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
@@ -68,17 +69,18 @@ class TestBaseResponsesAPIModel:
         model.setup_webserver()
 
 
-def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
+def _capture_config(tmp_path, *, enabled: bool = True, mode: str = "full") -> ModelCallCaptureConfig:
     return ModelCallCaptureConfig(
         observability_enabled=enabled,
         model_call_capture_dir=tmp_path if enabled else None,
+        model_call_capture_mode=mode,
     )
 
 
-def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
+def _install_capture(app, tmp_path, *, model_server_name: str = "srv", mode: str = "full") -> None:
     install_model_call_capture(
         app,
-        _capture_config(tmp_path),
+        _capture_config(tmp_path, mode=mode),
         model_server_name=model_server_name,
     )
 
@@ -230,6 +232,92 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     )
 
     assert durable_call_counts == [0, 1, 1]
+
+
+def test_derived_capture_omits_raw_bodies_and_retains_observability(tmp_path):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _responses(body: dict = Body()) -> dict:
+        return {
+            "output": [
+                {"type": "message", "content": "payload-sentinel-response"},
+                {"type": "reasoning", "summary": [{"text": "payload-sentinel-reasoning"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "click",
+                    "arguments": '{"value":"payload-sentinel-tool"}',
+                },
+            ],
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+                "input_tokens_details": {"cached_tokens": 3},
+            },
+        }
+
+    _install_capture(app, tmp_path, mode="derived")
+    response = TestClient(app).post(
+        "/ng-rollout/derived-1/v1/responses",
+        json={"input": "payload-sentinel-request"},
+    )
+
+    assert response.status_code == 200
+    capture_bytes = CaptureStore(tmp_path).path_for("derived-1").read_bytes()
+    assert b"payload-sentinel" not in capture_bytes
+
+    [captured] = CaptureStore(tmp_path).read("derived-1")
+    assert captured["_ng_capture_format"] == "model_call_record_v1"
+    assert {"request", "response", "reasoning_content", "tool_calls"}.isdisjoint(captured["record"])
+
+    [record] = read_model_call_records(CaptureStore(tmp_path), "derived-1")
+    assert record.request is None and record.response is None
+    assert (record.tokens_in, record.tokens_out, record.tokens_total) == (11, 7, 18)
+    assert record.cache_hit is True and record.cached_tokens == 3
+    assert record.reasoning_content is None and record.tool_calls == []
+    assert record.status_code == 200
+    assert record.latency_total_ms is not None
+    assert record.latency_ttft_ms is not None
+
+
+def test_capture_reader_supports_full_and_derived_rows(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.record("mixed", {"response": {"usage": {"total_tokens": 2}}})
+    store.record(
+        "mixed",
+        {
+            "_ng_capture_format": "model_call_record_v1",
+            "record": {"model_call_id": "derived", "tokens_total": 3},
+        },
+    )
+
+    calls = read_model_call_records(store, "mixed")
+    assert [call.call_index for call in calls] == [0, 1]
+    assert [call.tokens_total for call in calls] == [2, 3]
+
+
+@pytest.mark.parametrize("capture_mode", ["full", "derived"])
+def test_non_object_json_response_is_recorded(tmp_path, capture_mode):
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _responses() -> JSONResponse:
+        return JSONResponse(["raw-response-sentinel"])
+
+    _install_capture(app, tmp_path, mode=capture_mode)
+    response = TestClient(app).post("/ng-rollout/non-object/v1/responses", json={})
+
+    assert response.status_code == 200
+    store = CaptureStore(tmp_path)
+    capture_bytes = store.path_for("non-object").read_bytes()
+    assert (b"raw-response-sentinel" in capture_bytes) is (capture_mode == "full")
+    [record] = read_model_call_records(store, "non-object")
+    assert record.response is None
+    assert record.error_category == "capture_parse_error"
 
 
 def test_stream_error_events_are_terminal():
@@ -455,12 +543,20 @@ def test_classify_exception_branches():
 
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
-    assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
+    assert {
+        "observability_enabled",
+        "model_call_capture_dir",
+        "model_call_capture_mode",
+    } <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
     from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
 
+    assert ModelCallCaptureConfig().model_call_capture_mode == "full"
+    assert ModelCallCaptureConfig(model_call_capture_mode="derived").model_call_capture_mode == "derived"
+    with pytest.raises(ValueError, match="model_call_capture_mode"):
+        ModelCallCaptureConfig(model_call_capture_mode="invalid")
     assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
         ModelCallCaptureConfig(observability_enabled=True)
@@ -490,28 +586,32 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
     assert obs.make_capture_store(config) is None
 
 
-def test_record_swallows_store_failure():
+def test_record_swallows_store_failure_without_logging_payloads(caplog):
     from nemo_gym.base_responses_api_model import _record
 
     class _BadStore:
         def record(self, *args, **kwargs):
-            raise RuntimeError("disk full")
+            raise RuntimeError("raw-payload-sentinel")
 
     # Best-effort: a failing store must not raise out of _record.
-    _record(
-        _BadStore(),
-        "chat",
-        "srv",
-        b"{}",
-        rollout_id="r",
-        model_call_id="call-1",
-        started_at=100.0,
-        completed_at=100.01,
-        response_body={},
-        status_code=200,
-        error_category=None,
-        latency_ms=1.0,
-    )
+    with caplog.at_level("WARNING"):
+        _record(
+            _BadStore(),
+            "chat",
+            "srv",
+            b"{}",
+            rollout_id="r",
+            model_call_id="call-1",
+            started_at=100.0,
+            completed_at=100.01,
+            response_body={},
+            status_code=200,
+            error_category=None,
+            latency_ms=1.0,
+        )
+
+    assert "RuntimeError" in caplog.text
+    assert "raw-payload-sentinel" not in caplog.text
 
 
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
@@ -572,6 +672,8 @@ def test_cache_signal():
     from nemo_gym.base_responses_api_model import _cache_signal
 
     assert _cache_signal(None) == (None, None)
+    assert _cache_signal("invalid") == (None, None)
+    assert _cache_signal({"prompt_tokens_details": "invalid"}) == (None, None)
     assert _cache_signal({"prompt_tokens_details": {"cached_tokens": 4}}) == (True, 4)
     assert _cache_signal({"input_tokens_details": {"cached_tokens": 0}}) == (False, 0)
     assert _cache_signal({"cache_read_input_tokens": 5}) == (True, 5)  # Anthropic
@@ -582,6 +684,8 @@ def test_extract_token_stats_chat_fallback():
     from nemo_gym.base_responses_api_model import extract_token_stats
 
     assert extract_token_stats(None)["tokens_total"] is None
+    assert extract_token_stats("invalid")["tokens_total"] is None
+    assert extract_token_stats({"output_tokens_details": "invalid"})["tokens_reasoning"] is None
     stats = extract_token_stats(
         {"prompt_tokens": 5, "completion_tokens": 3, "completion_tokens_details": {"reasoning_tokens": 1}}
     )

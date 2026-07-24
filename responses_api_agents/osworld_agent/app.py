@@ -862,7 +862,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     **default_metadata,
                     **dict(sandbox_spec.get("metadata") or {}),
                 }
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            model_server_root = f"http://{model_server_config['host']}:{model_server_config['port']}"
+            base_url = f"{self.base_url_for_run(model_server_root, body)}/v1"
             resources_server_url = ""
             if self.config.resources_server is not None:
                 resources_server_config = get_first_server_config_dict(

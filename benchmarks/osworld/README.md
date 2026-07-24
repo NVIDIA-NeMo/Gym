@@ -409,7 +409,7 @@ for an authenticated proxy. No cluster-specific hostname is hard-coded.
 | --- | --- | --- | --- |
 | `false` | `0` | absent | Normal direct-network task |
 | `false` | `1` | valid | Normal task; no VM proxy is installed for this task |
-| `true` | `0` | any | Masked infrastructure result: `proxy_required_but_disabled` |
+| `true` | `0` | any | Normal direct-network task; no VM proxy is installed |
 | `true` | `1` | valid | OSWorld installs/uses the VM-local proxy |
 | `true` | `1` | absent or invalid | Masked infrastructure result: `proxy_configuration_error` |
 

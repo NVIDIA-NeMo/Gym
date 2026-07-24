@@ -37,7 +37,7 @@ import threading
 import time
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 from uuid import uuid4
 
 import orjson
@@ -149,6 +149,7 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
+    model_call_capture_mode: Literal["full", "derived"] = "full"
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -266,7 +267,7 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     cache-creation (~1.25x) differently from base input, so cost-accurate consumers should weight
     ``cached_tokens`` and ``cache_creation_tokens`` separately rather than summing ``tokens_in``.
     """
-    if not usage:
+    if not isinstance(usage, Mapping):
         return {
             "tokens_in": None,
             "tokens_out": None,
@@ -292,6 +293,8 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
     details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+    if not isinstance(details, Mapping):
+        details = {}
     return {
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
@@ -303,9 +306,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
 
 def _cache_signal(usage: Any) -> tuple[Optional[bool], Optional[int]]:
     """Cache hit/miss + cached-token count, from usage cache fields (OpenAI / Anthropic)."""
-    if not usage:
+    if not isinstance(usage, Mapping):
         return None, None
     details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    if not isinstance(details, Mapping):
+        details = {}
     cached = details.get("cached_tokens")
     if cached is None:
         cached = usage.get("cache_read_input_tokens")  # Anthropic
@@ -433,9 +438,14 @@ class ModelCallRecord(BaseModel):
     latency_ttft_ms: Optional[float] = None
 
 
+_DERIVED_CAPTURE_FORMAT = "model_call_record_v1"
+
+
 def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
     """Map one captured exchange and its transport metadata into an observability record."""
-    response = exchange.get("response") or {}
+    response = exchange.get("response")
+    if not isinstance(response, dict):
+        response = {}
     tokens = extract_token_stats(response.get("usage"))
     cache_hit, cached_tokens = _cache_signal(response.get("usage"))
     tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
@@ -461,10 +471,17 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
 
 
 def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelCallRecord]:
-    """Read captured exchanges in durable append order."""
-    return [
-        build_model_call_record(exchange, call_index=index) for index, exchange in enumerate(store.read(rollout_id))
-    ]
+    """Read full or derived capture rows in durable append order."""
+    records: list[ModelCallRecord] = []
+    for index, captured in enumerate(store.read(rollout_id)):
+        capture_format = captured.get("_ng_capture_format")
+        if capture_format is None:
+            records.append(build_model_call_record(captured, call_index=index))
+            continue
+        if capture_format != _DERIVED_CAPTURE_FORMAT or not isinstance(captured.get("record"), dict):
+            raise ValueError(f"Unsupported model-call capture format: {capture_format!r}")
+        records.append(ModelCallRecord.model_validate({**captured["record"], "call_index": index}))
+    return records
 
 
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
@@ -752,11 +769,12 @@ def _record(
     error_category: Optional[str],
     latency_ms: float,
     ttft_ms: Optional[float] = None,
+    capture_mode: Literal["full", "derived"] = "full",
 ) -> None:
-    """Append one exchange (success or failure). Best-effort: never raises."""
+    """Append one full exchange or derived record (success or failure). Best-effort: never raises."""
     request_body = None
     request_raw = None
-    if request_bytes:
+    if capture_mode == "full" and request_bytes:
         try:
             parsed_request = json.loads(request_bytes)
             if isinstance(parsed_request, dict):
@@ -782,9 +800,18 @@ def _record(
         }
         if request_raw is not None:
             exchange["request_raw"] = request_raw
+        if capture_mode == "derived":
+            record = build_model_call_record(exchange, call_index=0)
+            exchange = {
+                "_ng_capture_format": _DERIVED_CAPTURE_FORMAT,
+                "record": record.model_dump(
+                    mode="json",
+                    exclude={"call_index", "request", "response", "reasoning_content", "tool_calls"},
+                ),
+            }
         store.record(rollout_id, exchange)
-    except Exception:
-        logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
+    except Exception as exc:
+        logger.warning("Model-call capture failed for one %s call (%s).", dialect, type(exc).__name__)
 
 
 class _CaptureMiddleware:
@@ -792,18 +819,24 @@ class _CaptureMiddleware:
 
     Always strips an optional ``/ng-rollout/<id>`` path prefix before routing (used as the capture
     key) so the prefix is a stable routing feature independent of capture.
-    When ``store`` is set it buffers the request body and a copy of the response while forwarding both
-    downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
-    the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
-    after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
-    prefix and forwards only.
+    When ``store`` is set it buffers responses and, in ``full`` mode, requests while forwarding both
+    downstream unchanged, so it composes with streaming (SSE) responses. SSE chunks are forwarded
+    immediately except for the terminal event, which is released after the capture is durable. When
+    ``store`` is None (capture disabled) it strips the prefix and forwards only.
     """
 
-    def __init__(self, app: Any, *, store: Optional[CaptureStore], model_server_name: Optional[str]) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        store: Optional[CaptureStore],
+        model_server_name: Optional[str],
+        capture_mode: Literal["full", "derived"] = "full",
+    ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._capture_mode = capture_mode
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -836,11 +869,11 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        request_body = bytearray()
+        request_body = bytearray() if self._capture_mode == "full" else None
 
         async def _receive() -> dict[str, Any]:
             message = await receive()
-            if message.get("type") == "http.request":
+            if request_body is not None and message.get("type") == "http.request":
                 request_body.extend(message.get("body", b"") or b"")
             return message
 
@@ -895,7 +928,7 @@ class _CaptureMiddleware:
                     self._store,
                     dialect,
                     self._model_server_name,
-                    bytes(request_body),
+                    bytes(request_body or b""),
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -905,9 +938,10 @@ class _CaptureMiddleware:
                     error_category=_classify_exception(exc),
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
+                    capture_mode=self._capture_mode,
                 )
-            except Exception:
-                logger.warning("Model-call capture finalization failed.", exc_info=True)
+            except Exception as exc:
+                logger.warning("Model-call capture finalization failed (%s).", type(exc).__name__)
             finally:
                 await _flush_deferred_response()
             raise
@@ -919,7 +953,7 @@ class _CaptureMiddleware:
         streaming = state["streaming"]
         stream_terminal = state["stream_terminal"]
         ttft_ms = state["ttft_ms"]
-        request_bytes = bytes(request_body)
+        request_bytes = bytes(request_body or b"")
         store, model_server_name = self._store, self._model_server_name
 
         def _parse_and_record() -> None:
@@ -928,9 +962,11 @@ class _CaptureMiddleware:
             response_body = None
             if body_bytes:
                 try:
-                    response_body = (
+                    parsed_response = (
                         _reconstruct_streamed_response(body_bytes, dialect) if streaming else json.loads(body_bytes)
                     )
+                    if isinstance(parsed_response, dict) or self._capture_mode == "full":
+                        response_body = parsed_response
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None
@@ -943,7 +979,7 @@ class _CaptureMiddleware:
                 error_category = "stream_truncated"
             # A 2xx whose body we couldn't parse/reassemble isn't a clean success -- flag it so it
             # doesn't silently count as a success with null tokens in reliability/cost sums.
-            if error_category is None and body_bytes and response_body is None:
+            if error_category is None and body_bytes and not isinstance(response_body, dict):
                 error_category = "capture_parse_error"
             _record(
                 store,
@@ -959,12 +995,13 @@ class _CaptureMiddleware:
                 error_category=error_category,
                 latency_ms=latency_ms,
                 ttft_ms=ttft_ms,
+                capture_mode=self._capture_mode,
             )
 
         try:
             await asyncio.to_thread(_parse_and_record)
-        except Exception:
-            logger.warning("Model-call capture finalization failed.", exc_info=True)
+        except Exception as exc:
+            logger.warning("Model-call capture finalization failed (%s).", type(exc).__name__)
         finally:
             await _flush_deferred_response()
 
@@ -977,7 +1014,7 @@ def install_model_call_capture(
     Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
     regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
     prefixed model call). When capture is enabled the middleware additionally records each observed
-    call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
+    call's configured capture data into a rollout-keyed CaptureStore while forwarding bytes downstream
     unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
     durable capture write).
     """
@@ -985,6 +1022,7 @@ def install_model_call_capture(
         _CaptureMiddleware,
         store=make_capture_store(config),
         model_server_name=model_server_name,
+        capture_mode=config.model_call_capture_mode,
     )
 
 
@@ -1033,8 +1071,9 @@ def merge_model_call_capture_into_record(
     Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
     shape is identical for every agent harness. Adds
     ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
-    records. Raw request and response payloads remain in the capture store unless ``include_payloads``
-    is true. No-op when no capture exists. The harness output and reward are not modified.
+    records. In ``full`` mode, raw request and response payloads remain in the capture store and are
+    attached only when ``include_payloads`` is true. No-op when no capture exists. The harness output
+    and reward are not modified.
     """
     if not capture_dirs:
         return record

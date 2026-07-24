@@ -19,6 +19,7 @@ Configure capture once at the top level of Gym's global config. The setting appl
 ```yaml
 observability_enabled: true
 model_call_capture_dir: /data/model-calls
+model_call_capture_mode: derived
 
 policy_model:
   responses_api_models:
@@ -30,9 +31,11 @@ policy_model:
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+| `model_call_capture_mode` | `full \| derived` | `full` | `full` retains model payloads; `derived` retains only payload-free metadata and metrics. |
 
 Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
-and fsynced. Capture failures are logged and do not fail model requests.
+and fsynced. Capture failures are logged and do not fail model requests. `derived` mode omits
+requests, responses, reasoning content, and tool-call data.
 
 ## Correlate calls with a rollout
 
@@ -76,22 +79,20 @@ calls = read_model_call_records(store, rollout_id)
 totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
-`ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
-contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
-`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
-calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
+`ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges.
+Every mode exposes call identity, model reference, API dialect, token and cache usage, latency, and
+errors. `full` mode also retains requests, responses, reasoning content, and tool-call data.
+`started_at` is recorded immediately
 before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
 returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
 trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
-order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls. The
-request and response payloads remain the model-call evidence. Malformed or non-object request bodies
-are retained in raw JSONL as `request_raw`; the derived record has `request: null`.
+order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls.
+In `full` mode, malformed or non-object request bodies are retained in raw JSONL as `request_raw`.
 
 Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
-Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
-status, correlation, and latency data remain available. A successful-status stream that closes
-without its dialect's terminal event retains any partial reconstruction and is marked
-`stream_truncated`.
+Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, status,
+correlation, and latency data remain available. A successful-status stream that closes without its
+dialect's terminal event retains any partial reconstruction and is marked `stream_truncated`.
 
 ## Rollout-record attachment
 
@@ -106,9 +107,10 @@ ng_model_call_capture = {
 ```
 
 `metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
-response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
-data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
-for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
+response payloads. Those bodies remain in `CaptureStore` only in `full` mode. Resume attempts use an
+`-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch, the collector
+clears any existing capture for that exact rollout-attempt id, including a kill-shaped attempt being
+redispatched.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.

@@ -597,8 +597,17 @@ class TestApp:
         mock_remote.options.return_value.remote.return_value = future
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
 
-        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": True}
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
         request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
+        request = OSWorldRunRequest.model_validate(
+            {
+                **request.model_dump(),
+                "_ng_task_index": 4,
+                "_ng_rollout_index": 0,
+            }
+        )
 
         response = await agent.run(request)
 
@@ -622,6 +631,7 @@ class TestApp:
         mock_remote.options.return_value.remote.assert_called_once()
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
+        assert positional_args[1]["base_url"] == "http://127.0.0.1:8000/ng-rollout/4-0/v1"
         assert positional_args[1]["evaluator_disable_gpu"] is True
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False
@@ -670,6 +680,7 @@ class TestApp:
         assert response.reward == 1.0
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         runner_kwargs = positional_args[1]
+        assert runner_kwargs["base_url"] == "http://127.0.0.1:8000/v1"
         assert runner_kwargs["sandbox_provider_config"] == {"docker": {"create": {"use_init": False}}}
         assert runner_kwargs["sandbox_spec"] == {
             "image": "docker://osworld@sha256:fixed",

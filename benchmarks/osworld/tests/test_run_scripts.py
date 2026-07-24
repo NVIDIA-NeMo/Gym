@@ -33,7 +33,9 @@ def test_vm_prepare_script_pins_the_verified_image_identity() -> None:
 
 
 def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
-    assert "env start \\" in START_CONTROL_SCRIPT.read_text(encoding="utf-8")
+    start_control = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
+    assert "env start \\" in start_control
+    assert "model-io.jsonl" not in start_control
     assert "eval run --no-serve \\" in RUN_EVAL_SCRIPT.read_text(encoding="utf-8")
 
 

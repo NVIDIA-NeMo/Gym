@@ -39,7 +39,6 @@ exec >>"${RUN_ROOT}/logs/control-${RUN_ID}.log" 2>&1
 export PYTHONPATH="${GYM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export OSWORLD_RUN_ID=${RUN_ID}
 export OSWORLD_TASK_ARTIFACT_ROOT=${OSWORLD_TASK_ARTIFACT_ROOT:-${RUN_ROOT}/results/${RUN_ID}/tasks}
-export OSWORLD_MODEL_IO_LOG=${OSWORLD_MODEL_IO_LOG:-${RUN_ROOT}/results/${RUN_ID}/model-io.jsonl}
 export OSWORLD_RESOURCES_IO_LOG=${OSWORLD_RESOURCES_IO_LOG:-${RUN_ROOT}/results/${RUN_ID}/resources-io.jsonl}
 export OSWORLD_VM_EXEC_LOG=${OSWORLD_VM_EXEC_LOG:-${RUN_ROOT}/results/${RUN_ID}/vm-exec.jsonl}
 
