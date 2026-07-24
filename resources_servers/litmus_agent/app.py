@@ -775,9 +775,10 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         End of a rollout is the natural point to drop the session's sandbox so
         it does not leak; scoring is delegated unchanged to ``verify``.
         """
-        response = await self.verify(body)
-        await self._cleanup_session(request.session.get(SESSION_ID_KEY))
-        return response
+        try:
+            return await self.verify(body)
+        finally:
+            await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         extra = body.model_extra or {}

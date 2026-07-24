@@ -787,6 +787,20 @@ class TestCodeExecTool:
         assert provider.closed == 1 and provider.aclosed == 1
         assert "s1" not in server._sessions
 
+    async def test_verify_failure_still_cleans_up_session_sandbox(self):
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        provider = _LocalFakeProvider.instances[-1]
+
+        with pytest.raises(ValueError, match="not mappable"):
+            await server._verify_and_cleanup(
+                _FakeRequest(session_id="s1"),
+                _make_verify_request("((3))", expected_answer="3"),
+            )
+
+        assert provider.closed == 1 and provider.aclosed == 1
+        assert "s1" not in server._sessions
+
     async def test_shutdown_closes_open_sessions(self):
         server = _make_sandbox_server()
         await _run_code(server, "s1", "print(1)")
