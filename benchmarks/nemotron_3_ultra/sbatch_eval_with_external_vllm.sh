@@ -55,7 +55,7 @@ vllm serve $MODEL \
     --host \$host \
     --port 8000 &
 
-# Activate environment and cd into Gym
+# Activate environment in container and cd into Gym. The Gym path here may be mounted.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
