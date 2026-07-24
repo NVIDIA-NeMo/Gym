@@ -190,6 +190,7 @@ def _build_pi_observations(
     compactions: list[ContextCompactionObservation] = []
     compactions_waiting_for_call: list[ContextCompactionObservation] = []
     last_model_call: Optional[ModelCallRef] = None
+    invocation_status = "unknown"
 
     for observed_at, event in events:
         event_type = event.get("type")
@@ -211,6 +212,23 @@ def _build_pi_observations(
                 if last_model_call is None:
                     gaps.append(gap("compaction_after_model_call_unavailable"))
             compactions_waiting_for_call.clear()
+        elif event_type == "agent_end":
+            terminal_messages = event.get("messages")
+            if isinstance(terminal_messages, list):
+                stop_reason = next(
+                    (
+                        item.get("stopReason")
+                        for item in reversed(terminal_messages)
+                        if isinstance(item, dict) and item.get("role") == "assistant"
+                    ),
+                    None,
+                )
+                invocation_status = {
+                    "stop": "completed",
+                    "error": "failed",
+                    "aborted": "incomplete",
+                    "length": "incomplete",
+                }.get(stop_reason, "unknown")
         elif event_type == "tool_execution_start" and isinstance(call_id, str):
             starts[call_id] = (observed_at, tool_name)
         elif event_type == "tool_execution_end" and isinstance(call_id, str):
@@ -290,6 +308,8 @@ def _build_pi_observations(
             compaction_start = None
     if not model_calls or model_call_join_missing:
         gaps.append(gap("model_call_ownership_unavailable"))
+    if invocation_status == "unknown":
+        gaps.append(gap("invocation_outcome_unavailable"))
 
     for call_id, (started_at, tool_name) in starts.items():
         tools[call_id] = ToolCallObservation(
@@ -343,6 +363,7 @@ def _build_pi_observations(
         records=[
             AgentInvocation(
                 invocation_id=invocation_id,
+                status=invocation_status,
                 model_calls=model_calls,
                 conversation=conversation,
             ),
@@ -603,6 +624,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 observations = AgentObservationBundle(
                     source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
                 )
+            observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
     async def responses(
