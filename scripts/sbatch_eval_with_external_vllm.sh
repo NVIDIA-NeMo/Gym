@@ -15,8 +15,6 @@ vllm serve $MODEL \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --reasoning-parser nemotron_v3 \
-    --enable-prefix-caching \
-    --enable-chunked-prefill \
     --api-server-count 1 \
     --kv-cache-dtype fp8 \
     -cc.pass_config.fuse_allreduce_rms=False \
