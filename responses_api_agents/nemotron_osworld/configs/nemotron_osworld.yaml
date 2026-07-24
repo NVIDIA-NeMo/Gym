@@ -1,0 +1,39 @@
+nemotron_osworld:
+  responses_api_agents:
+    nemotron_osworld:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: osworld_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # The served model id the reference agent puts in its chat-completions payload.
+      model_name: ${oc.env:OSWORLD_MODEL_NAME,vllm_local}
+      # Debug: save per-step screenshots+actions here (empty = off).
+      debug_trajectory_dir: ${oc.env:OSWORLD_DEBUG_TRAJ_DIR,}
+      # Reference Omni-Nano-v3 run knobs (the fork's reference launch scripts):
+      # temp 0.6, top_p 0.95, max_tokens 4096, max_steps 100 (agent also force-FAILs at the
+      # cap), thinking on, 3-image history window, relative (0-1) coordinates, password
+      # `password`, 5s pause after each executed action.
+      max_steps: 100
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 4096
+      max_image_history_length: 3
+      thinking: true
+      coordinate_type: relative
+      client_password: password
+      screen_width: 1920
+      screen_height: 1080
+      sleep_after_execution_s: 5.0
+      # Dataset path must be a LITERAL (the data loader reads it before oc.env resolution),
+      # and `gym eval run`'s data preparation collates THIS list (the --input flag feeds a
+      # different code path) — swap the fpath to select the run:
+      #   os domain gate: resources_servers/osworld/data/os_domain.jsonl   (M5)
+      #   full run:       resources_servers/osworld/data/test_nogdrive.jsonl (M7)
+      datasets:
+      - name: os_domain
+        type: validation
+        jsonl_fpath: resources_servers/osworld/data/os_domain.jsonl
+        license: Apache 2.0

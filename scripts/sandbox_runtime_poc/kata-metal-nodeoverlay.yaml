@@ -1,0 +1,17 @@
+# Karpenter cannot model device-plugin extended resources for prospective nodes, so pods
+# requesting devic.es/kvm block scale-out with "no instance type has enough resources".
+# This NodeOverlay declares that kata-metal nodes WILL advertise the devices (the
+# generic-device-plugin DaemonSet provides them once the node joins), unblocking
+# demand-driven provisioning of additional metal nodes.
+apiVersion: karpenter.sh/v1alpha1
+kind: NodeOverlay
+metadata:
+  name: kata-metal-kvm-devices
+spec:
+  requirements:
+    - key: karpenter.sh/nodepool
+      operator: In
+      values: ["kata-metal"]
+  capacity:
+    devic.es/kvm: "100"
+    devic.es/tun: "100"
