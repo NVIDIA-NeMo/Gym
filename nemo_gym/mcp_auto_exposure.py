@@ -757,7 +757,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
-    secret = server.get_session_middleware_key()
+    secret = server.get_session_secret_key()
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
 
