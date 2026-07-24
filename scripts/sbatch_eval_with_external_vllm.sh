@@ -8,7 +8,7 @@ pip install ray==2.55.1
 host=\$(hostname -I | awk '{print \$1}')
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.9 \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
     --data-parallel-size 4 \
