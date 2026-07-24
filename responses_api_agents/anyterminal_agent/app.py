@@ -927,6 +927,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 sandbox_observations = _terminal_sandbox_observations(metrics)
                 observations.records.extend(sandbox_observations)
                 if sandbox_observations:
+                    observations.gaps = [gap for gap in observations.gaps if gap.code != "no_sandbox_runtime"]
                     sandbox_observation = sandbox_observations[0]
                     link_tool_calls_to_sandbox(observations, sandbox_observation.sandbox_id)
                     if sandbox_observation.cpu_time_s is None:
