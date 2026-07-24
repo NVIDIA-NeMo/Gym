@@ -53,7 +53,7 @@ mkdir -p Gym
 cd Gym
 git init
 git remote add origin $NEMO_GYM_GIT_URL
-git fetch
+git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
 uv sync --active
