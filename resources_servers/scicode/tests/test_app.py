@@ -164,6 +164,7 @@ class TestApp:
         assert result.step_results == [True, True]
         assert result.num_steps_passed == 2
         assert result.problem_accuracy is True
+        assert result.subtask_accuracy == 1.0
         assert result.problem_id == "1"  # preserved into the rollout output
 
     @pytest.mark.asyncio
@@ -173,6 +174,7 @@ class TestApp:
         assert result.reward == 0.0
         assert result.num_steps_passed == 0
         assert result.problem_accuracy is False
+        assert result.subtask_accuracy == 0.0
 
     @pytest.mark.asyncio
     async def test_verify_out_of_context_step_fails(self):
@@ -182,3 +184,4 @@ class TestApp:
         assert result.step_results == [True, False]
         assert result.num_steps_passed == 1
         assert result.reward == 0.0
+        assert result.subtask_accuracy == 0.5  # per-rollout sub-step pass fraction

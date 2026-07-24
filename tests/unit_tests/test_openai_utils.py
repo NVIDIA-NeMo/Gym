@@ -27,6 +27,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpApprovalRequest,
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
+    TokenIDLogProbMixin,
 )
 
 
@@ -123,3 +124,26 @@ class TestNeMoGymResponseHostedMcpItems:
         assert issubclass(NeMoGymResponseMcpCall, McpCall)
         assert issubclass(NeMoGymResponseMcpListTools, McpListTools)
         assert issubclass(NeMoGymResponseMcpApprovalRequest, McpApprovalRequest)
+
+
+class TestRoutedExpertsWireFormats:
+    _BASE = {
+        "prompt_token_ids": [1, 2],
+        "generation_token_ids": [3],
+        "generation_log_probs": [-0.1],
+    }
+
+    def test_accepts_nested_int_lists(self) -> None:
+        mixin = TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": [[[0, 1]], [[2, 3]]]})
+        assert mixin.routed_experts == [[[0, 1]], [[2, 3]]]
+
+    def test_accepts_opaque_string_envelope(self) -> None:
+        # Training frameworks may ship routes as a single opaque string (e.g. NeMo-RL's
+        # "nrlre1:<dtype>:<SxLxK>:<base64>") so multi-MB payloads validate in O(1).
+        envelope = "nrlre1:int16:2x1x2:AAABAAIAAwA="
+        mixin = TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": envelope})
+        assert mixin.routed_experts == envelope
+
+    def test_rejects_non_list_non_string(self) -> None:
+        with pytest.raises(ValidationError):
+            TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": 42})

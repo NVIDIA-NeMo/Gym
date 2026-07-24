@@ -23,18 +23,22 @@ makes multi-stage ELO a drop-in mode of the normal flow: enable it with
 
 How adaptivity maps onto the single-pass flow:
 
-* Each stage is one pass of the standard rollout collection over an
-  adaptively-chosen subset of tasks. The stage's sampled tasks come from the
-  task distribution (``task_distribution``); each row is tagged with the stage's
-  selected ``reference_ids`` (honored by the GDPVal verifier's per-request
-  reference filter) and a ``stage_index``.
+* Each stage is one pass of the standard rollout collection over the stage's
+  sampled ``T`` tasks (``T`` is configurable per stage and defaults to the full
+  task distribution). The stage includes a set of reference models (chosen
+  adaptively — see below) and assigns **each task a single reference** sampled
+  uniformly (equal weight) from that set; the task's row is tagged with that one
+  ``reference_ids=[ref]`` (honored by the GDPVal verifier's per-request reference
+  filter) and a ``stage_index``.
 * Between stages we fit the stage's anchored Bradley-Terry MLE ELO (the same
-  math the server's ``aggregate_metrics`` uses) to pick the next stage's
-  references — references whose known ELO is closest to the running estimate.
+  math the server's ``aggregate_metrics`` uses) — pooling each reference's
+  win/loss/tie counts over the tasks assigned to it — to pick the next stage's
+  references — those whose known ELO is closest to the running estimate.
 * A task's deliverable is reference-independent, so it is produced at most once:
   when a ``(task, repeat)`` recurs in a later stage its row is tagged
   ``reuse_cached_deliverable=True`` and the agent judges the cached deliverable
-  against that stage's references instead of re-running the policy.
+  against that stage's freshly-assigned reference instead of re-running the
+  policy.
 * After the last stage, all stages' rollouts are concatenated and handed to the
   standard ``_call_aggregate_metrics``; the GDPVal ``aggregate_metrics`` is
   stage-aware (it sees the ``stage_index`` tags) and reports the **last** stage's
@@ -69,11 +73,13 @@ from nemo_gym.rollout_collection import (
 from resources_servers.gdpval.multistage_elo import (
     PerReferenceTotals,
     StageSpec,
+    assign_task_references,
     ensure_distribution,
     fit_stage_elo,
     plan_stage_task_ids,
     pool_per_reference,
     select_references,
+    stage_assignment_rng,
 )
 
 
@@ -110,7 +116,7 @@ def _is_success_row(row: Mapping[str, Any]) -> bool:
 
 
 def compute_fingerprint(
-    ms_config: MultiStageRunConfig,
+    multistage_config: MultiStageRunConfig,
     reference_elos: Mapping[str, float],
     distribution: Mapping[str, Mapping[str, object]],
 ) -> str:
@@ -121,11 +127,11 @@ def compute_fingerprint(
     configuration or task distribution and cannot be safely replayed.
     """
     payload = {
-        "stages": [(s.num_tasks, s.num_models, s.seed) for s in ms_config.stages],
-        "seed": ms_config.seed,
-        "nested_tasks": ms_config.nested_tasks,
-        "reuse_cached_deliverables": ms_config.reuse_cached_deliverables,
-        "column": list(ms_config.column),
+        "stages": [(s.num_tasks, s.num_models, s.seed) for s in multistage_config.stages],
+        "seed": multistage_config.seed,
+        "nested_tasks": multistage_config.nested_tasks,
+        "reuse_cached_deliverables": multistage_config.reuse_cached_deliverables,
+        "column": list(multistage_config.column),
         "reference_elos": {k: reference_elos[k] for k in sorted(reference_elos)},
         "distribution": {
             grp: {
@@ -168,35 +174,37 @@ class MultiStageRunConfig:
 def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
     """Build a :class:`MultiStageRunConfig` from a raw config mapping.
 
-    Accepts stages as a list of mappings (``{num_tasks, num_models?, seed?}``)
-    or as a list of ``"num_tasks[:num_models[:seed]]"`` strings (handy for CLI
-    overrides). Raises ``ValueError`` on an empty/invalid stage list.
+    Accepts stages as a list of mappings (``{num_tasks?, num_models?, seed?}``)
+    or as a list of ``"[num_tasks][:num_models[:seed]]"`` strings (handy for CLI
+    overrides). ``num_tasks`` is the per-stage task count and defaults to the full
+    task set when omitted (empty leading field in the string form). Raises
+    ``ValueError`` on an empty/invalid stage list.
     """
     stages_raw = raw.get("stages") or []
     stages: List[StageSpec] = []
     for entry in stages_raw:
         if isinstance(entry, Mapping):
-            num_tasks = int(entry["num_tasks"])
+            num_tasks = entry.get("num_tasks")
             num_models = entry.get("num_models")
             seed = entry.get("seed")
             stages.append(
                 StageSpec(
-                    num_tasks=num_tasks,
                     num_models=int(num_models) if num_models is not None else None,
                     seed=int(seed) if seed is not None else None,
+                    num_tasks=int(num_tasks) if num_tasks is not None else None,
                 )
             )
         else:
             parts = str(entry).split(":")
-            num_tasks = int(parts[0])
+            num_tasks = int(parts[0]) if parts[0] != "" else None
             num_models = int(parts[1]) if len(parts) > 1 and parts[1] != "" else None
             seed = int(parts[2]) if len(parts) > 2 and parts[2] != "" else None
-            stages.append(StageSpec(num_tasks=num_tasks, num_models=num_models, seed=seed))
+            stages.append(StageSpec(num_models=num_models, seed=seed, num_tasks=num_tasks))
 
     if not stages:
         raise ValueError(
             "multistage.enabled=true but no stages were configured. Set "
-            "multistage.stages, e.g. ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'."
+            "multistage.stages, e.g. ++multistage.stages='[{num_tasks: 110, num_models: 12}, {num_models: 4}]'."
         )
 
     column = raw.get("column") or raw.get("columns") or ["occupation"]
@@ -268,28 +276,29 @@ def index_rows_by_task(rows: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict
 
 def build_stage_rows(
     rows_by_task: Mapping[str, Sequence[Mapping[str, Any]]],
-    task_ids: Sequence[str],
-    reference_ids: Sequence[str],
+    task_reference_ids: Mapping[str, str],
     stage_index: int,
     produced: Optional[AbstractSet[Tuple[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Materialize a stage's rollout rows from the sampled tasks.
+    """Materialize a stage's rollout rows from the per-task reference assignment.
 
-    Each row copies a base materialized row for one of ``task_ids`` and adds the
-    stage's ``reference_ids`` (the GDPVal verifier judges only against these) and
-    ``stage_index``. Task/rollout indices are kept at their original values: the
-    same rollout judged in two stages is distinguished by ``stage_index``, and the
-    rollout index must match the on-disk deliverable dir (``repeat_<index>/``).
+    ``task_reference_ids`` maps each task id to the **single** reference model it
+    is judged against this stage (see ``assign_task_references``). Each row copies
+    a base materialized row for that task and sets ``reference_ids=[ref]`` (the
+    GDPVal verifier judges only against this one reference) plus ``stage_index``.
+    Task/rollout indices are kept at their original values: the same rollout
+    judged in two stages is distinguished by ``stage_index``, and the rollout
+    index must match the on-disk deliverable dir (``repeat_<index>/``).
 
     ``produced`` lists ``(task_id, rollout_index)`` deliverables already created by
     earlier stages; matching rows are tagged ``reuse_cached_deliverable=True`` so
     the agent judges the cached deliverable instead of re-running the policy.
     """
     stage_rows: List[Dict[str, Any]] = []
-    for task_id in task_ids:
+    for task_id, reference_id in task_reference_ids.items():
         for base_row in rows_by_task.get(task_id, []):
             row = deepcopy(dict(base_row))
-            row["reference_ids"] = list(reference_ids)
+            row["reference_ids"] = [reference_id]
             row["stage_index"] = stage_index
             if produced is not None:
                 rollout_index = int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)
@@ -331,7 +340,7 @@ def tag_results(
 
 
 async def run_multistage_stages(
-    ms_config: MultiStageRunConfig,
+    multistage_config: MultiStageRunConfig,
     reference_elos: Mapping[str, float],
     distribution: Mapping[str, Mapping[str, object]],
     materialized_rows: Sequence[Mapping[str, Any]],
@@ -343,30 +352,42 @@ async def run_multistage_stages(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
-    For each stage: select references (closest known ELO to the running
-    estimate), build the stage's rollout rows from the sampled tasks, execute
-    them via ``run_rollouts``, tag the results, pool the per-reference votes, and
-    fit the stage ELO (threaded into the next stage's selection). ``all_result_rows``
-    is the concatenation of every stage's tagged results (ready to write as the
-    standard rollouts file); ``stage_summaries`` is one dict per stage for logging.
+    For each stage: sample the stage's ``T`` tasks (``T`` defaults to the full
+    task set), select the included references (closest known ELO to the running
+    estimate), assign each sampled task one of them uniformly at random, build the
+    stage's rollout rows, execute them via ``run_rollouts``, tag the results, pool
+    the per-reference votes, and fit the stage ELO (threaded into the next stage's
+    selection). ``all_result_rows`` is the concatenation of every stage's tagged
+    results (ready to write as the standard rollouts file); ``stage_summaries`` is
+    one dict per stage for logging.
+
+    ``rng`` seeds task sampling (defaults to ``multistage_config.seed``); per-task
+    reference assignment is seeded independently per stage via
+    ``stage_assignment_rng``.
 
     When ``resume`` is provided the loop reuses persisted state: complete stages
     are not re-dispatched (their cached rows are re-fitted for ELO threading),
     interrupted stages re-dispatch only the ``(task, rollout)`` rows without a
-    persisted success, and recorded plans are replayed so selection is identical
-    even when ``multistage.seed`` is ``None``. ``resume=None`` is byte-for-byte
-    the pre-resume behavior.
+    persisted success, and recorded plans (including each stage's per-task
+    reference assignment) are replayed so selection is identical even when
+    ``multistage.seed`` is ``None``. ``resume=None`` is byte-for-byte the
+    pre-resume behavior.
     """
-    base_rng = rng or (random.Random(ms_config.seed) if ms_config.seed is not None else random.Random())
+    base_rng = rng or (
+        random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
+    )
     rows_by_task = index_rows_by_task(materialized_rows)
 
+    # Sample each stage's ``T`` tasks up front (``num_tasks=None`` ⇒ the full task
+    # set). Within a stage each task is then assigned one reference (see
+    # ``_plan_stage``); stages differ in ``T`` and in which references are included.
     stage_task_sets = plan_stage_task_ids(
         distribution,
-        ms_config.stages,
+        multistage_config.stages,
         rng=base_rng,
-        nested=ms_config.nested_tasks,
+        nested=multistage_config.nested_tasks,
     )
-    total_stages = len(ms_config.stages)
+    total_stages = len(multistage_config.stages)
 
     def _emit(name: str, **data: object) -> None:
         if on_event is not None:
@@ -380,7 +401,7 @@ async def run_multistage_stages(
     # (task_id, rollout_index) deliverables already produced by earlier stages.
     # Later stages reuse these instead of re-running the policy.
     produced: set[Tuple[str, int]] = set()
-    for index, stage in enumerate(ms_config.stages):
+    for index, stage in enumerate(multistage_config.stages):
         if resume is not None and index in resume.outcomes:
             eval_elo = _resume_complete_stage(
                 index,
@@ -394,16 +415,15 @@ async def run_multistage_stages(
             )
             continue
 
-        reference_ids, task_ids, replayed = _plan_stage(
-            index, stage, reference_elos, eval_elo, stage_task_sets, resume
+        reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
+            index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
         )
 
         stage_rows = build_stage_rows(
             rows_by_task,
-            task_ids,
-            reference_ids,
+            task_reference_ids,
             index,
-            produced=produced if ms_config.reuse_cached_deliverables else None,
+            produced=produced if multistage_config.reuse_cached_deliverables else None,
         )
 
         cached_rows = resume.rows_by_stage.get(index, []) if resume is not None else []
@@ -480,21 +500,38 @@ def _plan_stage(
     reference_elos: Mapping[str, float],
     eval_elo: Optional[float],
     stage_task_sets: Sequence[Sequence[str]],
+    multistage_config: MultiStageRunConfig,
     resume: Optional[StageResume],
-) -> Tuple[List[str], List[str], bool]:
-    """Return ``(reference_ids, task_ids, replayed)`` for a stage.
+) -> Tuple[List[str], List[str], Dict[str, str], bool]:
+    """Return ``(reference_ids, task_ids, task_reference_ids, replayed)`` for a stage.
+
+    ``reference_ids`` is the stage's included reference set (all references, or
+    the ``num_models`` closest to the running ELO estimate). ``task_ids`` is the
+    stage's sampled ``T`` tasks (the full task set when ``num_tasks`` is unset).
+    ``task_reference_ids`` maps each task to the single reference it is judged
+    against, sampled uniformly (equal weight) from ``reference_ids``.
 
     ``replayed`` is True when the recorded plan was returned from
     ``resume.plans[index]`` (deterministic replay, even with ``seed=None``), False
-    when a fresh plan was computed via ``select_references`` and persisted via
-    ``resume.on_plan``.
+    when a fresh plan was computed and persisted via ``resume.on_plan``. When a
+    recorded plan predates per-task assignments (no ``task_reference_ids``), the
+    assignment is recomputed deterministically from the recorded reference/task
+    sets so it matches the rows that were originally dispatched.
     """
     if resume is not None and index in resume.plans:
         recorded = resume.plans[index]
-        return list(recorded["reference_ids"]), list(recorded["task_ids"]), True
+        reference_ids = list(recorded["reference_ids"])
+        task_ids = list(recorded["task_ids"])
+        task_reference_ids = {str(k): v for k, v in (recorded.get("task_reference_ids") or {}).items()}
+        if not task_reference_ids and reference_ids:
+            rng = stage_assignment_rng(multistage_config.seed, recorded.get("seed"), index)
+            task_reference_ids = assign_task_references(task_ids, reference_ids, rng=rng)
+        return reference_ids, task_ids, task_reference_ids, True
 
     reference_ids = select_references(reference_elos, eval_elo, stage.num_models)
     task_ids = list(stage_task_sets[index])
+    rng = stage_assignment_rng(multistage_config.seed, stage.seed, index)
+    task_reference_ids = assign_task_references(task_ids, reference_ids, rng=rng)
     if resume is not None:
         resume.on_plan(
             index,
@@ -503,11 +540,12 @@ def _plan_stage(
                 "status": "planned",
                 "reference_ids": list(reference_ids),
                 "task_ids": list(task_ids),
+                "task_reference_ids": task_reference_ids,
                 "seed": stage.seed,
                 "prior_eval_elo": eval_elo,
             },
         )
-    return list(reference_ids), task_ids, False
+    return list(reference_ids), task_ids, task_reference_ids, False
 
 
 def _resume_complete_stage(
@@ -791,7 +829,7 @@ async def run_e2e_multistage(
 
     from nemo_gym.rollout_collection import RolloutCollectionHelper
 
-    ms_config = parse_multistage_config(global_config_dict.get("multistage") or {})
+    multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
 
     helper = RolloutCollectionHelper()
     materialized_rows = helper._preprocess_rows_from_config(rollout_collection_config)
@@ -805,9 +843,9 @@ async def run_e2e_multistage(
 
     input_jsonl_fpath = getattr(rollout_collection_config, "input_jsonl_fpath", None)
     distribution, _ = ensure_distribution(
-        ms_config.distribution_path,
-        dataset_path=ms_config.dataset_path or input_jsonl_fpath,
-        columns=ms_config.column,
+        multistage_config.distribution_path,
+        dataset_path=multistage_config.dataset_path or input_jsonl_fpath,
+        columns=multistage_config.column,
     )
 
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
@@ -826,11 +864,11 @@ async def run_e2e_multistage(
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(ms_config, reference_elos, distribution)
+    fingerprint = compute_fingerprint(multistage_config, reference_elos, distribution)
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
 
     all_results, stage_summaries = await run_multistage_stages(
-        ms_config,
+        multistage_config,
         reference_elos,
         distribution,
         materialized_rows,
