@@ -8,9 +8,10 @@
 # SBATCH_PARTITION=batch \
 # INPUT_CONTAINER=/path/to/vllm/container \
 # OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
-# sbatch --gres=gpu:4 \
-#   benchmarks/nemotron_3_ultra/sbatch_eval_with_external_vllm.sh \
-#   --config benchmarks/my-benchmark/config.yaml
+# MOUNTS=/path/to/mount:/path/to/mount \
+# GYM_CONFIG=benchmarks/nemotron_3_ultra/eval_container_config.yaml \
+# sbatch --gres=gpu:4 --mount\
+#   benchmarks/nemotron_3_ultra/build_eval_container.sh
 # 
 
 set -euo pipefail
@@ -18,20 +19,14 @@ set -euo pipefail
 # Input arguments and validation
 INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
+MOUNTS=$MOUNTS
+GYM_CONFIG=$GYM_CONFIG
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
 
-CONFIGS=$(cat <<EOF
-    --config benchmarks/gpqa/config.yaml \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
-    ++policy_base_url="dummy" \
-    ++policy_api_key="dummy" \
-    ++policy_model_name="dummy"
-EOF
-)
-
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
+    --container-mounts=$MOUNTS \
     --container-save=$OUTPUT_CONTAINER \
     bash -s <<INNER_BUILD
 set -euo pipefail
@@ -56,10 +51,10 @@ git checkout $NEMO_GYM_GIT_REF
 uv sync --active
 uv pip install "\$ray_dependency"
 
-gym eval prepare $CONFIGS
+gym eval prepare $GYM_CONFIG
 
 gym eval run \
-    $CONFIGS \
+    $GYM_CONFIG \
     ++uv_venv_dir=/opt/uv_venvs \
     ++dry_run=true
 

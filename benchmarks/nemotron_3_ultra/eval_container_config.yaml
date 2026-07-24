@@ -1,0 +1,8 @@
+config_paths:
+- benchmarks/gpqa/config.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- env.yaml
+
+policy_base_url: dummy
+policy_api_key: dummy
+policy_model_name: dummy
