@@ -624,3 +624,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
+
+    async def create_generate(self, **kwargs):
+        # SGLang's native generation endpoint. The public Chat-Completions
+        # response contract does not guarantee exact sampled integer token IDs,
+        # while /generate with return_logprob=True exposes selected-token IDs
+        # and logprobs. This endpoint lives at the server root, not under /v1.
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(
+            url=f"{base_url}/generate",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "sglang-model"
+version = "0.2.0rc0"
+requires-python = ">=3.12"
+dependencies = [
+    "nemo-gym[dev]",
+    "transformers==5.6.0",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["sglang_model"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
