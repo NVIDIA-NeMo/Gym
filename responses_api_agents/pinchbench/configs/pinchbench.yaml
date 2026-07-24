@@ -14,8 +14,7 @@ pinchbench_agent:
       # Defaults are fine: the .sif rootfs is read-only, but the provider bind-mounts a
       # writable, per-sandbox-isolated host dir at mount_point (/sandbox) — run_task.sh
       # writes the skill copy, OpenClaw $HOME, $TMPDIR and the benchmark run-root there.
-      sandbox_provider:
-        apptainer: {}
+      sandbox_provider: ${sandbox_provider}
       sandbox_spec:
         image: ${sandbox_image}
         ready_timeout_s: 600

@@ -185,9 +185,13 @@ class RunHelper:  # pragma: no cover
             if not isinstance(server_config_dict, DictConfig):
                 continue
 
+            if not list(server_config_dict):
+                continue
             first_key = list(server_config_dict)[0]
             server_config_dict = server_config_dict[first_key]
             if not isinstance(server_config_dict, DictConfig):
+                continue
+            if not list(server_config_dict):
                 continue
             second_key = list(server_config_dict)[0]
             server_config_dict = server_config_dict[second_key]
