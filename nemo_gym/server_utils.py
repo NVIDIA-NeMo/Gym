@@ -831,3 +831,13 @@ def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
     if not rollout_id:
         return base_url
     return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
+
+
+def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
+    server_client = ServerClient.load_from_global_config(head_server_config)
+
+    # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
+    if not is_global_aiohttp_client_setup():
+        set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
+
+    return server_client

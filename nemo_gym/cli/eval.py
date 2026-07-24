@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
 import importlib
 import json
@@ -53,7 +52,7 @@ from nemo_gym.global_config import (
 )
 
 
-# NOTE: `reward_profile`, `rollout_collection`, and `train_data_utils` are imported lazily inside the run/aggregate/
+# NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
 # profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
 # commands in this module must not pay for on every invocation.
 
@@ -422,6 +421,19 @@ def aggregate_rollouts():  # pragma: no cover
     rah = RolloutAggregationHelper()
 
     asyncio.run(rah.run_from_config(config))
+
+
+@exit_cleanly_on_config_error
+def reverify_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+
+    rh = RunHelper()
+    rh.start(None)
+
+    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+    rrh = RolloutReverificationHelper()
+
+    asyncio.run(rrh.run_from_config(config))
 
 
 @exit_cleanly_on_config_error

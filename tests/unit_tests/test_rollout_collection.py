@@ -118,9 +118,9 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self, *args, **kwargs):
-                return mock_server_client
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
 
         async def fail_raise_for_status(_response):
             raise RuntimeError("boom")
@@ -133,7 +133,7 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(RuntimeError, match="boom"):
-            await next(MockHelper().run_examples([row]))
+            await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
         if request_debug_enabled:
@@ -964,7 +964,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
         agg = AggregateMetrics(
@@ -981,11 +981,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=mock_response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
@@ -1025,7 +1024,9 @@ class TestRolloutCollection:
             assert "responses_create_params" not in item
             assert "usage" in item["response"]
 
-    async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics_multiple_agents(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
 
         agg_a = AggregateMetrics(
@@ -1051,11 +1052,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},

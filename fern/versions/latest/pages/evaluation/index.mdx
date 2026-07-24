@@ -21,6 +21,7 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 5. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
 6. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
 7. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
+8. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
 
 The most important rule: vary one thing at a time. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful release-gate score — but it cannot explain what caused the difference.
 
@@ -98,6 +99,10 @@ Use BLADE to find why scores changed, which tasks failed, and what intervention 
 
 <Card title="Reward Profiling" href="/reference/cli-commands#eval-profile">
 Compute per-task pass rates and variance with <code>gym eval profile</code>.
+</Card>
+
+<Card title="Reverify Rollouts" href="/evaluation-tutorials/reverify-rollouts">
+Recompute rewards from existing rollouts without re-running inference using <code>gym eval reverify</code>.
 </Card>
 
 <Card title="Training" href="/training-tutorials">

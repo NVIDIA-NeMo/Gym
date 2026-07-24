@@ -23,11 +23,11 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
-    _failures_path_for,
 )
 from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
@@ -769,7 +769,7 @@ class TestFailureRouting:
         route_stage_rows(out, rows)
 
         main = [json.loads(line) for line in out.read_text().splitlines()]
-        sidecar = [json.loads(line) for line in _failures_path_for(out).read_text().splitlines()]
+        sidecar = [json.loads(line) for line in failures_path_for(out).read_text().splitlines()]
         # Success -> main; failure -> sidecar (with stage_index); kill_shaped -> nowhere.
         assert [r["task_id"] for r in main] == ["t0"]
         assert [r["task_id"] for r in sidecar] == ["t1"]
@@ -787,7 +787,7 @@ class TestFailureRouting:
             )
         # Sidecar: task 1 terminal (never retried), task 2 hit 3 attempts (gated),
         # task 3 has 1 attempt (still re-dispatchable).
-        sidecar = _failures_path_for(out)
+        sidecar = failures_path_for(out)
         entries = [
             {
                 "stage_index": 0,

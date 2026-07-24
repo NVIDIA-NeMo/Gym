@@ -568,6 +568,11 @@ COMMANDS = {
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -586,6 +591,37 @@ COMMANDS = {
                 "output_jsonl_fpath",
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
+            ),
+        ),
+    ),
+    "eval reverify": Command(
+        target="nemo_gym.cli.eval:reverify_rollouts",
+        summary="Re-verify existing rollouts to recompute rewards with an updated resources server",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
+            _value_flag("limit", "limit", "Maximum number of examples to re-verify."),
+            _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
+            _bool_flag(
+                "overwrite", "overwrite", "Delete existing output file before writing, instead of raising an error."
+            ),
+            _bool_flag(
+                "resume",
+                "resume_from_cache",
+                "Resume from a partially-completed output file: skip rows already done and re-verify only the rest.",
+            ),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip the post-reverification aggregate-metrics computation and file write.",
             ),
         ),
     ),
