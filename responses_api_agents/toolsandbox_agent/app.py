@@ -14,8 +14,7 @@
 # limitations under the License.
 """Agent harness for the ToolSandbox resources server.
 
-The difference: ToolSandbox is a
-conversation, not a pure tool loop. When the model replies in natural language
+ToolSandbox is a conversation, not a pure tool loop. When the model replies in natural language
 (no tool calls) that reply must go to the **user simulator** and the episode
 continues — so this harness forwards the *whole* model output (assistant text
 AND tool calls) to ``/step`` and lets the resources server decide ``done``,
