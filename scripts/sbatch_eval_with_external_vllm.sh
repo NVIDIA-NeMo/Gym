@@ -3,8 +3,6 @@
 command=$(cat <<EOF
 set -euo pipefail
 
-pip install ray==2.55.1
-
 host=\$(hostname -I | awk '{print \$1}')
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \

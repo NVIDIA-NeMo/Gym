@@ -1,8 +1,6 @@
 #!/bin/bash
 
 command=$(cat <<EOF
-pip install ray==2.55.1
-
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \
     --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
