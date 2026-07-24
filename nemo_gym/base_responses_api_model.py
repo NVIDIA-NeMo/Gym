@@ -42,8 +42,9 @@ from uuid import uuid4
 
 import orjson
 from fastapi import Body, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
@@ -57,6 +58,12 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.responses_streaming import (
+    sanitize_streaming_responses_body,
+    synthesize_responses_failure_sse,
+    synthesize_responses_sse,
+    validate_streaming_responses_params,
 )
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -90,7 +97,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         app.post("/v1/chat/completions")(self.chat_completions)
 
-        app.post("/v1/responses")(self.responses)
+        app.post("/v1/responses")(self.responses_dispatch)
 
         # Every Gym model server speaks the Anthropic Messages API by default, mapping
         # Messages <-> Responses around its own responses() implementation. This lets blackbox
@@ -109,6 +116,46 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
+
+    async def responses_dispatch(self, request: Request, body: dict = Body()):
+        """Default ``/v1/responses`` entrypoint shared by every Gym model server.
+
+        A plain JSON request validates strictly against
+        ``NeMoGymResponseCreateParamsNonStreaming`` and delegates to this server's own
+        ``responses()``, preserving the historical non-streaming behavior. When the client
+        requests ``stream: true`` (blackbox Responses-over-SSE harnesses like the Codex CLI
+        always do), the request is first sanitized from the streaming wire dialect (extra
+        bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
+        delegated to the same ``responses()``, and the complete response is re-emitted as a
+        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
+        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
+        still fails eagerly, before the stream is committed).
+        """
+        if not body.get("stream"):
+            params = _validate_responses_params(body)
+            return await self._invoke_responses(request, params)
+
+        cleaned, ns_map = sanitize_streaming_responses_body(body)
+        try:
+            params = validate_streaming_responses_params(cleaned)
+        except ValidationError as exc:
+            raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+
+        try:
+            response = await self._invoke_responses(request, params)
+            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+        except Exception as exc:
+            # The streaming contract is already the response's shape, so a backend failure must be a
+            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            logger.exception("responses() failed while serving a streaming /v1/responses request")
+            return StreamingResponse(
+                synthesize_responses_failure_sse(str(exc)),
+                media_type="text/event-stream",
+            )
+        return StreamingResponse(
+            synthesize_responses_sse(response_json, ns_map),
+            media_type="text/event-stream",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -139,6 +186,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if "request" in inspect.signature(self.responses).parameters:
             return await self.responses(request=request, body=params)
         return await self.responses(body=params)
+
+
+def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+    """Validate a /v1/responses body dict, surfacing failures as FastAPI's standard 422."""
+    try:
+        return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+    except ValidationError as exc:
+        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
 
 # --- Capture configuration + rollout-keyed storage ---
