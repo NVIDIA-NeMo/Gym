@@ -63,6 +63,9 @@ gym eval prepare --config $GYM_CONFIG
 
 gym eval run \
     --config $GYM_CONFIG \
+    ++output_jsonl_fpath=dummy.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=benchmark \
     ++uv_venv_dir=/opt/uv_venvs \
     ++dry_run=true
 
