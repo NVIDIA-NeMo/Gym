@@ -1,7 +1,7 @@
 #!/bin/bash
 # 
 #SBATCH --output=slurm-logs/%j-%x.log
-#SBATCH --job-name=gym-build_eval_container-%u
+#SBATCH --job-name=gym-build_eval_container
 # 
 # Example run:
 # SBATCH_ACCOUNT=my-slurm-account \
