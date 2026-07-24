@@ -12,9 +12,14 @@
 # --config benchmarks/my-benchmark/config.yaml
 # 
 # This script assumes:
+# - The container is one built via benchmarks/nemotron_3_ultra/build_eval_container.sh
 # - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
 # - Nemotron 3 Ultra configs e.g. with the parser configs.
-# - This is run from a NeMo Gym repository root with a valid NeMo Gym environment found at .venv.
+# 
+# If you want to use your own custom local Gym, please mount:
+# MOUNTS=/shared/fs:/shared/fs,/opt/Gym:/path/to/custom/local/Gym
+# The existing Gym venv and individual server venvs will still use the ones baked into the container.
+# 
 
 set -euo pipefail
 
@@ -50,8 +55,9 @@ vllm serve $MODEL \
     --host \$host \
     --port 8000 &
 
-# Assume this is run from Gym repository root.
-source .venv/bin/activate
+# Activate environment and cd into Gym
+source Gym_venv/bin/activate
+cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
@@ -61,10 +67,14 @@ until curl -s \$ip >/dev/null; do
 done
 
 experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+# +uv_venv_dir=/opt/uv_venvs is from the container.
+# +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
+    +uv_venv_dir=/opt/uv_venvs \
+    +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \
