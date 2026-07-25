@@ -60,6 +60,13 @@ from nemo_gym.openai_utils import (
 )
 
 
+def _message_content_to_text(content: Any) -> str:
+    """Plain text of a chat message content (a string, or a list of text parts)."""
+    if isinstance(content, str):
+        return content
+    return "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
+
+
 class ResponsesConverterState(BaseModel):
     return_token_id_information: bool
 
@@ -165,6 +172,22 @@ class ResponsesConverter(BaseModel):
                 )
 
         state.flush_assistant()
+
+        # The Responses API inserts `instructions` as a system message at the start of the model's
+        # context. Chat Completions has no such parameter, so map it explicitly — otherwise it is
+        # silently dropped when the remaining params are passed through (extra fields are ignored).
+        # The leading run of system/developer messages is folded into the same single system
+        # message: chat backends commonly admit only one system message, at position 0 (harnesses
+        # like the Codex CLI send instructions plus a leading developer message).
+        instructions = responses_create_params.pop("instructions", None)
+        if instructions:
+            leading_parts = [instructions]
+            while state.messages and state.messages[0]["role"] in ("system", "developer"):
+                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+            state.messages.insert(
+                0,
+                NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),
+            )
 
         model = responses_create_params.pop("model", None)
         if model is not None:

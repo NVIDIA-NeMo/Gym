@@ -247,11 +247,14 @@ class OmniscienceServer(SimpleResourcesServer):
 
     async def verify(self, body: OmniscienceVerifyRequest) -> OmniscienceVerifyResponse:
         # Match Skills' parse_reasoning=True behavior:
-        # 1. If </think> present: strip reasoning, keep answer after </think> (done by _strip_thinking_traces)
-        # 2. If </think> absent: empty string (model never finished reasoning)
+        # 1. <think>...</think> pair present: strip reasoning, keep answer after </think>
+        # 2. <think> opened but never closed: response was truncated mid-reasoning → empty
+        # 3. No <think> tags: preserve the plain answer
         raw_text = extract_text_from_response(body.response, strip_thinking=False)
         generation = extract_text_from_response(body.response)  # strips thinking traces
-        if "</think>" not in raw_text and "</thinking>" not in raw_text:
+        opened_think = ("<think>" in raw_text) or ("<thinking>" in raw_text)
+        closed_think = ("</think>" in raw_text) or ("</thinking>" in raw_text)
+        if opened_think and not closed_think:
             generation = ""
 
         question = body.question or ""

@@ -13,10 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+
+if TYPE_CHECKING:
+    # Type-only: importing MCPTool at runtime would be circular (mcp_auto_exposure imports this
+    # module) and would pull the mcp SDK into agent/model processes that never need it.
+    from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.openai_utils import (
@@ -115,7 +121,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)
 
-    def mcp_tools(self, harvested: list, catchall: Optional[Any]) -> Optional[list]:
+    def mcp_tools(self, harvested: list["MCPTool"], catchall: Optional[Any]) -> Optional[list["MCPTool"]]:
         """Return the MCP tools to expose (default: the auto-harvested typed POST routes).
 
         Override to exclude (filter harvested), add catch-all-backed tools (harvested + [catchall.tool(...)]),
@@ -123,7 +129,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         return harvested
 
-    def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> Optional[list[str]]:
         """Per-session tool restriction: return the tool names allowed for this rollout's MCP token,
         or ``None`` (the default) for unrestricted. ``seed_body`` is the JSON body POSTed to
         ``/seed_session``.

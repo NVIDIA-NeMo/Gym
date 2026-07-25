@@ -13,24 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
-import difflib
 import importlib
+import logging
+import os
 import re
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nemo_gym import PARENT_DIR, WORKING_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
+from nemo_gym.cli.utils import did_you_mean
 
+
+logger = logging.getLogger(__name__)
 
 VERSION_TARGET = "nemo_gym.cli.general:version"
-
-
-def _did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
-    return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
 class _GymArgumentParser(argparse.ArgumentParser):
@@ -47,7 +46,7 @@ class _GymArgumentParser(argparse.ArgumentParser):
             choices = re.findall(r"'([^']+)'", match.group(2))
             if not choices:
                 choices = [choice.strip() for choice in match.group(2).split(",")]
-            message += _did_you_mean(typo, choices)
+            message += did_you_mean(typo, choices)
         super().error(message)
 
 
@@ -144,11 +143,48 @@ RESOURCES_SERVER = Flag(
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
 
-# Positional search query for `gym search`; surfaced to the listing command as the `query` config key.
-QUERY = Flag(
-    register=lambda p: p.add_argument("query", metavar="QUERY", help="Substring to match against component names."),
-    translate_to_hydra=lambda args: [f"+query={args.query}"] if getattr(args, "query", None) else [],
+# `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
+# component (surfaced as the reserved `component_name` config key) instead of listing all.
+NAME = Flag(
+    register=lambda p: p.add_argument(
+        "name", nargs="?", metavar="NAME", help="Inspect a single component by name instead of listing all."
+    ),
+    translate_to_hydra=lambda args: [f"+component_name={args.name}"] if getattr(args, "name", None) else [],
 )
+
+# `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
+# chosen listing command as the reserved `query` config key; the type only picks which command to run
+# (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
+_SEARCHABLE_TYPES = {
+    "benchmarks": "nemo_gym.cli.eval:list_benchmarks",
+    "environments": "nemo_gym.cli.env:list_environments",
+    "agents": "nemo_gym.cli.agents:list_agents",
+    "models": "nemo_gym.cli.models:list_models",
+    "resources-servers": "nemo_gym.cli.resources_servers:list_resources_servers",
+}
+
+SEARCH_TERMS = Flag(
+    register=lambda p: (
+        p.add_argument(
+            "component_type",
+            nargs="?",
+            choices=list(_SEARCHABLE_TYPES),
+            help="Component type to search (default: benchmarks).",
+        ),
+        p.add_argument(
+            "query",
+            metavar="QUERY",
+            help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
+        ),
+    ),
+    translate_to_hydra=lambda args: [f'+query="{args.query}"'] if getattr(args, "query", None) else [],
+)
+
+
+def _search(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default benchmarks),
+    which filters itself to the `query` config key already in `overrides`."""
+    dispatch(_SEARCHABLE_TYPES[getattr(args, "component_type", None) or "benchmarks"], overrides)
 
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
@@ -161,13 +197,15 @@ _ASSETS = {
 }
 
 
-def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ()) -> str:
+def _asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the Gym install root (`PARENT_DIR` — where the built-in asset trees live in both
-    editable and wheel installs), then the current working directory (the user's project), then
-    any user-registered --search-dir roots. Searching `PARENT_DIR` is what lets built-ins resolve
-    by name from an arbitrary cwd (e.g. a wheel install), not just from inside the repo checkout.
+    Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
+    cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
+    discovery agree on where components live. On a name collision across roots the highest-priority root wins
+    (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
+    in ``main``). Searching the install root is what lets built-ins resolve by name from an arbitrary cwd
+    (e.g. a wheel install), not just inside the repo checkout.
     """
     parent, subdir, default_flavor = _ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
@@ -175,15 +213,7 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
     config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
     path = f"{config_dir}/{config_flavor}.yaml"
 
-    # Search the install root (built-ins) and the user's cwd / --search-dir roots; dedupe roots that
-    # resolve to the same directory so an editable install run from the repo root isn't searched twice.
-    seen_roots: set[Path] = set()
-    roots: list[Path] = []
-    for root in (PARENT_DIR, WORKING_DIR, Path.cwd(), *(Path(d) for d in search_dirs)):
-        resolved_root = root.resolve()
-        if resolved_root not in seen_roots:
-            seen_roots.add(resolved_root)
-            roots.append(root)
+    roots = component_search_roots()
     matches: list[Path] = []
 
     for root in roots:
@@ -194,33 +224,55 @@ def _asset_config_path(flag: str, value: str, search_dirs: tuple[str, ...] = ())
                 matches.append(resolved)
 
     if len(matches) > 1:
-        matches_str = ", ".join(f"`{m}`" for m in matches)
-        raise ValueError(
-            f"`--{flag} {value}` is ambiguous: it matches multiple configs ({matches_str}). "
-            f"Pass the intended config directly with `--config <path>` instead."
+        shadowed = ", ".join(f"`{m}`" for m in matches[1:])
+        logger.warning(
+            f"`--{flag} {value}` matches multiple configs; using `{matches[0]}` from the highest-priority root "
+            f"and ignoring {shadowed}. Pass `--config <path>` to select a different one."
         )
     if matches:
         return str(matches[0])
 
-    # No match: suggest the closest real name across all roots (a config flavor when the server exists, else a
-    # server name) and report the full paths that were searched.
-    available = ", ".join(set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir()))
-    typo = config_flavor
-    candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
+    # No match: build a "did you mean?" hint and the roots searched
+    if flag == "benchmark":
+        # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
+        # the generic one-level flavor/sibling search below can't see them.
+        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
+        from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
-    if len(candidates) == 0:
-        available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
-        typo = server_name
-        candidates = [
-            child.name
+        config_names = {
+            _benchmark_config_name(p.relative_to(root / parent))
             for root in roots
-            if (root / parent).is_dir()
-            for child in (root / parent).iterdir()
-            if child.is_dir()
-        ]
+            for p in _benchmark_config_paths(root / parent)
+        }
+        # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
+        # at the config names under it; otherwise fall back to a fuzzy match across every token.
+        under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
+        hint = f" Did you mean `{min(under_dir, key=len)}`?" if under_dir else did_you_mean(value, config_names)
+        available = ", ".join(sorted(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+    else:
+        # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
+        # name, reporting the full paths that were searched in each case.
+        available = ", ".join(
+            set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir())
+        )
+        typo = config_flavor
+        candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
+
+        if len(candidates) == 0:
+            available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+            typo = server_name
+            candidates = [
+                child.name
+                for root in roots
+                if (root / parent).is_dir()
+                for child in (root / parent).iterdir()
+                if child.is_dir()
+            ]
+
+        hint = did_you_mean(typo, candidates)
 
     raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{_did_you_mean(typo, candidates)} "
+        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{hint} "
         f"See available {flag} configs in {available}."
     )
 
@@ -231,11 +283,7 @@ def _asset_selector(flag: str) -> Flag:
     return Flag(
         register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
         translate_to_hydra=lambda args: (
-            [
-                f"+config_paths=[{_asset_config_path(flag, getattr(args, dest), tuple(getattr(args, 'search_dir', None) or ()))}]"
-            ]
-            if getattr(args, dest)
-            else []
+            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
         ),
     )
 
@@ -245,14 +293,15 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
-# Shared flag: register extra root dirs to search for named components. Consumed by the asset selectors above
-# (not emitted as a Hydra override). Reused by every command that accepts a --<component type> NAME selector.
+# `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
+# var before dispatch (see there), so a single register-only flag suffices for every command — the roots
+# reach discovery, the `--<component> NAME` selectors, deep path resolution, and spawned servers alike.
 SEARCH_DIR = Flag(
     register=lambda p: p.add_argument(
         "--search-dir",
         action="append",
         metavar="DIR",
-        help="Extra root directory to search for named components; repeatable.",
+        help="Extra root directory to search for components; repeatable.",
     ),
 )
 
@@ -301,7 +350,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
 
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
-    "list": "List available components (benchmarks, agents, environments).",
+    "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
@@ -312,20 +361,34 @@ GROUPS = {
 # NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
-        target="nemo_gym.cli.eval:list_benchmarks", summary="List available benchmarks.", flags=(JSON,)
+        target="nemo_gym.cli.eval:list_benchmarks",
+        summary="List or inspect available benchmarks.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list environments": Command(
-        target="nemo_gym.cli.env:list_environments", summary="List available environments by name.", flags=(JSON,)
+        target="nemo_gym.cli.env:list_environments",
+        summary="List or inspect available environments.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
-        summary="List agent harnesses and how each composes (Pattern A vs self-contained B).",
-        flags=(JSON,),
+        summary="List or inspect available agent harnesses.",
+        flags=(NAME, JSON, SEARCH_DIR),
+    ),
+    "list models": Command(
+        target="nemo_gym.cli.models:list_models",
+        summary="List or inspect available model servers.",
+        flags=(NAME, JSON, SEARCH_DIR),
+    ),
+    "list resources-servers": Command(
+        target="nemo_gym.cli.resources_servers:list_resources_servers",
+        summary="List or inspect available resources servers.",
+        flags=(NAME, JSON, SEARCH_DIR),
     ),
     "search": Command(
-        target="nemo_gym.cli.eval:list_benchmarks",
-        summary="Search available components (currently benchmarks) by name; like `list` filtered to a query.",
-        flags=(QUERY, JSON),
+        target=_search,
+        summary="Search a component type (default benchmarks) by name; like `list` filtered to a query.",
+        flags=(SEARCH_TERMS, JSON, SEARCH_DIR),
     ),
     "dataset upload": Command(
         target=_dataset_upload,
@@ -391,6 +454,7 @@ COMMANDS = {
             _value_flag("input", "input_jsonl_fpath", "Raw input JSONL file.", aliases=("-i",)),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
+            SEARCH_DIR,
         ),
     ),
     "dataset collate": Command(
@@ -414,7 +478,7 @@ COMMANDS = {
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
         summary="Resolve the final config from configs, flags, and overrides.",
-        flags=(CONFIG,),
+        flags=(CONFIG, SEARCH_DIR),
     ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
@@ -436,6 +500,7 @@ COMMANDS = {
         summary="Print pip packages for the selected resources server.",
         flags=(
             RESOURCES_SERVER,
+            SEARCH_DIR,
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
@@ -448,7 +513,7 @@ COMMANDS = {
     "env test": Command(
         target=_env_test,
         summary="Test the resources server(s); runs all if no resources server is given.",
-        flags=(RESOURCES_SERVER,),
+        flags=(RESOURCES_SERVER, SEARCH_DIR),
     ),
     "env start": Command(
         target="nemo_gym.cli.env:run",
@@ -616,46 +681,80 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
     parser.error(" ".join(parts) if parts else str(exc))
 
 
+@contextmanager
+def _extra_roots_from_search_dir(search_dirs: list[str] | None):
+    """Prepend ``--search-dir`` roots to ``NEMO_GYM_EXTRA_ROOTS`` for the duration of the command, then restore.
+
+    Setting the env var lets the roots reach every resolver (discovery, the --<component> selectors,
+    deep config/prompt/rollout resolution) and inherit into spawned server subprocesses.
+    The original value is restored (or the var unset) on exit so main() leaves no global side effect.
+    (sys.path is augmented with the new roots for plugin ``prepare.py`` imports and left as-is on exit.)
+    """
+    if not search_dirs:
+        yield
+        return
+    original = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+    value = os.pathsep.join([*search_dirs, *([original] if original else [])])
+    os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = value
+    _augment_sys_path()  # re-read env so --search-dir roots are importable (e.g. a benchmark prepare.py)
+    logger.debug(f"Set {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={value} from --search-dir")
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, None)
+            logger.debug(f"Unset {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}")
+        else:
+            os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = original
+            logger.debug(f"Restored {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={original}")
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
+
+    if getattr(args, "verbose", False):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
 
     # Hydra overrides never start with "-" so we treat them as unknown flags.
     unknown_flags = [token for token in overrides if token.startswith("-")]
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        hints = "".join(_did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        hints = "".join(did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
-    if args.version:
-        dispatch(VERSION_TARGET, ["+json=true", *overrides] if args.json else overrides)
-        return
+    # set NEMO_GYM_EXTRA_ROOTS from --search-dir for the duration of the command
+    with _extra_roots_from_search_dir(getattr(args, "search_dir", None)):
+        if args.version:
+            dispatch(VERSION_TARGET, ["+json=true", *overrides] if args.json else overrides)
+            return
 
-    command = getattr(args, "_command", None)
-    if command is None:
-        args._parser.print_help()
-        sys.exit(1)
+        command = getattr(args, "_command", None)
+        if command is None:
+            args._parser.print_help()
+            sys.exit(1)
 
-    try:
-        translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
-    except ValueError as exc:
-        getattr(args, "_parser", parser).error(str(exc))
+        try:
+            translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
+        except ValueError as exc:
+            getattr(args, "_parser", parser).error(str(exc))
 
-    # --config and the asset selectors all emit +config_paths; coalesce them into one token.
-    overrides = _merge_config_paths(translated + overrides)
-    # --verbose flows through the config (as +verbose=true) so it reaches spun-up servers, not just this process.
-    if getattr(args, "verbose", False):
-        overrides = ["+verbose=true", *overrides]
+        # --config and the asset selectors all emit +config_paths; coalesce them into one token.
+        overrides = _merge_config_paths(translated + overrides)
+        # --verbose flows through the config (as +verbose=true) so it reaches spun-up servers, not just this process.
+        if getattr(args, "verbose", False):
+            overrides = ["+verbose=true", *overrides]
 
-    # Local import keeps `gym --help` (which returns before this point) free of pydantic's import cost;
-    # any real command loads pydantic anyway via its config's model_validate.
-    from pydantic import ValidationError
+        # Local import keeps `gym --help` (which returns before this point) free of pydantic's import cost;
+        # any real command loads pydantic anyway via its config's model_validate.
+        from pydantic import ValidationError
 
-    try:
-        if callable(command.target):
-            command.target(args, overrides)
-        else:
-            dispatch(command.target, overrides)
-    except ValidationError as exc:
-        _handle_pydantic_validation_error(exc, getattr(args, "_parser", parser))
+        try:
+            if callable(command.target):
+                command.target(args, overrides)
+            else:
+                dispatch(command.target, overrides)
+        except ValidationError as exc:
+            _handle_pydantic_validation_error(exc, getattr(args, "_parser", parser))

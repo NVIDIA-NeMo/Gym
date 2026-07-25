@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,7 +43,8 @@ How to read this file
 Two timelines run here, and every function belongs to exactly one. Keep them apart while reading.
 
 STARTUP (runs once at boot, per opted-in server):
-    ``maybe_auto_expose`` (flag gate) -> ``install_auto_exposure``, which:
+    ``maybe_auto_expose`` (flag gate) -> ``install_auto_exposure``, which (after refusing a server
+    that already serves /mcp):
       * ``harvest_tools`` — walks the app's POST routes, calls ``bind_route`` on each, and builds the
         ``{tool name: MCPTool}`` map (advertisement + a direct binding per tool);
       * wraps endpoints — ``_wrap_seed_session`` makes the /seed_session response hand the client a
@@ -55,7 +56,7 @@ PER-CALL (runs on every MCP ``tools/call``):
     ``call_direct(binding)`` runs the route's own handler exactly once with a fabricated ``Request``
     and returns its JSON-able payload.
 
-Reading order: start with the dataclasses ``DirectBinding`` and ``MCPTool``, then ``bind_route``
+Reading order: start with the dataclasses ``DirectBinding``, ``BindResult``, and ``MCPTool``, then ``bind_route``
 (startup classify), then ``call_direct`` (per-call dispatch), then ``harvest_tools`` (startup build),
 then ``install_auto_exposure`` (startup wire-up). Everything else is a helper for those five.
 """
@@ -100,8 +101,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 LOG = logging.getLogger(__name__)
 
-# Re-export for existing importers; the canonical value lives in base_resources_server so the two
-# MCP mechanisms cannot drift apart on the wire.
+# Alias for readability; the canonical value lives in base_resources_server because the header is
+# wire contract — claude_code_agent reads the same constant from the /seed_session metadata.
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
@@ -140,12 +141,23 @@ class DirectBinding:
     is_coroutine: bool = False  # sync (def) handlers go to a threadpool, as FastAPI would send them
 
 
-def bind_route(route: APIRoute) -> tuple[Optional[DirectBinding], list[str], Optional[type[BaseModel]]]:
-    """Classify one route's handler signature for direct dispatch, returning
-    ``(binding, reasons, body_model)`` where ``binding`` is None (with the reasons why) for a handler
-    shape that is not directly dispatchable. ``body_model`` is the resolved body model even when
-    ``binding`` is None, so the harvested tools/list schema stays typed for a route the ``mcp_tools()``
-    override may drop. Public introspection only.
+@dataclass(frozen=True)
+class BindResult:
+    """bind_route's verdict for one route.
+
+    ``binding`` is None for a handler shape that is not directly dispatchable, with ``reasons``
+    saying why. ``body_model`` is resolved even when ``binding`` is None, so the harvested
+    tools/list schema stays typed for a route the ``mcp_tools()`` override may drop.
+    """
+
+    binding: Optional[DirectBinding]
+    reasons: list[str]
+    body_model: Optional[type[BaseModel]]
+
+
+def bind_route(route: APIRoute) -> BindResult:
+    """Classify one route's handler signature for direct dispatch (see :class:`BindResult`).
+    Public introspection only.
 
     Annotation resolution matches FastAPI's own: ``inspect.signature`` first (it honors a
     factory-set ``__signature__`` — some servers rewrite it with the real body model while
@@ -235,9 +247,9 @@ def bind_route(route: APIRoute) -> tuple[Optional[DirectBinding], list[str], Opt
         return_model = ret if isinstance(ret, type) and issubclass(ret, BaseModel) else None
 
     if reasons:
-        return None, reasons, body_model
-    return (
-        DirectBinding(
+        return BindResult(binding=None, reasons=reasons, body_model=body_model)
+    return BindResult(
+        binding=DirectBinding(
             endpoint=endpoint,
             path=route.path,
             request_params=tuple(request_params),
@@ -248,8 +260,8 @@ def bind_route(route: APIRoute) -> tuple[Optional[DirectBinding], list[str], Opt
             body_is_dict=body_is_dict,
             is_coroutine=inspect.iscoroutinefunction(inspect.unwrap(endpoint)),
         ),
-        [],
-        body_model,
+        reasons=[],
+        body_model=body_model,
     )
 
 
@@ -397,13 +409,13 @@ class _CatchAll:
         if self._binding is None:
             # First catch-all-backed tool for this route: bind it once and cache; on failure the
             # reasons drive the error (see bind_route's deferred-validation note).
-            binding, reasons, _ = bind_route(self.route)
-            if binding is None:
+            bound = bind_route(self.route)
+            if bound.binding is None:
                 raise ValueError(
                     f"{type(self.server).__name__} catch-all route {self.route.path!r} cannot be dispatched "
-                    f"directly: {'; '.join(reasons)}. Direct MCP dispatch does not reproduce this handler shape."
+                    f"directly: {'; '.join(bound.reasons)}. Direct MCP dispatch does not reproduce this handler shape."
                 )
-            self._binding = binding
+            self._binding = bound.binding
         return MCPTool(
             name=name,
             tool=types.Tool(name=name, description=description, inputSchema=input_schema or dict(PERMISSIVE_SCHEMA)),
@@ -451,16 +463,16 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         # Keep the binding + reasons; a None binding (undispatchable) only errors later, and only if
         # the override actually exposes this tool. See bind_route's deferred-validation note. The
         # schema comes from body_model, which survives a failed bind, so overrides see it typed.
-        binding, reasons, body_model = bind_route(route)
-        schema = body_model.model_json_schema() if body_model is not None else dict(PERMISSIVE_SCHEMA)
+        bound = bind_route(route)
+        schema = bound.body_model.model_json_schema() if bound.body_model is not None else dict(PERMISSIVE_SCHEMA)
         description = (route.description or route.summary or "").strip() or None
         harvested.append(
             MCPTool(
                 name=name,
                 tool=types.Tool(name=name, description=description, inputSchema=schema),
-                binding=binding,
+                binding=bound.binding,
                 path=route.path,
-                reasons=tuple(reasons),
+                reasons=tuple(bound.reasons),
             )
         )
 
@@ -487,7 +499,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     return tools
 
 
-def _validate_tools(server: Any, selected: Optional[list]) -> dict[str, MCPTool]:
+def _validate_tools(server: Any, selected: Optional[list[MCPTool]]) -> dict[str, MCPTool]:
     """Validate the final tool list from ``mcp_tools()``: legal name, not reserved, unique, dispatchable."""
     tools: dict[str, MCPTool] = {}
     for tool in selected or []:
