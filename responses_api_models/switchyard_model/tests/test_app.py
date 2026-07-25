@@ -250,12 +250,22 @@ class TestProxyLifecycle:
 
     def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
         """Build a launch-mode server without actually spawning a proxy."""
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
         monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
         return SwitchyardModel(
             config=self._launch_config(),
             server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
+
+    def test_missing_executable_explains_how_to_fix(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: None)
+
+        with pytest.raises(RuntimeError, match="nemo-switchyard"):
+            SwitchyardModel(
+                config=self._launch_config(),
+                server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+            )
 
     def test_start_proxy_builds_command_and_waits(self, monkeypatch: MonkeyPatch) -> None:
         commands: list = []
@@ -266,6 +276,7 @@ class TestProxyLifecycle:
             commands.append(command)
             return process
 
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
         monkeypatch.setattr(subprocess, "Popen", mock_popen)
         monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
 

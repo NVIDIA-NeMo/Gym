@@ -17,27 +17,18 @@
 name = "switchyard-model"
 version = "0.1.0"
 requires-python = ">=3.12"
+# This server deliberately takes no dependency on nemo-switchyard. It never imports Switchyard:
+# it speaks OpenAI-compatible HTTP to the proxy, and launch_proxy mode shells out to the
+# `switchyard` CLI, which only needs the executable on PATH. Users who want launch mode install
+# it themselves (`pip install 'nemo-switchyard[server]'`), which also lets them pin the exact
+# Switchyard build an eval is reported against rather than inheriting Gym's.
+#
+# Declaring it here is not currently possible in any case: the published nemo-switchyard 0.1.0
+# pins openai>=2.34.0 and Gym pins openai<=2.7.2, so the two cannot co-install. The Switchyard
+# floor was widened to >=2.7 in NVIDIA-NeMo/Switchyard#142, but PyPI releases are immutable, so
+# that only takes effect from the next release onward.
 dependencies = [
-    ########################################
-    # Every dependency listed here contains the following information:
-    # 1. Why this dependency is here in NeMo Gym
-    # 2. When this dependency was last updated
-    # 3. The license of the dependencies.
-    ########################################
-
     "nemo-gym[dev]",
-
-    # nemo-switchyard: provides the `switchyard` CLI this server launches in launch_proxy mode.
-    # Scoped to this model server rather than Gym's core dependencies, so only runs that route
-    # through Switchyard pay for it. Not needed in attach mode, where the proxy is a plain
-    # OpenAI-compatible endpoint run outside Gym.
-    #
-    # Requires >=0.1.1: the published 0.1.0 pins openai>=2.34.0, which is unsatisfiable against
-    # Gym's openai<=2.7.2. The floor was widened to >=2.7 in NVIDIA-NeMo/Switchyard#142.
-    # Upper-bounded at the 0.1 line -- Switchyard is alpha and its crates are being restructured.
-    # Updated Fri Jul 24, 2026 with nemo-switchyard>=0.1.1,<0.2.0
-    # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Switchyard/blob/main/LICENSE
-    "nemo-switchyard[server]>=0.1.1,<0.2.0",
 ]
 
 [build-system]
