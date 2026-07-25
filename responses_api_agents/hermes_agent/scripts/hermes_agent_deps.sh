@@ -4,7 +4,7 @@ set -euo pipefail
 set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/_portable_python.sh"
+source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 
 : "${DEPS_DIR:?DEPS_DIR must be set}"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
