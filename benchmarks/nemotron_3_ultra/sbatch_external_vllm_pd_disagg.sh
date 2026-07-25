@@ -23,6 +23,9 @@ MOUNTS=$MOUNTS
 command=$(cat <<EOF
 set -euo pipefail
 
+# TODO @bxyu-nvidia: Move this to the container prep script
+pip install vllm-router
+
 host="\$(hostname -I | awk '{print $1}')"
 common_args=(
     --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
@@ -30,7 +33,6 @@ common_args=(
     --distributed-executor-backend ray
     --data-parallel-backend ray
     --data-parallel-size 2
-    --data-parallel-size-local 1
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -49,6 +51,7 @@ common_args=(
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve $MODEL "\${common_args[@]}" \
     --port 8001 \
+    --data-parallel-size-local 1 \
     --kv-transfer-config \
         '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
     &
@@ -58,6 +61,7 @@ prefill_pid=\$!
 VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
 vllm serve $MODEL "\${common_args[@]}" \
     --port 8002 \
+    --data-parallel-size-local 0 \
     --kv-transfer-config \
         '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
