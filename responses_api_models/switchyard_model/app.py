@@ -202,15 +202,16 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     def start_proxy(self) -> str:
         """Start `switchyard ... serve` and block until it answers /health.
 
-        Switchyard is not a dependency of this package -- launching drives its CLI, so the
-        executable has to be on PATH. Check that up front rather than surfacing it as an opaque
-        FileNotFoundError from Popen.
+        nemo-switchyard is a dependency of this server, so the CLI is normally installed with it.
+        Check anyway -- a custom switchyard_executable or a hand-built environment can leave it
+        missing, and an explicit message beats an opaque FileNotFoundError from Popen.
         """
         if shutil.which(self.config.switchyard_executable) is None:
             raise RuntimeError(
-                f"switchyard_model needs the {self.config.switchyard_executable!r} executable on PATH to "
-                "launch a proxy. Install it with `pip install 'nemo-switchyard[server]'`, or set "
-                "switchyard_base_url to attach to a proxy you run yourself."
+                f"switchyard_model could not find the {self.config.switchyard_executable!r} executable on PATH, "
+                "so it cannot launch a proxy. It ships with this server's nemo-switchyard dependency; if you "
+                "are running a custom environment, install it with `pip install 'nemo-switchyard[server]'` or "
+                "set switchyard_base_url to attach to a proxy you run yourself."
             )
 
         port = self.config.proxy_port or find_open_port(
