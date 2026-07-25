@@ -1,0 +1,15 @@
+config_paths:
+- benchmarks/gpqa/config.yaml
+- benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- env.yaml
+
+policy_base_url: dummy
+policy_api_key: dummy
+policy_model_name: dummy
+
+# The following secrets must be filled in via env.yaml at runtime
+gpt-5_4-mini-2026-03-17:
+  responses_api_models:
+    openai_model:
+      openai_api_key: dummy
