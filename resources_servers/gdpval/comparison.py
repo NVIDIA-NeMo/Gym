@@ -21,9 +21,11 @@ between the eval model and a reference model's deliverables) and
 from __future__ import annotations
 
 import base64
+import logging
 import math
 import os
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -35,6 +37,9 @@ from typing import Any, Optional
 from openai import APITimeoutError
 
 from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 JUDGE_PROMPT = (
@@ -71,12 +76,15 @@ REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
 REQUEST_BACKOFF_MULTIPLIER = 2.0
 REQUEST_MAX_BACKOFF_SECONDS = 60.0
-# Per-request OpenAI client timeout. Multimodal payloads through a flaky
-# proxy have historically taken hours when this defaulted to 600 s × 5
-# retries (50 min/trial × 4 trials = 200 min/verify worst case). 120 s here,
-# combined with non-retryable ``APITimeoutError`` below, bounds wall-clock
-# damage to ~8 min/verify when the upstream is genuinely down.
-JUDGE_REQUEST_TIMEOUT_SECONDS = 120.0
+# Per-request OpenAI client timeout. A local multimodal VLM judge must prefill
+# the whole payload (dozens of rasterized pages + extracted text per side)
+# before the first token, which for image-dense deliverables can exceed the
+# 120 s originally tuned for a flaky frontier proxy -- silently dropping
+# slow-but-healthy local judgements and biasing the ELO fit. Default 300 s;
+# override with ``GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS``. Kept non-retryable
+# (below) so a genuinely dead upstream still bounds wall-clock rather than
+# retrying N x timeout.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "300"))
 # Per-file size cap on multimodal content blocks. Above this the file is
 # replaced with a one-line text marker so the judge still knows what was
 # claimed without us pushing 100s of MB of base64 through the proxy.
@@ -249,12 +257,132 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     return None
 
 
-def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
+def get_file_image_text_blocks(
+    file_dir: str,
+    file_name: str,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+    audio_capable: bool = False,
+    video_capable: bool = False,
+) -> list[dict]:
+    """``images_and_text`` variant of :func:`get_file_content_block`.
+
+    For image-only local VLM judges (e.g. a gym-spawned Kimi K2.6) PDFs and
+    (preconverted) Office docs are rasterized to per-page PNG image blocks with
+    the extracted text attached, instead of being sent as an ``application/pdf``
+    data URL the judge can't decode. Native images and text files pass through
+    unchanged.
+
+    Audio and video are gated INDEPENDENTLY because judges differ per modality:
+    a video file passes through only when *video_capable*, an audio file only
+    when *audio_capable* — so a MiniMax-M3 judge (video yes, audio no) keeps video
+    but stubs audio. Passed-through media uses the vLLM-standard ``video_url`` /
+    ``input_audio`` content types (not the ``image_url`` wrapper used for frontier
+    judges, which vLLM won't route to the video/audio tower). An unreadable
+    modality is replaced with a one-line marker. Returns a list of 0+ blocks.
+    """
+    from resources_servers.gdpval.media_conversion import audio_video_block, pdf_bytes_to_blocks
+
+    file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    info = FILE_TYPE_MAP.get(file_extension)
+    file_type = info["type"] if info else "DOC"
+    full_path = os.path.join(file_dir, file_name)
+
+    try:
+        size_bytes = os.path.getsize(full_path)
+    except OSError:
+        return []
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        size_mb = size_bytes / (1024 * 1024)
+        return [{"type": "text", "text": f"[oversize: {file_name} {size_mb:.1f}MB — not included]"}]
+
+    try:
+        # PDFs and Office docs (preconverted to a sibling .pdf) → page images + text.
+        if file_type == "PDF":
+            pdf_bytes: bytes | None = Path(full_path).read_bytes()
+        elif file_type == "DOC":
+            pdf_bytes = _convert_to_pdf(full_path)
+            if pdf_bytes is None:
+                # No sibling .pdf render exists, so this Office deliverable's content
+                # is invisible to an image-only judge (only the filename is shown).
+                # Warn so an incomplete-preconvert reference cache surfaces instead of
+                # silently scoring empty -- run preconvert on the cache to include it.
+                LOGGER.warning(
+                    "office file %r has no sibling .pdf render; its content is invisible "
+                    "to this judge -- preconvert the deliverables cache to include it",
+                    file_name,
+                )
+        else:
+            pdf_bytes = None
+
+        if pdf_bytes is not None:
+            blocks = pdf_bytes_to_blocks(
+                pdf_bytes,
+                dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+            )
+            if blocks:
+                return blocks
+            # Office doc with no preconverted PDF (or an unrenderable PDF): fall
+            # back to raw text extraction so the judge still sees the content.
+            if file_type == "DOC":
+                return [{"type": "text", "text": f"[no PDF render available for {file_name}]"}]
+            return []
+
+        # Audio/video: forward with the vLLM-standard content type when the judge
+        # can read that specific modality; otherwise advertise the file by name.
+        # This ``images_and_text`` path is only ever a self-hosted vLLM judge, so
+        # AV is emitted as ``video_url`` / ``input_audio`` (not the ``image_url``
+        # wrapper frontier judges use), which is what vLLM routes to the media
+        # tower. Audio and video are gated separately (MiniMax-M3: video yes,
+        # audio no).
+        if file_type in ("AUDIO", "VIDEO"):
+            can_read = video_capable if file_type == "VIDEO" else audio_capable
+            if not can_read:
+                return [
+                    {"type": "text", "text": f"[{file_type.lower()} file not readable by this judge: {file_name}]"}
+                ]
+            info = FILE_TYPE_MAP.get(file_extension) or {}
+            mime = info.get("mime_type") or "application/octet-stream"
+            data = _load_media(full_path)
+            return [audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)]
+
+        # Text and native images pass through exactly as in native mode.
+        block = get_file_content_block(file_dir, file_name)
+        return [block] if block is not None else []
+    except Exception as e:
+        raise RuntimeError(f"Error getting file: {file_name} in directory: {file_dir}: {e}") from e
+
+
+def build_file_section(
+    file_dir: str | None,
+    clean_up_list: list[Path] | None = None,
+    *,
+    media_mode: str = "native_pdf",
+    render_dpi: int = 144,
+    max_pages: int = 50,
+    include_text: bool = True,
+    audio_capable: bool = False,
+    video_capable: bool = False,
+) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
     Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
     (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
     Returns a list of content block dicts suitable for OpenAI messages.
+
+    *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
+    (default) sends them as ``application/pdf`` data URLs for frontier judges;
+    ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
+    extracted text, for image-only local VLM judges (see
+    :func:`get_file_image_text_blocks`). *render_dpi*, *max_pages*, and
+    *include_text* tune the ``images_and_text`` rendering. *audio_capable* /
+    *video_capable* keep audio / video files (respectively) as native media
+    blocks (vs stubbing them) when the judge reads that modality — they are
+    independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -276,6 +404,20 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
         if file_name in IGNORE_FILES:
             return
         section.append({"type": "text", "text": f"\n{file_name}:\n"})
+        if media_mode == "images_and_text":
+            blocks = get_file_image_text_blocks(
+                directory,
+                file_name,
+                render_dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+                audio_capable=audio_capable,
+                video_capable=video_capable,
+            )
+            if blocks:
+                section.extend(blocks)
+                no_files = False
+            return
         block = get_file_content_block(directory, file_name)
         if block is not None:
             section.append(block)
@@ -391,15 +533,29 @@ def send_judge_request(
 # ---------------------------------------------------------------------------
 
 
-def parse_judgement(response_text: str) -> str:
-    """Extract ``BOXED[A]``, ``BOXED[B]``, or ``BOXED[TIE]`` from judge response."""
-    if A_WIN_RESPONSE in response_text:
-        return A_WIN_RESPONSE
-    if B_WIN_RESPONSE in response_text:
-        return B_WIN_RESPONSE
-    if TIE_RESPONSE in response_text:
-        return TIE_RESPONSE
-    return TIE_RESPONSE
+_BOXED_RE = re.compile(r"BOXED\[(A|B|TIE)\]")
+
+_BOXED_TO_RESPONSE = {"A": A_WIN_RESPONSE, "B": B_WIN_RESPONSE, "TIE": TIE_RESPONSE}
+
+
+def parse_judgement(response_text: str) -> Optional[str]:
+    """Extract the judge's verdict (``BOXED[A|B|TIE]``) from its response.
+
+    Uses the **last** boxed token so a verbose/reasoning judge that writes e.g.
+    ``"not BOXED[A]; the answer is BOXED[B]"`` is scored on its conclusion rather
+    than the first token mentioned (the old first-substring match scored A here).
+    When no boxed verdict is present the response is mis-formatted; return
+    ``None`` so the caller can exclude it from the ELO calculation. Treating an
+    invalid response as a tie would award the eval model half a win.
+    """
+    matches = _BOXED_RE.findall(response_text or "")
+    if not matches:
+        LOGGER.warning(
+            "judge response has no BOXED[A|B|TIE] verdict; dropping vote. head=%r",
+            (response_text or "")[:200],
+        )
+        return None
+    return _BOXED_TO_RESPONSE[matches[-1]]
 
 
 def tally_result(
@@ -447,7 +603,10 @@ class Judge:
     model: str
     create_overrides: Optional[dict] = None
     weight: float = 1.0
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked separately: a MiniMax-M3 judge reads
+    # video but not audio.
+    handles_audio: bool = False
+    handles_video: bool = False
 
 
 def run_trials(
@@ -469,11 +628,16 @@ def run_trials(
     historical single-judge loop. Pass *rng* (a seeded ``random.Random``) for
     reproducible judge selection.
 
+    Invalid responses without a boxed verdict are excluded rather than scored
+    as ties. If every response is invalid, the matchup fails so its caller can
+    retry or drop it explicitly.
+
     Returns a dict with ``winner``, ``win_count_a``, ``win_count_b``,
-    ``tie_count``, ``task_count``, ``per_judge`` (per-member a/b/tie/trial
-    counts keyed by judge name), and ``trial_judges`` (the judge name that graded
-    each trial, ordered by trial index — always present so the grader of every
-    match is documented).
+    ``tie_count``, ``task_count`` (valid votes only), ``invalid_count``,
+    ``per_judge`` (per-member a/b/tie/valid/invalid counts keyed by judge name),
+    and ``trial_judges`` (the judge name that graded each attempted trial,
+    ordered by trial index — always present so the grader of every match is
+    documented).
 
     When ``return_raw_responses`` is True, the dict also carries
     ``raw_responses`` (per-trial judge completion strings, same ordering as
@@ -486,6 +650,7 @@ def run_trials(
     win_count_a = 0
     win_count_b = 0
     tie_count = 0
+    invalid_count = 0
     raw_responses: list[str] = []
     trial_judges: list[str] = []
     per_judge: dict[str, dict] = {}
@@ -509,15 +674,27 @@ def run_trials(
         if return_raw_responses:
             raw_responses.append(response_text)
         judgement = parse_judgement(response_text)
-        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
 
         # Per-judge tally (same A=submission_a / B=submission_b convention as the
         # global counts) so the panel's per-member balance is auditable.
-        jc = per_judge.setdefault(judge.name, {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0})
+        jc = per_judge.setdefault(
+            judge.name,
+            {"win_count_a": 0, "win_count_b": 0, "tie_count": 0, "trials": 0, "invalid_count": 0},
+        )
+        if judgement is None:
+            invalid_count += 1
+            jc["invalid_count"] += 1
+            continue
+
+        win_count_a, win_count_b, tie_count = tally_result(judgement, swapped, win_count_a, win_count_b, tie_count)
         jc["win_count_a"], jc["win_count_b"], jc["tie_count"] = tally_result(
             judgement, swapped, jc["win_count_a"], jc["win_count_b"], jc["tie_count"]
         )
         jc["trials"] += 1
+
+    valid_count = win_count_a + win_count_b + tie_count
+    if valid_count == 0:
+        raise ValueError(f"All {num_trials} pairwise judge responses were invalid")
 
     if win_count_a > win_count_b:
         winner = A_WIN_RESPONSE
@@ -531,7 +708,8 @@ def run_trials(
         "win_count_a": win_count_a,
         "win_count_b": win_count_b,
         "tie_count": tie_count,
-        "task_count": num_trials,
+        "task_count": valid_count,
+        "invalid_count": invalid_count,
         "per_judge": per_judge,
         # Always recorded (just judge names, ordered by trial) so every match's
         # per-trial grader is documented even when raw responses aren't kept.

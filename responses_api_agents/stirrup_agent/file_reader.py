@@ -163,6 +163,10 @@ def _read_pptx(fpath: Path) -> str:
 OFFICE_EXTS = {".docx", ".pptx", ".xlsx"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".yaml", ".yml", ".py", ".sh", ".log"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
+# Audio/video are only passed through when the judge is AV-capable (e.g. MiniMax
+# M3); image-only judges can't decode them, so they are otherwise skipped.
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -172,6 +176,17 @@ MIME_TYPES = {
     ".webp": "image/webp",
     ".heic": "image/heic",
     ".heif": "image/heif",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".aac": "audio/aac",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
 }
 
 
@@ -235,7 +250,62 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             shutil.rmtree(stage_dir, ignore_errors=True)
 
 
-def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, Any]]:
+def _pdf_bytes_to_image_text_blocks(
+    pdf_bytes: bytes,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+) -> list[dict[str, Any]] | None:
+    """Rasterize PDF bytes to page-image + text blocks for image-only judges.
+
+    Delegates to :mod:`resources_servers.gdpval.media_conversion` (imported
+    lazily so this module stays importable even where that package isn't on the
+    path). Returns ``None`` when the helper is unavailable or yields nothing, so
+    the caller can fall back to the native ``application/pdf`` data URL.
+    """
+    try:
+        from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+    except ImportError:
+        return None
+    blocks = pdf_bytes_to_blocks(
+        pdf_bytes,
+        dpi=render_dpi,
+        max_pages=max_pages,
+        include_text=include_text,
+    )
+    return blocks or None
+
+
+def _av_block(mime: str, data: bytes, *, ext: str, file_type: str, openai_native: bool) -> dict[str, Any]:
+    """Build an audio/video content block in the judge's dialect.
+
+    Delegates to :mod:`resources_servers.gdpval.media_conversion` (imported
+    lazily so this module stays importable where that package isn't on the
+    path). Falls back to the legacy ``image_url`` data URL if the helper is
+    unavailable — correct for frontier judges, and a benign degradation for
+    self-hosted ones (which is only reachable when the gdpval package is
+    present anyway).
+    """
+    try:
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        return audio_video_block(mime, data, ext=ext, file_type=file_type, openai_native=openai_native)
+    except ImportError:
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def convert_deliverables_to_content_blocks(
+    output_dir: str,
+    *,
+    media_mode: str = "native_pdf",
+    render_dpi: int = 150,
+    max_pages: int = 50,
+    include_text: bool = True,
+    audio_capable: bool = False,
+    video_capable: bool = False,
+) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
     Returns a list of content blocks suitable for the ``content`` field of an
@@ -246,10 +316,27 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
 
     Office documents (.docx/.xlsx/.pptx) are first converted to PDF via
     LibreOffice headless so the judge sees rendered formatting/tables/charts.
+
+    *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
+    (default) sends them as ``application/pdf`` data URLs for frontier judges;
+    ``"images_and_text"`` rasterizes each page to a PNG block and attaches the
+    extracted text, for image-only local VLM judges (e.g. a gym-spawned Kimi
+    K2.6). *render_dpi*, *max_pages*, and *include_text* tune that rendering.
+
+    *audio_capable* / *video_capable* forward audio / video files (respectively)
+    to judges that read that modality — tracked SEPARATELY because MiniMax-M3
+    reads video but not audio (a video-only judge keeps video, skips audio). An
+    unreadable modality's file is skipped. The AV block dialect follows
+    *media_mode*: ``native_pdf`` (frontier judges, e.g. Gemini) uses an
+    ``image_url`` data URL, while ``images_and_text`` (self-hosted vLLM judges)
+    uses the standard ``video_url`` / ``input_audio`` content types vLLM routes to
+    the media tower.
     """
     output_path = Path(output_dir)
     if not output_path.is_dir():
         return []
+
+    images_and_text = media_mode == "images_and_text"
 
     blocks: list[dict[str, Any]] = []
     converted_pdfs: list[Path] = []  # track for cleanup
@@ -271,6 +358,14 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                 if pdf_path and pdf_path.exists():
                     converted_pdfs.append(pdf_path)
                     data = pdf_path.read_bytes()
+                    if images_and_text:
+                        rendered = _pdf_bytes_to_image_text_blocks(
+                            data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
+                        )
+                        if rendered is not None:
+                            blocks.append({"type": "text", "text": f"\n{fpath.name} (rendered from PDF):"})
+                            blocks.extend(rendered)
+                            continue
                     b64 = base64.b64encode(data).decode("ascii")
                     blocks.append({"type": "text", "text": f"\n{fpath.name} (converted to PDF):"})
                     blocks.append(
@@ -287,6 +382,14 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
 
             elif ext == ".pdf":
                 data = fpath.read_bytes()
+                if images_and_text:
+                    rendered = _pdf_bytes_to_image_text_blocks(
+                        data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
+                    )
+                    if rendered is not None:
+                        blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                        blocks.extend(rendered)
+                        continue
                 b64 = base64.b64encode(data).decode("ascii")
                 blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
                 blocks.append(
@@ -307,6 +410,22 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                         "image_url": {"url": f"data:{mime};base64,{b64}"},
                     }
                 )
+
+            elif ext in AUDIO_EXTS or ext in VIDEO_EXTS:
+                # Forward AV only to judges that read that SPECIFIC modality, gated
+                # independently: video needs *video_capable*, audio *audio_capable*
+                # — so MiniMax-M3 (video yes, audio no) keeps video and skips audio.
+                # Among frontier judges only Gemini reads AV. Gemini (native_pdf)
+                # accepts AV as an image_url data URL; self-hosted vLLM judges
+                # (images_and_text) need the standard video_url / input_audio types,
+                # which vLLM routes to the media tower.
+                is_video = ext in VIDEO_EXTS
+                if video_capable if is_video else audio_capable:
+                    mime = MIME_TYPES.get(ext, "application/octet-stream")
+                    data = fpath.read_bytes()
+                    file_type = "VIDEO" if is_video else "AUDIO"
+                    blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                    blocks.append(_av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text))
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 

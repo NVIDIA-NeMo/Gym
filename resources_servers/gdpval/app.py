@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 from pydantic import BaseModel
 
@@ -53,10 +53,9 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, Mod
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
-    dir_contains_audio_video,
+    dir_media_modalities,
     make_rng,
     panel_summary,
-    select_av_judges,
 )
 
 
@@ -147,10 +146,16 @@ class JudgePanelMember(BaseModel):
     create_params_overrides: Dict[str, Any] = {}
     # Relative sampling weight; defaults to equal weighting across the panel.
     weight: float = 1.0
-    # Set True for a member that natively reads audio/video (e.g. Gemini 3.1 Pro
-    # Preview). Tasks whose deliverables/references contain audio or video files
-    # are routed to the AV-capable member(s) instead of the sampled panel.
-    handles_audio_video: bool = False
+    # Per-modality media capability, tracked SEPARATELY because a judge can read
+    # one but not the other:
+    #   - Gemini (e.g. Gemini 3.1 Pro Preview): audio AND video.
+    #   - self-hosted MiniMax-M3: video ONLY (no audio tower in its config).
+    #   - GPT / Claude: neither.
+    # Tasks are routed per the modalities they contain: video goes to
+    # video-capable members; audio deliverables a judge can't read are dropped
+    # with a warning (video/images/text are still graded).
+    handles_audio: bool = False
+    handles_video: bool = False
 
 
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
@@ -188,6 +193,44 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
+
+    # How deliverable/reference files are presented to the judge:
+    # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
+    #   as ``application/pdf`` data URLs. Works for frontier judges (Gemini/GPT/
+    #   Claude) that decode PDFs server-side.
+    # - ``"images_and_text"``: each PDF/Office page is rasterized to a PNG image
+    #   block and the extracted text is attached alongside. Required for image-
+    #   only local VLM judges (e.g. a gym-spawned Kimi K2.6) that cannot decode a
+    #   raw PDF data URL. Applies to every judge mode (rubric text/visual/
+    #   structured and pairwise comparison). See ``media_conversion.py``.
+    judge_media_mode: Literal["native_pdf", "images_and_text"] = "native_pdf"
+    # ``images_and_text`` render knobs (ignored in ``native_pdf`` mode).
+    judge_pdf_render_dpi: int = 144
+    judge_pdf_max_pages: int = 50
+    # Attach the extracted text copy alongside the page images. Off → images only.
+    judge_pdf_include_text: bool = True
+    # Whether the (single) local judge natively reads audio / video, tracked
+    # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
+    # but NOT audio (its config has an image + video tower but no audio config). So
+    # for MiniMax-M3 set ``judge_handles_video: true`` and leave
+    # ``judge_handles_audio`` false. In ``images_and_text`` mode a readable
+    # modality is forwarded to the judge using the vLLM-standard ``video_url`` /
+    # ``input_audio`` content types instead of a filename-only stub; an unreadable
+    # modality is stubbed. Among frontier judges only Gemini reads AV — mark that
+    # per-member on the panel via ``handles_audio`` / ``handles_video`` rather than
+    # these server-level flags.
+    judge_handles_audio: bool = False
+    judge_handles_video: bool = False
+
+    # What to do when a task carries VIDEO files but NO available judge can read
+    # video. Grading video with a video-blind judge yields unreliable scores.
+    # Defaults to ``"warn"`` — log a prominent warning and fall back to grading
+    # with the (video-blind) panel. Set to ``"error"`` to instead fail the task
+    # hard. NOTE: this guards VIDEO only. AUDIO is always handled leniently — if a
+    # task has audio deliverables no judge can read (e.g. any task judged solely by
+    # MiniMax-M3, which has no audio tower), those audio files are dropped with a
+    # warning and the rest of the deliverable (video/images/text) is still graded.
+    on_missing_av_judge: Literal["error", "warn"] = "warn"
 
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any] = {}
@@ -319,9 +362,16 @@ class GDPValResourcesServer(SimpleResourcesServer):
             return self.config.judge_panel
         # Degenerate 1-member panel: inherit the legacy create-params overrides
         # (model/api_key are split out during resolution, the rest become the
-        # member's reasoning/generation knobs).
+        # member's reasoning/generation knobs). The single judge inherits the
+        # server-level per-modality media flags so routing / the missing-video
+        # check treat a self-hosted MiniMax-M3 judge as video-capable (but not
+        # audio-capable).
         return [
-            JudgePanelMember(create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}))
+            JudgePanelMember(
+                create_params_overrides=dict(self.config.judge_responses_create_params_overrides or {}),
+                handles_audio=self.config.judge_handles_audio,
+                handles_video=self.config.judge_handles_video,
+            )
         ]
 
     def _resolve_judges(self) -> List[ResolvedJudge]:
@@ -344,7 +394,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             server = member.model_server or self.config.judge_model_server
             overrides = dict(member.create_params_overrides or {})
             model = member.model or overrides.pop("model", None) or legacy_overrides.get("model", "judge")
-            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "dummy")
+            api_key = overrides.pop("api_key", None) or legacy_overrides.get("api_key", "sk-dummy")
             judges.append(
                 ResolvedJudge(
                     name=member.name or model or f"judge_{i}",
@@ -353,10 +403,89 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     api_key=api_key,
                     create_overrides=overrides or None,
                     weight=member.weight,
-                    handles_audio_video=member.handles_audio_video,
+                    handles_audio=member.handles_audio,
+                    handles_video=member.handles_video,
                 )
             )
         return judges
+
+    def _route_media_judges(
+        self, judges: List[ResolvedJudge], *, task_id: str, modalities: Set[str], label: str
+    ) -> Tuple[List[ResolvedJudge], bool, bool]:
+        """Route a media-bearing task to capable judges, per modality.
+
+        *modalities* is the subset of ``{"audio", "video"}`` the task carries.
+
+        Routing prefers judges that can read EVERY modality present, so an
+        audio+video (or audio-only) task lands on a fully-capable member (e.g.
+        Gemini) when one exists. When no single judge covers everything, the two
+        modalities are handled with different strictness:
+
+        - **Video** is guarded: the panel is narrowed to the video-capable
+          member(s). If NONE can read video, grading it with a video-blind judge
+          is unreliable, so this warns and keeps the panel
+          (``on_missing_av_judge="warn"``, default) or raises (``"error"``).
+        - **Audio** is best-effort: if no (routed) judge can read it — the common
+          MiniMax-M3 case, which has no audio tower — the audio files are dropped
+          downstream with a warning and the rest of the deliverable
+          (video/images/text) is still graded. Never fatal.
+
+        Returns ``(routed_judges, audio_capable, video_capable)`` where the
+        capability booleans describe the *routed* panel and gate how deliverable
+        files are converted for the judge.
+        """
+
+        def _reads(judge: ResolvedJudge, modality: str) -> bool:
+            return getattr(judge, f"handles_{modality}", False)
+
+        fully_capable = [j for j in judges if all(_reads(j, m) for m in modalities)]
+        if fully_capable:
+            routed = fully_capable
+            if [j.name for j in routed] != [j.name for j in judges]:
+                print(
+                    f"[gdpval] task {task_id} has {'/'.join(sorted(modalities))} {label}; routing to "
+                    f"judge(s) {[j.name for j in routed]} that read those modalities",
+                    flush=True,
+                )
+        else:
+            # No single judge covers every modality. Guard video hard; audio is
+            # handled leniently below.
+            routed = judges
+            if "video" in modalities:
+                video_judges = [j for j in routed if _reads(j, "video")]
+                if video_judges:
+                    if [j.name for j in video_judges] != [j.name for j in routed]:
+                        print(
+                            f"[gdpval] task {task_id} has video {label}; routing to "
+                            f"video-capable judge(s) {[j.name for j in video_judges]}",
+                            flush=True,
+                        )
+                    routed = video_judges
+                else:
+                    msg = (
+                        f"task {task_id} has video {label} but no configured judge can read video "
+                        f"(panel: {[j.name for j in routed]}). Among frontier judges only Gemini reads "
+                        f"video; a self-hosted MiniMax-M3 judge does too (set judge_handles_video=true, "
+                        f"or handles_video=true on a panel member). Grading video with a video-blind "
+                        f"judge produces meaningless scores."
+                    )
+                    if self.config.on_missing_av_judge == "error":
+                        raise ValueError(f"[gdpval] {msg}")
+                    LOGGER.warning("%s Falling back to the full panel — scores for this task are UNRELIABLE.", msg)
+
+        video_capable = any(_reads(j, "video") for j in routed)
+        audio_capable = any(_reads(j, "audio") for j in routed)
+
+        if "audio" in modalities and not audio_capable:
+            LOGGER.warning(
+                "[gdpval] task %s has audio %s but the routed judge(s) %s cannot read audio "
+                "(e.g. MiniMax-M3 has no audio tower); audio files will NOT be judged. The rest "
+                "of the deliverable (video/images/text) is still graded.",
+                task_id,
+                label,
+                [j.name for j in routed],
+            )
+        return routed, audio_capable, video_capable
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
@@ -374,17 +503,16 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
 
         judges = self._resolve_judges()
-        # Route tasks with audio/video deliverables to the AV-capable judge(s) —
-        # most judges can't read those modalities natively.
-        if dir_contains_audio_video(body.deliverables_dir):
-            av_judges = select_av_judges(judges)
-            if [j.name for j in av_judges] != [j.name for j in judges]:
-                print(
-                    f"[gdpval] task {body.task_id} has audio/video deliverables; routing to "
-                    f"{[j.name for j in av_judges]}",
-                    flush=True,
-                )
-            judges = av_judges
+        # Route tasks with audio/video deliverables per modality: video goes to
+        # video-capable judge(s) (error/warn when none); audio a judge can't read
+        # is dropped downstream with a warning.
+        modalities = dir_media_modalities(body.deliverables_dir)
+        audio_capable = any(getattr(j, "handles_audio", False) for j in judges)
+        video_capable = any(getattr(j, "handles_video", False) for j in judges)
+        if modalities:
+            judges, audio_capable, video_capable = self._route_media_judges(
+                judges, task_id=body.task_id, modalities=modalities, label="deliverables"
+            )
         # Seed per task so a rerun samples the same judge(s); the ``rubric`` tag
         # keeps the stream distinct from the comparison path.
         rng = make_rng(self.config.judge_sampling_seed, body.task_id, "rubric")
@@ -401,7 +529,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
             read = read_deliverable_files(body.deliverables_dir)
             if read:
                 deliverable_text = read
-            blocks = convert_deliverables_to_content_blocks(body.deliverables_dir)
+            blocks = convert_deliverables_to_content_blocks(
+                body.deliverables_dir,
+                media_mode=self.config.judge_media_mode,
+                render_dpi=self.config.judge_pdf_render_dpi,
+                max_pages=self.config.judge_pdf_max_pages,
+                include_text=self.config.judge_pdf_include_text,
+                audio_capable=audio_capable,
+                video_capable=video_capable,
+            )
             if blocks:
                 deliverable_content_blocks = blocks
 
@@ -554,30 +690,32 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 model=rj.model,
                 create_overrides=rj.create_overrides or None,
                 weight=rj.weight,
-                handles_audio_video=rj.handles_audio_video,
+                handles_audio=rj.handles_audio,
+                handles_video=rj.handles_video,
             )
             for rj in resolved_judges
         ]
 
         # Route tasks with audio/video files (in the eval submission or any
-        # reference) to the AV-capable judge(s) — most judges can't read those
-        # modalities natively. Detection peeks into zip archives too.
-        av_routed = dir_contains_audio_video(eval_task_dir) or any(
-            dir_contains_audio_video(d) for dirs in ref_dirs_by_id.values() for d in dirs
-        )
-        if av_routed:
-            av_judges = select_av_judges(judges)
-            if [j.name for j in av_judges] != [j.name for j in judges]:
-                print(
-                    f"[gdpval] task {body.task_id} has audio/video files; routing comparison to "
-                    f"{[j.name for j in av_judges]}",
-                    flush=True,
-                )
-            judges = av_judges
+        # reference) per modality: video to video-capable judge(s) (error/warn
+        # when none); audio no judge can read is dropped downstream with a
+        # warning. Detection peeks into zips.
+        modalities: Set[str] = set(dir_media_modalities(eval_task_dir))
+        for dirs in ref_dirs_by_id.values():
+            for d in dirs:
+                modalities |= dir_media_modalities(d)
+        av_routed = bool(modalities)
+        audio_capable = any(getattr(j, "handles_audio", False) for j in judges)
+        video_capable = any(getattr(j, "handles_video", False) for j in judges)
+        if modalities:
+            judges, audio_capable, video_capable = self._route_media_judges(
+                judges, task_id=body.task_id, modalities=modalities, label="files"
+            )
 
         total_wins = 0
         total_losses = 0
         total_ties = 0
+        total_invalid = 0
         # Per-reference-model vote tallies + a flat list of every (ref × repeat)
         # matchup for back-compat with the single-reference judge_response shape.
         per_reference: Dict[str, Dict[str, Any]] = {}
@@ -591,8 +729,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
         last_error: Optional[Exception] = None
+        # Present PDFs/Office docs either as native PDF data URLs (frontier
+        # judges) or rasterized page images + text (image-only local VLM judges
+        # like a gym-spawned Kimi K2.6) — see ``judge_media_mode``.
+        media_kwargs: Dict[str, Any] = {
+            "media_mode": self.config.judge_media_mode,
+            "render_dpi": self.config.judge_pdf_render_dpi,
+            "max_pages": self.config.judge_pdf_max_pages,
+            "include_text": self.config.judge_pdf_include_text,
+            # Forward each AV modality only when a (routed) judge can read it.
+            "audio_capable": audio_capable,
+            "video_capable": video_capable,
+        }
         try:
-            eval_submission = build_file_section(str(eval_task_dir), clean_up_list)
+            eval_submission = build_file_section(str(eval_task_dir), clean_up_list, **media_kwargs)
 
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
@@ -606,8 +756,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     refs = build_file_section(
                         str(refs_subdir) if refs_subdir.is_dir() else None,
                         clean_up_list,
+                        **media_kwargs,
                     )
-                    ref_submission = build_file_section(str(ref_dir), clean_up_list)
+                    ref_submission = build_file_section(str(ref_dir), clean_up_list, **media_kwargs)
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
@@ -638,15 +789,19 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     ref_wins += result["win_count_b"]
                     ref_losses += result["win_count_a"]
                     ref_ties += result["tie_count"]
+                    total_invalid += result.get("invalid_count", 0)
                     ref_judged_repeats += 1
                     # Fold per-judge counts into eval-perspective panel totals
                     # (B=eval, A=ref) so the per-member balance is auditable.
                     for jname, jc in (result.get("per_judge") or {}).items():
-                        agg = per_judge_totals.setdefault(jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0})
+                        agg = per_judge_totals.setdefault(
+                            jname, {"wins": 0, "losses": 0, "ties": 0, "trials": 0, "invalid_count": 0}
+                        )
                         agg["wins"] += jc.get("win_count_b", 0)
                         agg["losses"] += jc.get("win_count_a", 0)
                         agg["ties"] += jc.get("tie_count", 0)
                         agg["trials"] += jc.get("trials", 0)
+                        agg["invalid_count"] += jc.get("invalid_count", 0)
                     per_ref_results.append({"ref_id": ref_id, "ref_repeat": ref_dir.name, **result})
 
                 # Only record references that produced at least one valid matchup;
@@ -693,6 +848,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 "total_losses": total_losses,
                 "total_ties": total_ties,
                 "total_judged": total_judged,
+                "total_invalid": total_invalid,
                 "reference_count": len(per_reference),
                 # Back-compat: total matchups across all references × repeats.
                 "ref_repeat_count": len(per_ref_results),

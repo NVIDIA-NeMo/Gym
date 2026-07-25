@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ⚠️  DOES NOT CURRENTLY START ON BLACKWELL / GB200 — KEPT FOR REFERENCE ONLY.
+#     The bundled `vllm/models/minimax_m3/nvidia/` plugin hardcodes FlashInfer
+#     CuTe-DSL kernels with no fallback; on GB200 they hit the nvidia-cutlass-dsl
+#     4.5.2 JIT bug (vllm#45392) and abort the engine during profiling. Serve
+#     MiniMax-M3 yourself from the vendor `vllm/vllm-openai:minimax-m3` container
+#     instead (still a LOCAL, self-hosted judge — just not spawned by gym) and
+#     point gym at its /v1 endpoint via
+#     resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml.
+#
+# Gym-spawned MiniMax-M3 vLLM deployment (MULTIMODAL — reads images, audio, and
+# video). MiniMax-M3 is used as the GDPVal local judge; unlike an image-only VLM
+# it can consume the raw audio/video deliverables directly (see
+# resources_servers/gdpval/configs/gdpval_minimax_local_judge.yaml).
+#
+# Requires vLLM >= 0.24.0 (first release with MiniMax-M3 support + the
+# minimax_m3 tool/reasoning parsers). Gym pins this in
+# responses_api_models/local_vllm_model/setup.py.
+#
+# The vendor's reference command serves M3 at TP=8 across two nodes:
+#
+#   vllm serve MiniMaxAI/MiniMax-M3 --tensor-parallel-size 8 --nnodes 2 ...
+#     --block-size 128 --tool-call-parser minimax_m3 --reasoning-parser minimax_m3
+#     --enable-auto-tool-choice
+#
+# BUT gym's local_vllm_model CANNOT span a single tensor-parallel group across
+# nodes (see the "multi-node model instances still need to be properly
+# supported" TODO in local_vllm_model/app.py — TP=8 over 4-GPU nodes raises
+# `Error computing device indices for CUDA_VISIBLE_DEVICES: local range [0, 8)
+# base value "0,1,2,3"`). gym's cross-node `span` strategy is for *data*-parallel
+# replicas, not one big TP group. So each TP group must fit on ONE node.
+#
+# Serving shape here: DP=2 / TP=4 / PP=1 across TWO 4-GPU GB200 nodes — two full
+# model replicas (one per node), TP=4 within each node, load-balanced behind one
+# endpoint (≈2x judge throughput). The MXFP8 checkpoint is ~414GB → ~103GB/GPU
+# per replica across 4×~192GB GB200 GPUs, leaving ample room for KV cache.
+#
+# Pack strategy is `strict` (STRICT_PACK): each replica's TP=4 group is packed
+# onto ONE node, so two replicas land on the two nodes (one each). `span` is NOT
+# for this — span is only for a single replica whose world size (TP×PP) EXCEEDS
+# one node (gym asserts `world_size > devices_per_node` for span), which is the
+# broken cross-node-TP case. For a single-node deployment, keep `strict` and set
+# data_parallel_size: 1.
+#
+# Used directly as `--model-type` this serves MiniMax as a POLICY model under the
+# `policy_model` key. To use it as the GDPVal *judge*, use the dedicated overlay
+# resources_servers/gdpval/configs/gdpval_minimax_local_judge.yaml (which reuses
+# these exact serve settings under the judge server name).
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      # Local checkpoint path (HF-format, MXFP8). Override with
+      # MINIMAX_CHECKPOINT_PATH or ++...model=.
+      model: ${oc.env:MINIMAX_CHECKPOINT_PATH,/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_compeval/checkpoints/hf_cache/MiniMax-M3-MXFP8}
+      return_token_id_information: false
+      # MiniMax-M3 emits reasoning; the minimax_m3 reasoning parser splits it out
+      # so the judge's verdict lands in message.content (gym re-wraps in <think>).
+      uses_reasoning_parser: true
+      debug: false
+
+      hf_home: null
+
+      vllm_serve_env_vars:
+        # Each TP=4 replica fits on one node → `strict` (STRICT_PACK packs each
+        # replica onto a single node; DP=2 then lands one replica per node). Do
+        # NOT use `span` here — span is only for a replica that must cross nodes
+        # (world_size > devices_per_node), and gym asserts that.
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+        # NCCL/GLOO must bind the fast fabric NIC for the cross-node DP backend.
+        # Set IFACE_NAME (or the two vars directly) to your fabric iface.
+        NCCL_SOCKET_IFNAME: ${oc.env:NCCL_SOCKET_IFNAME,${oc.env:IFACE_NAME,eth0}}
+        GLOO_SOCKET_IFNAME: ${oc.env:GLOO_SOCKET_IFNAME,${oc.env:IFACE_NAME,eth0}}
+        # Generous engine/runtime timeouts for this large MoE's cold load.
+        VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        RAY_CGRAPH_get_timeout: "600"
+
+      vllm_serve_kwargs:
+        # Parallelism: DP=2 / TP=4 / PP=1 — one TP=4 replica per 4-GPU node.
+        data_parallel_size: 2
+        tensor_parallel_size: 4
+        pipeline_parallel_size: 1
+
+        # From the vendor serve command: 128-token paged-KV blocks.
+        block_size: 128
+
+        # Bound the context so the KV cache is sane — M3's default max_model_len
+        # is ~1M tokens, which would dominate GPU memory. 128K is plenty for a
+        # judge reading rasterized deliverables. Raise if you need longer inputs.
+        max_model_len: 131072
+
+        gpu_memory_utilization: 0.90
+
+        # Serve under a stable, friendly id (matches the vendor model id) so
+        # downstream `model=` refs don't have to spell out the checkpoint path.
+        served_model_name: [MiniMaxAI/MiniMax-M3]
+
+        # MiniMax-specific tool/reasoning parsers (vendor command).
+        trust_remote_code: true
+        enable_auto_tool_choice: true
+        tool_call_parser: minimax_m3
+        reasoning_parser: minimax_m3
+
+        # The multimodal (vision/video) encoder's default FlashAttention path has
+        # no Blackwell (SM100) kernel and hard-crashes during the profiling pass
+        # (`flash_fwd_sm100` / `_vllm_fa2_C` → cudaErrorUnsupportedPtxVersion /
+        # MLIR nanobind error). TORCH_SDPA bypasses the custom kernel — required
+        # to serve M3's vision tower on GB200. See vllm-project/vllm#38411.
+        mm_encoder_attn_backend: TORCH_SDPA
+
+        # `-cc.pass_config.fuse_allreduce_rms=False` from the vendor command: the
+        # allreduce+RMSNorm fusion pass is disabled. Expressed as the nested
+        # compilation-config dict gym passes straight through to vLLM. If your
+        # vLLM build rejects this form, drop it — it is a fusion toggle, not
+        # required for correctness on all builds.
+        compilation_config:
+          pass_config:
+            fuse_allreduce_rms: false
