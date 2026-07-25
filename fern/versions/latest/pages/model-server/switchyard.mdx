@@ -1,0 +1,104 @@
+---
+title: "Switchyard"
+description: "Route model calls across a fleet of models with a Gym-managed Switchyard proxy"
+position: 8
+---
+
+[Switchyard](https://github.com/NVIDIA-NeMo/Switchyard) is a routing proxy: it decides, per request, which model should carry the work. The `switchyard_model` server (in `responses_api_models/switchyard_model`) puts that decision behind a NeMo Gym model server, so any benchmark Gym already supports can be run against a router without changing the agent harness.
+
+NeMo Gym launches and manages the proxy for you, the same way [Local vLLM](/model-server/local-vllm) manages a vLLM engine. You supply a Switchyard routing profile; Gym starts the proxy when the model server starts, waits for it to become healthy, and shuts it down when the server exits.
+
+## Use SwitchyardModel
+
+Launching drives the `switchyard` CLI, so install it first. It is deliberately not a dependency of NeMo Gym — this keeps Gym free of Switchyard, and lets you pin the exact Switchyard build your results are reported against.
+
+```bash
+pip install 'nemo-switchyard[server]'
+```
+
+Then point `routing_profiles` at your routing config and run an eval:
+
+```bash
+gym eval run \
+    --benchmark <name> \
+    --model-type switchyard_model \
+    --model <route-name> \
+    ++policy_model.responses_api_models.switchyard_model.routing_profiles=/abs/path/routes.yaml
+```
+
+Or start a persistent environment:
+
+```bash
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type switchyard_model \
+    --model <route-name> \
+    ++policy_model.responses_api_models.switchyard_model.routing_profiles=/abs/path/routes.yaml
+```
+
+`routing_profiles` can also come from the `SWITCHYARD_ROUTING_PROFILES` environment variable, in which case the override can be dropped.
+
+<Warning>
+Use an absolute path for `routing_profiles`. The proxy runs as a subprocess and relative paths are not resolved against the config file's location.
+</Warning>
+
+Under the hood, Gym runs the following on a free port that does not collide with its own servers, polls `/health` until the proxy answers, and points the model server at `http://127.0.0.1:<port>/v1`:
+
+```bash
+switchyard --routing-profiles /abs/path/routes.yaml -- serve --host 0.0.0.0 --port <auto>
+```
+
+## `--model` names a route, not a model
+
+For other model servers, `--model` is the model to serve. Here it is the **route name** Switchyard resolves — it must match a route in your routing profile. Which concrete model actually served a call is Switchyard's decision, made per request, and comes back on the response.
+
+<Note>
+A caller-supplied `model` in the request body is always overridden with the configured route name. Otherwise an agent that sets its own model would bypass the router, and the eval would silently measure something other than routing.
+</Note>
+
+## Attach to a proxy you run yourself
+
+Set `switchyard_base_url` instead of `routing_profiles` and Gym will use an existing proxy rather than starting one:
+
+```bash
+switchyard --routing-profiles routes.yaml -- serve --port 4000
+
+gym eval run \
+    --benchmark <name> \
+    --model-type switchyard_model \
+    --model <route-name> \
+    ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
+```
+
+The mode is inferred from whichever of the two you set; configuring neither is a startup error. Two reasons to attach:
+
+- **Pinning.** Running the proxy yourself lets an eval target a specific Switchyard build, so a Gym run can be compared against another harness's run of the same commit.
+- **Shared state.** Routing strategies that use session or agent affinity are stateful. If several model servers each launch their own proxy, calls that belong together can land on different instances, and routing will not behave the way a single deployed proxy does. One attached proxy shared by all of them avoids this. Stateless strategies — task classification, for example — are unaffected.
+
+## Correlating routing decisions with rollouts
+
+Gym sends its rollout-attempt id to Switchyard as an opaque session id, using the `proxy_x_session_id` header. That lets proxy-side records — which model was chosen, what it cost — be joined back to the rollout that produced them. Set `forward_session_id: false` to disable it, or `session_id_header` to change the header name.
+
+To see which model served each call from Gym's side, enable [model-call capture](/model-server/model-call-capture). Each captured exchange records the response, so the routed model is visible per call.
+
+<Warning>
+Read routing attribution from the capture records, not from the rollout response. Some agent harnesses overwrite the top-level response `model` with the configured policy model name, which would report the route name for every call regardless of what actually served it.
+</Warning>
+
+## Configuration reference
+
+| Field | Default | Purpose |
+|---|---|---|
+| `routing_profiles` | `null` | Switchyard routing config. Gym launches a proxy when this is set. |
+| `switchyard_base_url` | `null` | Attach to an existing proxy instead of launching one. |
+| `switchyard_model` | `${policy_model_name}` | Route name to request. |
+| `switchyard_api_key` | `dummy` | Sent as the bearer token to the proxy. |
+| `proxy_host` | `0.0.0.0` | Bind address for a launched proxy. Gym reaches its own child over loopback. |
+| `proxy_port` | `null` | Fixed port. `null` picks a free one. |
+| `proxy_startup_timeout_s` | `120.0` | How long to wait for `/health` before failing. |
+| `switchyard_executable` | `switchyard` | CLI to launch. |
+| `session_id_header` | `proxy_x_session_id` | Header carrying the rollout id. |
+| `forward_session_id` | `true` | Whether to send it at all. |
+| `extra_body` | `{}` | Merged into every upstream request body. |
+| `default_headers` | `{}` | Sent on every upstream request. |
+| `max_concurrent_requests` | `null` | Cap on in-flight upstream requests. `null` is unlimited. |
