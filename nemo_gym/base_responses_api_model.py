@@ -245,6 +245,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             self._is_exception_middleware_setup = False
             self.setup_exception_middleware(app)
             self.setup_model_call_capture_middleware(app)
+            print(f"Set up model call capture middleware for {self.config.name}")
 
         app.post("/v1/chat/completions")(self.chat_completions)
 
@@ -265,8 +266,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return super().setup_exception_middleware(app)
 
     def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
-        print(f"Set up model call capture middleware for {self.config.name}")
-
         server = self
         self._store = CaptureStore(self._capture_config.model_call_capture_dir)
 
