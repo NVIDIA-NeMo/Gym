@@ -21,6 +21,8 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 
 command=$(cat <<EOF
+host=\$(hostname -I | awk '{print \$1}')
+
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \
     --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
@@ -40,7 +42,7 @@ vllm serve $MODEL \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --enable-expert-parallel \
     --max-num-batched-tokens 16384 \
-    --host \$(hostname -I | awk '{print \$1}') \
+    --host \$host \
     --port 8000
 EOF
 )
