@@ -3215,6 +3215,28 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
 
         captured_kwargs.clear()
+        request_body_null_metadata = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata=None,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_null_metadata.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is True
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
         request_body_multi_override = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(
