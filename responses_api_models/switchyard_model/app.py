@@ -31,6 +31,7 @@ import atexit
 import contextvars
 import logging
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -177,7 +178,19 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     # --- Proxy lifecycle (launch mode) ---
 
     def start_proxy(self) -> str:
-        """Start `switchyard ... serve` and block until it answers /health."""
+        """Start `switchyard ... serve` and block until it answers /health.
+
+        Switchyard is not a dependency of this package -- launch mode drives its CLI, so the
+        executable has to be on PATH. Check that up front rather than surfacing it as an opaque
+        FileNotFoundError from Popen.
+        """
+        if shutil.which(self.config.switchyard_executable) is None:
+            raise RuntimeError(
+                f"launch_proxy=true needs the {self.config.switchyard_executable!r} executable on PATH. "
+                "Install it with `pip install 'nemo-switchyard[server]'`, or set launch_proxy=false "
+                "and point switchyard_base_url at a proxy you run yourself."
+            )
+
         port = self.config.proxy_port or find_open_port(
             disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME]
         )
