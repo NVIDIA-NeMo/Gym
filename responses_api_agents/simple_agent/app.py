@@ -187,7 +187,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
+            url_path=self.resolve_model_call_path("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )
