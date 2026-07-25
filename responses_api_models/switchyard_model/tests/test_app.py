@@ -73,32 +73,31 @@ def _chat_data() -> dict:
 
 
 class TestConfig:
-    def test_attach_mode_requires_base_url(self) -> None:
-        with pytest.raises(ValueError, match="switchyard_base_url is required"):
+    def test_requires_a_routing_profile_or_a_base_url(self) -> None:
+        with pytest.raises(ValueError, match="routing_profiles"):
             SwitchyardModelConfig(host="0.0.0.0", port=8081, entrypoint="", name="sy", switchyard_model="policy-model")
 
-    def test_launch_mode_requires_routing_profiles(self) -> None:
-        with pytest.raises(ValueError, match="routing_profiles is required"):
-            SwitchyardModelConfig(
-                host="0.0.0.0",
-                port=8081,
-                entrypoint="",
-                name="sy",
-                switchyard_model="policy-model",
-                launch_proxy=True,
-            )
-
-    def test_launch_mode_accepts_routing_profiles(self) -> None:
+    def test_routing_profiles_alone_means_gym_launches(self) -> None:
         config = SwitchyardModelConfig(
             host="0.0.0.0",
             port=8081,
             entrypoint="",
             name="sy",
             switchyard_model="policy-model",
-            launch_proxy=True,
             routing_profiles="/tmp/routes.yaml",
         )
-        assert config.routing_profiles == "/tmp/routes.yaml"
+        assert config.launches_proxy is True
+
+    def test_base_url_alone_means_attach(self) -> None:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+        assert config.launches_proxy is False
 
 
 class TestRolloutSessionMiddleware:
@@ -242,30 +241,40 @@ class TestProxyLifecycle:
             entrypoint="",
             name="test_switchyard_model",
             switchyard_model="policy-model",
-            launch_proxy=True,
             routing_profiles="/tmp/routes.yaml",
             proxy_port=4123,
             **overrides,
         )
 
-    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
-        """Build a launch-mode server without actually spawning a proxy."""
-        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
-        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+    def _build(self) -> SwitchyardModel:
         return SwitchyardModel(
             config=self._launch_config(),
             server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
 
+    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
+        """Build a launch-mode server with the spawn stubbed out."""
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+        return self._build()
+
+    def test_constructing_the_server_does_not_spawn_a_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """The proxy belongs to serving, not to config validation."""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("constructing SwitchyardModel must not spawn a proxy")
+
+        monkeypatch.setattr(subprocess, "Popen", explode)
+
+        self._build()
+
     def test_missing_executable_explains_how_to_fix(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._build()
         monkeypatch.setattr(app_module.shutil, "which", lambda executable: None)
 
         with pytest.raises(RuntimeError, match="nemo-switchyard"):
-            SwitchyardModel(
-                config=self._launch_config(),
-                server_client=MagicMock(spec=ServerClient, global_config_dict={}),
-            )
+            server.setup_webserver()
 
     def test_start_proxy_builds_command_and_waits(self, monkeypatch: MonkeyPatch) -> None:
         commands: list = []
@@ -280,12 +289,10 @@ class TestProxyLifecycle:
         monkeypatch.setattr(subprocess, "Popen", mock_popen)
         monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
 
-        server = SwitchyardModel(
-            config=self._launch_config(),
-            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
-        )
+        server = self._build()
+        server.setup_webserver()
 
-        assert server._client.base_url == "http://127.0.0.1:4123/v1"
+        # Bound on the wildcard so the proxy is reachable off-box, but addressed over loopback.
         assert commands[0] == [
             "switchyard",
             "--routing-profiles",
@@ -293,10 +300,11 @@ class TestProxyLifecycle:
             "--",
             "serve",
             "--host",
-            "127.0.0.1",
+            "0.0.0.0",
             "--port",
             "4123",
         ]
+        assert server._client.base_url == "http://127.0.0.1:4123/v1"
 
     def test_wait_for_proxy_raises_when_process_dies(self, monkeypatch: MonkeyPatch) -> None:
         server = self._launch_server(monkeypatch)
