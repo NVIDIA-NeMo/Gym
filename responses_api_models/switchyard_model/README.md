@@ -13,11 +13,10 @@ gym eval run --benchmark <name> --model-type switchyard_model
 ## Gym runs the proxy for you
 
 Point `routing_profiles` at your Switchyard routing config; the proxy is started with this server
-and stopped when it exits. You never manage it.
+and stopped when it exits. You never install or manage it — `nemo-switchyard` is a dependency of
+this server, so Gym installs it into the server's virtual environment on startup.
 
 ```bash
-pip install 'nemo-switchyard[server]'   # launching drives the `switchyard` CLI
-
 gym eval run --benchmark <name> --model-type switchyard_model \
   ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
 ```
@@ -49,10 +48,13 @@ attribution should be read from the model-call capture records rather than the r
 
 Gym knows Switchyard; Switchyard does not know Gym.
 
-This server takes no dependency on `nemo-switchyard` and never imports it — it speaks
-OpenAI-compatible HTTP to the proxy, and launch mode drives the CLI. Installing Switchyard is left
-to whoever wants launch mode, which also lets an eval pin the exact Switchyard build its numbers
-are reported against rather than inheriting Gym's.
+`nemo-switchyard` is a dependency of this server only, not of Gym's core — so only runs that route
+through Switchyard pay for it. No Gym code imports Switchyard; this server speaks
+OpenAI-compatible HTTP to the proxy and drives the CLI to launch one.
+
+The dependency is pinned to `==0.1.0` with a `[tool.uv] override-dependencies` entry relaxing that
+release's stale `openai>=2.34.0` floor. See the comments in `pyproject.toml` — both should be
+removed once a Switchyard release carrying the widened floor ships.
 
 # Licensing information
 Code: Apache 2.0
@@ -60,6 +62,4 @@ Data: N/A
 
 Dependencies
 - nemo_gym: Apache 2.0
-
-Optional, installed separately for `launch_proxy` mode
 - nemo-switchyard: Apache 2.0
