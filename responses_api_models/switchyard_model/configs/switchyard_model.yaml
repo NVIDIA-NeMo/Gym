@@ -1,0 +1,45 @@
+# Route Gym model calls through a Switchyard proxy, so any benchmark Gym supports can be run
+# against a router.
+#
+# Attach mode (default): start the proxy yourself, then point Gym at it. Keeping the proxy outside
+# Gym is what lets an eval pin a specific Switchyard build and compare against scaled-evals runs.
+#
+#   switchyard --routing-profiles routes.yaml -- serve --port 4000
+#   gym eval run --benchmark <name> --model-type switchyard_model \
+#     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
+#
+# Launch mode: Gym starts the proxy itself, for a single-command run.
+#
+#   gym eval run --benchmark <name> --model-type switchyard_model \
+#     ++policy_model.responses_api_models.switchyard_model.launch_proxy=true \
+#     ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
+policy_model:
+  responses_api_models:
+    switchyard_model:
+      entrypoint: app.py
+
+      # Attach mode.
+      switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
+      switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
+
+      # Route name to request. Switchyard maps it to a concrete target; the model that actually
+      # served each call comes back on the response.
+      switchyard_model: ${policy_model_name}
+
+      # Launch mode. routing_profiles is required when launch_proxy is true.
+      launch_proxy: false
+      routing_profiles: null
+      proxy_host: 127.0.0.1
+      # null picks a free port that does not collide with Gym's own servers.
+      proxy_port: null
+      proxy_startup_timeout_s: 120.0
+      switchyard_executable: switchyard
+
+      # Gym's rollout-attempt id is sent as Switchyard's opaque session id, so routing decisions
+      # and costs can be joined back to the rollout that produced them.
+      session_id_header: proxy_x_session_id
+      forward_session_id: true
+
+      extra_body: {}
+      default_headers: {}
+      max_concurrent_requests: null
