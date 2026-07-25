@@ -12,7 +12,7 @@ Both are fully supported; pick whichever fits how you work.
 
 | | Set | Gym does | Use when |
 |---|---|---|---|
-| **Gym manages it** | `routing_profiles` | Starts the proxy, health-checks it, stops it at exit | You want one command and no processes to babysit |
+| **Gym manages it** | `routing_profiles` | Installs Switchyard, starts the proxy, health-checks it, stops it at exit | You want one command and nothing to install or babysit |
 | **You manage it** | `switchyard_base_url` | Points at your proxy and nothing else | You need to pin a specific Switchyard build, share one proxy across servers, or already have one running |
 
 The mode is inferred from whichever field you set — there is no separate switch. Setting neither is a startup error naming both.
@@ -23,13 +23,9 @@ If you set both, Gym attaches to `switchyard_base_url` and logs a warning that `
 
 ## Let Gym manage the proxy
 
-Launching drives the `switchyard` CLI, so install it first. It is deliberately not a dependency of NeMo Gym — this keeps Gym free of Switchyard, and lets you pin the exact Switchyard build your results are reported against.
+Nothing to install. Switchyard is a dependency of this model server, so NeMo Gym installs it into the server's virtual environment when the server starts. It is scoped to this server rather than to Gym's core dependencies — Gym itself never imports Switchyard, and runs that do not route through it are unaffected.
 
-```bash
-pip install 'nemo-switchyard[server]'
-```
-
-Then point `routing_profiles` at your routing config and run an eval:
+Point `routing_profiles` at your routing config and run an eval:
 
 ```bash
 gym eval run \
