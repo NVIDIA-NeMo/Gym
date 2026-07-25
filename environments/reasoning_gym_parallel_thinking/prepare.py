@@ -169,11 +169,21 @@ TASK_CATEGORIES = {
     ],
 }
 
+ANSWER_FORMAT_INSTRUCTION = (
+    "Put only your final answer inside <answer></answer> tags or \\boxed{...}. "
+    "Do not mention either delimiter elsewhere in your response."
+)
+
 
 def format_entry_to_nemo_gym(entry: dict) -> dict:
     return {
         "responses_create_params": {
-            "input": [{"role": "user", "content": entry["question"]}],
+            "input": [
+                {
+                    "role": "user",
+                    "content": f"{entry['question']}\n\n{ANSWER_FORMAT_INSTRUCTION}",
+                }
+            ],
         },
         **entry,
         "agent_ref": {"type": "responses_api_agents", "name": "reasoning_gym_parallel_thinking_agent"},
