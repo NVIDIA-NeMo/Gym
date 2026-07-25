@@ -10,28 +10,28 @@ can be run against a router without changing harness code:
 gym eval run --benchmark <name> --model-type switchyard_model
 ```
 
-## Modes
+## Gym runs the proxy for you
 
-**Attach (default).** You run the proxy; Gym points at it. Keeping the proxy outside Gym is what
-lets an eval pin a specific Switchyard build and compare against scaled-evals runs of the same
-commit.
+Point `routing_profiles` at your Switchyard routing config; the proxy is started with this server
+and stopped when it exits. You never manage it.
+
+```bash
+pip install 'nemo-switchyard[server]'   # launching drives the `switchyard` CLI
+
+gym eval run --benchmark <name> --model-type switchyard_model \
+  ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
+```
+
+**Attaching instead.** Set `switchyard_base_url` to use a proxy you already run — worth doing when
+an eval needs to pin a specific Switchyard build, or when several servers should share one
+instance (routing strategies that use session or agent affinity are stateful, so replicas each
+running their own proxy would not route the way a single deployed proxy does).
 
 ```bash
 switchyard --routing-profiles routes.yaml -- serve --port 4000
 
 gym eval run --benchmark <name> --model-type switchyard_model \
   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
-```
-
-**Launch.** Gym starts the proxy itself and shuts it down at exit, for a single-command run. This
-drives the `switchyard` CLI, so the executable has to be on PATH:
-
-```bash
-pip install 'nemo-switchyard[server]'
-
-gym eval run --benchmark <name> --model-type switchyard_model \
-  ++policy_model.responses_api_models.switchyard_model.launch_proxy=true \
-  ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
 ```
 
 ## Rollout correlation

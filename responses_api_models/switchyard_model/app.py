@@ -100,13 +100,13 @@ class _RolloutSessionMiddleware:
 class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     """Configuration for serving Gym model calls through a Switchyard proxy.
 
-    Two modes. In *attach* mode (the default) the proxy is run by whoever owns the eval -- set
-    ``switchyard_base_url`` and Gym points at it, which keeps proxy lifecycle and image pinning
-    outside Gym. In *launch* mode Gym starts the proxy itself from ``routing_profiles`` so a run is
-    a single command.
+    By default Gym launches the proxy itself from ``routing_profiles``, so a routed eval is one
+    command and the user never manages a proxy. Setting ``switchyard_base_url`` instead attaches to
+    a proxy someone else runs -- useful when an eval needs to pin a specific Switchyard build, or
+    when several servers should share one instance.
     """
 
-    # Attach mode. Required unless launch_proxy is set.
+    # Set to attach to an already-running proxy instead of launching one.
     switchyard_base_url: Optional[str] = None
     switchyard_api_key: str = "dummy"  # pragma: allowlist secret
 
@@ -115,10 +115,10 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     # the response.
     switchyard_model: str
 
-    # Launch mode.
-    launch_proxy: bool = False
+    # Used when launching. routing_profiles is the routing config Switchyard serves.
     routing_profiles: Optional[str] = None
-    proxy_host: str = "127.0.0.1"
+    # 0.0.0.0 so the proxy is reachable off-box; this server always talks to it over loopback.
+    proxy_host: str = "0.0.0.0"
     proxy_port: Optional[int] = None
     proxy_startup_timeout_s: float = 120.0
     switchyard_executable: str = "switchyard"
@@ -138,13 +138,17 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    @property
+    def launches_proxy(self) -> bool:
+        return self.switchyard_base_url is None
+
     @model_validator(mode="after")
     def validate_target(self) -> "SwitchyardModelConfig":
-        if self.launch_proxy:
-            if not self.routing_profiles:
-                raise ValueError("routing_profiles is required when launch_proxy=true")
-        elif not self.switchyard_base_url:
-            raise ValueError("switchyard_base_url is required when launch_proxy=false")
+        if self.launches_proxy and not self.routing_profiles:
+            raise ValueError(
+                "switchyard_model needs either routing_profiles (Gym launches the proxy) or "
+                "switchyard_base_url (attach to a proxy you run yourself)"
+            )
         return self
 
 
@@ -152,43 +156,51 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     config: SwitchyardModelConfig
 
     def model_post_init(self, context: Any) -> None:
-        base_url = self.config.switchyard_base_url
-        if self.config.launch_proxy:
-            base_url = self.start_proxy()
-
-        self._client = NeMoGymAsyncOpenAI(
-            base_url=base_url,
-            api_key=self.config.switchyard_api_key,
-            default_headers=self.config.default_headers,
-        )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )
-
+        # When launching, the address does not exist yet -- setup_webserver builds the client once
+        # the proxy is serving.
+        if not self.config.launches_proxy:
+            self._build_client(self.config.switchyard_base_url)
         return super().model_post_init(context)
 
+    def _build_client(self, base_url: str) -> None:
+        self._client = NeMoGymAsyncOpenAI(
+            base_url=base_url,
+            api_key=self.config.switchyard_api_key,
+            default_headers=self.config.default_headers,
+        )
+
     def setup_webserver(self):
+        # Launch here rather than in model_post_init so the proxy only starts when this server is
+        # actually going to serve -- matching local_vllm_model, and keeping config validation and
+        # tests free of side effects.
+        if self.config.launches_proxy:
+            print("Starting Switchyard proxy...")
+            self._build_client(self.start_proxy())
+
         app = super().setup_webserver()
         # Added last, so it wraps the capture middleware and still sees the correlation prefix.
         app.add_middleware(_RolloutSessionMiddleware)
         return app
 
-    # --- Proxy lifecycle (launch mode) ---
+    # --- Proxy lifecycle ---
 
     def start_proxy(self) -> str:
         """Start `switchyard ... serve` and block until it answers /health.
 
-        Switchyard is not a dependency of this package -- launch mode drives its CLI, so the
+        Switchyard is not a dependency of this package -- launching drives its CLI, so the
         executable has to be on PATH. Check that up front rather than surfacing it as an opaque
         FileNotFoundError from Popen.
         """
         if shutil.which(self.config.switchyard_executable) is None:
             raise RuntimeError(
-                f"launch_proxy=true needs the {self.config.switchyard_executable!r} executable on PATH. "
-                "Install it with `pip install 'nemo-switchyard[server]'`, or set launch_proxy=false "
-                "and point switchyard_base_url at a proxy you run yourself."
+                f"switchyard_model needs the {self.config.switchyard_executable!r} executable on PATH to "
+                "launch a proxy. Install it with `pip install 'nemo-switchyard[server]'`, or set "
+                "switchyard_base_url to attach to a proxy you run yourself."
             )
 
         port = self.config.proxy_port or find_open_port(
@@ -210,7 +222,10 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         self._proxy_process = process
         atexit.register(self.stop_proxy)
 
-        root_url = f"http://{self.config.proxy_host}:{port}"
+        # The proxy binds a wildcard address so it is reachable off-box, but a wildcard is not a
+        # destination -- this server always reaches its own child over loopback.
+        host = "127.0.0.1" if self.config.proxy_host in ("0.0.0.0", "::") else self.config.proxy_host
+        root_url = f"http://{host}:{port}"
         self.wait_for_proxy(root_url, process)
         return f"{root_url}/v1"
 
