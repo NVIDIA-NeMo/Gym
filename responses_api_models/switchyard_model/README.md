@@ -23,9 +23,12 @@ gym eval run --benchmark <name> --model-type switchyard_model \
   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 ```
 
-**Launch.** Gym starts the proxy itself and shuts it down at exit, for a single-command run.
+**Launch.** Gym starts the proxy itself and shuts it down at exit, for a single-command run. This
+drives the `switchyard` CLI, so the executable has to be on PATH:
 
 ```bash
+pip install 'nemo-switchyard[server]'
+
 gym eval run --benchmark <name> --model-type switchyard_model \
   ++policy_model.responses_api_models.switchyard_model.launch_proxy=true \
   ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
@@ -44,9 +47,12 @@ attribution should be read from the model-call capture records rather than the r
 
 ## Dependency direction
 
-Gym knows Switchyard; Switchyard does not know Gym. The `nemo-switchyard` dependency is scoped to
-this package rather than Gym's core dependencies, so only runs that route through Switchyard pay
-for it. Attach mode needs no dependency at all — the proxy is a plain OpenAI-compatible endpoint.
+Gym knows Switchyard; Switchyard does not know Gym.
+
+This server takes no dependency on `nemo-switchyard` and never imports it — it speaks
+OpenAI-compatible HTTP to the proxy, and launch mode drives the CLI. Installing Switchyard is left
+to whoever wants launch mode, which also lets an eval pin the exact Switchyard build its numbers
+are reported against rather than inheriting Gym's.
 
 # Licensing information
 Code: Apache 2.0
@@ -54,4 +60,6 @@ Data: N/A
 
 Dependencies
 - nemo_gym: Apache 2.0
+
+Optional, installed separately for `launch_proxy` mode
 - nemo-switchyard: Apache 2.0
