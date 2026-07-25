@@ -149,6 +149,16 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
                 "switchyard_model needs either routing_profiles (Gym launches the proxy) or "
                 "switchyard_base_url (attach to a proxy you run yourself)"
             )
+        if self.switchyard_base_url and self.routing_profiles:
+            # Both fields default from environment variables, so this is easy to hit by accident.
+            # Attaching wins, but say so -- silently ignoring a routing profile the user supplied
+            # would look like their routing config was in effect when it was not.
+            logger.warning(
+                "switchyard_model: both switchyard_base_url and routing_profiles are set. Attaching to %s; "
+                "the routing profile %s is served by that proxy, not by Gym, and is otherwise ignored.",
+                self.switchyard_base_url,
+                self.routing_profiles,
+            )
         return self
 
 

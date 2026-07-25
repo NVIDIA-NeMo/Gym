@@ -88,6 +88,20 @@ class TestConfig:
         )
         assert config.launches_proxy is True
 
+    def test_both_set_attaches_and_warns(self, caplog) -> None:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+
+        assert config.launches_proxy is False
+        assert "both switchyard_base_url and routing_profiles are set" in caplog.text
+
     def test_base_url_alone_means_attach(self) -> None:
         config = SwitchyardModelConfig(
             host="0.0.0.0",

@@ -1,14 +1,27 @@
 ---
 title: "Switchyard"
-description: "Route model calls across a fleet of models with a Gym-managed Switchyard proxy"
+description: "Route model calls across a fleet of models, with a proxy Gym manages or one you run yourself"
 position: 8
 ---
 
 [Switchyard](https://github.com/NVIDIA-NeMo/Switchyard) is a routing proxy: it decides, per request, which model should carry the work. The `switchyard_model` server (in `responses_api_models/switchyard_model`) puts that decision behind a NeMo Gym model server, so any benchmark Gym already supports can be run against a router without changing the agent harness.
 
-NeMo Gym launches and manages the proxy for you, the same way [Local vLLM](/model-server/local-vllm) manages a vLLM engine. You supply a Switchyard routing profile; Gym starts the proxy when the model server starts, waits for it to become healthy, and shuts it down when the server exits.
+## Two ways to run the proxy
 
-## Use SwitchyardModel
+Both are fully supported; pick whichever fits how you work.
+
+| | Set | Gym does | Use when |
+|---|---|---|---|
+| **Gym manages it** | `routing_profiles` | Starts the proxy, health-checks it, stops it at exit | You want one command and no processes to babysit |
+| **You manage it** | `switchyard_base_url` | Points at your proxy and nothing else | You need to pin a specific Switchyard build, share one proxy across servers, or already have one running |
+
+The mode is inferred from whichever field you set — there is no separate switch. Setting neither is a startup error naming both.
+
+<Note>
+If you set both, Gym attaches to `switchyard_base_url` and logs a warning that `routing_profiles` is not being used. The routing profile is served by whatever proxy you pointed at, not by Gym.
+</Note>
+
+## Let Gym manage the proxy
 
 Launching drives the `switchyard` CLI, so install it first. It is deliberately not a dependency of NeMo Gym — this keeps Gym free of Switchyard, and lets you pin the exact Switchyard build your results are reported against.
 
@@ -56,9 +69,9 @@ For other model servers, `--model` is the model to serve. Here it is the **route
 A caller-supplied `model` in the request body is always overridden with the configured route name. Otherwise an agent that sets its own model would bypass the router, and the eval would silently measure something other than routing.
 </Note>
 
-## Attach to a proxy you run yourself
+## Manage the proxy yourself
 
-Set `switchyard_base_url` instead of `routing_profiles` and Gym will use an existing proxy rather than starting one:
+Start Switchyard however you normally would, then set `switchyard_base_url` instead of `routing_profiles`. Gym will use that proxy and never start one of its own — it does not need the `switchyard` CLI installed in this mode, and does not care how the proxy got there (a local process, a container, a shared service on another host).
 
 ```bash
 switchyard --routing-profiles routes.yaml -- serve --port 4000
@@ -70,10 +83,12 @@ gym eval run \
     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 ```
 
-The mode is inferred from whichever of the two you set; configuring neither is a startup error. Two reasons to attach:
+`switchyard_base_url` can also come from the `SWITCHYARD_BASE_URL` environment variable, and `switchyard_api_key` from `SWITCHYARD_API_KEY`.
+
+Two reasons to prefer this mode:
 
 - **Pinning.** Running the proxy yourself lets an eval target a specific Switchyard build, so a Gym run can be compared against another harness's run of the same commit.
-- **Shared state.** Routing strategies that use session or agent affinity are stateful. If several model servers each launch their own proxy, calls that belong together can land on different instances, and routing will not behave the way a single deployed proxy does. One attached proxy shared by all of them avoids this. Stateless strategies — task classification, for example — are unaffected.
+- **Shared state.** Routing strategies that use session or agent affinity are stateful. If several model servers each launch their own proxy, calls that belong together can land on different instances, and routing will not behave the way a single deployed proxy does. One proxy shared by all of them avoids this. Stateless strategies — task classification, for example — are unaffected.
 
 ## Correlating routing decisions with rollouts
 
