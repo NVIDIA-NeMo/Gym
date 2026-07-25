@@ -23,8 +23,24 @@ gym eval run --no-serve --agent math_with_judge_opencode_agent \
   --output opencode_rollout.jsonl --limit 5
 ```
 
-Per request the agent writes `opencode.json` into an isolated run dir, runs one `opencode run` with
-its own `XDG_DATA_HOME`, then reads the sqlite session for the trajectory.
+Each request gets a temporary directory under `workspace_root`, which the agent deletes after the
+run. Leave `repo_dir` unset when no files need to survive, such as a math task. Set `repo_dir` when
+OpenCode must edit an environment-owned task directory: the agent creates it if needed, runs
+OpenCode there, and preserves it for the environment to grade or collect before cleanup.
+
+```yaml
+# Math or another task without persistent files.
+repo_dir: null
+
+# AnySWE repository provided by the task sandbox.
+repo_dir: /testbed
+
+# Terminal workspace provided by the task sandbox.
+repo_dir: /workspace
+```
+
+`repo_dir` sets the working directory, not a filesystem boundary. Do not share it across concurrent
+requests unless each request runs in an isolated filesystem.
 
 ## Model id
 
@@ -53,12 +69,13 @@ opencode_config:
 - `openai_base_url`: passed to the subprocess as `OPENAI_BASE_URL`
 - `env`: extra env vars for the subprocess
 - `workspace_root`: where per-request run dirs are created and deleted
+- `repo_dir`: optional environment-owned task directory that OpenCode edits and the agent preserves
 - `thinking`: passes `--thinking` when true
 - `system_prompt`: prepended to the user message
 - `setup_timeout`: reserved, currently unused
 - `timeout`: seconds for the `opencode run` call
 - `extra_args`: extra flags appended to `opencode run`
-- `opencode_config`: written to `opencode.json` in the run dir
+- `opencode_config`: written to `opencode.json` in `repo_dir` when set, otherwise in the run dir
 - `opencode_version`: npm version to pin on install (null means latest)
 
 See `configs/opencode_agent.yaml`.

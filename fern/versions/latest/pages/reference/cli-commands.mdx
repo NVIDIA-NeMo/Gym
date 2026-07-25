@@ -20,10 +20,12 @@ gym --version [--json]        # print version and system info
 ng ...                        # 'ng' is an alias for 'gym'
 
 # Discover
-gym list benchmarks [--json]    # list available benchmarks
-gym list environments [--json]  # list available environments by name
-gym list agents [--json]        # list agent harnesses and how each composes
-gym search <query> [--json]     # filter the benchmark list by name
+gym list benchmarks [<name>] [--json]         # list benchmarks (or inspect one), by their --benchmark value
+gym list environments [<name>] [--json]       # list environments (or inspect one)
+gym list agents [<name>] [--json]             # list agent harnesses and how each composes
+gym list models [<name>] [--json]             # list --model-type values (or inspect a model)
+gym list resources-servers [<name>] [--json]  # list --resources-server values (or inspect one)
+gym search [<type>] <query> [--json]          # filter a component type (default: benchmarks) by query
 
 # Datasets
 gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
@@ -62,7 +64,7 @@ These options are shared across many commands.
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
-| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. Lets you register your own benchmarks, resources servers, and models. |
+| `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
 | `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
@@ -129,18 +131,26 @@ gym --version --json
 
 ## Discovery
 
-Commands for discovering what you can evaluate against.
+Commands for discovering benchmarks, environments, model servers, agent harnesses, and resources servers.
+
+`gym list <type>` lists all components of that type; `gym list <type> <name>` inspects that one.
+All commands accept:
+ * `--json` which prints machine-readable output instead of a human-readable table.
+ * `--search-dir` which allows you to surface your own Gym-compatible components alongside the built-ins.
 
 ### `gym list benchmarks`
 
 List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
+The value in the **Name** column is the benchmark identifier and can be passed to `--benchmark`.
 
 | Option | Description |
 | --- | --- |
+| `[<name>]` | Inspect a single benchmark (config path, dataset, prepare script) instead of listing all. |
 | `--json` | Output the benchmark list as JSON. |
 
 ```bash
 gym list benchmarks
+gym list benchmarks aime24            # inspect one benchmark
 
 # Machine-readable output for scripting
 gym list benchmarks --json | jq '.[].name'
@@ -148,14 +158,17 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the environments available under `environments/`, by short name (with their domain and description). The names map to `environments/<name>/config.yaml` and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+List the environments available under `environments/`, by short name (with their domain and description).
+The names map to environments' configs and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
 
 | Option | Description |
 | --- | --- |
+| `[<name>]` | Inspect a single environment (config path, resources servers, agent, datasets). |
 | `--json` | Output the environment list as JSON. |
 
 ```bash
 gym list environments
+gym list environments calendar        # inspect one environment
 gym list environments --json | jq '.[].name'
 ```
 
@@ -165,25 +178,62 @@ List the agent harnesses under `responses_api_agents/`, with each one's composit
 
 | Option | Description |
 | --- | --- |
+| `[<name>]` | Inspect a single agent (composition pattern and config variants). |
 | `--json` | Output the agent list as JSON (includes the `self_contained` flag). |
 
 ```bash
 gym list agents
+gym list agents simple_agent          # inspect one agent
 gym list agents --json | jq '.[] | {name, self_contained}'
+```
+
+### `gym list models`
+
+List the model servers under `responses_api_models/`.
+The value in the **Model** column corresponds to a config flavor and can be passed as the `--model-type` flag to other commands.
+
+| Option | Description |
+| --- | --- |
+| `[<name>]` | Inspect a single model instead of listing all. |
+| `--json` | Output the rows as JSON. |
+
+```bash
+gym list models
+gym list models vllm_model            # inspect one model
+gym list models --json | jq '.[].model'
+```
+
+### `gym list resources-servers`
+
+List the resources servers under `resources_servers/`.
+The value in the **Name** column corresponds to the config flavor and can be passed as `--resources-server`.
+
+| Option | Description |
+| --- | --- |
+| `[<name>]` | Inspect a single resources server (config path, domain, description). |
+| `--json` | Output the list as JSON. |
+
+```bash
+gym list resources-servers
+gym list resources-servers mcqa       # inspect one resources server
+gym list resources-servers --json | jq '.[].name'
 ```
 
 ### `gym search`
 
-List benchmarks whose name, agent, resources server, dataset, or domain matches a query.
+Filter a component type's listing to fuzzy matches on a query (against each component's name/value, description, domain, and type-specific fields).
+The type is optional and defaults to `benchmarks`.
 
-| Argument / Option | Description |
+| Option | Description |
 | --- | --- |
-| `QUERY` | Query to match against component names (positional, required). |
+| `[<type>]` | Component type to search: `benchmarks` (default), `environments`, `agents`, `models`, or `resources-servers`. |
+| `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
-gym search math
-gym search aime --json
+gym search math                       # benchmarks matching "math" (default type)
+gym search environments calendar      # environments matching "calendar"
+gym search models vllm --json
 ```
 
 ---
@@ -312,6 +362,7 @@ Each input row must **not** already have a populated `responses_create_params.in
 | `--input`, `-i` | Raw input JSONL file (rows without `responses_create_params.input`). |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--output`, `-o` | Output JSONL file. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 gym dataset render \
@@ -352,6 +403,7 @@ Resolve the configs, flags, and overrides into a final merged config and print i
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 # Merge a resources-server config with a model config, apply an override, and print the result
@@ -371,6 +423,7 @@ Validate a config without starting Ray or any server subprocess — a fast pre-f
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
@@ -388,6 +441,7 @@ Each server has its own isolated virtual environment. List the packages installe
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--outdated` | List only outdated packages. |
 | `--json` | Output the package list as JSON. |
 
@@ -407,6 +461,7 @@ Test resource server(s) by running their pytest suite. If no resources server is
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 # Test a single server

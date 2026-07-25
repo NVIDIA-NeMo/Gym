@@ -714,19 +714,24 @@ class TestApp:
 
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
+        # The rollout prefix is only applied when model-call capture is enabled.
+        mock_server_client.global_config_dict = {"observability_enabled": True}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
 
-        run_request = create_run_request()
+        run_request = MiniSWEAgentRunRequest.model_validate(
+            create_run_request().model_dump() | {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 1}
+        )
 
         response = await server.run(run_request)
 
         assert_run_response(response)
 
         assert_run_mini_swe_called(mock_to_thread)
+        assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/ng-rollout/2-1/v1")
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")

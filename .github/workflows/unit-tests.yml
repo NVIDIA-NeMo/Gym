@@ -186,7 +186,7 @@ jobs:
               echo "================================================"
               echo "Testing: $server"
               echo "================================================"
-              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true; then
+              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true +should_validate_data=true; then
                 echo "PASS: $server"
               else
                 echo "FAIL: $server"

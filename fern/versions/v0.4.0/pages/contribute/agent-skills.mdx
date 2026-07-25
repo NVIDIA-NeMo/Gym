@@ -12,10 +12,11 @@ Skills are versioned with the repo and kept up to date as Gym evolves. Gym will 
 
 | Directory | Assistants |
 |---|---|
-| [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) | Claude Code and other tools that read the Claude skills layout |
-| [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) | OpenAI Codex |
+| [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills) | Canonical cross-agent skills |
+| [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) | Claude Code compatibility links |
+| [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) | Codex compatibility links |
 
-The `.claude/skills/` tree is the superset — it includes Gym-specific skills plus vendored skills such as [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/gh-stack) for stacked pull requests.
+Skills have one source of truth under `.agents/skills/`. Claude Code and Codex reach that same content through their native discovery paths, so references, scripts, and instructions cannot drift between copies.
 
 <Info>
 Assistants discover skills automatically when they are pointed at a local Gym checkout. No extra install step is required beyond cloning the repository.
@@ -25,15 +26,15 @@ Assistants discover skills automatically when they are pointed at a local Gym ch
 
 | Skill | What it covers |
 |---|---|
-| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/add-benchmark) | End-to-end workflow for adding a new benchmark or training environment |
-| [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-reward-profiling) | `gym env start`, `gym eval run`, and `gym eval profile` baselining |
-| [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-debugging) | Diagnosing failed rollouts, partial JSONL, verifier errors, and infra issues |
-| [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-docs) | Adding, moving, and removing pages on the Fern docs site |
-| [`nemo-gym-blade-analysis`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-blade-analysis) | BLADE-style benchmark reports from rollout evidence |
-| [`nemo-gym-pivot-datasets`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-pivot-datasets) | Creating and validating pivot datasets from rollout artifacts |
-| [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/gh-stack) | Stacked pull request workflows with the `gh-stack` CLI extension |
+| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | End-to-end workflow for adding a new benchmark or training environment |
+| [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | `gym env start`, `gym eval run`, and `gym eval profile` baselining |
+| [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-debugging) | Diagnosing failed rollouts, partial JSONL, verifier errors, and infra issues |
+| [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) | Adding, moving, and removing pages on the Fern docs site |
+| [`nemo-gym-blade-analysis`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-blade-analysis) | BLADE-style benchmark reports from rollout evidence |
+| [`nemo-gym-pivot-datasets`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-pivot-datasets) | Creating and validating pivot datasets from rollout artifacts |
+| [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/gh-stack) | Stacked pull request workflows with the `gh-stack` CLI extension |
 
-The Codex tree currently includes the five `nemo-gym-*` operational skills (excluding `add-benchmark`, `nemo-gym-docs`, and `gh-stack`).
+Compatible agents discover skills from the canonical tree directly. Native-path links provide compatibility for agents that require their own directory.
 
 ## Using Skills
 
@@ -42,11 +43,11 @@ When you work with an AI coding assistant in a Gym checkout, mention the task in
 You can also point an assistant at a specific skill file if you want a particular playbook:
 
 ```text
-Follow .claude/skills/add-benchmark/SKILL.md to integrate this benchmark.
+Follow .agents/skills/add-benchmark/SKILL.md to integrate this benchmark.
 ```
 
 <Tip>
-The [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills/nemo-gym-docs) skill mirrors the procedures in the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) — use it when contributing documentation changes.
+The [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) skill mirrors the procedures in the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) — use it when contributing documentation changes.
 </Tip>
 
 ---

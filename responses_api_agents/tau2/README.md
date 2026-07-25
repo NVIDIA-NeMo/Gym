@@ -52,13 +52,13 @@ python -m benchmarks.tau2.prepare_utils.runtime alltools
 ```
 
 By default the bridge installs runtime Tau from
-`https://github.com/bxyu-nvidia/tau2-bench@jk/bxyu-nemo-gym-stable-upstream-main-tau3`
+`https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_stable`
 and fetches the Tau `data/` tree from the same ref. Override with
 `NEMO_GYM_TAU2_BENCH_REPO_URL` and `NEMO_GYM_TAU2_BENCH_REF` when testing a
 different PR branch or commit.
 
 Benchmark prepare uses a separate pinned data-generation branch,
-`https://github.com/bxyu-nvidia/tau2-bench@edobrowolska/jk/bxyu-nemo-gym-data-upstream-main-tau3`.
+`https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_data`.
 That branch owns `dump_nemo_gym_data.sh`; Gym clones it, runs the dump script,
 and reads the resulting `nemo_gym_data` JSON files. Override that source with
 `NEMO_GYM_TAU2_BENCH_DATA_REPO_URL` and `NEMO_GYM_TAU2_BENCH_DATA_REF`.
