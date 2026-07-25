@@ -1,35 +1,38 @@
 # Route Gym model calls through a Switchyard proxy, so any benchmark Gym supports can be run
 # against a router.
 #
-# Attach mode (default): start the proxy yourself, then point Gym at it. Keeping the proxy outside
-# Gym is what lets an eval pin a specific Switchyard build and compare against scaled-evals runs.
-#
-#   switchyard --routing-profiles routes.yaml -- serve --port 4000
-#   gym eval run --benchmark <name> --model-type switchyard_model \
-#     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
-#
-# Launch mode: Gym starts the proxy itself, for a single-command run.
+# Gym launches and manages the proxy for you. Point routing_profiles at your Switchyard routing
+# config and run:
 #
 #   gym eval run --benchmark <name> --model-type switchyard_model \
-#     ++policy_model.responses_api_models.switchyard_model.launch_proxy=true \
 #     ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
+#
+# Launching drives the `switchyard` CLI, so it must be on PATH (`pip install
+# 'nemo-switchyard[server]'`). The proxy is started when this server starts and stopped when it
+# exits.
+#
+# To attach to a proxy you already run instead -- to pin a specific Switchyard build, or to share
+# one instance across servers -- set switchyard_base_url and routing_profiles is not needed:
+#
+#   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 policy_model:
   responses_api_models:
     switchyard_model:
       entrypoint: app.py
 
-      # Attach mode.
-      switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
-      switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
+      # The routing config Switchyard serves. Required unless switchyard_base_url is set.
+      routing_profiles: ${oc.env:SWITCHYARD_ROUTING_PROFILES,null}
 
       # Route name to request. Switchyard maps it to a concrete target; the model that actually
       # served each call comes back on the response.
       switchyard_model: ${policy_model_name}
 
-      # Launch mode. routing_profiles is required when launch_proxy is true.
-      launch_proxy: false
-      routing_profiles: null
-      proxy_host: 127.0.0.1
+      # Set to attach to an already-running proxy instead of launching one.
+      switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
+      switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
+
+      # Wildcard bind so the proxy is reachable off-box; this server talks to it over loopback.
+      proxy_host: 0.0.0.0
       # null picks a free port that does not collide with Gym's own servers.
       proxy_port: null
       proxy_startup_timeout_s: 120.0
