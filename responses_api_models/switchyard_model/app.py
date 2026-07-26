@@ -29,14 +29,17 @@ and costs join back to the rollout that produced them.
 import asyncio
 import atexit
 import contextvars
+import ctypes
 import logging
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Dict, Optional
 
 from pydantic import Field, model_validator
@@ -95,6 +98,29 @@ class _RolloutSessionMiddleware:
             await self._app(scope, receive, send)
         finally:
             _ROLLOUT_ID.reset(token)
+
+
+_PR_SET_PDEATHSIG = 1
+
+
+def _set_parent_death_signal() -> None:  # pragma: no cover - runs post-fork, in the child
+    """Ask the kernel to SIGTERM this child when its parent dies.
+
+    Gym's orchestrator stops a server with SIGINT and escalates to SIGKILL after one second, and a
+    SIGKILLed parent runs no handler -- not the shutdown event, not atexit. Without a kernel-level
+    tie the proxy survives its owner and keeps holding its port, so every eval that cycles servers
+    leaks one. prctl is Linux-only; elsewhere this is a no-op and the shutdown handler is the only
+    line of defence.
+
+    Raising here would fail the spawn, which is a worse outcome than a proxy that needs reaping, so
+    a platform without prctl is tolerated silently.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+    except (OSError, AttributeError):
+        pass
 
 
 class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
@@ -195,7 +221,27 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         app = super().setup_webserver()
         # Added last, so it wraps the capture middleware and still sees the correlation prefix.
         app.add_middleware(_RolloutSessionMiddleware)
+        self.setup_proxy_shutdown(app)
         return app
+
+    def setup_proxy_shutdown(self, app) -> None:
+        """Stop the proxy when the app shuts down.
+
+        The graceful half of proxy cleanup. atexit does not cover this on its own: uvicorn's
+        signal handling ends the process without running interpreter exit hooks, so a proxy
+        launched here outlived every orchestrated shutdown. See _set_parent_death_signal for the
+        other half, which covers shutdowns too abrupt for any handler to run.
+        """
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+            self.stop_proxy()
+
+        app.router.lifespan_context = lifespan_wrapper
 
     # --- Proxy lifecycle ---
 
@@ -229,7 +275,10 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             str(port),
         ]
         logger.info("Starting Switchyard proxy: %s", " ".join(command))
-        process = subprocess.Popen(command)
+        # preexec_fn runs between fork and exec, which is the only point where the child can ask
+        # the kernel to tie its lifetime to this process. It carries the documented thread-safety
+        # caveat, but this runs once at startup before the server serves traffic.
+        process = subprocess.Popen(command, preexec_fn=_set_parent_death_signal)
         self._proxy_process = process
         atexit.register(self.stop_proxy)
 
