@@ -15,7 +15,6 @@
 """mini-swe-agent environment adapter backed by the Gym sandbox API."""
 
 import os
-import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +33,7 @@ except ModuleNotFoundError:
 
 from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.utils import rewrite_image
+from responses_api_agents.mini_swe_agent_2.sandbox_hooks import conda_activate_wrap
 
 
 @dataclass
@@ -121,20 +121,12 @@ class MiniSWESandboxEnvironment:
         }
 
     def _command(self, command: str) -> str:
-        if not self.config.activate_conda or not self.config.conda_env:
-            return command
-        quoted_env = shlex.quote(self.config.conda_env)
-        # Resolve conda from common install roots before activating. The sandbox exec
-        # shell is non-login (apptainer/docker/ECS alike), so `conda` may not be on PATH
-        # and `conda info --base` can't be relied on. The grouped loop (not an `&&` chain)
-        # keeps a missing root from aborting the command; cwd is handled by exec(cwd=...),
-        # so we don't `cd` here.
-        return (
-            '{ for __base in /opt/miniconda3 /opt/conda "$HOME/miniconda3" '
-            '"$(command -v conda >/dev/null 2>&1 && conda info --base 2>/dev/null)"; do '
-            '[ -n "$__base" ] && [ -f "$__base/etc/profile.d/conda.sh" ] && '
-            '. "$__base/etc/profile.d/conda.sh" && break; done; } && '
-            f"conda activate {quoted_env} && {command}"
+        # Shared with `gym sandbox debug` so a debugged command runs in the same
+        # shell context as a real rollout's.
+        return conda_activate_wrap(
+            command,
+            conda_env=self.config.conda_env,
+            activate_conda=self.config.activate_conda,
         )
 
     def execute(

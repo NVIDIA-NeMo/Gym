@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import hashlib
 import json
 import os
@@ -51,6 +52,10 @@ from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
+)
+from responses_api_agents.mini_swe_agent_2.sandbox_hooks import (
+    resource_profile_for_instance,
+    swebench_image_for_row,
 )
 
 
@@ -213,11 +218,9 @@ def _sandbox_spec_for_instance(
     if not resource_profiles:
         return instance_spec
 
-    resources = dict(instance_spec.get("resources") or {})
-    digest = hashlib.sha256(instance_id.encode("utf-8")).digest()
-    profile = resource_profiles[int.from_bytes(digest[:4], "big") % len(resource_profiles)]
-    resources.update(profile)
-    instance_spec["resources"] = resources
+    instance_spec["resources"] = resource_profile_for_instance(
+        instance_spec.get("resources"), resource_profiles, instance_id
+    )
     return instance_spec
 
 
@@ -232,17 +235,9 @@ def _swebench_config_path() -> Path:
 
 
 def _swebench_image_name(instance: dict[str, Any], subset: str) -> str:
-    image_name = instance.get("image_name")
-    if image_name:
-        return str(image_name)
-
-    instance_id = instance["instance_id"]
-    if subset == "verified":
-        docker_compatible_id = instance_id.replace("__", "_1776_")
-        return f"docker.io/swebench/sweb.eval.x86_64.{docker_compatible_id}:latest".lower()
-
-    docker_compatible_id = instance_id.replace("__", "_s_")
-    return f"docker.io/xingyaoww/sweb.eval.x86_64.{docker_compatible_id}:latest".lower()
+    # `subset` is passed explicitly here but lives on the row for the shared hook,
+    # which `gym sandbox debug` also calls; keep the two in agreement.
+    return swebench_image_for_row({**instance, "subset": subset})
 
 
 def _message_content_to_text(content: Any) -> str:
