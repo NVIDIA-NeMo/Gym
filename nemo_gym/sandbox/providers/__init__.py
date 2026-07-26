@@ -17,6 +17,7 @@
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     ExecResult,
+    RenewableProvider,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -38,6 +39,7 @@ from nemo_gym.sandbox.providers.registry import (
 
 __all__ = [
     "ConnectableProvider",
+    "RenewableProvider",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",

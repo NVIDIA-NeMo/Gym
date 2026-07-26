@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import RenewableProvider, SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytestmark = pytest.mark.sandbox
@@ -878,7 +878,7 @@ async def test_create_once_and_connect_after_create_error_paths(
     monkeypatch.setattr(opensandbox_provider, "_to_volumes", lambda volumes: volumes)
     spec = SandboxSpec(
         image="image:tag",
-        ttl_s=10,
+        ttl_s=600,
         ready_timeout_s=20,
         resources=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20, gpu=1, gpu_type="H100"),
         entrypoint=["/bin/sh"],
@@ -892,7 +892,7 @@ async def test_create_once_and_connect_after_create_error_paths(
     handle = await provider._create_once(spec)
     assert handle.sandbox_id == "sandbox-1"
     assert FakeSandbox.created_kwargs["snapshot_id"] == "snapshot-1"
-    assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=10)
+    assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=600)
     assert FakeSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=20)
     assert FakeSandbox.created_kwargs["resource"] == {
         "cpu": "2",
@@ -1310,3 +1310,37 @@ def test_duration_ms_between_handles_missing_and_odd_timestamps() -> None:
     assert opensandbox_provider._duration_ms_between(started, None) is None
     # A string timestamp (a plausible SDK change) must degrade, not explode.
     assert opensandbox_provider._duration_ms_between("2026-08-01T12:00:00Z", started) is None
+async def test_renew_pushes_the_expiry_out() -> None:
+    """Renewal is what lets a sandbox be short-lived *and* long-held.
+
+    Without it the only way to keep a box past its lifetime is to ask for a long
+    one up front, which is exactly the request that strands sandboxes when the
+    caller goes away.
+    """
+    renewals: list[timedelta] = []
+
+    class FakeRaw:
+        async def renew(self, delta: timedelta) -> None:
+            renewals.append(delta)
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5})
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=FakeRaw())
+
+    await provider.renew(handle, 900.0)
+    assert renewals == [timedelta(seconds=900)]
+    assert isinstance(provider, RenewableProvider)
+
+
+def test_ttl_below_the_api_minimum_is_named_locally() -> None:
+    """A sub-minimum lifetime otherwise comes back as a bare HTTP 422.
+
+    The API's floor is provider knowledge, so the provider is where it can be
+    turned into a message that says which field was wrong.
+    """
+    import asyncio
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import MIN_TTL_S, OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "example", "api_key": "k"})
+    with pytest.raises(ValueError, match=f"at least {MIN_TTL_S:g}s"):
+        asyncio.run(provider.create(SandboxSpec(image="img", ttl_s=30)))

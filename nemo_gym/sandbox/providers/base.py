@@ -255,3 +255,19 @@ class ConnectableProvider(Protocol):
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle in this process from a descriptor."""
         ...
+
+
+@runtime_checkable
+class RenewableProvider(Protocol):
+    """Optional capability: push back a sandbox's expiry.
+
+    Lets a caller hold a sandbox open across several operations without giving it
+    a long lifetime up front — the lifetime stays short, and activity is what
+    keeps it alive. Providers whose sandboxes have no server-side expiry do not
+    implement this. Membership is checked with ``isinstance`` because the
+    protocol is ``runtime_checkable``.
+    """
+
+    async def renew(self, handle: SandboxHandle, ttl_s: float) -> None:
+        """Set the sandbox to expire ``ttl_s`` seconds from now."""
+        ...

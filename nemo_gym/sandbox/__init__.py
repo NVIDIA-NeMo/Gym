@@ -19,6 +19,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     ExecResult,
+    RenewableProvider,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -41,6 +42,7 @@ __all__ = [
     "Sandbox",
     "AsyncSandbox",
     "ConnectableProvider",
+    "RenewableProvider",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",
