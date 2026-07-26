@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import signal
 import subprocess
 import urllib.error
 from contextlib import contextmanager
@@ -391,3 +392,98 @@ class TestProxyLifecycle:
         server.stop_proxy()
 
         process.terminate.assert_not_called()
+
+
+class TestProxyOutlivesNothing:
+    """The proxy is a child process, so it must not survive the server that launched it.
+
+    Gym's orchestrator sends SIGINT and escalates to SIGKILL after one second, so cleanup needs
+    both a graceful handler and a kernel-level tie for the shutdowns too abrupt to run one.
+    """
+
+    def _launch_config(self, **overrides) -> SwitchyardModelConfig:
+        return SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+            proxy_port=4123,
+            **overrides,
+        )
+
+    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+        return SwitchyardModel(
+            config=self._launch_config(),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+    def test_graceful_shutdown_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """A clean shutdown must reap the proxy. atexit does not run on uvicorn's signal exit."""
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        server = self._launch_server(monkeypatch)
+
+        app = server.setup_webserver()
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+        server._proxy_process = process
+
+        # Entering and leaving the TestClient context runs the app's startup/shutdown events.
+        with TestClient(app):
+            process.terminate.assert_not_called()
+
+        process.terminate.assert_called_once()
+
+    def test_spawn_ties_proxy_lifetime_to_this_process(self, monkeypatch: MonkeyPatch) -> None:
+        """A SIGKILLed parent runs no handler, so the kernel must reap the child instead."""
+        spawns: list = []
+
+        def mock_popen(command, *args, **kwargs):
+            spawns.append(kwargs)
+            return MagicMock(spec=_REAL_POPEN)
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        server = self._launch_server(monkeypatch)
+
+        server.setup_webserver()
+
+        assert spawns[0]["preexec_fn"] is app_module._set_parent_death_signal
+
+    def test_parent_death_signal_is_requested_on_linux(self, monkeypatch: MonkeyPatch) -> None:
+        calls: list = []
+        monkeypatch.setattr(app_module.sys, "platform", "linux")
+        monkeypatch.setattr(
+            app_module.ctypes,
+            "CDLL",
+            lambda name, use_errno=False: MagicMock(prctl=lambda *args: calls.append(args)),
+        )
+
+        app_module._set_parent_death_signal()
+
+        assert calls == [(app_module._PR_SET_PDEATHSIG, signal.SIGTERM)]
+
+    def test_parent_death_signal_is_skipped_off_linux(self, monkeypatch: MonkeyPatch) -> None:
+        """macOS has no prctl; the spawn must still succeed there."""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("must not touch libc off Linux")
+
+        monkeypatch.setattr(app_module.sys, "platform", "darwin")
+        monkeypatch.setattr(app_module.ctypes, "CDLL", explode)
+
+        app_module._set_parent_death_signal()
+
+    def test_missing_prctl_does_not_break_the_spawn(self, monkeypatch: MonkeyPatch) -> None:
+        """Losing the kernel tie is worse than nothing, but failing to launch is worse still."""
+        monkeypatch.setattr(app_module.sys, "platform", "linux")
+
+        def no_libc(name, use_errno=False):
+            raise OSError("libc.so.6 not found")
+
+        monkeypatch.setattr(app_module.ctypes, "CDLL", no_libc)
+
+        app_module._set_parent_death_signal()
