@@ -31,10 +31,20 @@ dependencies = [
     # server rather than Gym's core dependencies, so only runs that route through Switchyard pay
     # for it -- Gym itself never imports Switchyard.
     #
-    # Pinned exactly, not to a range: see the openai override below.
-    # Updated Fri Jul 24, 2026 with nemo-switchyard[server]==0.1.0
+    # Pinned to a git commit rather than a release because the published 0.1.0 cannot serve this
+    # server's /v1/responses endpoint at all: its chat->responses translation omits the
+    # input_tokens_details and output_tokens_details objects that the Responses schema requires,
+    # so every response fails NeMoGymResponse validation. Fixed in
+    # NVIDIA-NeMo/Switchyard#144, which is merged but not yet released -- PyPI still carries only
+    # 0.1.0. Move to `>=0.1.1,<0.2.0` as soon as a release carrying that fix ships.
+    #
+    # Installing from git builds Switchyard's Rust extension (maturin), so this needs a cargo
+    # toolchain on the installing machine. Gym's CI does not provide one, so `gym env test` for
+    # this server will not run there until the pin moves to a released wheel.
+    #
+    # Updated Sun Jul 26, 2026 with nemo-switchyard[server] @ 0a03235
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Switchyard/blob/main/LICENSE
-    "nemo-switchyard[server]==0.1.0",
+    "nemo-switchyard[server] @ git+https://github.com/NVIDIA-NeMo/Switchyard@0a03235ba9cacb439e6981f44754965f64347dea",
 ]
 
 [build-system]
@@ -44,25 +54,6 @@ requires = ["setuptools>=61", "setuptools-scm"]
 [tool.setuptools.packages.find]
 where = [".."]
 include = ["switchyard_model"]
-
-[tool.uv]
-# Neutralizes a stale floor in nemo-switchyard 0.1.0, which declares openai>=2.34.0 and so will not
-# co-install with Gym's openai<=2.7.2. That floor was never a real requirement -- it was whatever
-# version was current when the package metadata was written -- and it was widened to >=2.7 in
-# NVIDIA-NeMo/Switchyard#142. PyPI releases are immutable, so the published 0.1.0 keeps the old
-# metadata regardless. Switchyard's own suite at v0.1.0 passes identically on 2.7.0, 2.7.1, 2.7.2,
-# 2.34.0 and 2.48.0, so the constraint is not describing anything the code needs.
-#
-# This deliberately restates Gym's own openai pin rather than expressing a preference of its own:
-# the intent is "whatever openai Gym resolves", not "some particular openai". uv overrides apply to
-# every requirement for a package, not just the offending one, so an unbounded override here would
-# also erase Gym's deliberate ceiling and pull in a much newer openai than Gym is tested against --
-# hence the ceiling is repeated rather than omitted. Keep it in sync with Gym's openai pin.
-#
-# Because this asserts something about one specific published artifact, nemo-switchyard is pinned
-# to ==0.1.0 above. Delete both the pin and this override once a release carrying the widened floor
-# ships; a plain >=0.1.1,<0.2.0 range is enough after that.
-override-dependencies = ["openai<=2.7.2"]
 
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
