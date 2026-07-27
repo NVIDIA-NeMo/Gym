@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Action space for ``openair_congestion_v1`` — 7 actuator tools + ``noop``.
 

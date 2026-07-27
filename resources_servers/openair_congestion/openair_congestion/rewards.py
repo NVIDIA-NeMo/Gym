@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Reward function (``docs/PLAN.md`` §5.2).
 
