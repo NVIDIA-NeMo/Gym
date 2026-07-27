@@ -372,7 +372,7 @@ class AnthropicConverter:
                         arguments=json.dumps(block.get("input", {})),
                         call_id=block["id"],
                         name=block["name"],
-                        id=f"fc_{uuid4().hex}",
+                        id=block["id"],
                         status="completed",
                         type="function_call",
                     )

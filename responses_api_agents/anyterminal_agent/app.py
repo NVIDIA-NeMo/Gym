@@ -35,12 +35,6 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body,
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import (
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-    link_tool_calls_to_sandbox,
-)
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
@@ -115,12 +109,6 @@ class TerminalBenchMetrics(BaseModel):
     agent_run_time: Optional[float] = None
     eval_run_time: Optional[float] = None
     total_run_time: Optional[float] = None
-    sandbox_provider: Optional[str] = None
-    sandbox_id: Optional[str] = None
-    sandbox_wall_time_s: Optional[float] = None
-    sandbox_cpu_time_s: Optional[float] = None
-    sandbox_peak_memory_mib: Optional[float] = None
-    sandbox_resource_usage_source: Optional[str] = None
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
@@ -137,9 +125,7 @@ def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int]
             return {
                 key: (
                     "***"
-                    if any(secret in key.lower() for secret in ("api_key", "secret", "password"))
-                    or key.lower() == "token"
-                    or key.lower().endswith("_token")
+                    if any(secret in key.lower() for secret in ("api_key", "secret", "password", "token"))
                     else redact(item)
                 )
                 for key, item in value.items()
@@ -151,49 +137,6 @@ def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int]
     d = json.loads(params.model_dump_json())
     d.pop("agent_command_str", None)
     return json.dumps(redact(d), indent=indent)
-
-
-def _load_agent_observations(path: Path) -> tuple[str, str]:
-    """Return canonical observation JSON and an error code without raising."""
-    try:
-        raw = path.read_text()
-    except FileNotFoundError:
-        return "", ""
-    except OSError:
-        return "", "observation_read_failed"
-
-    try:
-        bundle = AgentObservationBundle.model_validate_json(raw)
-    except Exception:
-        return "", "observation_parse_failed"
-    return bundle.model_dump_json(), ""
-
-
-def _observation_gap(source: str, code: str) -> AgentObservationBundle:
-    return AgentObservationBundle(
-        source=source,
-        gaps=[ObservationGap(code=code)],
-    )
-
-
-def _terminal_sandbox_observations(metrics: TerminalBenchMetrics) -> list[SandboxObservation]:
-    if metrics.sandbox_id is None:
-        return []
-    outcome = "sandbox_error" if metrics.sandbox_failed else "timeout"
-    if not metrics.sandbox_failed and not metrics.agent_timed_out and not metrics.container_timed_out:
-        outcome = "completed"
-    return [
-        SandboxObservation(
-            role="environment",
-            provider=metrics.sandbox_provider,
-            sandbox_id=metrics.sandbox_id,
-            outcome=outcome,
-            wall_time_s=metrics.sandbox_wall_time_s,
-            cpu_time_s=metrics.sandbox_cpu_time_s,
-            peak_memory_mib=metrics.sandbox_peak_memory_mib,
-            resource_usage_source=metrics.sandbox_resource_usage_source,
-        )
-    ]
 
 
 ### Agent runner template
@@ -214,8 +157,6 @@ MODEL_NAME   = os.environ["NGTB_MODEL_NAME"]
 INSTRUCTION  = Path("/trajectories_mount/instruction.txt").read_text()
 AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
-OBSERVABILITY = os.environ.get("NGTB_OBSERVABILITY") == "1"
-MODEL_SERVER_REF = json.loads(os.environ.get("NGTB_MODEL_SERVER_REF", "null"))
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -227,7 +168,7 @@ _mock_client._build_server_base_url = lambda cfg: MODEL_URL
 
 _cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
 
-_model_server = ModelServerRef.model_validate(MODEL_SERVER_REF) if MODEL_URL and MODEL_SERVER_REF else None
+_model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
 config = {agent_cfg_class}(
     host="0.0.0.0",
     port=0,
@@ -253,20 +194,8 @@ body = NeMoGymResponseCreateParamsNonStreaming(
     model=MODEL_NAME,
     **SAMPLING,
 )
-observed = getattr(agent, "responses_with_observations", None)
-if OBSERVABILITY and callable(observed):
-    episode = asyncio.run(observed(request=None, body=body))
-    response = episode.response
-else:
-    response = asyncio.run(agent.responses(request=None, body=body))
+response = asyncio.run(agent.responses(request=None, body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
-if OBSERVABILITY and callable(observed):
-    try:
-        Path("/trajectories_mount/agent_observations.json").write_text(
-            episode.observations.model_dump_json()
-        )
-    except Exception as exc:
-        print(f"failed to persist agent observations: {{type(exc).__name__}}", file=sys.stderr, flush=True)
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
 
@@ -383,7 +312,6 @@ class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig)
     metrics_fpath: Path
     container: str
     ray_queue_timestamp: float
-    observability_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     agent_command_str: Optional[str] = None
 
     @property
@@ -397,10 +325,6 @@ class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig)
 
 class AnyTerminalVerifyResponse(TerminalBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
-    ng_agent_observations: AgentObservationBundle | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
 
 
 ### Sandbox provider selection
@@ -532,10 +456,6 @@ class RunTerminalAgent(BaseModel):
     async def _collect_remote_outputs(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
         for remote, local in (
             ("/trajectories_mount/response.json", cfg.persistent_dir / "response.json"),
-            (
-                "/trajectories_mount/agent_observations.json",
-                cfg.persistent_dir / "agent_observations.json",
-            ),
             ("/logs/verifier/reward.txt", cfg.verifier_dir / "reward.txt"),
             ("/logs/verifier/test-stdout.txt", cfg.verifier_dir / "test-stdout.txt"),
         ):
@@ -557,10 +477,6 @@ class RunTerminalAgent(BaseModel):
         }
         if cfg.model_server_url:
             env["NGTB_MODEL_URL"] = cfg.model_server_url
-        if cfg.model_server is not None:
-            env["NGTB_MODEL_SERVER_REF"] = cfg.model_server.model_dump_json()
-        if cfg.observability_enabled:
-            env["NGTB_OBSERVABILITY"] = "1"
         return env
 
     async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
@@ -614,12 +530,8 @@ class RunTerminalAgent(BaseModel):
         agent_timed_out = container_timed_out = False
         sandbox_failed = False
         agent_run_time = eval_run_time = None
-        sandbox_id = None
-        sandbox_usage = None
-        sandbox_provider = next(iter(cfg.sandbox_provider), None)
         try:
             await sandbox.start()
-            sandbox_id = getattr(sandbox, "sandbox_id", None)
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_runtime(sandbox, cfg)
             agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
@@ -633,11 +545,6 @@ class RunTerminalAgent(BaseModel):
             sandbox_failed = True
             print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
         finally:
-            try:
-                if sandbox_id is not None:
-                    sandbox_usage = await sandbox.resource_usage()
-            except Exception as e:
-                print(f"[{cfg.task_name}] sandbox resource usage unavailable: {e}", flush=True)
             try:
                 await sandbox.stop()
             except Exception as e:
@@ -665,12 +572,6 @@ class RunTerminalAgent(BaseModel):
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
             total_run_time=total_run_time,
-            sandbox_provider=sandbox_provider,
-            sandbox_id=sandbox_id,
-            sandbox_wall_time_s=None if sandbox_usage is None else sandbox_usage.wall_time_s,
-            sandbox_cpu_time_s=None if sandbox_usage is None else sandbox_usage.cpu_time_s,
-            sandbox_peak_memory_mib=None if sandbox_usage is None else sandbox_usage.peak_memory_mib,
-            sandbox_resource_usage_source=None if sandbox_usage is None else sandbox_usage.source,
         )
         update_metrics(cfg.metrics_fpath, metrics.model_dump())
         return resolved
@@ -812,7 +713,6 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 self.config.container_formatter, task_name, problem_info.get("docker_image", "ubuntu:22.04")
             ),
             ray_queue_timestamp=time.time(),
-            observability_enabled=rollout_id is not None,
         )
         params.metrics_fpath.write_text("{}")
 
@@ -863,20 +763,6 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
 
-        metadata = {
-            "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
-            "metrics": params.metrics_fpath.read_text(),
-            "instance_config": _safe_config_json(params),
-        }
-        if params.observability_enabled:
-            observations_json, observations_error = _load_agent_observations(
-                params.persistent_dir / "agent_observations.json"
-            )
-            metadata.update(
-                agent_observations=observations_json,
-                agent_observations_error=observations_error,
-            )
-
         return NeMoGymResponse(
             id=f"anyterminal-{params.instance_id}",
             created_at=int(time.time()),
@@ -886,7 +772,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
-            metadata=metadata,
+            metadata={
+                "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
+                "metrics": params.metrics_fpath.read_text(),
+                "instance_config": _safe_config_json(params),
+            },
         )
 
     async def run(self, body: AnyTerminalRunRequest) -> AnyTerminalVerifyResponse:
@@ -897,9 +787,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
             meta, response.metadata = response.metadata, None
             metrics = TerminalBenchMetrics.model_validate_json(meta["metrics"])
-            instance_config = AnyTerminalInstanceConfig.model_validate_json(meta["instance_config"])
 
-            result = dict(
+            return AnyTerminalVerifyResponse(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {
                     "input": json.loads(meta["input"]),
@@ -909,35 +798,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
-                instance_config=instance_config.model_dump(),
+                instance_config=AnyTerminalInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
             )
-            observations_json = meta.get("agent_observations")
-            source = self.config.agent_server_module.split(".")[-2].removesuffix("_agent")
-            observations: Optional[AgentObservationBundle] = None
-            if observations_json:
-                try:
-                    observations = AgentObservationBundle.model_validate_json(observations_json)
-                except Exception:
-                    observations = _observation_gap(source, "observation_parse_failed")
-            elif meta.get("agent_observations_error"):
-                observations = _observation_gap(source, meta["agent_observations_error"])
-            elif instance_config.observability_enabled:
-                observations = _observation_gap(source, "agent_observations_unavailable")
-            if observations is not None:
-                sandbox_observations = _terminal_sandbox_observations(metrics)
-                observations.records.extend(sandbox_observations)
-                if sandbox_observations:
-                    observations.gaps = [gap for gap in observations.gaps if gap.code != "no_sandbox_runtime"]
-                    sandbox_observation = sandbox_observations[0]
-                    link_tool_calls_to_sandbox(observations, sandbox_observation.sandbox_id)
-                    if sandbox_observation.cpu_time_s is None:
-                        observations.gaps.append(ObservationGap(code="sandbox_cpu_time_unavailable"))
-                    if sandbox_observation.peak_memory_mib is None:
-                        observations.gaps.append(ObservationGap(code="sandbox_memory_usage_unavailable"))
-                else:
-                    observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
-                result["ng_agent_observations"] = observations.model_dump(mode="json")
-            return AnyTerminalVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

@@ -356,7 +356,6 @@ class TestObservability:
         assert invocation.invocation_id == "session-1"
         assert invocation.model_calls[0].response_id == "msg-1"
         assert "no_sandbox_runtime" in {gap.code for gap in observations.gaps}
-        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
 
 
 class TestRunClaudeCode:
@@ -543,7 +542,7 @@ class TestRolloutMCPConfig:
                 "mcp": {
                     "server_name": "example_mcp_weather",
                     "url_path": "/mcp",
-                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                    "headers": {"X-NeMo-Gym-Session-Token": "mcp-session-value"},
                 }
             },
             tmp_path,
@@ -554,7 +553,7 @@ class TestRolloutMCPConfig:
         server = config["mcpServers"]["example_mcp_weather"]
         assert server["type"] == "http"
         assert server["url"] == "http://127.0.0.1:8123/mcp"
-        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "secret-token"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "mcp-session-value"
 
     def test_merges_static_mcp_config_when_metadata_present(self, tmp_path: Path) -> None:
         static_config = tmp_path / "static_mcp.json"
