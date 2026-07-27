@@ -1,0 +1,48 @@
+# SECQUE open-book financial Q&A using LLM-as-judge scoring.
+config_paths:
+  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+
+# Grading model. Falls back to the policy model, so a single-model setup needs
+# no extra configuration. Set judge_model_name (and judge_base_url /
+# judge_api_key if the endpoint differs) to grade with a separate model, which
+# keeps scores comparable when evaluating several policy models.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${policy_base_url}}
+      openai_api_key: ${oc.select:judge_api_key,${policy_api_key}}
+      openai_model: ${oc.select:judge_model_name,${policy_model_name}}
+
+# Judge server for SECQUE: rates answers 0-2 against the reference. Only a
+# fully correct answer ([[2]]) scores 1.0; [[0]] and [[1]] score 0.0.
+secque_judge_resources_server:
+  _inherit_from: equivalence_llm_judge
+  resources_servers:
+    equivalence_llm_judge:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_system_message: ""
+      judge_prompt_template_fpath: ../../benchmarks/secque/prompts/judge.txt
+      judge_equal_label: "[[2]]"
+      judge_not_equal_label: "[[0]]"
+      # Grade the full generation rather than a regex-extracted span.
+      response_extract_regex: null
+      use_per_record_regex: false
+      check_twice_swap: false
+
+secque_simple_agent:
+  _inherit_from: equivalence_llm_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: secque_judge_resources_server
+      datasets:
+        - name: secque
+          type: benchmark
+          jsonl_fpath: benchmarks/secque/data/secque_benchmark.jsonl
+          prompt_config: benchmarks/secque/prompts/default.yaml
+          prepare_script: benchmarks/secque/prepare.py
+          num_repeats: 1
+          license: Creative Commons Attribution 4.0 International
