@@ -24,7 +24,7 @@ claude_code_math_agent:
         name: policy_model
       concurrency: 32
       model: ${policy_model_name}
-      anthropic_api_key: EMPTY
+      anthropic_api_key: EMPTY  # pragma: allowlist secret
       anthropic_base_url: null
       max_turns: 30
       timeout: 300
